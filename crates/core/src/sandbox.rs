@@ -2010,9 +2010,10 @@ pub mod compiler_seccomp {
     /// deliberately absent — the filter is installed before the exec that
     /// starts the compiler, and Cranelift compiles with threads.
     const DENIED: &[i64] = &[
-        // Network.
+        // Network. `socketpair` is deliberately absent: it creates an
+        // anonymous AF_UNIX pair, not a network endpoint, and tokio's signal
+        // driver uses it when the compiler helper's runtime starts.
         libc::SYS_socket,
-        libc::SYS_socketpair,
         libc::SYS_connect,
         libc::SYS_bind,
         libc::SYS_listen,
