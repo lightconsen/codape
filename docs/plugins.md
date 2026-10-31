@@ -339,7 +339,7 @@ The manifest is parsed with `deny_unknown_fields`: a field that is not in the ta
 | `outputStyles` | ✅ implemented | Name-keyed registry; `/style <name>` applies one as extra system instructions. |
 | `themes` | ✅ implemented | Name-keyed registry; `ThemeManager::register_json` makes them selectable via `/theme`. |
 | `workflows` | ✅ implemented | Named scripts registered with the Workflow tool. |
-| `monitors` | ✅ implemented | Persistent watch scripts armed with the session (`PluginMonitorSupervisor`). |
+| `monitors` | ✅ implemented | Persistent watch scripts armed with the session (`PluginMonitorSupervisor`). Whole-tree ownership is a process group (Unix) or Job Object (Windows), plus a cgroup on Linux; on macOS the supervisor samples descendants while the monitor runs, so one that is re-parented to `launchd` after its intermediate parent exits is still killed at cleanup. |
 | `mcpServers` | ✅ implemented | Active plugins contribute `{"mcpServers": {...}}` through `PluginManager::plugin_mcp_servers()`; the orchestrator loads them before `.mcp.json` (project file wins on name clashes). |
 | `lspServers` | ✅ implemented | The first configured server is the default for the `LSP` tool (the REPL fills the tool's shared default at startup). |
 | `channels` | ✅ implemented (delivery: webhook, MCP tool, or command) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |

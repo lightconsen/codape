@@ -34,6 +34,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use coderex_core::process_tree::{JobLimits, ProcessTree};
+#[cfg(target_os = "macos")]
+use coderex_core::process_tree::{
+    TrackedProcess, kill_tracked_process, process_start_time, tracked_descendants,
+};
 #[cfg(target_os = "linux")]
 use coderex_core::sandbox::CgroupMemoryLimit;
 use serde_json::Value;
@@ -48,19 +52,33 @@ use tokio::task::JoinHandle;
 /// so on Linux the monitor is additionally placed in a cgroup v2 group —
 /// killing the group stops the whole tree however the monitor rearranged its
 /// process groups. On macOS there is no cgroup; the descendant walk in
-/// [`ProcessTree::terminate`] reaches the `setsid()` child instead (best
-/// effort, see that module).
+/// [`ProcessTree::terminate`] reaches a `setsid()` child while its parent
+/// chain is intact, and [`MonitorOwnership::seen`] keeps the records that
+/// outlive a chain broken by an exiting intermediate parent.
 #[derive(Debug)]
 struct MonitorOwnership {
     tree: Arc<ProcessTree>,
     #[cfg(target_os = "linux")]
     cgroup: Option<CgroupMemoryLimit>,
+    /// macOS: descendants observed while the monitor was alive.
+    ///
+    /// A double-forked descendant is re-parented to `launchd` when its
+    /// intermediate parent exits. At cleanup the live walk starts from the
+    /// monitor and no longer has a chain to it, so the sampler records it
+    /// (pid plus kernel start time) while the monitor is still running.
+    #[cfg(target_os = "macos")]
+    seen: Mutex<Vec<TrackedProcess>>,
 }
 
 impl MonitorOwnership {
     /// Kill the monitor and everything it started. Returns whether a kill was
     /// issued.
-    fn terminate(&self) -> bool {
+    ///
+    /// `from_signal` selects how the macOS record lock is taken: a signal
+    /// handler must not block on a sampler that holds it, while `stop`/`drop`
+    /// can wait.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn terminate(&self, from_signal: bool) -> bool {
         #[cfg(target_os = "linux")]
         {
             // The cgroup reaches a `setsid()` descendant that the process
@@ -68,10 +86,43 @@ impl MonitorOwnership {
             let cgroup = self.cgroup.as_ref().is_some_and(CgroupMemoryLimit::kill);
             self.tree.terminate() || cgroup
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            // The records reach a descendant that has been re-parented to
+            // launchd; the live walk in `tree.terminate()` cannot.
+            let recorded = self.kill_recorded(from_signal);
+            self.tree.terminate() || recorded
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             self.tree.terminate()
         }
+    }
+
+    /// `SIGKILL` every recorded descendant whose pid still names it.
+    ///
+    /// Reading and signalling recorded pids is bounded and allocation-free.
+    /// The start-time check happens inside [`kill_tracked_process`], so a
+    /// reused pid is never signalled. `try_only` is for the SIGTERM handler and
+    /// the panic hook: a miss there still leaves the live walk in
+    /// `tree.terminate()`.
+    #[cfg(target_os = "macos")]
+    fn kill_recorded(&self, try_only: bool) -> bool {
+        let recorded = if try_only {
+            let Ok(recorded) = self.seen.try_lock() else {
+                return false;
+            };
+            recorded
+        } else {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let mut issued = false;
+        for process in recorded.iter().rev() {
+            issued |= kill_tracked_process(*process);
+        }
+        issued
     }
 
     /// Stop owning the tree: the monitor exited on its own, so its remaining
@@ -129,7 +180,8 @@ pub fn terminate_all_monitors() {
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     for (_, ownership) in monitors {
-        ownership.terminate();
+        // Signal context: never block on the macOS sampler's record lock.
+        ownership.terminate(true);
     }
 }
 
@@ -141,6 +193,29 @@ pub const MAX_MONITORS: usize = 32;
 
 /// Most bytes of a single monitor output line that are written to the log.
 const MAX_LOG_LINE_BYTES: usize = 8 * 1024;
+
+/// macOS: how often a monitor's descendants are sampled just after it starts.
+///
+/// A daemonising monitor forks almost immediately, so the first couple of
+/// seconds need a fine interval to see the child before its intermediate
+/// parent exits.
+#[cfg(target_os = "macos")]
+const DESCENDANT_SAMPLE_FAST: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// macOS: how often descendants are sampled after the fast window.
+#[cfg(target_os = "macos")]
+const DESCENDANT_SAMPLE_SLOW: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// macOS: how long the fast sampling interval lasts after a monitor starts.
+#[cfg(target_os = "macos")]
+const DESCENDANT_SAMPLE_FAST_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// macOS: most descendant records kept for one monitor.
+///
+/// Far more than a monitor normally starts; the cap stops a runaway monitor
+/// from growing the record list without bound over a long session.
+#[cfg(target_os = "macos")]
+const MAX_TRACKED_DESCENDANTS: usize = 4096;
 
 /// Owns the running tasks of a session's plugin monitors.
 ///
@@ -162,6 +237,9 @@ struct MonitorTask {
     name: String,
     task: JoinHandle<()>,
     ownership: Arc<MonitorOwnership>,
+    /// macOS: the task that samples descendants while the monitor is alive.
+    #[cfg(target_os = "macos")]
+    tracker: JoinHandle<()>,
 }
 
 /// One validated monitor definition, before it is spawned.
@@ -249,8 +327,10 @@ impl PluginMonitorSupervisor {
     pub async fn stop(&mut self) {
         let monitors = std::mem::take(&mut self.monitors);
         for monitor in &monitors {
-            monitor.ownership.terminate();
+            monitor.ownership.terminate(false);
             monitor.task.abort();
+            #[cfg(target_os = "macos")]
+            monitor.tracker.abort();
         }
         for monitor in monitors {
             match monitor.task.await {
@@ -277,8 +357,10 @@ impl Drop for PluginMonitorSupervisor {
     /// reaches.
     fn drop(&mut self) {
         for monitor in &self.monitors {
-            monitor.ownership.terminate();
+            monitor.ownership.terminate(false);
             monitor.task.abort();
+            #[cfg(target_os = "macos")]
+            monitor.tracker.abort();
         }
     }
 }
@@ -505,11 +587,15 @@ fn spawn_monitor(spec: MonitorSpec, cwd: &Path) -> std::io::Result<MonitorTask> 
         tree,
         #[cfg(target_os = "linux")]
         cgroup,
+        #[cfg(target_os = "macos")]
+        seen: Mutex::new(Vec::new()),
     });
     let id = register_monitor(Arc::clone(&ownership));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let name = spec.name;
+    #[cfg(target_os = "macos")]
+    let tracker = track_descendants(pid, process_start_time(pid), Arc::clone(&ownership));
     let task = tokio::spawn(pump(
         child,
         id,
@@ -522,6 +608,58 @@ fn spawn_monitor(spec: MonitorSpec, cwd: &Path) -> std::io::Result<MonitorTask> 
         name,
         task,
         ownership,
+        #[cfg(target_os = "macos")]
+        tracker,
+    })
+}
+
+/// Record a monitor's descendants while it is alive (macOS).
+///
+/// The process group cannot reach a descendant that moved to its own group,
+/// and the live libproc walk cannot reach one whose intermediate parent exited
+/// and re-parented it to `launchd`. Sampling while the monitor runs is the
+/// only way to know that pid at all. The interval is fine for the first two
+/// seconds — a daemonising monitor forks immediately — then backs off so a
+/// long-lived monitor costs one libproc walk every half second.
+///
+/// The task stops on its own when the monitor exits; the supervisor also
+/// aborts it on `stop`/`drop` so it never outlives the ownership it holds.
+#[cfg(target_os = "macos")]
+fn track_descendants(
+    root: u32,
+    root_start_time: Option<u64>,
+    ownership: Arc<MonitorOwnership>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // No start time means the monitor was already gone; and comparing the
+        // start time (not just the pid) keeps a reused pid from being sampled.
+        let Some(root_start_time) = root_start_time else {
+            return;
+        };
+        let started = tokio::time::Instant::now();
+        while process_start_time(root) == Some(root_start_time) {
+            let descendants = tracked_descendants(root);
+            if !descendants.is_empty() {
+                let mut seen = ownership
+                    .seen
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for process in descendants {
+                    if seen.len() >= MAX_TRACKED_DESCENDANTS {
+                        break;
+                    }
+                    if !seen.contains(&process) {
+                        seen.push(process);
+                    }
+                }
+            }
+            let interval = if started.elapsed() < DESCENDANT_SAMPLE_FAST_WINDOW {
+                DESCENDANT_SAMPLE_FAST
+            } else {
+                DESCENDANT_SAMPLE_SLOW
+            };
+            tokio::time::sleep(interval).await;
+        }
     })
 }
 
@@ -1005,6 +1143,67 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the monitor's escaped descendant {escaped} survived stop"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// A monitor whose intermediate child exits leaves the descendant
+    /// re-parented to `launchd`: it is outside the process group, and the live
+    /// libproc walk from the monitor no longer has a chain to it. The sampler
+    /// must have recorded it while the chain still existed.
+    ///
+    /// This is the macOS-specific half of the daemonize escape; Linux has the
+    /// cgroup and Windows has the Job Object for the same case.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // TEST_LOCK serialises monitor tests; held across awaits on purpose.
+    async fn a_reparented_descendant_is_still_killed() {
+        let _guard = serial();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("orphan.pid");
+        // `set -m` gives the background job its own process group. The
+        // subshell that starts it exits after a second, so the sleep is
+        // re-parented to launchd before `stop()` runs; only the sampler can
+        // still know its pid.
+        let script = "set -m\n\
+             ( /bin/sh -c 'echo $$ > \"$CODEREX_MONITOR_ORPHAN_PID\"; exec /bin/sleep 60' & \
+             sleep 1 )\n\
+             sleep 60\n";
+        let monitors = json!({
+            "reparents": {
+                "command": "/bin/sh",
+                "args": ["-c", script],
+                "env": { "CODEREX_MONITOR_ORPHAN_PID": pid_file.to_string_lossy() }
+            }
+        });
+
+        let mut supervisor =
+            PluginMonitorSupervisor::start(&monitors, dir.path()).expect("start monitors");
+        wait_for_file(&pid_file).await;
+        let orphan: i32 = std::fs::read_to_string(&pid_file)
+            .expect("read pid file")
+            .trim()
+            .parse()
+            .expect("parse pid");
+
+        // Let the intermediate subshell exit, so cleanup cannot reach the
+        // orphan through libproc any more.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        supervisor.stop().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &orphan.to_string()])
+                .status()
+                .is_ok_and(|status| status.success());
+            if !alive {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the re-parented descendant {orphan} survived stop"
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

@@ -36,10 +36,13 @@
 //! A Unix descendant that calls `setsid()` leaves the process group, so the
 //! group kill misses it. On macOS [`ProcessTree::terminate`] additionally walks
 //! the libproc parent/child chain and kills the descendants it finds, which
-//! covers the common case but not one whose intermediate parent has already
-//! exited (see the note on `kill_descendants`). On Linux the process group is
-//! the fallback and a caller that needs a `setsid()`-proof boundary puts the
-//! child in a cgroup instead.
+//! covers the common case; a process whose intermediate parent already exited
+//! is re-parented to `launchd` and is no longer on that chain. The monitor
+//! supervisor closes that window by sampling [`tracked_descendants`] while the
+//! monitor is alive and signalling the records later
+//! ([`kill_tracked_process`]). On Linux the process group is the fallback and a
+//! caller that needs a `setsid()`-proof boundary puts the child in a cgroup
+//! instead.
 
 #![allow(unsafe_code)]
 #![cfg_attr(not(any(unix, target_os = "windows")), allow(dead_code))]
@@ -160,6 +163,75 @@ impl ProcessTree {
     pub fn active_processes(&self) -> Option<u32> {
         self.inner.active_processes()
     }
+}
+
+/// A descendant observed at a moment in time, identified by pid and start
+/// time.
+///
+/// A pid alone is not enough to signal later: the system may reuse it after
+/// the original process exits. The kernel's start time disambiguates the two,
+/// so a cleanup path can refuse to kill a stranger.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackedProcess {
+    /// Process id observed.
+    pub pid: u32,
+    /// `pbi_start_tvsec`/`pbi_start_tvusec`, folded into microseconds.
+    pub start_time_micros: u64,
+}
+
+/// Every live descendant of `root`, deepest first, with start times.
+///
+/// macOS only. This is the same walk [`ProcessTree::terminate`] performs, but
+/// it returns records the caller can keep: a process whose intermediate parent
+/// exits is re-parented to `launchd` and disappears from later walks, so the
+/// monitor supervisor samples this while the monitor is alive and signals the
+/// records at cleanup.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn tracked_descendants(root: u32) -> Vec<TrackedProcess> {
+    let Ok(root) = libc::pid_t::try_from(root) else {
+        return Vec::new();
+    };
+    imp::descendants_of(root)
+        .into_iter()
+        .filter_map(|pid| {
+            let start_time_micros = imp::process_start_micros(pid)?;
+            u32::try_from(pid).ok().map(|pid| TrackedProcess {
+                pid,
+                start_time_micros,
+            })
+        })
+        .collect()
+}
+
+/// The kernel start time for `pid`, or `None` if it is gone.
+///
+/// Callers that intend to poll a process over time keep this value and compare
+/// it, so a reused pid is not mistaken for the process they started.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    libc::pid_t::try_from(pid)
+        .ok()
+        .and_then(imp::process_start_micros)
+}
+
+/// `SIGKILL` the recorded process, but only if the pid still names it.
+///
+/// The start-time check is what makes a later signal safe: a reused pid is a
+/// different process and is left alone. Returns whether a kill was issued.
+#[cfg(target_os = "macos")]
+pub fn kill_tracked_process(process: TrackedProcess) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(process.pid) else {
+        return false;
+    };
+    if imp::process_start_micros(pid) != Some(process.start_time_micros) {
+        return false;
+    }
+    // SAFETY: `kill` takes plain integers, and the pid was just verified to
+    // still name the process this record describes.
+    unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
 }
 
 #[cfg(unix)]
@@ -297,7 +369,7 @@ mod imp {
 
     /// Every live descendant of `root`, deepest first, excluding `root`.
     #[cfg(target_os = "macos")]
-    fn descendants_of(root: libc::pid_t) -> Vec<libc::pid_t> {
+    pub(super) fn descendants_of(root: libc::pid_t) -> Vec<libc::pid_t> {
         let mut found = Vec::new();
         let mut frontier = vec![root];
         while let Some(parent) = frontier.pop() {
@@ -314,6 +386,38 @@ mod imp {
         // reverse lists children before parents.
         found.reverse();
         found
+    }
+
+    /// `pbi_start_tvsec`/`pbi_start_tvusec` for `pid`, or `None` if it is gone.
+    ///
+    /// The start time identifies a process across pid reuse: two processes
+    /// with the same pid cannot have the same value.
+    #[cfg(target_os = "macos")]
+    pub(super) fn process_start_micros(pid: libc::pid_t) -> Option<u64> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+            .unwrap_or(libc::c_int::MAX);
+        // SAFETY: `info` is a correctly sized out buffer for
+        // `PROC_PIDTBSDINFO`; `proc_pidinfo` only writes within `size` bytes.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        Some(start_micros(info.pbi_start_tvsec, info.pbi_start_tvusec))
+    }
+
+    /// Fold the kernel's seconds/microseconds pair into one value.
+    #[cfg(target_os = "macos")]
+    const fn start_micros(seconds: u64, micros: u64) -> u64 {
+        seconds.saturating_mul(1_000_000).saturating_add(micros)
     }
 
     /// The direct children of `parent`, or an empty vector if it has none or
