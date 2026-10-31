@@ -4913,6 +4913,23 @@ impl ReplLoop {
             // `plan_mod_drain`: at most three consecutive auto-turns, eight
             // messages per person-initiated turn, and a system notice for
             // anything the guard drops.
+            //
+            // A prompt typed just before a failed turn was recorded is queued
+            // before the completion handler opens its "Failure Details"
+            // dialog. Informational overlays do not own the keyboard (the key
+            // path dismisses them on the next key), so dismiss one here rather
+            // than stranding the prompt behind it until another key arrives.
+            if !queued_prompts.is_empty()
+                && matches!(
+                    ui_state.overlays.top(),
+                    Some(
+                        coderex_ui::overlay::Overlay::Detail { .. }
+                            | coderex_ui::overlay::Overlay::Notification { .. }
+                    )
+                )
+            {
+                ui_state.overlays.clear();
+            }
             if !thinking
                 && query_done_rx.is_none()
                 && pending_confirmation.is_none()
