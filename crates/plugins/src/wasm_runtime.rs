@@ -1394,18 +1394,14 @@ fn run_compile_helper(
     let mut compile_cgroup_attached = false;
     #[cfg(target_os = "linux")]
     if let Some(limit) = &compile_cgroup {
-        match child.id() {
-            Some(pid) => match limit.attach(pid) {
-                Ok(()) => compile_cgroup_attached = true,
-                Err(error) => tracing::warn!(
-                    %error,
-                    cgroup = %limit.path().display(),
-                    "could not add the WASM compiler to its cgroup; it runs with RLIMIT_AS only"
-                ),
-            },
-            None => tracing::warn!(
-                "the WASM compiler exited before it could join its cgroup; it ran with \
-                 RLIMIT_AS only"
+        // `std::process::Child::id()` is a plain pid; even if the compiler has
+        // already exited, attaching fails with ESRCH and is reported below.
+        match limit.attach(child.id()) {
+            Ok(()) => compile_cgroup_attached = true,
+            Err(error) => tracing::warn!(
+                %error,
+                cgroup = %limit.path().display(),
+                "could not add the WASM compiler to its cgroup; it runs with RLIMIT_AS only"
             ),
         }
     }
