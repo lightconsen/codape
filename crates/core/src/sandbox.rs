@@ -643,11 +643,13 @@ pub(crate) const fn memory_watchdog_start_micros(tv_sec: u64, tv_usec: u64) -> u
 /// `SandboxConfig::max_memory_bytes` cannot be enforced by the kernel on modern
 /// Darwin: `RLIMIT_AS` and `RLIMIT_DATA` are both rejected with `EINVAL` (see
 /// [`apply_darwin_memory_limit`]). The watchdog closes that gap in user space —
-/// a thread samples the child's resident footprint through `libproc` and sends
-/// `SIGKILL` once it exceeds the ceiling, and when the child leads its own
-/// process group it kills the whole group so descendants die with it. The
-/// `RLIMIT_*` attempt is kept as a secondary layer: on the kernels that honour
-/// it, the child never reaches the watchdog's threshold in the first place.
+/// a thread samples the child's resident footprint through `libproc`, then
+/// `SIGSTOP`s and `SIGKILL`s it once the sample exceeds the ceiling, so it
+/// cannot keep allocating between the decision and the kill. When the child
+/// leads its own process group, the whole group is stopped and killed, so
+/// descendants die with it. The `RLIMIT_*` attempt is kept as a secondary
+/// layer: on the kernels that honour it, the child never reaches the
+/// watchdog's threshold in the first place.
 #[cfg(target_os = "macos")]
 mod memory_watchdog {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -857,21 +859,29 @@ mod memory_watchdog {
         Some(info.pti_resident_size)
     }
 
-    /// `SIGKILL` the child, and its process group when it leads one.
+    /// Stop and then `SIGKILL` the child, and its process group when it leads
+    /// one.
+    ///
+    /// The `SIGSTOP` matters: the watchdog decides from a sample taken up to
+    /// one poll interval ago, and a process that is over its ceiling must not
+    /// keep allocating between that decision and the kill. A stopped process
+    /// cannot run, and `SIGKILL` still terminates it (it cannot be blocked or
+    /// ignored, and a stopped process is woken to die).
     ///
     /// A child started with `process_group(0)` (the WASM compiler) is its own
-    /// group leader, so killing `-pid` takes its descendants too. A child that
-    /// shares this process's group must **not** be killed that way — `-pid`
-    /// would name a group this process belongs to — so the group is only
-    /// targeted when `getpgid(pid) == pid`. That check is also what makes the
-    /// group kill "where applicable" rather than assumed.
+    /// group leader, so targeting `-pid` takes its descendants too. A child
+    /// that shares this process's group must **not** be treated that way —
+    /// `-pid` would name a group this process belongs to — so the group is
+    /// only targeted when `getpgid(pid) == pid`.
     fn kill_child(pid: libc::pid_t) {
         // SAFETY: `getpgid` and `kill` take plain integers; the pid was just
         // verified to be the child.
         unsafe {
             if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGSTOP);
                 libc::kill(-pid, libc::SIGKILL);
             } else {
+                libc::kill(pid, libc::SIGSTOP);
                 libc::kill(pid, libc::SIGKILL);
             }
         }
@@ -1937,6 +1947,215 @@ mod seccomp_arch {
         libc::SYS_recvmsg,
         libc::SYS_accept4,
     ];
+}
+
+// ─── Linux: compiler seccomp deny-list ──────────────────────────────────────
+
+/// A pre-built seccomp deny-list for the WASM compiler child.
+///
+/// This is deliberately not the shell allowlist: that table is written for
+/// shells and rejects syscalls wasmtime needs. This filter allows everything
+/// by default and refuses a short list the compiler has no use for, so it does
+/// not go stale as wasmtime or glibc learns new calls.
+///
+/// The filter is **built in the parent** and only installed with `prctl` in
+/// the child: building it in `pre_exec` would allocate after `fork`, which can
+/// deadlock a multithreaded process.
+///
+/// [`CompilerSeccompFilter::install`] is installed only when bubblewrap is not
+/// wrapping the command. The wrapper itself needs `unshare`, `mount` and
+/// `pivot_root`, and inherits any filter the process that exec'd it had, so
+/// the two cannot both run in one process. With bubblewrap the mount and
+/// network namespaces are the boundary; without it this filter is the network
+/// (and ptrace/module) boundary.
+#[cfg(target_os = "linux")]
+pub mod compiler_seccomp {
+    use std::io;
+
+    // `libc` may not expose all of these.
+    const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
+    const PR_SET_SECCOMP: libc::c_int = 22;
+    const SECCOMP_MODE_FILTER: libc::c_int = 2;
+    const SECCOMP_RET_ALLOW: u32 = 0x7FFF_0000;
+    const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+    const SECCOMP_RET_KILL: u32 = 0x0000_0000;
+
+    const BPF_LD: u16 = 0x00;
+    const BPF_W: u16 = 0x00;
+    const BPF_ABS: u16 = 0x20;
+    const BPF_JMP: u16 = 0x05;
+    const BPF_JEQ: u16 = 0x10;
+    const BPF_K: u16 = 0x00;
+    const BPF_RET: u16 = 0x06;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+
+    /// Syscalls the compiler never needs, denied with `EPERM`.
+    ///
+    /// Kept short on purpose: a deny-list does not need to anticipate every
+    /// call the loader or compiler makes. `execve` and `clone` are
+    /// deliberately absent — the filter is installed before the exec that
+    /// starts the compiler, and Cranelift compiles with threads.
+    const DENIED: &[i64] = &[
+        // Network.
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_connect,
+        libc::SYS_bind,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
+        libc::SYS_sendto,
+        libc::SYS_recvfrom,
+        libc::SYS_sendmsg,
+        libc::SYS_recvmsg,
+        libc::SYS_shutdown,
+        libc::SYS_setsockopt,
+        libc::SYS_getsockopt,
+        libc::SYS_getsockname,
+        libc::SYS_getpeername,
+        // Inspecting or changing another process.
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        // Mounts and namespaces. Bubblewrap needs these; it is the one layout
+        // this filter is not installed under.
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_chroot,
+        libc::SYS_unshare,
+        libc::SYS_setns,
+        // Kernel instrumentation and extension.
+        libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_userfaultfd,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+        libc::SYS_init_module,
+        libc::SYS_finit_module,
+        libc::SYS_delete_module,
+        libc::SYS_kexec_load,
+        libc::SYS_reboot,
+        // Filesystem handles and kernel keyrings.
+        libc::SYS_open_by_handle_at,
+        libc::SYS_add_key,
+        libc::SYS_request_key,
+        libc::SYS_keyctl,
+    ];
+
+    /// A built filter. Nothing here allocates in [`Self::install`].
+    #[derive(Debug)]
+    pub struct CompilerSeccompFilter {
+        filter: Vec<SockFilter>,
+    }
+
+    impl CompilerSeccompFilter {
+        /// Build the deny-list for the current architecture.
+        #[must_use]
+        pub fn wasm_compiler() -> Self {
+            let mut filter = Vec::with_capacity(4 + DENIED.len() * 2);
+            // `seccomp_data.arch` is at offset 4. A filter built for another
+            // architecture must not run here; `KILL` is the only safe answer.
+            filter.push(SockFilter {
+                code: BPF_LD + BPF_W + BPF_ABS,
+                jt: 0,
+                jf: 0,
+                k: 4,
+            });
+            filter.push(SockFilter {
+                code: BPF_JMP + BPF_JEQ + BPF_K,
+                jt: 1,
+                jf: 0,
+                k: super::seccomp_arch::AUDIT_ARCH,
+            });
+            filter.push(SockFilter {
+                code: BPF_RET + BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_KILL,
+            });
+            // `seccomp_data.nr`, the syscall number, is at offset 0.
+            filter.push(SockFilter {
+                code: BPF_LD + BPF_W + BPF_ABS,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            });
+
+            for &nr in DENIED {
+                filter.push(SockFilter {
+                    code: BPF_JMP + BPF_JEQ + BPF_K,
+                    jt: 0,
+                    jf: 1,
+                    k: u32::try_from(nr).unwrap_or(u32::MAX),
+                });
+                filter.push(SockFilter {
+                    code: BPF_RET + BPF_K,
+                    jt: 0,
+                    jf: 0,
+                    k: SECCOMP_RET_ERRNO | (libc::EPERM as u32 & 0xffff),
+                });
+            }
+            filter.push(SockFilter {
+                code: BPF_RET + BPF_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            });
+
+            Self { filter }
+        }
+
+        /// Install the filter on the calling process.
+        ///
+        /// # Errors
+        ///
+        /// Returns the kernel's error when `no_new_privs` or filter mode is
+        /// unavailable. The caller may treat that as a degraded layer.
+        pub fn install(&self) -> io::Result<()> {
+            // The filter has a few dozen entries; the conversion cannot fail.
+            let program = SockFprog {
+                len: self.filter.len() as u16,
+                filter: self.filter.as_ptr(),
+            };
+            // SAFETY: `prctl` takes plain integers; `program` points at a
+            // vector that outlives the call.
+            let ret = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: as above. The kernel copies the filter during the call,
+            // so the vector does not need to outlive it.
+            let ret = unsafe {
+                libc::prctl(
+                    PR_SET_SECCOMP,
+                    SECCOMP_MODE_FILTER as libc::c_ulong,
+                    (&raw const program) as libc::c_ulong,
+                    0,
+                    0,
+                )
+            };
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4102,6 +4321,52 @@ mod tests {
             "the syscall allowlist killed a trivial process: {:?}",
             output.status
         );
+    }
+
+    /// The compiler deny-list refuses a network syscall and leaves ordinary
+    /// calls alone. Runs in a forked child: the filter is irreversible, so it
+    /// must not be installed in the test process.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_compiler_seccomp_filter_denies_network_and_allows_basics() {
+        use super::compiler_seccomp::CompilerSeccompFilter;
+
+        let filter = CompilerSeccompFilter::wasm_compiler();
+        // SAFETY: the child installs a pre-built filter, probes two syscalls
+        // and `_exit`s. It allocates nothing and touches no locks, so forking
+        // from a multithreaded test process is safe here.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                let exit = if filter.install().is_err() {
+                    10
+                } else {
+                    let socket = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+                    let denied = socket == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                    if !denied {
+                        11
+                    } else if libc::getpid() <= 0 {
+                        12
+                    } else {
+                        0
+                    }
+                };
+                libc::_exit(exit);
+            }
+            let mut status = 0;
+            assert_eq!(
+                libc::waitpid(pid, &raw mut status, 0),
+                pid,
+                "waitpid failed"
+            );
+            assert!(
+                libc::WIFEXITED(status),
+                "the filtered child did not exit normally: {status}"
+            );
+            assert_eq!(libc::WEXITSTATUS(status), 0, "the child reported a failure");
+        }
     }
 
     #[test]

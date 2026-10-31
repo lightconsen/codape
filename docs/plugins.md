@@ -253,11 +253,20 @@ wrap the compiler as well as the process-group/job kill:
 |---|---|---|
 | macOS | `sandbox-exec(1)` profile from `coderex_core::sandbox` | reads to system roots plus the staging directory and compiler binary; writes to the staging directory only; network denied |
 | Linux with `bwrap` | bubblewrap mount/network namespace, plus the cgroup above | read-only root, staging directory the only writable path, network namespace unshared; memory ceiling and whole-group kill when a cgroup could be created |
-| Linux without `bwrap` | the cgroup above, when available | memory ceiling and whole-group kill; paths are confined by Landlock instead of a mount namespace |
+| Linux without `bwrap` | Landlock, the cgroup above when available, and a short seccomp deny-list | memory ceiling and whole-group kill; paths confined by Landlock instead of a mount namespace; network, ptrace, mount/namespace, bpf/perf/userfaultfd/io_uring and module/key syscalls refused with `EPERM` |
 | Windows | AppContainer + Job Object (`SandboxHandle`) | reads to system roots, the staging directory and the compiler directory; writes to the staging directory; execute of the compiler; network denied; CPU/memory and kill-on-close |
 
-The Linux seccomp allowlist is deliberately not applied: it is written for
-shells and would reject wasmtime's syscalls. Bubblewrap is skipped when the
+The shell seccomp **allowlist** is deliberately not applied: it is written for
+shells and would reject wasmtime's syscalls. A short **deny-list** is installed
+instead whenever bubblewrap is not wrapping the compiler: network, ptrace,
+mount/namespace, bpf/perf/userfaultfd/io_uring, module, kexec/reboot and
+kernel-keyring syscalls are refused with `EPERM`, and everything else is
+allowed, so the list does not go stale as wasmtime or the loader learns new
+calls. It is built before the fork and only handed to `prctl` in `pre_exec`
+(nothing allocates after fork). Bubblewrap needs those syscalls itself and
+inherits any filter, so the filter is not installed when it wraps the command;
+the mount and network namespaces are the boundary in that layout. Bubblewrap is
+skipped when the
 staging directory is inside the system temp directory, because `bwrap` replaces
 `/tmp` with a fresh tmpfs and the bind mount would resolve against it; in that
 layout the compiler gets rlimits, Landlock path confinement, the cgroup above
@@ -297,8 +306,11 @@ this document does not claim a sandbox that was not applied.
   image are outside it, so it is **not a full address-space cap**. The limit is
   best-effort (a failure is ignored, because it cannot be logged from
   `pre_exec`); the child still has the hard CPU limit, the wall-clock kill and
-  the sandbox-exec profile. Other Unix platforms use `RLIMIT_AS`, subject to
-  the same best-effort handling.
+  the sandbox-exec profile. Since Darwin has no kernel memory ceiling, a
+  user-space watchdog samples resident use and, once it exceeds the limit,
+  `SIGSTOP`s the group before `SIGKILL`ing it, so the process cannot keep
+  allocating while the signal is delivered. Other Unix platforms use
+  `RLIMIT_AS`, subject to the same best-effort handling.
 - The Windows compiler sandbox uses `coderex_core::sandbox`; its Win32 calls are
   exercised by the `test_windows` CI job (`wasm_compile_subprocess`), not by a
   macOS host.

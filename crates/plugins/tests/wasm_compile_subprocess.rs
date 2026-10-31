@@ -147,6 +147,23 @@ fn linux_compiler_is_placed_in_a_memory_cgroup() {
     );
 }
 
+/// With bubblewrap switched off the compiler runs under the seccomp
+/// deny-list. A real compile proves the list does not block what wasmtime and
+/// the dynamic loader need.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_compiler_survives_the_seccomp_deny_list() {
+    let _guard = env_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_module(dir.path(), "plugin.wat", NORMAL_MODULE);
+    let cache = tempfile::tempdir().unwrap();
+
+    set_env(coderex_core::sandbox::BWRAP_ENV, "0");
+    let result = load_with(&input, Some(helper_command()), cache.path());
+    remove_env(coderex_core::sandbox::BWRAP_ENV);
+    result.expect("a real compile must not be blocked by the deny-list");
+}
+
 /// The host-injected command may carry leading arguments. A wrapper script
 /// receives `--marker <input> <output>`, drops the marker, and runs the real
 /// helper with the remaining pair.

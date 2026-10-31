@@ -134,6 +134,18 @@ the x86_64 table. `allow_network` **is** honoured there: the network syscalls ar
 a separate table concatenated only when the flag is set, and a test asserts the
 two tables do not overlap.
 
+The WASM compiler uses a different, much smaller filter
+(`compiler_seccomp` in `crates/core/src/sandbox.rs`): a **deny-list** with a
+default of `ALLOW`, refusing network, ptrace, mount/namespace,
+bpf/perf/userfaultfd/io_uring, module, kexec/reboot and kernel-keyring
+syscalls with `EPERM`. The compiler is the one helper that runs without a
+shell profile, and in the no-bubblewrap layout it has no network namespace, so
+this is the layer that keeps it off the network. The filter is built before
+the fork and only handed to `prctl` in `pre_exec` (nothing allocates after
+fork). It is **not** installed when bubblewrap wraps the command: the wrapper
+needs `unshare`/`mount`/`pivot_root` and inherits any filter, so the two cannot
+run together.
+
 When both backends are unavailable — no `bwrap`, `CODEREX_LANDLOCK=0` set or a
 kernel without Landlock — `filesystem_isolation()` reports `None` and a gating
 hook is denied rather than run unconfined. Nothing silently claims otherwise.

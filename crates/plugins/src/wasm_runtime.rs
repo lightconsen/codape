@@ -1310,6 +1310,19 @@ fn run_compile_helper(
         }
     };
 
+    // Linux: a short seccomp deny-list, but only when bubblewrap is *not*
+    // wrapping the command. The wrapper needs `unshare`, `mount` and
+    // `pivot_root`, and a filter installed here would be inherited by it.
+    // Without bubblewrap there is no network namespace, so this is the layer
+    // that keeps the compiler off the network (and away from ptrace, module
+    // loading and the like).
+    #[cfg(target_os = "linux")]
+    let compiler_seccomp = if used_bwrap {
+        None
+    } else {
+        Some(coderex_core::sandbox::compiler_seccomp::CompilerSeccompFilter::wasm_compiler())
+    };
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1317,6 +1330,22 @@ fn run_compile_helper(
         // take the whole tree with it, including wrapper processes and any
         // descendants the compiler created.
         child_command.process_group(0);
+        #[cfg(target_os = "linux")]
+        // SAFETY: `pre_exec` runs between fork and exec in the child. The
+        // closure calls `setrlimit` and `prctl`, both async-signal-safe, and
+        // the filter was built before the fork, so nothing here allocates.
+        unsafe {
+            child_command.pre_exec(move || {
+                apply_compile_rlimits()?;
+                if let Some(filter) = &compiler_seccomp {
+                    // Best effort, like the other compiler layers: a kernel
+                    // that refuses filter mode leaves Landlock and the cgroup.
+                    let _ = filter.install();
+                }
+                Ok(())
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
         // SAFETY: `pre_exec` runs between fork and exec in the child. The
         // closure only calls `setrlimit`, which is async-signal-safe, and
         // captures two integers.
