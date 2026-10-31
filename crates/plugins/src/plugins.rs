@@ -2263,36 +2263,66 @@ pub struct PluginChannelEvent {
 
 /// Where a channel's notifications are delivered.
 ///
-/// A declaration opts in with a `deliver` object on the channel:
+/// A declaration opts in with a `deliver` object on the channel. Two forms
+/// exist:
 ///
 /// ```json
 /// "channels": {
-///   "ops": { "server": "ops-server", "deliver": { "url": "https://hooks.example.com/coderex" } }
+///   "ops":  { "server": "ops-server", "deliver": { "url": "https://hooks.example.com/coderex" } },
+///   "page": { "server": "ops-server", "deliver": { "server": "pager", "tool": "raise" } }
 /// }
 /// ```
 ///
-/// `https` is required everywhere except for a loopback host, where plain
-/// `http` is allowed: that is the shape a local integration or a test server
-/// uses, and it cannot leave the machine by accident. Anything else (other
-/// schemes, a remote `http` URL) is refused when the manifest is read, so a
-/// plugin cannot quietly send its events somewhere in the clear.
+/// **Webhook** — `https` is required everywhere except for a loopback host,
+/// where plain `http` is allowed: that is the shape a local integration or a
+/// test server uses, and it cannot leave the machine by accident. Anything
+/// else (other schemes, a remote `http` URL) is refused when the manifest is
+/// read, so a plugin cannot quietly send its events somewhere in the clear.
+///
+/// **MCP tool** — the event object is passed as the arguments of `tool` on
+/// another server. Delivering to the channel's *own* server is refused: the
+/// delivery would feed the notifications that produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelDelivery {
-    /// Absolute URL the event is POSTed to.
-    pub url: String,
+#[serde(untagged)]
+pub enum ChannelDelivery {
+    /// POST the event as JSON to a URL.
+    Webhook {
+        /// Absolute URL the event is POSTed to.
+        url: String,
+    },
+    /// Call a tool on another MCP server, with the event as its arguments.
+    McpTool {
+        /// The server exposing the tool.
+        server: String,
+        /// The tool to call.
+        tool: String,
+    },
 }
 
 impl ChannelDelivery {
     /// Read the `deliver` object from a channel declaration.
     ///
+    /// `source_server` is the MCP server the channel is bound to; a tool
+    /// delivery aimed at that same server is refused.
+    ///
     /// `Ok(None)` means the channel declares no delivery. `Err` carries the
     /// reason a declared one was refused; the channel still exists, but the
     /// report marks it [`ChannelStatus::DeliveryInvalid`] instead of silently
     /// dropping the configuration.
-    pub fn parse(entry: &Value) -> Result<Option<Self>, String> {
+    pub fn parse(entry: &Value, source_server: &str) -> Result<Option<Self>, String> {
         let Some(deliver) = entry.get("deliver") else {
             return Ok(None);
         };
+        if deliver.get("url").is_some() {
+            return Self::parse_webhook(deliver).map(Some);
+        }
+        if deliver.get("server").is_some() || deliver.get("tool").is_some() {
+            return Self::parse_tool(deliver, source_server).map(Some);
+        }
+        Err("deliver needs either a `url` or a `server` and `tool`".to_string())
+    }
+
+    fn parse_webhook(deliver: &Value) -> Result<Self, String> {
         let Some(url) = deliver.get("url").and_then(Value::as_str) else {
             return Err("deliver needs a `url` string".to_string());
         };
@@ -2313,9 +2343,44 @@ impl ChannelDelivery {
             }
             other => return Err(format!("deliver.url scheme '{other}' is not supported")),
         }
-        Ok(Some(Self {
+        Ok(Self::Webhook {
             url: parsed.to_string(),
-        }))
+        })
+    }
+
+    fn parse_tool(deliver: &Value, source_server: &str) -> Result<Self, String> {
+        let Some(server) = deliver.get("server").and_then(Value::as_str) else {
+            return Err("deliver needs a `server` string for a tool delivery".to_string());
+        };
+        let Some(tool) = deliver.get("tool").and_then(Value::as_str) else {
+            return Err("deliver needs a `tool` string for a tool delivery".to_string());
+        };
+        let (server, tool) = (server.trim(), tool.trim());
+        if server.is_empty() {
+            return Err("deliver.server is empty".to_string());
+        }
+        if tool.is_empty() {
+            return Err("deliver.tool is empty".to_string());
+        }
+        if server == source_server {
+            return Err(format!(
+                "deliver.server '{server}' is the channel's own server; delivering there would \
+                 feed the notifications that produced the event"
+            ));
+        }
+        Ok(Self::McpTool {
+            server: server.to_string(),
+            tool: tool.to_string(),
+        })
+    }
+
+    /// A short description for a report line.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Webhook { url } => url.clone(),
+            Self::McpTool { server, tool } => format!("{server}#{tool}"),
+        }
     }
 }
 
@@ -2384,7 +2449,7 @@ impl PluginChannelReport {
             },
         };
         let target = match &self.delivery {
-            Some(delivery) => format!(" -> {}", delivery.url),
+            Some(delivery) => format!(" -> {}", delivery.describe()),
             None => String::new(),
         };
         format!("{label} -> {} [{state}]{target}", self.server)
@@ -3641,7 +3706,7 @@ impl PluginManager {
             .into_iter()
             .map(|(channel, plugin, server, display_name, entry)| {
                 let subscribers = self.channel_subscribers(&channel);
-                let (delivery, delivery_error) = match ChannelDelivery::parse(&entry) {
+                let (delivery, delivery_error) = match ChannelDelivery::parse(&entry, &server) {
                     Ok(delivery) => (delivery, None),
                     Err(error) => {
                         tracing::warn!(
@@ -7505,24 +7570,32 @@ mod tests {
     }
 
     /// A delivery target is accepted only where it can be trusted: https
-    /// anywhere, plain http on loopback.
+    /// anywhere, plain http on loopback, and a tool delivery to another server.
     #[test]
-    fn channel_delivery_requires_a_secure_url() {
-        let ok = |entry: serde_json::Value| ChannelDelivery::parse(&entry).unwrap();
+    fn channel_delivery_is_validated() {
+        let ok = |entry: serde_json::Value| ChannelDelivery::parse(&entry, "source").unwrap();
         assert_eq!(
-            ChannelDelivery::parse(&serde_json::json!({"server": "s"})).unwrap(),
+            ChannelDelivery::parse(&serde_json::json!({"server": "source"}), "source").unwrap(),
             None
         );
         assert_eq!(
             ok(serde_json::json!({"deliver": {"url": "https://hooks.example.com/x"}})),
-            Some(ChannelDelivery {
+            Some(ChannelDelivery::Webhook {
                 url: "https://hooks.example.com/x".into()
             })
         );
         assert_eq!(
             ok(serde_json::json!({"deliver": {"url": "http://127.0.0.1:8080/x"}})),
-            Some(ChannelDelivery {
+            Some(ChannelDelivery::Webhook {
                 url: "http://127.0.0.1:8080/x".into()
+            })
+        );
+        // A tool delivery names a different server and one of its tools.
+        assert_eq!(
+            ok(serde_json::json!({"deliver": {"server": "pager", "tool": "raise"}})),
+            Some(ChannelDelivery::McpTool {
+                server: "pager".into(),
+                tool: "raise".into()
             })
         );
 
@@ -7535,14 +7608,26 @@ mod tests {
                 serde_json::json!({"deliver": {"url": "ftp://example.com/x"}}),
                 "scheme",
             ),
-            (serde_json::json!({"deliver": {}}), "url"),
             (serde_json::json!({"deliver": {"url": "  "}}), "empty"),
             (
                 serde_json::json!({"deliver": {"url": "not a url"}}),
                 "not a URL",
             ),
+            // A tool delivery aimed at the channel's own server would feed the
+            // notifications that produced the event.
+            (
+                serde_json::json!({"deliver": {"server": "source", "tool": "x"}}),
+                "own server",
+            ),
+            (serde_json::json!({"deliver": {"server": "pager"}}), "tool"),
+            (serde_json::json!({"deliver": {"tool": "raise"}}), "server"),
+            (
+                serde_json::json!({"deliver": {"server": "  ", "tool": "raise"}}),
+                "empty",
+            ),
+            (serde_json::json!({"deliver": {}}), "either"),
         ] {
-            let error = ChannelDelivery::parse(&entry).expect_err("should be refused");
+            let error = ChannelDelivery::parse(&entry, "source").expect_err("should be refused");
             assert!(error.contains(needle), "{error:?} for {entry}");
         }
     }
@@ -7592,11 +7677,8 @@ mod tests {
         let report = mgr.plugin_channel_report();
         assert_eq!(report[0].status, ChannelStatus::Idle);
         assert_eq!(
-            report[0]
-                .delivery
-                .as_ref()
-                .map(|delivery| delivery.url.as_str()),
-            Some("https://hooks.example.com/x")
+            report[0].delivery.as_ref().map(ChannelDelivery::describe),
+            Some("https://hooks.example.com/x".to_string())
         );
         assert!(
             report[0]

@@ -145,11 +145,53 @@ struct PluginChannelSubscriptions {
     log: Arc<
         std::sync::Mutex<std::collections::VecDeque<coderex_plugins::plugins::PluginChannelEvent>>,
     >,
-    /// The webhook sink per channel that declared a delivery target.
+    /// The webhook sink per channel that declared a delivery URL.
     webhooks: Vec<(
         String,
-        Arc<coderex_plugins::channel_webhook::WebhookChannelSink>,
+        Arc<coderex_plugins::channel_delivery::WebhookChannelSink>,
     )>,
+    /// The tool sink per channel that declared a server and tool.
+    tools: Vec<(
+        String,
+        Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
+    )>,
+}
+
+/// Adapts the MCP manager to the plugin crate's [`ToolCaller`].
+///
+/// The plugin crate cannot depend on the MCP crate, so the call goes through
+/// this thin bridge: it resolves the tool's public name, calls it, and turns an
+/// `isError` result into the `Err` the sink counts.
+///
+/// [`ToolCaller`]: coderex_plugins::channel_delivery::ToolCaller
+#[derive(Debug)]
+struct McpChannelToolCaller {
+    manager: Arc<coderex_mcp::manager::McpManager>,
+}
+
+#[async_trait::async_trait]
+impl coderex_plugins::channel_delivery::ToolCaller for McpChannelToolCaller {
+    async fn call_tool(
+        &self,
+        server: &str,
+        tool: &str,
+        input: serde_json::Value,
+    ) -> Result<(), String> {
+        let name = coderex_mcp::proxy::qualified_tool_name(server, tool);
+        let proxy = self
+            .manager
+            .get_tool_proxy(&name)
+            .ok_or_else(|| format!("MCP tool '{name}' is not registered"))?;
+        let result = proxy.call(input).await?;
+        if result
+            .get("isError")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(format!("'{name}' reported an error result"));
+        }
+        Ok(())
+    }
 }
 
 /// Resolved settings and state passed between startup phases.
@@ -205,11 +247,16 @@ pub struct SessionContext {
     pub plugin_channel_events: Arc<
         std::sync::Mutex<std::collections::VecDeque<coderex_plugins::plugins::PluginChannelEvent>>,
     >,
-    /// Webhook sinks for channels that declared a `deliver` target, with the
+    /// Webhook sinks for channels that declared a `deliver.url`, with the
     /// counters each one keeps.
     pub plugin_channel_webhooks: Vec<(
         String,
-        Arc<coderex_plugins::channel_webhook::WebhookChannelSink>,
+        Arc<coderex_plugins::channel_delivery::WebhookChannelSink>,
+    )>,
+    /// Tool sinks for channels that declared `deliver.server` + `deliver.tool`.
+    pub plugin_channel_tools: Vec<(
+        String,
+        Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
     )>,
     /// Marketplaces configured in settings.
     pub marketplaces: Vec<coderex_config::MarketplaceSetting>,
@@ -636,6 +683,7 @@ impl StartupOrchestrator {
                     std::collections::VecDeque::new(),
                 )),
                 plugin_channel_webhooks: Vec::new(),
+                plugin_channel_tools: Vec::new(),
                 marketplaces: Vec::new(),
                 telemetry_handle: None,
                 telemetry_uploader: None,
@@ -1709,11 +1757,10 @@ impl StartupOrchestrator {
             Self::spawn_plugin_restart_loop(&manager, std::time::Duration::from_secs(1));
         // The channel layer needs a production subscriber, or every channel
         // would report `Idle` forever and a routed notification would reach
-        // nobody. Subscribe one sink to every declared channel and keep the log
-        // it records into.
-        let subscriptions = Self::subscribe_plugin_channels(&manager);
-        self.ctx.plugin_channel_events = subscriptions.log;
-        self.ctx.plugin_channel_webhooks = subscriptions.webhooks;
+        // nobody. The subscription happens after the MCP servers start
+        // (`phase_init_mcp`), because a channel that delivers to an MCP tool
+        // needs the manager, and notifications cannot arrive before then
+        // either.
         self.ctx.plugin_manager = Some(manager);
         Ok(())
     }
@@ -1941,33 +1988,66 @@ impl StartupOrchestrator {
     /// subscriber — the one place the channel layer is actually consumed.
     fn subscribe_plugin_channels(
         manager: &Arc<coderex_plugins::plugins::PluginManager>,
+        tool_caller: Option<Arc<dyn coderex_plugins::channel_delivery::ToolCaller>>,
     ) -> PluginChannelSubscriptions {
         let log = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let sink: Arc<dyn coderex_plugins::plugins::ChannelSink> = Arc::new(PluginChannelSink {
             log: Arc::clone(&log),
         });
         let mut webhooks = Vec::new();
+        let mut tools = Vec::new();
         for report in manager.plugin_channel_report() {
             manager.subscribe_channel(&report.channel, Arc::clone(&sink));
-            // A channel that declared a delivery target gets a webhook sink as
-            // well. The declaration was validated when the report was built, so
-            // an invalid one has no `delivery` here and is left to the report
-            // to explain.
-            if let Some(delivery) = &report.delivery {
-                let webhook = coderex_plugins::channel_webhook::WebhookChannelSink::spawn(
-                    delivery.url.clone(),
-                );
-                manager.subscribe_channel(
-                    &report.channel,
-                    Arc::clone(&webhook) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
-                );
-                webhooks.push((report.channel.clone(), webhook));
+            // A channel that declared a delivery target gets its sink as well.
+            // The declaration was validated when the report was built, so an
+            // invalid one has no `delivery` here and is left to the report to
+            // explain.
+            match &report.delivery {
+                Some(coderex_plugins::plugins::ChannelDelivery::Webhook { url }) => {
+                    let webhook =
+                        coderex_plugins::channel_delivery::WebhookChannelSink::spawn(url.clone());
+                    manager.subscribe_channel(
+                        &report.channel,
+                        Arc::clone(&webhook) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                    );
+                    webhooks.push((report.channel.clone(), webhook));
+                }
+                Some(coderex_plugins::plugins::ChannelDelivery::McpTool { server, tool }) => {
+                    let Some(caller) = tool_caller.as_ref() else {
+                        tracing::warn!(
+                            channel = %report.channel,
+                            server = %server,
+                            tool = %tool,
+                            "no MCP manager here, so this channel's tool delivery is not subscribed"
+                        );
+                        continue;
+                    };
+                    let sink = coderex_plugins::channel_delivery::McpToolChannelSink::spawn(
+                        server.clone(),
+                        tool.clone(),
+                        Arc::clone(caller),
+                    );
+                    manager.subscribe_channel(
+                        &report.channel,
+                        Arc::clone(&sink) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                    );
+                    tools.push((report.channel.clone(), sink));
+                }
+                None => {}
             }
         }
-        if !webhooks.is_empty() {
-            tracing::info!(count = webhooks.len(), "plugin channel webhooks subscribed");
+        if !webhooks.is_empty() || !tools.is_empty() {
+            tracing::info!(
+                webhooks = webhooks.len(),
+                tools = tools.len(),
+                "plugin channel deliveries subscribed"
+            );
         }
-        PluginChannelSubscriptions { log, webhooks }
+        PluginChannelSubscriptions {
+            log,
+            webhooks,
+            tools,
+        }
     }
 
     /// Marketplaces configured in settings plus the legacy environment pair.
@@ -2207,11 +2287,36 @@ impl StartupOrchestrator {
             // tools into its registry, and they resolve their connection
             // through this manager at call time.
             self.ctx.mcp_manager = Some(Arc::clone(&manager));
+            Self::subscribe_channels_for_mcp(&mut self.ctx, Some(Arc::clone(&manager)));
         } else {
             tracing::debug!("no MCP servers configured");
+            Self::subscribe_channels_for_mcp(&mut self.ctx, None);
         }
 
         Ok(())
+    }
+
+    /// Subscribe the production channel sinks now that the MCP manager exists.
+    ///
+    /// A channel that delivers to a tool needs the manager to make the call;
+    /// one that has no manager here (no servers configured) still gets the
+    /// webhook and log sinks, and its tool delivery is reported as
+    /// unsubscribed rather than silently dropped.
+    fn subscribe_channels_for_mcp(
+        ctx: &mut SessionContext,
+        manager: Option<Arc<coderex_mcp::manager::McpManager>>,
+    ) {
+        let Some(plugins) = ctx.plugin_manager.clone() else {
+            return;
+        };
+        let caller = manager.map(|manager| {
+            Arc::new(McpChannelToolCaller { manager })
+                as Arc<dyn coderex_plugins::channel_delivery::ToolCaller>
+        });
+        let subscriptions = Self::subscribe_plugin_channels(&plugins, caller);
+        ctx.plugin_channel_events = subscriptions.log;
+        ctx.plugin_channel_webhooks = subscriptions.webhooks;
+        ctx.plugin_channel_tools = subscriptions.tools;
     }
 
     /// InitMemory: initialize memory subsystem (auto dream, team memory).
@@ -2680,14 +2785,21 @@ impl StartupOrchestrator {
                     "plugin channel delivery was refused"
                 );
             }
-            // What the webhook has actually done, when this channel has one:
+            // What the delivery has actually done, when this channel has one:
             // "delivered 3, dropped 0, failed 1; last error: …".
             let stats = self
                 .ctx
                 .plugin_channel_webhooks
                 .iter()
                 .find(|(channel, _)| channel == &report.channel)
-                .map(|(_, sink)| sink.stats().render());
+                .map(|(_, sink)| sink.stats().render())
+                .or_else(|| {
+                    self.ctx
+                        .plugin_channel_tools
+                        .iter()
+                        .find(|(channel, _)| channel == &report.channel)
+                        .map(|(_, sink)| sink.stats().render())
+                });
             let line = match stats {
                 Some(stats) => format!("{} [{stats}]", report.render()),
                 None => report.render(),
@@ -4302,7 +4414,7 @@ mod tests {
         );
         let manager = Arc::new(manager);
 
-        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager);
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
 
         assert_eq!(subscriptions.webhooks.len(), 1);
         assert_eq!(subscriptions.webhooks[0].0, "chat");
@@ -4322,6 +4434,105 @@ mod tests {
         );
     }
 
+    /// A fake tool caller: records the calls and answers with a fixed result.
+    #[derive(Debug)]
+    struct FakeCaller {
+        calls: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
+        outcome: Result<(), String>,
+    }
+
+    #[async_trait::async_trait]
+    impl coderex_plugins::channel_delivery::ToolCaller for FakeCaller {
+        async fn call_tool(
+            &self,
+            server: &str,
+            tool: &str,
+            input: serde_json::Value,
+        ) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((server.into(), tool.into(), input));
+            self.outcome.clone()
+        }
+    }
+
+    /// A channel that declares `deliver.server` + `deliver.tool` gets a tool
+    /// sink, and a routed notification reaches that tool with the event as its
+    /// arguments.
+    #[tokio::test]
+    async fn a_channel_with_a_tool_delivery_calls_that_tool() {
+        let manager = coderex_plugins::plugins::PluginManager::new();
+        manager.load_plugin(
+            serde_json::from_value(serde_json::json!({
+                "name": "chan",
+                "version": "1.0.0",
+                "mcpServers": {"chat": {"command": "chat-server"}},
+                "channels": [{
+                    "server": "chat",
+                    "displayName": "Team chat",
+                    "deliver": {"server": "pager", "tool": "raise"}
+                }]
+            }))
+            .expect("the manifest should parse"),
+            std::path::PathBuf::from("/tmp/chan"),
+        );
+        let manager = Arc::new(manager);
+        let caller = Arc::new(FakeCaller {
+            calls: std::sync::Mutex::new(Vec::new()),
+            outcome: Ok(()),
+        });
+
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(
+            &manager,
+            Some(Arc::clone(&caller) as Arc<dyn coderex_plugins::channel_delivery::ToolCaller>),
+        );
+
+        assert_eq!(subscriptions.tools.len(), 1);
+        assert_eq!(subscriptions.tools[0].0, "chat");
+        assert!(subscriptions.webhooks.is_empty());
+        assert!(
+            manager.plugin_channel_report()[0]
+                .render()
+                .contains("pager#raise")
+        );
+
+        manager.route_channel_notification("chat", "notifications/message", None);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while caller.calls.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let calls = caller.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the tool should have been called once");
+        assert_eq!(calls[0].0, "pager");
+        assert_eq!(calls[0].1, "raise");
+        assert_eq!(calls[0].2["channel"], "chat");
+        assert_eq!(calls[0].2["method"], "notifications/message");
+    }
+
+    /// Without an MCP manager there is nothing to call, so the tool sink is
+    /// not subscribed — and the channel says so rather than appearing healthy.
+    #[tokio::test]
+    async fn a_tool_delivery_without_a_manager_is_not_subscribed() {
+        let manager = coderex_plugins::plugins::PluginManager::new();
+        manager.load_plugin(
+            serde_json::from_value(serde_json::json!({
+                "name": "chan",
+                "version": "1.0.0",
+                "mcpServers": {"chat": {"command": "chat-server"}},
+                "channels": [{"server": "chat", "deliver": {"server": "pager", "tool": "raise"}}]
+            }))
+            .expect("the manifest should parse"),
+            std::path::PathBuf::from("/tmp/chan"),
+        );
+        let manager = Arc::new(manager);
+
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
+
+        assert!(subscriptions.tools.is_empty());
+    }
+
     /// A refused declaration subscribes nothing and says why, rather than
     /// silently behaving like a channel with no delivery.
     #[tokio::test]
@@ -4339,7 +4550,7 @@ mod tests {
         );
         let manager = Arc::new(manager);
 
-        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager);
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
 
         assert!(subscriptions.webhooks.is_empty());
         let report = manager.plugin_channel_report();
@@ -4371,7 +4582,7 @@ mod tests {
             coderex_plugins::plugins::ChannelStatus::Idle
         );
 
-        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager);
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
         let report = manager.plugin_channel_report();
         assert_eq!(
             report[0].status,
@@ -4412,7 +4623,7 @@ mod tests {
         manager.load_plugin(manifest, std::path::PathBuf::from("/tmp/chan"));
 
         let manager = Arc::new(manager);
-        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager);
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
         let router = PluginChannelRouter {
             manager: Arc::clone(&manager),
         };

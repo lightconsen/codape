@@ -324,7 +324,7 @@ The manifest is parsed with `deny_unknown_fields`: a field that is not in the ta
 | `monitors` | ✅ implemented | Persistent watch scripts armed with the session (`PluginMonitorSupervisor`). |
 | `mcpServers` | ✅ implemented | Active plugins contribute `{"mcpServers": {...}}` through `PluginManager::plugin_mcp_servers()`; the orchestrator loads them before `.mcp.json` (project file wins on name clashes). |
 | `lspServers` | ✅ implemented | The first configured server is the default for the `LSP` tool (the REPL fills the tool's shared default at startup). |
-| `channels` | ✅ implemented (delivery: webhook) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |
+| `channels` | ✅ implemented (delivery: webhook or MCP tool) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |
 | `binaries` | ✅ implemented | SHA-256-pinned HTTPS fetch into `<plugin>/bin/` (`fetch_plugin_binaries`); `CODEREX_PLUGIN_NO_BINARIES=1` skips the fetch. |
 | `types` | ✅ implemented | Validated `.d.ts` files are exported at startup to `config_home()/plugin-types/<plugin>/` (`export_plugin_types`) so a plugin author has a stable include path, **and** read into a `PluginTypeRegistry` that `/plugin components` lists. The same export writes the host's generated surface — `coderex/`, `coderex-tools/`, `coderex-mcp/` and a `tsconfig.json` — from the registered tool schemas; `/plugin types [name]` lists or prints them. The exported tree is **type-checked** with a real `tsc` when one is available (startup, plus `coderex plugin-typecheck`); nothing is ever executed. See "Types". |
 | `settings` | ✅ implemented (allowlisted) | A typed patch deep-merges into the resolved settings, by source: user/project values win over every plugin, and a plugin only fills a key the user left unset. `permission_mode`, `telemetry` and `max_budget_usd` are tighten-only; `hooks`, `mcpServers`, `api_key`, `provider` and `env` are never taken. Unknown keys warn and are ignored. See "Settings". |
@@ -494,16 +494,38 @@ may now declare a delivery target:
 ```
 
 Each notification is POSTed to that URL as JSON (`channel`, `plugin`, `server`,
-`method`, `params`, `sequence`). Delivery is **lossy on purpose**: the sink
-enqueues (256 events) and a background task posts with a 5 s timeout, so a
-slow or hanging endpoint cannot stall the MCP notification path. A full queue,
-a non-2xx answer, or a timeout is counted — `/plugin components` shows
-`delivered N, dropped N, failed N` and the last error next to the channel.
+`method`, `params`, `sequence`).
+
+The second transport calls a tool on another MCP server instead:
+
+```json
+"deliver": { "server": "pager", "tool": "raise" }
+```
+
+The event object is passed verbatim as the tool's arguments, so the target
+tool declares the shape it accepts (`channel`, `method`, `params`, `sequence`).
+This is for a server that already knows how to reach Slack, Jira or PagerDuty:
+no webhook endpoint and no script. Delivering to the channel's **own** server
+is refused — the delivery would feed the notifications that produced it. An
+indirect cycle (A's channel delivers to B, whose notifications deliver back to
+A) is not detectable statically and is the manifest author's responsibility.
+
+Delivery is **lossy on purpose** for both: the sink enqueues (256 events) and a
+background task sends with a timeout (5 s for a webhook, 10 s for a tool call),
+so a slow or hanging target cannot stall the MCP notification path. A full
+queue, a non-2xx answer, an `isError` result, or a timeout is counted —
+`/plugin components` shows `delivered N, dropped N, failed N` and the last
+error next to the channel.
 
 `https` is required except on a loopback host, where plain `http` is allowed
 (a local integration or a test server). Any other scheme, or plain `http` to a
 remote host, is refused when the manifest is read: the channel is listed as
 `delivery refused: …` and no sink is subscribed.
+
+The tool sink is subscribed after the MCP servers start (a notification cannot
+arrive before that either); a run with no MCP servers configured has no
+manager to call, so a tool delivery is reported as unsubscribed rather than
+silently dropped.
 
 `CODEREX_PLUGIN_NO_TYPECHECK` does not affect delivery; there is no
 environment switch that turns webhooks off — remove the `deliver` block.

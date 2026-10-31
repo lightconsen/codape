@@ -2,7 +2,7 @@
 
 #![warn(missing_docs)]
 
-pub mod channel_webhook;
+pub mod channel_delivery;
 pub mod command_bridge;
 pub mod declarations;
 pub mod plugin_ui;
