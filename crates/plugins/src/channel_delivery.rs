@@ -1,6 +1,6 @@
 //! Deliver plugin channel notifications out of the process.
 //!
-//! Two transports live here:
+//! Three transports live here:
 //!
 //! - **Webhook** — a channel that declares `"deliver": {"url": "…"}` gets an
 //!   event POSTed as JSON to that URL.
@@ -9,8 +9,11 @@
 //!   tool on another MCP server as its arguments (the event object itself), so
 //!   a server that already knows how to reach Slack, Jira or PagerDuty can do
 //!   the delivery without a webhook or a script.
+//! - **Command** — a channel that declares
+//!   `"deliver": {"command": "/abs/path", "args": […]}` runs that program for
+//!   each event, with the event as JSON on its stdin.
 //!
-//! Both share [`DeliveryStats`] and the same lossy contract below.
+//! All three share [`DeliveryStats`] and the same lossy contract below.
 //!
 //! Delivery is **lossy on purpose**. A webhook that is slow, hanging, or
 //! returning errors must not stall `PluginManager::route_channel_notification`:
@@ -282,6 +285,183 @@ impl ChannelSink for McpToolChannelSink {
     }
 }
 
+/// How long one command delivery may run.
+pub const COMMAND_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A sink that runs a local command per event, with the event as JSON on stdin.
+///
+/// The command is the manifest's absolute path; it runs with no shell, so
+/// arguments and the event cannot be reinterpreted as code. Its environment is
+/// cleared — only `PATH` and three `CODEREX_CHANNEL_*` markers are set — so a
+/// session's provider credentials do not reach it.
+///
+/// This is **not** sandboxed. A plugin manifest that can name a command can
+/// already run code (`commands`, `monitors`, `mcpServers`), so the transport
+/// adds no new capability to that trust decision; it does mean the command can
+/// read and write whatever the user can. Use it for a notification script the
+/// user wrote or reviewed.
+#[derive(Debug)]
+pub struct CommandChannelSink {
+    sender: tokio::sync::mpsc::Sender<PluginChannelEvent>,
+    stats: Arc<DeliveryStats>,
+    command: String,
+    args: Vec<String>,
+}
+
+impl CommandChannelSink {
+    /// Create a sink and start its delivery task.
+    ///
+    /// Must be called from within a Tokio runtime.
+    #[must_use]
+    pub fn spawn(command: impl Into<String>, args: Vec<String>) -> Arc<Self> {
+        let command = command.into();
+        let (sender, mut receiver) =
+            tokio::sync::mpsc::channel::<PluginChannelEvent>(WEBHOOK_QUEUE_CAPACITY);
+        let stats = Arc::new(DeliveryStats::default());
+        let task_stats = Arc::clone(&stats);
+        let task_command = command.clone();
+        let task_args = args.clone();
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                match run_command(&task_command, &task_args, &event).await {
+                    Ok(()) => {
+                        task_stats.delivered.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        task_stats.failed.fetch_add(1, Ordering::Relaxed);
+                        task_stats.record_error(error);
+                    }
+                }
+            }
+        });
+        Arc::new(Self {
+            sender,
+            stats,
+            command,
+            args,
+        })
+    }
+
+    /// The program and arguments this sink runs.
+    #[must_use]
+    pub fn target(&self) -> (&str, &[String]) {
+        (&self.command, &self.args)
+    }
+
+    /// The counters this sink keeps.
+    #[must_use]
+    pub const fn stats(&self) -> &Arc<DeliveryStats> {
+        &self.stats
+    }
+}
+
+impl ChannelSink for CommandChannelSink {
+    fn deliver(&self, event: PluginChannelEvent) {
+        if self.sender.try_send(event).is_err() {
+            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// How much of a failed command's stderr is kept for the report.
+const COMMAND_STDERR_LIMIT: usize = 4096;
+
+/// Run the command once for `event`, with a timeout and a cleared environment.
+async fn run_command(
+    command: &str,
+    args: &[String],
+    event: &PluginChannelEvent,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let payload = serde_json::to_vec(event)
+        .map_err(|error| format!("the event could not be serialised: {error}"))?;
+
+    let mut builder = tokio::process::Command::new(command);
+    builder
+        .args(args)
+        // No shell: the program is exactly what the manifest named.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("CODEREX_CHANNEL", &event.channel)
+        .env("CODEREX_CHANNEL_PLUGIN", &event.plugin)
+        .env("CODEREX_CHANNEL_SERVER", &event.server)
+        .stdin(std::process::Stdio::piped())
+        // Output is not part of the contract: stdout is discarded, and stderr
+        // is read only as far as a failure report needs (see `bounded_stderr`).
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    // Some Windows programs and the loader expect this; it is not a credential.
+    #[cfg(windows)]
+    builder.env(
+        "SystemRoot",
+        std::env::var_os("SystemRoot").unwrap_or_default(),
+    );
+
+    let mut child = builder
+        .spawn()
+        .map_err(|error| format!("could not run {command}: {error}"))?;
+    let stderr = tokio::spawn(bounded_stderr(child.stderr.take(), COMMAND_STDERR_LIMIT));
+
+    // Feeding stdin and waiting share one deadline. A command that never reads
+    // stdin would otherwise block `write_all` forever once the payload is
+    // larger than the pipe buffer, and the timeout below would never start.
+    let outcome = tokio::time::timeout(COMMAND_DELIVERY_TIMEOUT, async move {
+        if let Some(mut stdin) = child.stdin.take() {
+            // A command that exits without reading stdin gives EPIPE here; that
+            // is its choice, and the exit status below is the real answer.
+            let _ = stdin.write_all(&payload).await;
+            let _ = stdin.shutdown().await;
+        }
+        child.wait().await
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => {
+            let stderr = stderr.await.unwrap_or_default();
+            let excerpt: String = stderr.trim().chars().take(200).collect();
+            Err(if excerpt.is_empty() {
+                format!("{command} exited with {status}")
+            } else {
+                format!("{command} exited with {status}: {excerpt}")
+            })
+        }
+        Ok(Err(error)) => Err(format!("could not wait for {command}: {error}")),
+        // Dropping the future drops the child, and `kill_on_drop` kills it.
+        Err(_) => Err(format!(
+            "{command} did not finish within {}s",
+            COMMAND_DELIVERY_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Read a child's stderr, keeping at most `limit` bytes.
+///
+/// The remainder is drained and discarded: a command that writes more must not
+/// block on a full pipe, and must not grow this process's memory without bound.
+async fn bounded_stderr(pipe: Option<impl tokio::io::AsyncRead + Unpin>, limit: usize) -> String {
+    use tokio::io::AsyncReadExt as _;
+
+    let Some(mut pipe) = pipe else {
+        return String::new();
+    };
+    let mut kept = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match pipe.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                let room = limit.saturating_sub(kept.len());
+                kept.extend_from_slice(&buffer[..read.min(room)]);
+            }
+        }
+    }
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +699,133 @@ mod tests {
             sink.stats()
                 .last_error()
                 .is_some_and(|error| error.contains("did not answer")),
+            "{:?}",
+            sink.stats().last_error()
+        );
+    }
+
+    /// A shell script that records its stdin and exits with `status`.
+    #[cfg(unix)]
+    fn script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_receives_the_event_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = dir.path().join("event.json");
+        let command = script(
+            dir.path(),
+            "notify.sh",
+            // Rename after writing: a redirect target exists before `cat` has
+            // written anything, so existence alone is not "the event is here".
+            &format!("cat > {0}.tmp && mv {0}.tmp {0}", captured.display()),
+        );
+        let sink = CommandChannelSink::spawn(command.to_string_lossy().to_string(), Vec::new());
+        sink.deliver(event(9));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !captured.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let body = std::fs::read_to_string(&captured).expect("the command wrote its stdin");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("JSON on stdin");
+        assert_eq!(parsed["channel"], "ops");
+        assert_eq!(parsed["sequence"], 9);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.stats().delivered() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(sink.stats().delivered(), 1);
+    }
+
+    /// The arguments in the declaration are passed exactly, and the environment
+    /// is cleared apart from `PATH` and the channel markers.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_runs_with_its_arguments_and_a_clean_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = dir.path().join("env.txt");
+        let command = script(
+            dir.path(),
+            "dump.sh",
+            &format!(
+                "env > {}\necho \"$1\" >> {}",
+                captured.display(),
+                captured.display()
+            ),
+        );
+        let sink = CommandChannelSink::spawn(
+            command.to_string_lossy().to_string(),
+            vec!["first-arg".to_string()],
+        );
+        sink.deliver(event(1));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.stats().delivered() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let dump = std::fs::read_to_string(&captured).unwrap();
+
+        // SAFETY: reading this test process's own environment is safe; the
+        // assertion only fires when the variable is actually set.
+        if let Ok(secret) = std::env::var("CODEREX_TEST_CHANNEL_SECRET") {
+            assert!(
+                !dump.contains(&secret),
+                "a host variable reached the command"
+            );
+        }
+        assert!(dump.contains("CODEREX_CHANNEL=ops"), "{dump}");
+        assert!(dump.lines().any(|line| line == "first-arg"), "{dump}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_exits_non_zero_is_counted_with_its_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = script(dir.path(), "fail.sh", "echo \"boom\" >&2; exit 3");
+        let sink = CommandChannelSink::spawn(command.to_string_lossy().to_string(), Vec::new());
+        sink.deliver(event(1));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sink.stats().failed() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(sink.stats().failed(), 1);
+        assert!(
+            sink.stats()
+                .last_error()
+                .is_some_and(|error| error.contains("exit") && error.contains("boom")),
+            "{:?}",
+            sink.stats().last_error()
+        );
+    }
+
+    /// A command that never exits is killed and counted, not left running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hanging_command_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = script(dir.path(), "hang.sh", "sleep 30");
+        let sink = CommandChannelSink::spawn(command.to_string_lossy().to_string(), Vec::new());
+        sink.deliver(event(1));
+
+        let deadline =
+            std::time::Instant::now() + COMMAND_DELIVERY_TIMEOUT + Duration::from_secs(5);
+        while sink.stats().failed() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(sink.stats().failed(), 1);
+        assert!(
+            sink.stats()
+                .last_error()
+                .is_some_and(|error| error.contains("did not finish")),
             "{:?}",
             sink.stats().last_error()
         );

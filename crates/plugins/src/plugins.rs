@@ -2263,13 +2263,14 @@ pub struct PluginChannelEvent {
 
 /// Where a channel's notifications are delivered.
 ///
-/// A declaration opts in with a `deliver` object on the channel. Two forms
-/// exist:
+/// A declaration opts in with a `deliver` object on the channel. Three forms
+/// exist, and exactly one may appear:
 ///
 /// ```json
 /// "channels": {
 ///   "ops":  { "server": "ops-server", "deliver": { "url": "https://hooks.example.com/coderex" } },
-///   "page": { "server": "ops-server", "deliver": { "server": "pager", "tool": "raise" } }
+///   "page": { "server": "ops-server", "deliver": { "server": "pager", "tool": "raise" } },
+///   "mail": { "server": "ops-server", "deliver": { "command": "/home/me/notify.sh", "args": ["--ops"] } }
 /// }
 /// ```
 ///
@@ -2282,6 +2283,12 @@ pub struct PluginChannelEvent {
 /// **MCP tool** — the event object is passed as the arguments of `tool` on
 /// another server. Delivering to the channel's *own* server is refused: the
 /// delivery would feed the notifications that produced it.
+///
+/// **Command** — the program at `command` runs once per event with the event
+/// as JSON on its stdin. The path must be absolute and is executed directly,
+/// with no shell, so neither the arguments nor the event can be reinterpreted
+/// as code. See [`crate::channel_delivery::CommandChannelSink`] for the
+/// environment and timeout; the command is not sandboxed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ChannelDelivery {
@@ -2296,6 +2303,14 @@ pub enum ChannelDelivery {
         server: String,
         /// The tool to call.
         tool: String,
+    },
+    /// Run a local command, with the event as JSON on its stdin.
+    Command {
+        /// Absolute path to the program. No shell, no `PATH` lookup.
+        command: String,
+        /// Arguments passed verbatim.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
     },
 }
 
@@ -2313,13 +2328,25 @@ impl ChannelDelivery {
         let Some(deliver) = entry.get("deliver") else {
             return Ok(None);
         };
-        if deliver.get("url").is_some() {
-            return Self::parse_webhook(deliver).map(Some);
+        match [
+            deliver.get("url").is_some(),
+            deliver.get("server").is_some() || deliver.get("tool").is_some(),
+            deliver.get("command").is_some(),
+        ] {
+            [true, false, false] => Self::parse_webhook(deliver).map(Some),
+            [false, true, false] => Self::parse_tool(deliver, source_server).map(Some),
+            [false, false, true] => Self::parse_command(deliver).map(Some),
+            [false, false, false] => {
+                Err("deliver needs one of `url`, `server`+`tool`, or `command`".to_string())
+            }
+            // Two transports in one object would leave which one runs to this
+            // function's order, so it is refused.
+            _ => Err(
+                "deliver names more than one transport; use exactly one of `url`, \
+                      `server`+`tool`, or `command`"
+                    .to_string(),
+            ),
         }
-        if deliver.get("server").is_some() || deliver.get("tool").is_some() {
-            return Self::parse_tool(deliver, source_server).map(Some);
-        }
-        Err("deliver needs either a `url` or a `server` and `tool`".to_string())
     }
 
     fn parse_webhook(deliver: &Value) -> Result<Self, String> {
@@ -2374,12 +2401,48 @@ impl ChannelDelivery {
         })
     }
 
+    fn parse_command(deliver: &Value) -> Result<Self, String> {
+        let Some(command) = deliver.get("command").and_then(Value::as_str) else {
+            return Err("deliver needs a `command` string".to_string());
+        };
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("deliver.command is empty".to_string());
+        }
+        // An absolute path, not a `PATH` lookup: the manifest says exactly
+        // which file runs, and a changed `PATH` cannot redirect it.
+        let path = std::path::Path::new(command);
+        if !path.is_absolute() {
+            return Err(format!(
+                "deliver.command '{command}' must be an absolute path"
+            ));
+        }
+        let args = match deliver.get("args") {
+            None => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "deliver.args must be strings".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("deliver.args must be an array of strings".to_string()),
+        };
+        Ok(Self::Command {
+            command: command.to_string(),
+            args,
+        })
+    }
+
     /// A short description for a report line.
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
             Self::Webhook { url } => url.clone(),
             Self::McpTool { server, tool } => format!("{server}#{tool}"),
+            Self::Command { command, args } if args.is_empty() => command.clone(),
+            Self::Command { command, args } => format!("{command} {}", args.join(" ")),
         }
     }
 }
@@ -7598,6 +7661,31 @@ mod tests {
                 tool: "raise".into()
             })
         );
+        // A command delivery runs an absolute program with its arguments.
+        let notify = std::env::temp_dir().join("notify");
+        assert_eq!(
+            ok(serde_json::json!({"deliver": {"command": notify.to_string_lossy()}})),
+            Some(ChannelDelivery::Command {
+                command: notify.to_string_lossy().into_owned(),
+                args: Vec::new()
+            })
+        );
+        assert_eq!(
+            ok(serde_json::json!({
+                "deliver": {"command": notify.to_string_lossy(), "args": ["--ops", "now"]}
+            })),
+            Some(ChannelDelivery::Command {
+                command: notify.to_string_lossy().into_owned(),
+                args: vec!["--ops".into(), "now".into()]
+            })
+        );
+        assert_eq!(
+            ok(serde_json::json!({"deliver": {"command": notify.to_string_lossy(), "args": []}})),
+            Some(ChannelDelivery::Command {
+                command: notify.to_string_lossy().into_owned(),
+                args: Vec::new()
+            })
+        );
 
         for (entry, needle) in [
             (
@@ -7625,7 +7713,35 @@ mod tests {
                 serde_json::json!({"deliver": {"server": "  ", "tool": "raise"}}),
                 "empty",
             ),
-            (serde_json::json!({"deliver": {}}), "either"),
+            // A command must be an absolute path, so a `PATH` lookup cannot
+            // redirect what the manifest said.
+            (
+                serde_json::json!({"deliver": {"command": "notify.sh"}}),
+                "absolute path",
+            ),
+            (serde_json::json!({"deliver": {"command": "  "}}), "empty"),
+            (
+                serde_json::json!({"deliver": {"command": 7}}),
+                "`command` string",
+            ),
+            (
+                serde_json::json!({"deliver": {"command": notify.to_string_lossy(), "args": ["a", 7]}}),
+                "args must be strings",
+            ),
+            (
+                serde_json::json!({"deliver": {"command": notify.to_string_lossy(), "args": "--ops"}}),
+                "args must be an array",
+            ),
+            // Two transports in one object are ambiguous, not one-plus-extra.
+            (
+                serde_json::json!({"deliver": {"url": "https://hooks.example.com/x", "command": "/bin/notify"}}),
+                "more than one transport",
+            ),
+            (
+                serde_json::json!({"deliver": {"server": "pager", "tool": "raise", "command": "/bin/notify"}}),
+                "more than one transport",
+            ),
+            (serde_json::json!({"deliver": {}}), "one of"),
         ] {
             let error = ChannelDelivery::parse(&entry, "source").expect_err("should be refused");
             assert!(error.contains(needle), "{error:?} for {entry}");

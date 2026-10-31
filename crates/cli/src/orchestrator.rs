@@ -155,6 +155,11 @@ struct PluginChannelSubscriptions {
         String,
         Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
     )>,
+    /// The command sink per channel that declared a command.
+    commands: Vec<(
+        String,
+        Arc<coderex_plugins::channel_delivery::CommandChannelSink>,
+    )>,
 }
 
 /// Adapts the MCP manager to the plugin crate's [`ToolCaller`].
@@ -257,6 +262,11 @@ pub struct SessionContext {
     pub plugin_channel_tools: Vec<(
         String,
         Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
+    )>,
+    /// Command sinks for channels that declared `deliver.command`.
+    pub plugin_channel_commands: Vec<(
+        String,
+        Arc<coderex_plugins::channel_delivery::CommandChannelSink>,
     )>,
     /// Marketplaces configured in settings.
     pub marketplaces: Vec<coderex_config::MarketplaceSetting>,
@@ -684,6 +694,7 @@ impl StartupOrchestrator {
                 )),
                 plugin_channel_webhooks: Vec::new(),
                 plugin_channel_tools: Vec::new(),
+                plugin_channel_commands: Vec::new(),
                 marketplaces: Vec::new(),
                 telemetry_handle: None,
                 telemetry_uploader: None,
@@ -1996,6 +2007,7 @@ impl StartupOrchestrator {
         });
         let mut webhooks = Vec::new();
         let mut tools = Vec::new();
+        let mut commands = Vec::new();
         for report in manager.plugin_channel_report() {
             manager.subscribe_channel(&report.channel, Arc::clone(&sink));
             // A channel that declared a delivery target gets its sink as well.
@@ -2033,13 +2045,27 @@ impl StartupOrchestrator {
                     );
                     tools.push((report.channel.clone(), sink));
                 }
+                // A command needs nothing from the MCP layer: it is a process
+                // on this machine, so it is subscribed like a webhook.
+                Some(coderex_plugins::plugins::ChannelDelivery::Command { command, args }) => {
+                    let sink = coderex_plugins::channel_delivery::CommandChannelSink::spawn(
+                        command.clone(),
+                        args.clone(),
+                    );
+                    manager.subscribe_channel(
+                        &report.channel,
+                        Arc::clone(&sink) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                    );
+                    commands.push((report.channel.clone(), sink));
+                }
                 None => {}
             }
         }
-        if !webhooks.is_empty() || !tools.is_empty() {
+        if !webhooks.is_empty() || !tools.is_empty() || !commands.is_empty() {
             tracing::info!(
                 webhooks = webhooks.len(),
                 tools = tools.len(),
+                commands = commands.len(),
                 "plugin channel deliveries subscribed"
             );
         }
@@ -2047,6 +2073,7 @@ impl StartupOrchestrator {
             log,
             webhooks,
             tools,
+            commands,
         }
     }
 
@@ -2317,6 +2344,7 @@ impl StartupOrchestrator {
         ctx.plugin_channel_events = subscriptions.log;
         ctx.plugin_channel_webhooks = subscriptions.webhooks;
         ctx.plugin_channel_tools = subscriptions.tools;
+        ctx.plugin_channel_commands = subscriptions.commands;
     }
 
     /// InitMemory: initialize memory subsystem (auto dream, team memory).
@@ -2796,6 +2824,13 @@ impl StartupOrchestrator {
                 .or_else(|| {
                     self.ctx
                         .plugin_channel_tools
+                        .iter()
+                        .find(|(channel, _)| channel == &report.channel)
+                        .map(|(_, sink)| sink.stats().render())
+                })
+                .or_else(|| {
+                    self.ctx
+                        .plugin_channel_commands
                         .iter()
                         .find(|(channel, _)| channel == &report.channel)
                         .map(|(_, sink)| sink.stats().render())
@@ -4531,6 +4566,95 @@ mod tests {
         let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
 
         assert!(subscriptions.tools.is_empty());
+    }
+
+    /// A channel that declares `deliver.command` gets a command sink, and a
+    /// routed notification runs that program with the event on stdin. This
+    /// transport needs no MCP manager, so it is subscribed in a run with no
+    /// servers as well.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_channel_with_a_command_delivery_runs_that_command() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let captured = dir.path().join("event.json");
+        let script = dir.path().join("notify.sh");
+        // Write then rename, so the file's appearance means the whole event is
+        // there: reading a redirect target the shell just created can catch it
+        // empty, before `cat` has written anything.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncat > {0}.tmp && mv {0}.tmp {0}\n",
+                captured.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let command = script.to_string_lossy().to_string();
+
+        let manager = coderex_plugins::plugins::PluginManager::new();
+        manager.load_plugin(
+            serde_json::from_value(serde_json::json!({
+                "name": "chan",
+                "version": "1.0.0",
+                "mcpServers": {"chat": {"command": "chat-server"}},
+                "channels": [{
+                    "server": "chat",
+                    "displayName": "Team chat",
+                    "deliver": {"command": command}
+                }]
+            }))
+            .expect("the manifest should parse"),
+            std::path::PathBuf::from("/tmp/chan"),
+        );
+        let manager = Arc::new(manager);
+
+        let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
+
+        assert_eq!(subscriptions.commands.len(), 1);
+        assert_eq!(subscriptions.commands[0].0, "chat");
+        assert_eq!(subscriptions.commands[0].1.target().0, command);
+        assert!(subscriptions.webhooks.is_empty());
+        assert!(subscriptions.tools.is_empty());
+        assert!(
+            manager.plugin_channel_report()[0]
+                .render()
+                .contains(&command)
+        );
+
+        manager.route_channel_notification("chat", "notifications/message", None);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !captured.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let body = std::fs::read_to_string(&captured).expect("the command wrote its stdin");
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|error| panic!("stdin was not JSON ({error}): {body:?}"));
+        assert_eq!(parsed["channel"], "chat");
+        assert_eq!(parsed["method"], "notifications/message");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while subscriptions.commands[0].1.stats().delivered() == 0
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // The component report shows what the delivery has actually done.
+        let mut orch = StartupOrchestrator::new();
+        orch.ctx.plugin_manager = Some(Arc::clone(&manager));
+        orch.ctx.plugin_channel_commands = subscriptions.commands;
+        let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        orch.configure_plugin_components(&mut repl, orch.ctx.plugin_manager.as_ref().unwrap());
+        let components = repl.command_context_for_test().plugin_components;
+        assert!(
+            components
+                .iter()
+                .any(|(kind, name)| kind == "channel" && name.contains("delivered 1")),
+            "{components:?}"
+        );
     }
 
     /// A refused declaration subscribes nothing and says why, rather than

@@ -324,7 +324,7 @@ The manifest is parsed with `deny_unknown_fields`: a field that is not in the ta
 | `monitors` | ✅ implemented | Persistent watch scripts armed with the session (`PluginMonitorSupervisor`). |
 | `mcpServers` | ✅ implemented | Active plugins contribute `{"mcpServers": {...}}` through `PluginManager::plugin_mcp_servers()`; the orchestrator loads them before `.mcp.json` (project file wins on name clashes). |
 | `lspServers` | ✅ implemented | The first configured server is the default for the `LSP` tool (the REPL fills the tool's shared default at startup). |
-| `channels` | ✅ implemented (delivery: webhook or MCP tool) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |
+| `channels` | ✅ implemented (delivery: webhook, MCP tool, or command) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |
 | `binaries` | ✅ implemented | SHA-256-pinned HTTPS fetch into `<plugin>/bin/` (`fetch_plugin_binaries`); `CODEREX_PLUGIN_NO_BINARIES=1` skips the fetch. |
 | `types` | ✅ implemented | Validated `.d.ts` files are exported at startup to `config_home()/plugin-types/<plugin>/` (`export_plugin_types`) so a plugin author has a stable include path, **and** read into a `PluginTypeRegistry` that `/plugin components` lists. The same export writes the host's generated surface — `coderex/`, `coderex-tools/`, `coderex-mcp/` and a `tsconfig.json` — from the registered tool schemas; `/plugin types [name]` lists or prints them. The exported tree is **type-checked** with a real `tsc` when one is available (startup, plus `coderex plugin-typecheck`); nothing is ever executed. See "Types". |
 | `settings` | ✅ implemented (allowlisted) | A typed patch deep-merges into the resolved settings, by source: user/project values win over every plugin, and a plugin only fills a key the user left unset. `permission_mode`, `telemetry` and `max_budget_usd` are tighten-only; `hooks`, `mcpServers`, `api_key`, `provider` and `env` are never taken. Unknown keys warn and are ignored. See "Settings". |
@@ -476,12 +476,15 @@ Property and tool names that are not TypeScript identifiers are quoted (`"run-in
 - `/plugin types` lists every emitted declaration with its path: `coderex`, `coderex-tools`, `coderex-mcp`, `tsconfig`, and one entry per plugin directory.
 - `/plugin types <name>` prints one. The name is the listed name; a relative path such as `coderex-tools/index.d.ts` also works. A name that is not in the list is an error — the resolver only matches already-listed files, so it cannot read outside the type root.
 
-### Channel delivery (webhooks)
+### Channel delivery
 
 A channel binds a name to an MCP server: that server's notifications are
-routed to every sink subscribed to the channel. Until now the only sink was
-the CLI's recorder, so a notification could not leave the process. A channel
-may now declare a delivery target:
+routed to every sink subscribed to the channel. The CLI's recorder is always
+one sink; a channel may also declare one delivery target, in one of three
+forms. A `deliver` object naming more than one form is refused rather than
+silently picking one.
+
+The first form is a webhook:
 
 ```json
 "channels": {
@@ -510,12 +513,32 @@ is refused — the delivery would feed the notifications that produced it. An
 indirect cycle (A's channel delivers to B, whose notifications deliver back to
 A) is not detectable statically and is the manifest author's responsibility.
 
-Delivery is **lossy on purpose** for both: the sink enqueues (256 events) and a
-background task sends with a timeout (5 s for a webhook, 10 s for a tool call),
-so a slow or hanging target cannot stall the MCP notification path. A full
-queue, a non-2xx answer, an `isError` result, or a timeout is counted —
-`/plugin components` shows `delivered N, dropped N, failed N` and the last
-error next to the channel.
+The third transport runs a local program once per event, with the event as
+JSON on its stdin:
+
+```json
+"deliver": { "command": "/home/me/bin/notify.sh", "args": ["--ops"] }
+```
+
+`command` must be an absolute path, and it is executed directly — no shell —
+so neither `args` nor the event can be reinterpreted as code. The environment
+is cleared apart from `PATH` and three markers (`CODEREX_CHANNEL`,
+`CODEREX_CHANNEL_PLUGIN`, `CODEREX_CHANNEL_SERVER`), so the session's provider
+credentials do not reach the program. The program is **not** sandboxed: it
+runs with the user's privileges. That is not a new trust decision a manifest
+can make — `commands`, `monitors` and `mcpServers` already run code — but it
+does mean the program can read and write whatever the user can. Point it at a
+notification script the user wrote or reviewed. A non-zero exit counts as a
+failure, and its stderr (up to 200 characters) becomes the reported reason.
+The timeout kills the program CodeRex started; children it spawned itself are
+not reaped.
+
+Delivery is **lossy on purpose** for all three: the sink enqueues (256 events)
+and a background task sends with a timeout (5 s for a webhook or a command,
+10 s for a tool call), so a slow or hanging target cannot stall the MCP
+notification path. A full queue, a non-2xx answer, an `isError` result, a
+non-zero exit, or a timeout is counted — `/plugin components` shows
+`delivered N, dropped N, failed N` and the last error next to the channel.
 
 `https` is required except on a loopback host, where plain `http` is allowed
 (a local integration or a test server). Any other scheme, or plain `http` to a
@@ -525,10 +548,11 @@ remote host, is refused when the manifest is read: the channel is listed as
 The tool sink is subscribed after the MCP servers start (a notification cannot
 arrive before that either); a run with no MCP servers configured has no
 manager to call, so a tool delivery is reported as unsubscribed rather than
-silently dropped.
+silently dropped. A command delivery needs no MCP manager, so it is
+subscribed even in a run with no servers.
 
 `CODEREX_PLUGIN_NO_TYPECHECK` does not affect delivery; there is no
-environment switch that turns webhooks off — remove the `deliver` block.
+environment switch that turns delivery off — remove the `deliver` block.
 
 ### Type-checking the exported declarations
 
@@ -701,7 +725,7 @@ During REPL construction:
 ### Known Gaps
 
 - No keychain access in this crate, so sensitive options are host-supplied or environment-supplied; nothing prompts the user or writes answers back to settings (see "userConfig Injection").
-- ~~Plugin channels route notifications … but nothing drives `route_channel_notification` from a live stream yet~~ **已接线**:CLI 通过 `set_notification_router` 把每个 MCP 通知转给 `route_channel_notification`(`orchestrator.rs:2084`),再由渠道的 sink 投递(2026-10-31 起可 POST 到 webhook)。
+- ~~Plugin channels route notifications … but nothing drives `route_channel_notification` from a live stream yet~~ **已接线**:CLI 通过 `set_notification_router` 把每个 MCP 通知转给 `route_channel_notification`(`orchestrator.rs:2084`),再由渠道的 sink 投递(2026-10-31 起可 POST 到 webhook、调用 MCP 工具,或运行本地命令)。
 - Pin files are created by the first install; a user cannot pre-seed a pin before installing.
 - WASM plugins must import `coderex.user_config` to receive options; an existing module cannot be given `userConfig` without that ABI change.
 - WASM compilation always requires a host-injected compiler command (or a `coderex-wasm-compile` next to the executable); with neither, loads fail closed. On Darwin the memory bound is `RLIMIT_DATA`, which does not cap the full address space; the Windows Job Object path is untested, and the compiler sandbox degrades to rlimits plus process-group kill where `sandbox-exec`/`bwrap` cannot be applied (see "WASM Plugins").
