@@ -620,6 +620,14 @@ deployment's TLS and authentication.
 
 **Total: 201 bridge unit + 31 CLI launcher unit + 33 bridge integration + 55 server unit + 24 server integration = 344 tests pass.**
 
+**Platform coverage.** The whole bridge crate — unit tests and the
+`bridge_integration`, `gateway_round_trip` and `teleport_rendezvous` targets —
+runs in the Windows `test-windows` CI job, so the spawner, poller and
+orchestrator paths get runtime coverage there rather than only the `archive`
+subset. `ssh_spawn` stays `#![cfg(unix)]`: the `openssh` dependency is
+Unix-only, and Windows refuses `SpawnMode::Ssh` with an explicit error instead
+of pretending the transport exists.
+
 ## Dependencies
 
 | Crate | Purpose |

@@ -327,10 +327,15 @@ jobs:
         if: always()
         timeout-minutes: 15
         run: cargo test --no-fail-fast -p coderex-mcp --lib windows_ -- --nocapture
-      - name: Bridge cleanup tests
+      # The whole crate, not just `archive`: the spawner, poller and
+      # orchestrator tests are portable and used to run only on Unix, which
+      # left the Windows spawn path with no runtime coverage. `ssh_spawn` is
+      # `#![cfg(unix)]` because the openssh crate is Unix-only; on Windows that
+      # target is an empty test binary rather than a skipped failure.
+      - name: Bridge tests
         if: always()
-        timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-bridge archive -- --nocapture
+        timeout-minutes: 20
+        run: cargo test --no-fail-fast -p coderex-bridge -- --nocapture
       - name: WASM compiler sandbox tests
         if: always()
         timeout-minutes: 20
