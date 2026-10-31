@@ -250,6 +250,12 @@ static MONITOR_GUARDIAN: Mutex<Option<std::process::Child>> = Mutex::new(None);
 ///
 /// Returns the exit code to use, or `None` for an ordinary launch.
 #[must_use]
+// Outside macOS/Linux the body is only `None`, which clippy would prefer as a
+// `const fn`; the real body reads the environment and cannot be one.
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux")),
+    allow(clippy::missing_const_for_fn)
+)]
 pub fn maybe_run_guardian() -> Option<i32> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {

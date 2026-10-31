@@ -1962,8 +1962,8 @@ mod seccomp_arch {
 /// the child: building it in `pre_exec` would allocate after `fork`, which can
 /// deadlock a multithreaded process.
 ///
-/// [`CompilerSeccompFilter::install`] is installed only when bubblewrap is not
-/// wrapping the command. The wrapper itself needs `unshare`, `mount` and
+/// The filter is installed only when bubblewrap is not wrapping the command.
+/// The wrapper itself needs `unshare`, `mount` and
 /// `pivot_root`, and inherits any filter the process that exec'd it had, so
 /// the two cannot both run in one process. With bubblewrap the mount and
 /// network namespaces are the boundary; without it this filter is the network
