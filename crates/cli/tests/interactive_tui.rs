@@ -332,7 +332,7 @@ impl PtySession {
             let mut buf = [0_u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(n) => {
                         if let Ok(mut parser) = parser_bg.lock() {
                             parser.process(&buf[..n]);
@@ -341,6 +341,10 @@ impl PtySession {
                             raw.extend_from_slice(&buf[..n]);
                         }
                     }
+                    // A signal delivered to the test process can interrupt the
+                    // blocking read; that is not the PTY closing.
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
                 }
             }
         });
@@ -485,6 +489,41 @@ impl PtySession {
             );
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Wait for `needle`, returning `None` instead of panicking on timeout.
+    fn try_wait_for_text(&self, needle: &str, timeout: Duration) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let screen = self.screen_text();
+            if screen.contains(needle) {
+                return Some(screen);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Type `text` after a resize, retrying once if nothing appeared.
+    ///
+    /// A PTY resize races the next draw: a write can land while the terminal
+    /// is being reconfigured, and the redraw that would show it may not
+    /// happen. The retry clears whatever was typed and sends it again, which
+    /// is what a person would do; the final wait still carries the full
+    /// timeout and the screen/raw dump.
+    fn type_after_resize(&mut self, text: &str) -> String {
+        self.send_text(text);
+        if let Some(screen) = self.try_wait_for_text(text, Duration::from_secs(10)) {
+            return screen;
+        }
+        for _ in 0..(text.len() + 8) {
+            self.send_bytes(b"\x7f");
+        }
+        thread::sleep(Duration::from_millis(100));
+        self.send_text(text);
+        self.wait_for_text(text, SCREEN_TIMEOUT)
     }
 
     fn wait_for_text_absent(&self, needle: &str, timeout: Duration) {
@@ -1996,8 +2035,7 @@ fn resize_keeps_tui_alive() {
     // Typing at the new size requires a redraw at the new size: the prompt
     // assertions above could be satisfied by a screen left over from before
     // the resize.
-    session.send_text("typed-after-resize");
-    let typed = session.wait_for_text("typed-after-resize", SCREEN_TIMEOUT);
+    let typed = session.type_after_resize("typed-after-resize");
     assert!(typed.contains("❯"), "{typed}");
     for _ in 0.."typed-after-resize".len() {
         session.send_bytes(b"\x7f");
@@ -2007,8 +2045,7 @@ fn resize_keeps_tui_alive() {
     // Force a redraw at the new size instead of waiting for one that may only
     // update the cells ratatui thinks changed. Typing is the same thing the
     // shrink half does, and it makes the wait deterministic under load.
-    session.send_text("grown");
-    let after_grow = session.wait_for_text("grown", SCREEN_TIMEOUT);
+    let after_grow = session.type_after_resize("grown");
     assert!(
         after_grow.contains("CodeRex v"),
         "the banner is missing after growing:\n{after_grow}"

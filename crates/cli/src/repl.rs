@@ -4773,16 +4773,30 @@ impl ReplLoop {
         let (ct_tx, mut ct_rx) = tokio::sync::mpsc::unbounded_channel::<crossterm::event::Event>();
         std::thread::spawn(move || {
             loop {
+                // A transient terminal error (a resize or a signal delivered
+                // between `poll` and `read`) must not end keyboard input for
+                // the rest of the session. Only a closed receiver ends the
+                // thread; errors back off and retry.
                 match crossterm::event::poll(Duration::from_millis(50)) {
-                    Ok(true) => {
-                        if let Ok(event) = crossterm::event::read()
-                            && ct_tx.send(event).is_err()
-                        {
-                            break;
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(event) => {
+                            if ct_tx.send(event).is_err() {
+                                break;
+                            }
                         }
-                    }
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                "could not read a terminal event; retrying"
+                            );
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                    },
                     Ok(false) => {}
-                    Err(_) => break,
+                    Err(error) => {
+                        tracing::debug!(%error, "could not poll terminal events; retrying");
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
                 }
             }
         });
