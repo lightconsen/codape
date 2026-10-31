@@ -98,6 +98,55 @@ fn injected_command_compiles_serializes_and_deserializes() {
         .expect("the parent must load a module compiled by the injected command");
 }
 
+/// On Linux a writable delegated cgroup tree is used: the compiler is placed
+/// in a group carrying the compile memory ceiling, so the bound is enforced by
+/// the kernel rather than by `RLIMIT_AS` alone.
+///
+/// The tree is a directory stand-in. `create` checks for
+/// `cgroup.controllers`, delegates the controllers on the parent, then writes
+/// the child's limit files; because this is a plain filesystem, the files
+/// survive the group's removal attempt, which is what makes the attachment
+/// observable after the compiler has exited.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_compiler_is_placed_in_a_memory_cgroup() {
+    let _guard = env_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cgroup");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("cgroup.controllers"), "memory pids\n").unwrap();
+    std::fs::write(root.join("cgroup.subtree_control"), "").unwrap();
+    set_env(coderex_core::sandbox::cgroup::CGROUP_ROOT_ENV, &root);
+
+    let input = write_module(dir.path(), "plugin.wat", NORMAL_MODULE);
+    let cache = tempfile::tempdir().unwrap();
+    let result = load_with(&input, Some(helper_command()), cache.path());
+    remove_env(coderex_core::sandbox::cgroup::CGROUP_ROOT_ENV);
+    result.expect("the module compiles");
+
+    let groups: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(groups.len(), 1, "one compiler cgroup: {groups:?}");
+    let group = &groups[0];
+
+    // The pid the parent wrote when it attached the compiler.
+    let procs = std::fs::read_to_string(group.join("cgroup.procs")).unwrap();
+    assert!(
+        procs.trim().parse::<u32>().is_ok_and(|pid| pid > 0),
+        "the compiler was not attached: {procs:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(group.join("memory.max"))
+            .unwrap()
+            .trim(),
+        (2 * 1024 * 1024 * 1024_u64).to_string()
+    );
+}
+
 /// The host-injected command may carry leading arguments. A wrapper script
 /// receives `--marker <input> <output>`, drops the marker, and runs the real
 /// helper with the remaining pair.

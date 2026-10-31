@@ -220,7 +220,11 @@ falls back to compiling untrusted code in-process.
 
 **Killing the tree.** The child is spawned in its own process group
 (`process_group(0)`), and a timeout sends `SIGKILL` to the whole group before
-reaping the direct child. On Windows the compiler runs under the shared
+reaping the direct child. On Linux, when the compiler was actually attached to
+its cgroup (see the limits below), the timeout uses `cgroup.kill` instead: it
+also stops a descendant that called `setsid` and left the process group. If the
+group could not be created or the attach failed, the process-group kill is
+used. On Windows the compiler runs under the shared
 `SandboxHandle` (the same one the shell tools use): a suspended child, an
 AppContainer token attached after spawn, and an anonymous Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. A timeout calls `TerminateJobObject` via
@@ -232,6 +236,12 @@ The parent also installs:
 - `RLIMIT_CPU` = 20 s (Unix, mandatory);
 - a 2 GiB memory limit (Unix, best-effort): `RLIMIT_AS` on Linux and other
   Unix, `RLIMIT_DATA` on Darwin (see the boundary note);
+- on Linux, a cgroup v2 group with `memory.max` = 2 GiB when a writable
+  delegated tree exists. It is created before the spawn and the child is
+  attached immediately after. `memory.max` bounds resident use for the whole
+  group, while `RLIMIT_AS` only bounds one process's virtual address space.
+  There is deliberately no `pids.max`: that controller counts threads, and
+  Cranelift sizes its compilation pool from the core count;
 - a 30 s wall-clock timer;
 - on Windows, Job Object job user-time and job memory limits in addition to
   kill-on-close.
@@ -242,14 +252,16 @@ wrap the compiler as well as the process-group/job kill:
 | Platform | Applied to the compiler process | What it confines |
 |---|---|---|
 | macOS | `sandbox-exec(1)` profile from `coderex_core::sandbox` | reads to system roots plus the staging directory and compiler binary; writes to the staging directory only; network denied |
-| Linux with `bwrap` | bubblewrap mount/network namespace | read-only root, staging directory the only writable path, network namespace unshared |
+| Linux with `bwrap` | bubblewrap mount/network namespace, plus the cgroup above | read-only root, staging directory the only writable path, network namespace unshared; memory ceiling and whole-group kill when a cgroup could be created |
+| Linux without `bwrap` | the cgroup above, when available | memory ceiling and whole-group kill; paths are confined by Landlock instead of a mount namespace |
 | Windows | AppContainer + Job Object (`SandboxHandle`) | reads to system roots, the staging directory and the compiler directory; writes to the staging directory; execute of the compiler; network denied; CPU/memory and kill-on-close |
 
 The Linux seccomp allowlist is deliberately not applied: it is written for
 shells and would reject wasmtime's syscalls. Bubblewrap is skipped when the
 staging directory is inside the system temp directory, because `bwrap` replaces
 `/tmp` with a fresh tmpfs and the bind mount would resolve against it; in that
-layout the compiler gets rlimits and the process-group kill only. On macOS, if
+layout the compiler gets rlimits, Landlock path confinement, the cgroup above
+when one could be created, and the process-group kill. On macOS, if
 `sandbox-exec` is missing or profile creation fails, the compiler likewise runs
 with rlimits and the process-group kill only. Those degradations are logged;
 this document does not claim a sandbox that was not applied.
@@ -290,6 +302,12 @@ this document does not claim a sandbox that was not applied.
 - The Windows compiler sandbox uses `coderex_core::sandbox`; its Win32 calls are
   exercised by the `test_windows` CI job (`wasm_compile_subprocess`), not by a
   macOS host.
+- The Linux cgroup limit exists only when the host delegates a writable cgroup
+  v2 tree. An ordinary unprivileged session usually cannot create one, and the
+  compiler then runs with `RLIMIT_AS` + the process-group kill; the fallback is
+  logged and never reported as cgroup-limited. The integration test uses a
+  plain-directory stand-in for the tree, so its group directory is left behind
+  (`remove_dir` cannot delete the synthetic files); a real cgroupfs removes it.
 - The compiler child inherits this process's environment. It is the same
   binary/trust domain as the host, so credentials are not scrubbed from it (in
   contrast to third-party tool processes).
@@ -715,7 +733,7 @@ During REPL construction:
 - Skill frontmatter parsing via `serde_yaml` with custom scalar/array deserializers.
 - Repo-specific skills from `.coderex/skills/`.
 - MCP skills bridge: `phase_init_mcp` converts discovered MCP tools to `SkillMetadata`.
-- **WASM runtime enabled by default**: `process-runtime` and `wasm-runtime` are both default Cargo features; WASM calls run under fuel (100M per call), a 64 MiB memory limiter, disabled threads, and one optional host import (`coderex.user_config`). Compilation is guarded by a `wasmparser` pre-scan (16 MiB file, 8 MiB code section, 50,000 functions, 1,000,000 operators, 256 nesting levels) and always runs out-of-process through a host-injected compiler command (the CLI re-executes itself with `--internal-wasm-compile`) with `RLIMIT_CPU` and a best-effort 2 GiB memory limit (`RLIMIT_AS`, or `RLIMIT_DATA` on Darwin), a wall-clock timeout, and a process-group or Job Object kill. There is no in-process fallback: a missing or failing compiler refuses the load. Successful compilations are cached as serialized modules keyed by engine-config and module SHA-256 (256 MiB bounded).
+- **WASM runtime enabled by default**: `process-runtime` and `wasm-runtime` are both default Cargo features; WASM calls run under fuel (100M per call), a 64 MiB memory limiter, disabled threads, and one optional host import (`coderex.user_config`). Compilation is guarded by a `wasmparser` pre-scan (16 MiB file, 8 MiB code section, 50,000 functions, 1,000,000 operators, 256 nesting levels) and always runs out-of-process through a host-injected compiler command (the CLI re-executes itself with `--internal-wasm-compile`) with `RLIMIT_CPU` and a best-effort 2 GiB memory limit (`RLIMIT_AS`, `RLIMIT_DATA` on Darwin, plus a cgroup v2 `memory.max` on Linux when a delegated tree is available), a wall-clock timeout, and a process-group, cgroup or Job Object kill. There is no in-process fallback: a missing or failing compiler refuses the load. Successful compilations are cached as serialized modules keyed by engine-config and module SHA-256 (256 MiB bounded).
 - **WASM `userConfig` injection**: the same resolution and validation as process plugins, delivered to a module that imports `coderex.user_config(ptr, capacity) -> required_len` as one JSON object in its linear memory; modules that do not import it are unchanged.
 - **Full manifest field table** with `deny_unknown_fields`, `PluginAuthor` accepting a string or an object, and a load-time warning for fields CodeRex accepts but does not implement.
 - **`userConfig` injection**: `CODEREX_PLUGIN_OPTION_<KEY>` in the child's environment and `${user_config.KEY}` substitution in `env` and `entrypoint`; sensitive options refuse a plaintext default and refuse an unresolved `keyring://` reference; a required option with no value stops the spawn.
@@ -738,5 +756,5 @@ During REPL construction:
 - 14 tests in `skills.rs` (parsing, loader, plugin/MCP skills, repo dir, conflict resolution, precedence, quoted strings).
 - 7 tests in `runtime.rs` (spawn, initialize, terminate, invalid command).
 - 20 tests in `wasm_runtime.rs`, all run by the default `cargo test -p coderex-plugins`: 4 core/unit tests (the loader stub, the injected command's program/leading-argument shape, helper discovery, and the platform rlimit plan), 10 sandbox tests (fuel, memory growth, initial memory, shared memory, WASI import, the 3 size-cap cases, `userConfig` injection into an importing module, and an empty-import module still running), and 6 pre-scan tests (normal module, oversized code section, too many functions, too many operators, excessive nesting, nesting exactly at the cap).
-- 7 integration tests in `tests/wasm_compile_subprocess.rs`: an injected command compiles, serializes, and deserializes; leading arguments are forwarded; the host-injected global command is used; a missing command fails closed with an actionable error and leaves no artifacts; a slow helper and its spawned descendant are killed at the wall-clock limit; a second load hits the AOT cache with exactly one compiler invocation; and a pathological module is rejected by the pre-scan without starting the compiler.
+- Integration tests in `tests/wasm_compile_subprocess.rs`: an injected command compiles, serializes, and deserializes; leading arguments are forwarded; the host-injected global command is used; a missing command fails closed with an actionable error and leaves no artifacts; a slow helper and its spawned descendant are killed at the wall-clock limit; a second load hits the AOT cache with exactly one compiler invocation; a pathological module is rejected by the pre-scan without starting the compiler; and, on Linux, the compiler is attached to a cgroup carrying the memory ceiling.
 - Tests use `tempfile` for filesystem operations. The git and git-subdir install tests create a throwaway repository inside a `tempfile::tempdir()` and pin every git command with `-C`, so they never touch the project's own repository. The subdirectory tests use `file://` clone URLs, so they need no network.

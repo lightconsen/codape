@@ -162,7 +162,11 @@ the caller logs a warning naming the failed path and continues with `RLIMIT_AS`
 only — the command is never counted as cgroup-limited when it was not.
 `CODEREX_CGROUP_ROOT` selects a writable delegated tree for containers and
 tests. The helper is reusable (`coderex_core::sandbox::CgroupMemoryLimit`):
-create, spawn, `attach(pid)`, keep alive until exit.
+create, spawn, `attach(pid)`, keep alive until exit. The WASM compiler helper
+uses it directly with `memory.max` only — no `pids.max`, because the process
+ceiling counts threads and Cranelift sizes its compilation pool from the core
+count — and uses `cgroup.kill` on timeout when the compiler actually joined the
+group (see `docs/plugins.md`, "WASM Plugins").
 
 **Verified on Linux, in containers.** Two runs, because the backends need
 different environments.

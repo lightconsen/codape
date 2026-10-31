@@ -1285,6 +1285,31 @@ fn run_compile_helper(
         wrap_with_landlock(&mut child_command, &work_dir, command.program())
     };
 
+    // Linux: a cgroup v2 memory ceiling, when the host delegates a writable
+    // tree. `memory.max` bounds resident use — the same kind of cap the
+    // Windows Job Object applies — and is enforced by the kernel, unlike
+    // `RLIMIT_AS`, which bounds virtual address space and barely constrains a
+    // process that reserves large mappings up front. Creation is best-effort:
+    // an unprivileged session normally cannot create a group, and then the
+    // `RLIMIT_AS` below remains the only memory bound.
+    // No process ceiling: the pids controller counts threads, and Cranelift's
+    // parallel compilation sizes its pool from the core count. A cap written
+    // for shell commands would break compilation on a very large host.
+    #[cfg(target_os = "linux")]
+    let compile_cgroup = match coderex_core::sandbox::CgroupMemoryLimit::create(
+        Some(WASM_COMPILE_MEMORY_BYTES),
+        None,
+    ) {
+        Ok(limit) => Some(limit),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "WASM compiler cgroup v2 limit unavailable; the compiler runs with RLIMIT_AS only"
+            );
+            None
+        }
+    };
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1362,8 +1387,39 @@ fn run_compile_helper(
         format!("failed to confine the WASM compiler: {e}")
     })?;
 
-    #[cfg(unix)]
+    // Attach as soon as the pid exists: everything the compiler allocates from
+    // here on counts against `memory.max`. A failure cannot undo the spawn, so
+    // it is logged and the compiler is said to be running with the rlimit only.
+    #[cfg(target_os = "linux")]
+    let mut compile_cgroup_attached = false;
+    #[cfg(target_os = "linux")]
+    if let Some(limit) = &compile_cgroup {
+        match child.id() {
+            Some(pid) => match limit.attach(pid) {
+                Ok(()) => compile_cgroup_attached = true,
+                Err(error) => tracing::warn!(
+                    %error,
+                    cgroup = %limit.path().display(),
+                    "could not add the WASM compiler to its cgroup; it runs with RLIMIT_AS only"
+                ),
+            },
+            None => tracing::warn!(
+                "the WASM compiler exited before it could join its cgroup; it ran with \
+                 RLIMIT_AS only"
+            ),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
     let killer = ChildKiller::Group;
+    #[cfg(target_os = "linux")]
+    let killer = match &compile_cgroup {
+        // Only a group the compiler actually joined can stop its tree; an
+        // empty group would kill nothing, so the process-group kill is safer.
+        // `cgroup.kill` also takes descendants that left the process group.
+        Some(limit) if compile_cgroup_attached => ChildKiller::Cgroup(limit),
+        _ => ChildKiller::Group,
+    };
     #[cfg(target_os = "windows")]
     let killer = ChildKiller::Sandbox(&sandbox);
     #[cfg(not(any(unix, windows)))]
@@ -1787,28 +1843,57 @@ fn apply_compile_rlimits() -> std::io::Result<()> {
     Ok(())
 }
 
-/// How a timed-out compiler child is killed.
+/// `SIGKILL` the compiler's process group, which `process_group(0)` made the
+/// child lead.
 #[cfg(all(unix, feature = "wasm-runtime"))]
+fn kill_compile_group(child: &mut std::process::Child) {
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `process_group(0)` made the child the leader of a new group
+        // and it has not exec'd anything that changes that. `-pid` therefore
+        // names exactly the spawned tree.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
+/// How a timed-out compiler child is killed.
+#[cfg(all(unix, not(target_os = "linux"), feature = "wasm-runtime"))]
 enum ChildKiller {
     /// The child leads its own process group (`process_group(0)`).
     Group,
 }
 
-#[cfg(all(unix, feature = "wasm-runtime"))]
+#[cfg(all(unix, not(target_os = "linux"), feature = "wasm-runtime"))]
 impl ChildKiller {
     fn kill(&self, child: &mut std::process::Child) {
         match self {
-            Self::Group => {
-                if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-                    // SAFETY: `process_group(0)` made the child the leader of
-                    // a new group and it has not exec'd anything that changes
-                    // that. `-pid` therefore names exactly the spawned tree.
-                    unsafe {
-                        libc::kill(-pid, libc::SIGKILL);
-                    }
-                }
+            Self::Group => kill_compile_group(child),
+        }
+    }
+}
+
+/// How a timed-out compiler child is killed on Linux.
+///
+/// A cgroup is preferred when one could be created: `cgroup.kill` stops every
+/// process in it, including a descendant that called `setsid` and left the
+/// process group. Without a cgroup the group kill is all Linux offers.
+#[cfg(all(target_os = "linux", feature = "wasm-runtime"))]
+enum ChildKiller<'a> {
+    Cgroup(&'a coderex_core::sandbox::CgroupMemoryLimit),
+    Group,
+}
+
+#[cfg(all(target_os = "linux", feature = "wasm-runtime"))]
+impl ChildKiller<'_> {
+    fn kill(&self, child: &mut std::process::Child) {
+        match self {
+            Self::Cgroup(limit) => {
+                let _ = limit.kill();
                 let _ = child.kill();
             }
+            Self::Group => kill_compile_group(child),
         }
     }
 }
