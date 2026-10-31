@@ -38,9 +38,9 @@
 //! the libproc parent/child chain and kills the descendants it finds, which
 //! covers the common case; a process whose intermediate parent already exited
 //! is re-parented to `launchd` and is no longer on that chain. The monitor
-//! supervisor closes that window by sampling [`tracked_descendants`] while the
-//! monitor is alive and signalling the records later
-//! ([`kill_tracked_process`]). On Linux the process group is the fallback and a
+//! supervisor closes that window by sampling `tracked_descendants` (macOS)
+//! while the monitor is alive and signalling the records later with
+//! `kill_tracked_process`. On Linux the process group is the fallback and a
 //! caller that needs a `setsid()`-proof boundary puts the child in a cgroup
 //! instead.
 
@@ -171,13 +171,15 @@ impl ProcessTree {
 /// A pid alone is not enough to signal later: the system may reuse it after
 /// the original process exits. The kernel's start time disambiguates the two,
 /// so a cleanup path can refuse to kill a stranger.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrackedProcess {
     /// Process id observed.
     pub pid: u32,
-    /// `pbi_start_tvsec`/`pbi_start_tvusec`, folded into microseconds.
-    pub start_time_micros: u64,
+    /// Opaque kernel start marker. macOS folds `pbi_start_tvsec`/`pbi_start_tvusec`
+    /// into microseconds; Linux reads field 22 of `/proc/<pid>/stat` (clock
+    /// ticks since boot). Only equality matters.
+    pub start_time: u64,
 }
 
 /// Every live descendant of `root`, deepest first, with start times.
@@ -196,11 +198,10 @@ pub fn tracked_descendants(root: u32) -> Vec<TrackedProcess> {
     imp::descendants_of(root)
         .into_iter()
         .filter_map(|pid| {
-            let start_time_micros = imp::process_start_micros(pid)?;
-            u32::try_from(pid).ok().map(|pid| TrackedProcess {
-                pid,
-                start_time_micros,
-            })
+            let start_time = imp::process_start_micros(pid)?;
+            u32::try_from(pid)
+                .ok()
+                .map(|pid| TrackedProcess { pid, start_time })
         })
         .collect()
 }
@@ -208,7 +209,8 @@ pub fn tracked_descendants(root: u32) -> Vec<TrackedProcess> {
 /// The kernel start time for `pid`, or `None` if it is gone.
 ///
 /// Callers that intend to poll a process over time keep this value and compare
-/// it, so a reused pid is not mistaken for the process they started.
+/// it, so a reused pid is not mistaken for the process they started. The unit
+/// is opaque and platform-specific; only equality is meaningful.
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn process_start_time(pid: u32) -> Option<u64> {
@@ -217,18 +219,33 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
         .and_then(imp::process_start_micros)
 }
 
+/// The kernel start time for `pid`, or `None` if it is gone.
+///
+/// Linux exposes it as field 22 of `/proc/<pid>/stat` (`starttime`, in clock
+/// ticks since boot). The field is parsed after the last `)`, because the
+/// command name in field 2 may contain spaces and parentheses.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    // `after_comm` starts with field 3 (state); starttime is field 22, so the
+    // index from here is 22 - 3 = 19.
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// `SIGKILL` the recorded process, but only if the pid still names it.
 ///
 /// The start-time check is what makes a later signal safe: a reused pid is a
 /// different process and is left alone. Returns whether a kill was issued.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn kill_tracked_process(process: TrackedProcess) -> bool {
+    if process_start_time(process.pid) != Some(process.start_time) {
+        return false;
+    }
     let Ok(pid) = libc::pid_t::try_from(process.pid) else {
         return false;
     };
-    if imp::process_start_micros(pid) != Some(process.start_time_micros) {
-        return false;
-    }
     // SAFETY: `kill` takes plain integers, and the pid was just verified to
     // still name the process this record describes.
     unsafe { libc::kill(pid, libc::SIGKILL) == 0 }

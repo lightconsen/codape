@@ -26,6 +26,15 @@
 //! directory. Invalid entries are logged and skipped: one malformed monitor,
 //! or one that cannot be spawned, must not keep the session or the other
 //! monitors from running.
+//!
+//! A monitor can outlive its host: `SIGKILL` runs no signal handler and no
+//! destructor. On Unix the host therefore starts a small guardian process
+//! (`--internal-monitor-guardian`) and feeds it `(pid, start time)` records;
+//! when the host dies the pipe reaches EOF and the guardian kills the recorded
+//! processes, re-checking the start time so a reused pid is left alone. Linux
+//! also records the monitor's cgroup, whose `cgroup.kill` reaches a daemonised
+//! descendant. Windows needs no guardian: its Job Object is kill-on-close, so
+//! the kernel does the same when the host's handles go away.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -33,11 +42,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use coderex_core::process_tree::{JobLimits, ProcessTree};
 #[cfg(target_os = "macos")]
-use coderex_core::process_tree::{
-    TrackedProcess, kill_tracked_process, process_start_time, tracked_descendants,
-};
+use coderex_core::process_tree::tracked_descendants;
+use coderex_core::process_tree::{JobLimits, ProcessTree};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use coderex_core::process_tree::{TrackedProcess, kill_tracked_process, process_start_time};
 #[cfg(target_os = "linux")]
 use coderex_core::sandbox::CgroupMemoryLimit;
 use serde_json::Value;
@@ -216,6 +225,164 @@ const DESCENDANT_SAMPLE_FAST_WINDOW: std::time::Duration = std::time::Duration::
 /// from growing the record list without bound over a long session.
 #[cfg(target_os = "macos")]
 const MAX_TRACKED_DESCENDANTS: usize = 4096;
+
+// ─── Host-death guardian ────────────────────────────────────────────────────
+
+/// The hidden subcommand the monitor guardian runs as.
+///
+/// The host starts itself with this argument and keeps its stdin open. When
+/// the host dies — including `SIGKILL`, where no destructor, `Drop` or signal
+/// handler runs — the pipe reaches EOF and the guardian kills everything the
+/// host had recorded. Windows needs no guardian: its Job Object is
+/// kill-on-close, so the kernel does this when the host's handles go away.
+pub const GUARDIAN_FLAG: &str = "--internal-monitor-guardian";
+
+/// Records one guardian will hold. Far beyond the monitor cap; a bound keeps a
+/// buggy host from growing the guardian without limit.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const MAX_GUARDIAN_RECORDS: usize = 8192;
+
+/// The guardian process, once started. Its stdin is the record pipe.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static MONITOR_GUARDIAN: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
+/// Run the guardian when this process was started with the hidden flag.
+///
+/// Returns the exit code to use, or `None` for an ordinary launch.
+#[must_use]
+pub fn maybe_run_guardian() -> Option<i32> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let mut args = std::env::args_os();
+        let _ = args.next();
+        if args.next().as_deref() == Some(std::ffi::OsStr::new(GUARDIAN_FLAG)) {
+            return Some(run_guardian(std::io::stdin().lock()));
+        }
+    }
+    None
+}
+
+/// Read records until EOF, then kill what they name.
+///
+/// `pid <pid> <start>` is killed only when the pid still carries the recorded
+/// start time. `cgroup <path>` (Linux) gets `cgroup.kill`, which reaches a
+/// `setsid()` descendant the pid records may not. EOF is the signal that the
+/// host is gone; nothing here needs the host to cooperate.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn run_guardian(reader: impl std::io::BufRead) -> i32 {
+    let mut processes: Vec<TrackedProcess> = Vec::new();
+    let mut cgroups: Vec<std::path::PathBuf> = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let line = line.trim();
+        if let Some(record) = line.strip_prefix("pid ") {
+            let mut fields = record.split_whitespace();
+            if let (Some(pid), Some(start)) = (fields.next(), fields.next())
+                && let (Ok(pid), Ok(start_time)) = (pid.parse::<u32>(), start.parse::<u64>())
+                && processes.len() < MAX_GUARDIAN_RECORDS
+            {
+                processes.push(TrackedProcess { pid, start_time });
+            }
+        } else if let Some(path) = line.strip_prefix("cgroup ")
+            && cgroups.len() < MAX_GUARDIAN_RECORDS
+        {
+            cgroups.push(std::path::PathBuf::from(path));
+        }
+    }
+
+    for process in &processes {
+        let _ = kill_tracked_process(*process);
+    }
+    #[cfg(target_os = "linux")]
+    for path in &cgroups {
+        let _ = std::fs::write(path.join("cgroup.kill"), "1");
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cgroups;
+    0
+}
+
+/// Start the guardian if it is not already running.
+///
+/// Returns whether records can be sent. Unit tests run inside the test-harness
+/// binary, which does not handle the hidden flag, so they exercise
+/// [`run_guardian`] directly instead.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn ensure_guardian() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    let mut guardian = MONITOR_GUARDIAN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(child) = guardian.as_mut() {
+        // Reap a guardian that died; a later record may start a fresh one.
+        if child.try_wait().ok().flatten().is_none() {
+            return true;
+        }
+        *guardian = None;
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg(GUARDIAN_FLAG)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // The guardian needs nothing from this session, least of all its
+        // provider credentials.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    match command.spawn() {
+        Ok(child) => {
+            *guardian = Some(child);
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not start the monitor guardian; monitors may survive a host SIGKILL"
+            );
+            false
+        }
+    }
+}
+
+/// Send one record to the guardian, if it is running.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn guardian_send(line: &str) {
+    use std::io::Write as _;
+
+    let mut guardian = MONITOR_GUARDIAN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(child) = guardian.as_mut() else {
+        return;
+    };
+    let Some(stdin) = child.stdin.as_mut() else {
+        return;
+    };
+    let _ = stdin.write_all(line.as_bytes());
+    let _ = stdin.flush();
+}
+
+/// Record a monitor the guardian should kill if this host disappears.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn guardian_record_monitor(pid: u32, ownership: &MonitorOwnership) {
+    if !ensure_guardian() {
+        return;
+    }
+    if let Some(start) = process_start_time(pid) {
+        guardian_send(&format!("pid {pid} {start}\n"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(cgroup) = &ownership.cgroup {
+        guardian_send(&format!("cgroup {}\n", cgroup.path().display()));
+    }
+    let _ = ownership;
+}
 
 /// Owns the running tasks of a session's plugin monitors.
 ///
@@ -591,6 +758,8 @@ fn spawn_monitor(spec: MonitorSpec, cwd: &Path) -> std::io::Result<MonitorTask> 
         seen: Mutex::new(Vec::new()),
     });
     let id = register_monitor(Arc::clone(&ownership));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    guardian_record_monitor(pid, &ownership);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let name = spec.name;
@@ -640,17 +809,26 @@ fn track_descendants(
         while process_start_time(root) == Some(root_start_time) {
             let descendants = tracked_descendants(root);
             if !descendants.is_empty() {
-                let mut seen = ownership
-                    .seen
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for process in descendants {
-                    if seen.len() >= MAX_TRACKED_DESCENDANTS {
-                        break;
+                let mut added = Vec::new();
+                {
+                    let mut seen = ownership
+                        .seen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for process in descendants {
+                        if seen.len() >= MAX_TRACKED_DESCENDANTS {
+                            break;
+                        }
+                        if !seen.contains(&process) {
+                            seen.push(process);
+                            added.push(process);
+                        }
                     }
-                    if !seen.contains(&process) {
-                        seen.push(process);
-                    }
+                }
+                // Tell the guardian too, so a host SIGKILL is covered as well
+                // as an orderly stop.
+                for process in added {
+                    guardian_send(&format!("pid {} {}\n", process.pid, process.start_time));
                 }
             }
             let interval = if started.elapsed() < DESCENDANT_SAMPLE_FAST_WINDOW {
@@ -1207,6 +1385,64 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    /// Wait for a `std` child to exit, bounded.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn wait_for_child_exit(child: &mut std::process::Child, budget: Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The guardian's whole contract: EOF means the host is gone, and what it
+    /// recorded dies with it.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_guardian_kills_a_recorded_process_at_eof() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let start = coderex_core::process_tree::process_start_time(child.id())
+            .expect("the child has a start time");
+        let records = format!("pid {} {}\n", child.id(), start);
+
+        assert_eq!(run_guardian(std::io::Cursor::new(records.into_bytes())), 0);
+        assert!(
+            wait_for_child_exit(&mut child, Duration::from_secs(5)),
+            "the recorded process survived the guardian"
+        );
+    }
+
+    /// A reused pid must be left alone: the start time is the whole guard
+    /// against killing an unrelated process after the host is gone.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_guardian_does_not_kill_a_reused_pid() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let start = coderex_core::process_tree::process_start_time(child.id())
+            .expect("the child has a start time");
+        let records = format!("pid {} {}\n", child.id(), start.saturating_add(1));
+
+        assert_eq!(run_guardian(std::io::Cursor::new(records.into_bytes())), 0);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a start-time mismatch must not kill the process"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// A signal handler cannot run destructors, so the registry is the only

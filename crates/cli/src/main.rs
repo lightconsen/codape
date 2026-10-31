@@ -14,6 +14,13 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // The host starts itself as the monitor guardian and holds the other end
+    // of its stdin. EOF means the host is gone (including SIGKILL), and the
+    // guardian kills what the host recorded. Hidden like the compiler above.
+    if let Some(code) = coderex_cli::plugin_monitors::maybe_run_guardian() {
+        std::process::exit(code);
+    }
+
     coderex_cli::tracing_setup::init_tracing();
     coderex_cli::tracing_setup::install_panic_hook();
 
