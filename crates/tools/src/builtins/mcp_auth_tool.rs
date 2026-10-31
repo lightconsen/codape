@@ -66,7 +66,9 @@ impl Tool for McpAuthTool {
                     "auth_url": { "type": "string" },
                     "code_verifier": { "type": "string" },
                     "persisted": { "type": "boolean" },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "device_flow": { "type": "boolean", "description": "Set when the sign-in is an RFC 8628 device flow: approve user_code at auth_url, and polling finishes the sign-in on its own." },
+                    "user_code": { "type": "string", "description": "The code to approve for a device flow" }
                 }
             }),
             requires_approval: false,
@@ -125,9 +127,19 @@ async fn authenticate_with(
     )
     .await;
 
+    let headless = input
+        .arguments
+        .get("headless")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
     // The authorization server may reject S256. Discovering that here is
     // better than after the user has approved a flow that cannot complete.
-    discovery.require_s256(&server_url)?;
+    // A device flow does not use PKCE at all, so a server that offers only the
+    // device grant is not refused for failing to advertise it.
+    if !(headless && discovery.device_authorization_endpoint.is_some()) {
+        discovery.require_s256(&server_url)?;
+    }
 
     // A client id the caller named wins; otherwise a stored (possibly
     // dynamically registered) one is reused. Registration happens only when
@@ -195,6 +207,39 @@ async fn authenticate_with(
     let supplied_code = extract_string(&input.arguments, "code").ok();
     let supplied_verifier = extract_string(&input.arguments, "code_verifier").ok();
 
+    // RFC 8628: in a headless session a device endpoint replaces the
+    // redirect-URL hand-off with "approve this code on any device". The
+    // request is made now, the code is returned immediately, and a background
+    // task polls and persists the token once approved.
+    if redirect_url.is_none()
+        && supplied_code.is_none()
+        && headless
+        && let Some(device_endpoint) = discovery.device_authorization_endpoint.clone()
+    {
+        match begin_device_flow(
+            &client,
+            &device_endpoint,
+            &token_endpoint,
+            &client_id,
+            client_secret.as_deref(),
+            &auth_method,
+            &scope,
+            &resource,
+            &discovery,
+            persistence,
+            &server_url,
+        )
+        .await
+        {
+            Ok(output) => return Ok(output),
+            Err(error) => tracing::warn!(
+                %error,
+                server = %server_url,
+                "the device authorization flow could not be started; falling back to the URL hand-off"
+            ),
+        }
+    }
+
     let mut auth_url = None;
     let (code, verifier) = if let Some(redirect_url) = redirect_url {
         // Finishing from a pasted redirect URL. The state is only meaningful
@@ -257,11 +302,6 @@ async fn authenticate_with(
         // A headless caller (the CLI's re-authorization handler when there is
         // no terminal) cannot wait for a callback and should not launch a
         // browser behind the user's back. Return the URL and hand-off state.
-        let headless = input
-            .arguments
-            .get("headless")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
         if headless {
             let note = "Headless session: open auth_url in a browser to approve access.";
             return Ok(pending_output(
@@ -582,6 +622,8 @@ struct DiscoveredEndpoints {
     issuer: Option<String>,
     authorization_endpoint: Option<String>,
     token_endpoint: Option<String>,
+    /// RFC 8628 device authorization endpoint, when the server publishes one.
+    device_authorization_endpoint: Option<String>,
     registration_endpoint: Option<String>,
     resource: Option<String>,
     scopes_supported: Vec<String>,
@@ -630,6 +672,7 @@ impl DiscoveredEndpoints {
             issuer: entry.issuer.clone(),
             authorization_endpoint: entry.authorization_endpoint.clone(),
             token_endpoint: entry.token_endpoint.clone(),
+            device_authorization_endpoint: entry.device_authorization_endpoint.clone(),
             registration_endpoint: entry.registration_endpoint.clone(),
             resource: entry.resource.clone(),
             scopes_supported: entry.scopes_supported.clone(),
@@ -679,6 +722,8 @@ struct IssuerMetadataEntry {
     #[serde(default)]
     token_endpoint: Option<String>,
     #[serde(default)]
+    device_authorization_endpoint: Option<String>,
+    #[serde(default)]
     registration_endpoint: Option<String>,
     #[serde(default)]
     scopes_supported: Vec<String>,
@@ -710,6 +755,7 @@ impl IssuerMetadataEntry {
             issuer: self.issuer,
             authorization_endpoint: self.authorization_endpoint,
             token_endpoint: self.token_endpoint,
+            device_authorization_endpoint: self.device_authorization_endpoint,
             registration_endpoint: self.registration_endpoint,
             scopes_supported: self.scopes_supported,
             token_endpoint_auth_methods_supported: self.token_endpoint_auth_methods_supported,
@@ -1073,6 +1119,10 @@ async fn fetch_issuer_metadata(
                 .or_else(|| Some(issuer.to_string())),
             authorization_endpoint,
             token_endpoint,
+            device_authorization_endpoint: value
+                .get("device_authorization_endpoint")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             registration_endpoint: value
                 .get("registration_endpoint")
                 .and_then(|v| v.as_str())
@@ -1206,6 +1256,232 @@ fn authorization_url(
         .append_pair("code_challenge_method", "S256")
         .append_pair("resource", resource);
     Ok(url.into())
+}
+
+/// Start an RFC 8628 device authorization flow.
+///
+/// The authorization request is made now, the user code is returned
+/// immediately, and a background task polls the token endpoint and persists
+/// the token when the person approves. The call must not block: a headless
+/// handler awaits this tool, and the person needs to see the code before they
+/// can use it.
+#[allow(clippy::too_many_arguments)]
+async fn begin_device_flow(
+    client: &reqwest::Client,
+    device_endpoint: &str,
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    auth_method: &str,
+    scope: &str,
+    resource: &str,
+    discovery: &DiscoveredEndpoints,
+    persistence: &TokenPersistence,
+    server_url: &str,
+) -> Result<ToolOutput, String> {
+    let mut form = vec![
+        ("client_id", client_id.to_string()),
+        ("scope", scope.to_string()),
+        ("resource", resource.to_string()),
+    ];
+    if auth_method == "client_secret_post"
+        && let Some(secret) = client_secret
+    {
+        form.push(("client_secret", secret.to_string()));
+    }
+    let mut request = client.post(device_endpoint);
+    if auth_method == "client_secret_basic" {
+        request = request.basic_auth(client_id, client_secret);
+    }
+    let response = request
+        .form(&form)
+        .send()
+        .await
+        .map_err(|error| format!("device authorization request failed: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "device authorization endpoint returned HTTP {status}: {body}"
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("device authorization response was not JSON: {error}"))?;
+    let device_code = body
+        .get("device_code")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("device authorization response has no device_code")?
+        .to_string();
+    let user_code = body
+        .get("user_code")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let verification_uri = body
+        .get("verification_uri")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.get("verification_url")
+                .and_then(serde_json::Value::as_str)
+        })
+        .ok_or("device authorization response has no verification_uri")?;
+    let verification_uri = body
+        .get("verification_uri_complete")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(verification_uri)
+        .to_string();
+    let interval = body
+        .get("interval")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(5)
+        .max(1);
+    let expires_in = body
+        .get("expires_in")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(600)
+        // The poll is a background task; cap it so a server advertising a day
+        // cannot keep one alive for a day.
+        .min(1800);
+
+    let poll = DevicePoll {
+        token_endpoint: token_endpoint.to_string(),
+        client_id: client_id.to_string(),
+        client_secret: client_secret.map(String::from),
+        auth_method: auth_method.to_string(),
+        resource: resource.to_string(),
+        device_code,
+        interval,
+        expires_in,
+    };
+    let task_client = client.clone();
+    let task_persistence = persistence.clone();
+    let task_discovery = discovery.clone();
+    let task_server_url = server_url.to_string();
+    tokio::spawn(async move {
+        let Some(token) = poll.poll(&task_client).await else {
+            tracing::debug!(
+                server = %task_server_url,
+                "the device authorization flow was not approved before it expired"
+            );
+            return;
+        };
+        let expires_in = token
+            .get("expires_in")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(3600);
+        let Some(access_token) = token
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let refresh_token = token
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str);
+        if let Err(error) = persist_authenticated_at(
+            &task_persistence,
+            &task_server_url,
+            &poll.client_id,
+            poll.client_secret.as_deref(),
+            access_token,
+            expires_in,
+            refresh_token,
+            &task_discovery,
+        ) {
+            tracing::warn!(
+                %error,
+                server = %task_server_url,
+                "device sign-in completed but the token could not be saved"
+            );
+        }
+    });
+
+    Ok(ToolOutput {
+        output: serde_json::json!({
+            "authenticated": false,
+            "device_flow": true,
+            "auth_url": verification_uri,
+            "user_code": user_code,
+            "note": format!(
+                "Device sign-in: approve code {user_code} at {verification_uri} on any device. \
+                 This process is polling the token endpoint, so the sign-in completes \
+                 automatically once it is approved."
+            ),
+        })
+        .to_string(),
+        is_display: true,
+        images: Vec::new(),
+    })
+}
+
+/// The polling half of an RFC 8628 flow.
+struct DevicePoll {
+    token_endpoint: String,
+    client_id: String,
+    client_secret: Option<String>,
+    auth_method: String,
+    resource: String,
+    device_code: String,
+    interval: u64,
+    expires_in: u64,
+}
+
+impl DevicePoll {
+    /// Poll until the token arrives, the request is denied, or the device code
+    /// expires. Returns the token endpoint's success body.
+    async fn poll(&self, client: &reqwest::Client) -> Option<serde_json::Value> {
+        use tokio::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(self.expires_in);
+        let mut interval = Duration::from_secs(self.interval);
+        loop {
+            tokio::time::sleep(interval).await;
+            if Instant::now() >= deadline {
+                return None;
+            }
+            let mut form = vec![
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                ),
+                ("device_code", self.device_code.clone()),
+                ("client_id", self.client_id.clone()),
+                ("resource", self.resource.clone()),
+            ];
+            if self.auth_method == "client_secret_post"
+                && let Some(secret) = &self.client_secret
+            {
+                form.push(("client_secret", secret.clone()));
+            }
+            let mut request = client.post(&self.token_endpoint);
+            if self.auth_method == "client_secret_basic" {
+                request = request.basic_auth(&self.client_id, self.client_secret.as_deref());
+            }
+            let Ok(response) = request.form(&form).send().await else {
+                // A transport error is transient; try again until the deadline.
+                continue;
+            };
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+            if status.is_success()
+                && body
+                    .get("access_token")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+            {
+                return Some(body);
+            }
+            match body.get("error").and_then(serde_json::Value::as_str) {
+                Some("authorization_pending") => {}
+                Some("slow_down") => interval += Duration::from_secs(5),
+                // `access_denied`, `expired_token`, or an unknown error: the
+                // flow is over and the person has to start again.
+                _ => return None,
+            }
+        }
+    }
 }
 
 /// A PKCE code verifier (RFC 7636 §4.1): 64 unreserved characters.
@@ -1423,6 +1699,8 @@ struct TokenEntry {
     #[serde(default)]
     authorization_endpoint: Option<String>,
     #[serde(default)]
+    device_authorization_endpoint: Option<String>,
+    #[serde(default)]
     scopes_supported: Vec<String>,
     #[serde(default)]
     discovery_expires_at: Option<i64>,
@@ -1462,6 +1740,7 @@ impl TokenEntry {
             scopes: Vec::new(),
             token_endpoint: None,
             authorization_endpoint: None,
+            device_authorization_endpoint: None,
             scopes_supported: Vec::new(),
             discovery_expires_at: None,
             issuer: None,
@@ -1628,6 +1907,9 @@ fn record_discovery_fields(entry: &mut TokenEntry, discovery: &DiscoveredEndpoin
     }
     if let Some(endpoint) = &discovery.token_endpoint {
         entry.token_endpoint = Some(endpoint.clone());
+    }
+    if let Some(endpoint) = &discovery.device_authorization_endpoint {
+        entry.device_authorization_endpoint = Some(endpoint.clone());
     }
     if let Some(endpoint) = &discovery.registration_endpoint {
         entry.registration_endpoint = Some(endpoint.clone());
@@ -2023,6 +2305,106 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&pending).unwrap()).unwrap();
         assert_eq!(stored["flows"][0]["state"], parsed["state"]);
         assert_eq!(stored["flows"][0]["code_verifier"], parsed["code_verifier"]);
+    }
+
+    /// RFC 8628: a headless session whose server advertises a device endpoint
+    /// gets a user code immediately, and a background poll persists the token
+    /// once the code is approved. PKCE is not part of this flow.
+    #[tokio::test]
+    async fn a_headless_device_flow_polls_and_persists_the_token() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let metadata = format!(
+            r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","device_authorization_endpoint":"{base}/device","token_endpoint_auth_methods_supported":["none"]}}"#
+        );
+        let device = r#"{"device_code":"dev-code","user_code":"ABCD-EFGH","verification_uri":"https://example.test/device","expires_in":30,"interval":1}"#;
+        let handle = std::thread::spawn(move || {
+            let mut token_polls = 0;
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                if request.starts_with("POST /device ") {
+                    write_response(&mut stream, "200 OK", device);
+                } else if request.starts_with("POST /token ") {
+                    token_polls += 1;
+                    if token_polls == 1 {
+                        write_response(
+                            &mut stream,
+                            "400 Bad Request",
+                            r#"{"error":"authorization_pending"}"#,
+                        );
+                    } else {
+                        write_response(
+                            &mut stream,
+                            "200 OK",
+                            r#"{"access_token":"device-tok","refresh_token":"device-ref","expires_in":3600}"#,
+                        );
+                        return token_polls;
+                    }
+                } else {
+                    write_response(&mut stream, "200 OK", &metadata);
+                }
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_tokens.json");
+        let started = std::time::Instant::now();
+        let output = authenticate(
+            ToolInput {
+                call_id: "1".into(),
+                name: "McpAuth".into(),
+                arguments: serde_json::json!({ "server_url": base, "headless": true }),
+            },
+            &path,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the device hand-off must return without waiting for approval"
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        assert_eq!(parsed["device_flow"], true, "{parsed}");
+        assert_eq!(parsed["user_code"], "ABCD-EFGH", "{parsed}");
+        assert!(
+            parsed["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ABCD-EFGH"),
+            "the note must show the code: {parsed}"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let stored = std::fs::read_to_string(&path).unwrap_or_default();
+            if stored.contains("device-tok") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background poll did not persist the token: {stored}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            handle.join().unwrap(),
+            2,
+            "the first poll should have been retried after authorization_pending"
+        );
+
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(store["states"][0]["access_token"], "device-tok");
+        assert_eq!(store["states"][0]["refresh_token"], "device-ref");
+        assert_eq!(
+            store["states"][0]["device_authorization_endpoint"],
+            format!("{base}/device"),
+            "the device endpoint must be persisted for a later sign-in"
+        );
     }
 
     /// A pasted full redirect URL is parsed, its state checked against the

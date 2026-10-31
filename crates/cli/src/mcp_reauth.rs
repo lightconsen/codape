@@ -97,6 +97,15 @@ fn classify_output(output: &str) -> Result<(), String> {
         .get("note")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("McpAuth did not complete the authorization flow");
+    // A device flow has its own instructions (and finishes on its own once
+    // approved); appending "finish the flow with McpAuth" would be wrong.
+    if value
+        .get("device_flow")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(note.to_string());
+    }
     let message = value
         .get("auth_url")
         .and_then(serde_json::Value::as_str)
