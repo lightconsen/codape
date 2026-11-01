@@ -1,0 +1,151 @@
+# Terminal-Bench: what runs, and what it has found
+
+Terminal-Bench is the external agent benchmark CodeRex is measured against. The
+runner lives in [`scripts/external-benchmarks/terminal-bench/`](../scripts/external-benchmarks/terminal-bench/)
+and is described there; this file is the **record of results**, and it is the
+place to look before blaming a model for a result CodeRex caused, or vice
+versa.
+
+The distinction that matters throughout: a benchmark score of 0 can mean the
+agent harness failed, *or* it can mean the model chose not to follow the task.
+Those have nothing in common except the number, and separating them is why this
+record keeps both the frame subtype and the test's own verdict.
+
+## How to read a run
+
+Every trial writes these to
+`target/external-benchmarks/terminal-bench/<run-id>/`:
+
+| File | What it answers |
+|---|---|
+| `results.json` | `accuracy`, per-task `parser_results`, and `failure_mode` |
+| `<task>/*/sessions/agent.log` | the last lines of CodeRex's stream-json transcript |
+| `<task>/*/sessions/tests.log` | the grading test's real output, including the assertion text |
+| `<task>/*/panes/post-agent.txt` | the terminal state when the agent stopped |
+| `/logs/coderex-stream.jsonl` (in-container) | the **full** transcript, copied there by the adapter |
+
+`failure_mode` is the first thing to check, because it says whether the agent
+ever got a fair test:
+
+| `failure_mode` | Meaning |
+|---|---|
+| `unset` | the agent exited cleanly and the task's tests ran and scored it |
+| `unknown_agent_error` | CodeRex's `result` frame reported an error (see the subtype) |
+| `test_timeout` | the grading test itself timed out — the run was not scored on merit |
+| `agent_timeout` | CodeRex exceeded its own timeout |
+
+A trial with `failure_mode: unset` and `accuracy: 0` is a **model or prompt
+result**. A trial with any other mode is a **plumbing result** and says nothing
+about the model until the plumbing is fixed.
+
+## Environment on this machine
+
+- macOS on arm64; Docker runs `linux/arm64` task images.
+- There is no published aarch64 CodeRex release, so runs use
+  `--coderex-binary` with a locally cross-built binary:
+
+  ```bash
+  docker run --rm --platform linux/arm64 \
+    -v "$PWD":/src:ro -v /tmp/coderex-arm-target:/target \
+    -v /tmp/coderex-cargo-registry:/usr/local/cargo/registry \
+    -e CARGO_TARGET_DIR=/target -w /src rust:1.99.1 \
+    bash -c 'apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config \
+             && cargo build --release --locked -p coderex-cli --bin coderex'
+  ```
+
+- The model endpoint is reached through a gateway on the host. Task containers
+  get `http://host.docker.internal:8317`, which Docker Desktop resolves.
+- `--coderex-binary` requires the path **on the host**; the adapter copies it
+  into the container as `/tmp/coderex-local-binary`.
+
+## Run history
+
+### 2026-11-01 — `configure-git-webserver`, 7 runs, 0 resolved
+
+The task asks for a git server answering `git clone user@server:/git/server`
+with a post-receive hook deploying to an nginx on `:8080`. Its test clones with
+**`git@localhost` on port 22, password `password`**, pushes, and fetches
+`http://localhost:8080/hello.html`.
+
+| Run | `failure_mode` | Test verdict | Root cause |
+|---|---|---|---|
+| `tb-20261101-052106` | unset | HTTP 000 | CodeRex ended the turn early (see defect 1) |
+| `tb-20261101-054858` | unset | HTTP 000 | same |
+| `tb-20261101-060424` | unset | HTTP 000 | same |
+| `tb-20261101-061448` | unset | HTTP 000 | same — 89 s, 1 turn, no work beyond installing git |
+| `tb-fixed-182822` | unknown_agent_error | HTTP 000 | streaming request hit the whole-request timeout (defect 2) |
+| `tb-final-200330` | unset | HTTP 000 | ran the full 18 min; built a design the test does not accept |
+| `tb-accept-202553` | test_timeout | HTTP 404 | nginx up, file not in the web root; grading timed out |
+
+**Final verdict: model design substitution, not a CodeRex defect.** With the
+harness defects fixed the agent runs to completion, but it builds its own
+service rather than the one specified:
+
+| Requirement | What the agent built |
+|---|---|
+| bare repo at `/git/server` | `/srv/git/repos` — `/git/server` never appears in the transcript |
+| sshd on port 22 | its own sshd on 2222 |
+| `git` user, password `password` | key-only auth; `chpasswd` never ran |
+| web root `/var/www/html` | an fcgiwrap/`git daemon` design; `/var/www/html` never appears |
+
+The final answer states the alternative design explicitly ("Repos live in
+`/srv/git/repos`"), so this is a deliberate substitution, not an oversight.
+The instruction is genuinely ambiguous — it says `user@server`, the test uses
+`git@localhost` — but `/git/server` is written literally in the task, and the
+agent replaced it.
+
+### CodeRex defects this task exposed
+
+All three were real, and all three are fixed on `main`:
+
+1. **A truncated answer was reported as success.** `max_tokens` 4096 was
+   exhausted by reasoning before any text or tool call; the loop ended the run
+   and `repl.rs` reported every non-`MaxTurns` reason as
+   `subtype: success, is_error: false`. Proven by instrumenting the loop:
+
+   ```
+   provider answer ended turn=9 stop_reason=max_tokens tool_calls=0 content_chars=0
+   turn loop decided reason=token limit stop ... step=Break(TokenLimitStop)
+   ```
+
+2. **The whole-request timeout killed long streams.** One `reqwest::Client`
+   with a 120 s `timeout` served every request, and `timeout` covers the
+   response body; a turn that thought past two minutes died mid-stream. Streaming
+   now uses a separate client with `read_timeout` (gap between chunks).
+
+3. **Cassette maintenance was the only red thing on `main`.** Unrelated to the
+   benchmark, but it blocked verifying any of this:
+   `5196c02`/`2e9201b` changed the system prompt without refreshing the recorded
+   digests, leaving `e2e_code_agent` and `e2e_equivalence` failing with
+   `cassette_stale`.
+
+### Known, unfixed
+
+- **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
+  recognise, it compacts against a 32 K guess. The benchmark runs worked around
+  this with `CODEREX_CONTEXT_WINDOW=131072`; the guess itself is unchanged, so
+  an unknown model with a larger window still compacts far too early.
+- **Compaction can burn its retry budget on a no-op.** Observed at the 32 K
+  guess: a pass reported success while removing 35 tokens and *growing* the
+  message list (39 → 44 → 47) before the turn hard-stopped with
+  "context window is full".
+
+## Reproducing a run
+
+```bash
+export ANTHROPIC_API_KEY=...            # or CODEREX_API_KEY
+export ANTHROPIC_BASE_URL=http://host.docker.internal:8317
+export ANTHROPIC_MODEL=...
+export CODEREX_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
+
+scripts/external-benchmarks/terminal-bench/run.sh \
+  --task <task-id> \
+  --coderex-binary /tmp/coderex-arm-target/release/coderex \
+  --timeout 2700 --max-turns 200 \
+  --run-id <run-id>
+```
+
+`--no-rebuild` reuses task images between runs; `--n-concurrent N` runs several
+tasks at once. Each task still needs its own container — the tasks conflict
+(package installs, `/etc`, ports like 8080), and the grading tests attribute
+results to a container's final state.
