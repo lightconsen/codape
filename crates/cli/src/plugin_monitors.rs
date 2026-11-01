@@ -331,17 +331,7 @@ fn ensure_guardian() -> bool {
     let Ok(exe) = std::env::current_exe() else {
         return false;
     };
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg(GUARDIAN_FLAG)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // The guardian needs nothing from this session, least of all its
-        // provider credentials.
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
-    match command.spawn() {
+    match spawn_guardian(&exe) {
         Ok(child) => {
             *guardian = Some(child);
             true
@@ -354,6 +344,30 @@ fn ensure_guardian() -> bool {
             false
         }
     }
+}
+
+/// Spawn the guardian process for `exe`.
+///
+/// The guardian leads its **own process group**. A `killpg` on the host's
+/// group — or a SIGHUP from the terminal closing — must not take the one
+/// process that is supposed to outlive the host down with it. The pipe stays
+/// the only channel, and EOF on it is still what triggers cleanup.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn spawn_guardian(exe: &std::path::Path) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt as _;
+
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg(GUARDIAN_FLAG)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // The guardian needs nothing from this session, least of all its
+        // provider credentials.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    command.process_group(0);
+    command.spawn()
 }
 
 /// Send one record to the guardian, if it is running.
@@ -1406,6 +1420,39 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The guardian must not share the host's process group: a `killpg` on
+    /// that group (or a terminal SIGHUP) would otherwise kill the one process
+    /// meant to outlive the host.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[allow(unsafe_code)] // `getpgid` is the only way to read a process group.
+    fn the_guardian_leads_its_own_process_group() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("guardian.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut child = spawn_guardian(&script).expect("spawn the guardian");
+        let pid = libc::pid_t::try_from(child.id()).expect("pid");
+        // SAFETY: `getpgid` takes plain integers; the pid belongs to the child
+        // we just spawned and have not waited on.
+        let (child_group, own_group) = unsafe { (libc::getpgid(pid), libc::getpgid(0)) };
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(child_group > 0, "getpgid failed for the guardian");
+        assert_ne!(
+            child_group, own_group,
+            "the guardian shares the host's process group"
+        );
+        assert_eq!(
+            child_group, pid,
+            "the guardian should lead its own process group"
+        );
     }
 
     /// The guardian's whole contract: EOF means the host is gone, and what it
