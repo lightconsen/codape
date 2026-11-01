@@ -94,7 +94,79 @@ The instruction is genuinely ambiguous — it says `user@server`, the test uses
 `git@localhost` — but `/git/server` is written literally in the task, and the
 agent replaced it.
 
-### CodeRex defects this task exposed
+### 2026-11-01 — `hello-world`, 3 runs, **1 resolved**
+
+The simplest task in the dataset: write `/app/hello.txt` with exactly
+`Hello, world!\n` and create nothing else. It was chosen to separate "CodeRex
+can finish a task at all" from the design-substitution problem above.
+
+| Run | `failure_mode` | Agent result | Root cause |
+|---|---|---|---|
+| `tb-hello-213746` | parse_error | never ran | the binary could not start — `GLIBC_2.39 not found` |
+| `tb-hello-musl-222541` | test_timeout | **correct, 26 s** | the grading script's `apt-get update` exceeded the 60 s test budget |
+| `tb-hello-graded-223630` | unset | **correct, 26 s** | **1/1 resolved** — both assertions passed |
+
+**This is the first task CodeRex has passed on Terminal-Bench**, and it is a
+clean result: `failure_mode: unset` and `parser_results` =
+`{test_hello_file_exists: passed, test_hello_file_content: passed}`. The two
+earlier failures were both environment, not agent.
+
+#### Why the binary failed to start
+
+The gnu build was linked against the toolchain image's newer glibc:
+
+```
+/usr/local/bin/coderex: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+INSTALL_FAIL_STATUS
+```
+
+`hello-world` builds on `python-3-13` (Debian **bookworm**, glibc 2.36);
+`configure-git-webserver` builds on `ubuntu-24-04` (glibc 2.39), which is why
+the same binary worked there. Build a **static** binary instead — it works on
+both, and on whatever base a later task uses:
+
+```bash
+docker run --rm --platform linux/arm64 \
+  -v "$PWD":/src:ro -v /tmp/coderex-musl-target:/target \
+  -v /tmp/coderex-cargo-registry:/usr/local/cargo/registry \
+  -e CARGO_TARGET_DIR=/target -w /src rust:1.99.1 \
+  bash -c 'apt-get update -qq && apt-get install -y -qq musl-tools libdbus-1-dev pkg-config \
+           && rustup target add aarch64-unknown-linux-musl \
+           && cargo build --release --locked --target aarch64-unknown-linux-musl \
+                -p coderex-cli --bin coderex'
+# /tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex
+# -> "statically linked"; ~11 min cold
+```
+
+**Use the static build for Terminal-Bench.** A gnu build only runs on tasks
+whose base image is at least as new as the toolchain image.
+
+#### Why the grade timed out
+
+`tests/setup-uv-pytest.sh` starts with `apt-get update` to install `curl`, then
+fetches uv. Here the Debian package index (8.7 MB) downloads at 28–68 kB/s, so
+the update alone takes 2–3 minutes — while the task's `max_test_timeout_sec`
+is **60 s**. The log ends mid-download at 56 %:
+
+```
+56% [4 Packages 4678 kB/8689 kB 54%]   68.6 kB/s 1min 3s
+```
+
+The budget is the task's `max_test_timeout_sec`, overridden globally by the
+harness flag `--global-test-timeout-sec` — exposed as `--test-timeout` on the
+runner, which is what turned this run into a pass:
+
+```bash
+scripts/external-benchmarks/terminal-bench/run.sh \
+  --task hello-world --test-timeout 900 ...
+```
+
+`configure-git-webserver` hit the same wall (`tb-accept-202553`: HTTP 404 was
+recorded, then `test_timeout`). **Treat any `test_timeout` as an environment
+result, not a task result, and re-grade with a larger budget before drawing a
+conclusion.**
+
+## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
 
@@ -110,14 +182,16 @@ All three were real, and all three are fixed on `main`:
 
 2. **The whole-request timeout killed long streams.** One `reqwest::Client`
    with a 120 s `timeout` served every request, and `timeout` covers the
-   response body; a turn that thought past two minutes died mid-stream. Streaming
-   now uses a separate client with `read_timeout` (gap between chunks).
+   response body; a turn that thought past two minutes died mid-stream.
+   Streaming now uses a separate client with `read_timeout` (gap between
+   chunks).
 
 3. **Cassette maintenance was the only red thing on `main`.** Unrelated to the
    benchmark, but it blocked verifying any of this:
-   `5196c02`/`2e9201b` changed the system prompt without refreshing the recorded
-   digests, leaving `e2e_code_agent` and `e2e_equivalence` failing with
-   `cassette_stale`.
+   `5196c02`/`2e9201b` changed the system prompt without refreshing the
+   recorded digests, leaving `e2e_code_agent` and `e2e_equivalence` failing
+   with `cassette_stale`.
+
 
 ### Known, unfixed
 
@@ -140,10 +214,13 @@ export CODEREX_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
 
 scripts/external-benchmarks/terminal-bench/run.sh \
   --task <task-id> \
-  --coderex-binary /tmp/coderex-arm-target/release/coderex \
-  --timeout 2700 --max-turns 200 \
+  --coderex-binary /tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex \
+  --timeout 2700 --max-turns 200 --test-timeout 900 \
   --run-id <run-id>
 ```
+
+`--test-timeout` is not optional in practice on this machine: the tasks'
+own 60 s budgets are shorter than an `apt-get update` here.
 
 `--no-rebuild` reuses task images between runs; `--n-concurrent N` runs several
 tasks at once. Each task still needs its own container — the tasks conflict

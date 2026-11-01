@@ -224,6 +224,13 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         "--global-agent-timeout-sec",
         str(args.timeout + 180),
     ]
+    # The default test budget comes from each task's `max_test_timeout_sec`,
+    # and several tasks install packages inside it — `apt-get update` on a slow
+    # link alone can exceed the 60 s these tasks declare, which scores a correct
+    # answer as `test_timeout`. Raising it changes nothing for a test that
+    # finishes early.
+    if args.test_timeout:
+        command += ["--global-test-timeout-sec", str(args.test_timeout)]
     if args.model:
         command += ["--model", args.model]
     if args.coderex_binary:
@@ -382,6 +389,15 @@ Notes:
     parser.add_argument("--model", help="Model ID passed to both tb metadata and CodeRex")
     parser.add_argument("--timeout", type=positive_float, default=DEFAULT_TIMEOUT, help=f"Per-task CodeRex timeout in seconds (default: {DEFAULT_TIMEOUT})")
     parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"CodeRex --max-turns (default: {DEFAULT_MAX_TURNS})")
+    parser.add_argument(
+        "--test-timeout",
+        type=positive_float,
+        default=None,
+        help="Grading timeout in seconds, overriding each task's "
+        "max_test_timeout_sec. Several tasks run apt-get inside this budget; "
+        "a slow link can exceed it and score a correct answer as test_timeout "
+        "(default: the task's own value)",
+    )
     parser.add_argument("--n-concurrent", type=positive_int, default=DEFAULT_N_CONCURRENT, help=f"Concurrent tasks (default: {DEFAULT_N_CONCURRENT})")
     parser.add_argument("--coderex-version", default=CODEREX_VERSION, help=f"CodeRex release installed in containers (default: {CODEREX_VERSION})")
     parser.add_argument("--coderex-binary", type=Path, help="Linux x86_64 ELF CodeRex binary to copy into containers")
