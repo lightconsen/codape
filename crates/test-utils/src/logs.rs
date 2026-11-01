@@ -176,6 +176,12 @@ pub fn capture_logs() -> LogCapture {
     };
     let subscriber = tracing_subscriber::registry().with(collector);
     let guard = tracing::subscriber::set_default(subscriber);
+    // `set_default` installs a thread-local dispatcher but does not rebuild
+    // the process-wide callsite interest cache. If another test thread has
+    // already hit this callsite under the no-op dispatcher, the cache can say
+    // "disabled" and this capture would see nothing. Rebuilding asks every
+    // callsite about the dispatcher now active on this thread.
+    tracing::callsite::rebuild_interest_cache();
     LogCapture {
         events,
         _guard: guard,
