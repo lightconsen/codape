@@ -32,7 +32,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 TERMINAL_BENCH_VERSION = "0.2.18"
 TERMINAL_BENCH_PYTHON = "3.12"
 DATASET = "terminal-bench-core==0.1.1"
-CODEREX_VERSION = "v0.1.2"
+CODEREX_VERSION = "v0.1.3"
 ADAPTER_IMPORT_PATH = "coderex_agent:CodeRexAgent"
 
 DEFAULT_TIMEOUT = 1800

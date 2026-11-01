@@ -19,7 +19,7 @@ Usage with ``tb`` (see run_terminal_bench.py for the wrapper):
     tb run \
       --dataset terminal-bench-core==0.1.1 \
       --agent-import-path coderex_agent:CodeRexAgent \
-      --agent-kwarg version=v0.1.2 \
+      --agent-kwarg version=v0.1.3 \
       --model claude-sonnet-4-5-20250929
 """
 
@@ -48,7 +48,7 @@ EXIT_CODE_PATH = f"{INSTALLED_DIR}/coderex-exit-code"
 CONFIG_DIR = "/tmp/coderex-config"
 LOCAL_BINARY_PATH = "/tmp/coderex-local-binary"
 
-DEFAULT_VERSION = "v0.1.2"
+DEFAULT_VERSION = "v0.1.3"
 DEFAULT_MAX_TURNS = 200
 DEFAULT_TIMEOUT_SEC = 1800
 

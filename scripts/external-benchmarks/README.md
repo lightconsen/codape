@@ -63,10 +63,10 @@ Change these only on purpose: they define what a recorded score means.
 | SWE-bench harness | `5.0.2` | `swebench/run_swebench.py` |
 | SWE-bench Verified revision | `78f471bf655a3137b2e8a75af1501690ec009ec3` | same |
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` | same |
-| CodeRex in SWE-bench containers | `v0.1.2`, `x86_64-unknown-linux-musl` | same |
+| CodeRex in SWE-bench containers | `v0.1.3`, `x86_64-unknown-linux-musl` | same |
 | Terminal-Bench harness | `0.2.18` | `terminal-bench/run_terminal_bench.py` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` | same |
-| CodeRex in Terminal-Bench containers | `v0.1.2` | same and `coderex_agent.py` |
+| CodeRex in Terminal-Bench containers | `v0.1.3` | same and `coderex_agent.py` |
 
 The CodeRex release downloaded inside containers is verified against the
 release's `SHA256SUMS`; a missing entry or checksum mismatch aborts that

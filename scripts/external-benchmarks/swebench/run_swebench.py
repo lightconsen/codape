@@ -61,8 +61,8 @@ DATASETS = {
 }
 
 # CodeRex release installed inside the container when no --coderex-binary is
-# given. v0.1.2 is the newest release that publishes a Linux x86_64 musl build.
-CODEREX_RELEASE_VERSION = "v0.1.2"
+# given. v0.1.3 is the newest release that publishes a Linux x86_64 musl build.
+CODEREX_RELEASE_VERSION = "v0.1.3"
 CODEREX_TARGET = "x86_64-unknown-linux-musl"
 
 # Variables forwarded from the host into CodeRex inside the container. The
