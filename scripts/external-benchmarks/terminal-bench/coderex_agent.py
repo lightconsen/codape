@@ -99,9 +99,12 @@ class CodeRexAgent(AbstractInstalledAgent):
         if self._binary_path is not None and not self._binary_path.exists():
             raise FileNotFoundError(f"CodeRex binary does not exist: {self._binary_path}")
 
-        # Moved into the host-mounted /agent-logs directory when the harness
-        # supplies a logging directory, so the transcript survives the
-        # container. Falls back to the plain container path for manual use.
+        # `/installed-agent` is the directory AbstractInstalledAgent mounts
+        # back to the host, so the transcript and exit code survive the
+        # container. This used to switch to a `/agent-logs` mount when the
+        # harness supplied a logging directory, but that directory is not
+        # created in terminal-bench 0.2.18 task containers: the redirect
+        # failed with "No such file or directory" before CodeRex ever ran.
         self._stream_path = STREAM_PATH
         self._exit_code_path = EXIT_CODE_PATH
 
@@ -151,10 +154,6 @@ class CodeRexAgent(AbstractInstalledAgent):
         session,
         logging_dir: Path | None = None,
     ) -> AgentResult:
-        if logging_dir is not None:
-            self._stream_path = f"{self.CONTAINER_AGENT_LOGS_PATH}/coderex-stream.jsonl"
-            self._exit_code_path = f"{self.CONTAINER_AGENT_LOGS_PATH}/coderex-exit-code"
-
         # Write the instruction as a file inside the container. Sending a
         # multi-line string through tmux would execute each line separately.
         rendered = self._render_instruction(instruction)

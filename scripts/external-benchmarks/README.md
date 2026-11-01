@@ -209,7 +209,7 @@ summary.json                            # pass@1, timings, usage, instance list
 
 Terminal-Bench, under `target/external-benchmarks/terminal-bench/<run-id>/`:
 the harness's task directories, per-trial logs (including the CodeRex
-stream-json transcript written through the mounted `/agent-logs` directory),
+stream-json transcript written to the host-mounted `/installed-agent` directory),
 and aggregate `results.json` (accuracy, resolved/unresolved IDs, failure
 modes). `target/` is gitignored.
 
