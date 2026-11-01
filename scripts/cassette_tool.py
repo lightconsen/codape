@@ -4,11 +4,16 @@
 Subcommands:
   check [--max-age-days N] [--max-mb N] [--strict]
   backfill [--no-git-date]
+  rekey --template PATH [--dry-run] [SUITE ...]
   prune [--dry-run]
 
 `check` never modifies files. It reports malformed/missing-marker files,
 recordings without metadata, stale recordings and suites over the size budget.
 `backfill` fills metadata for recordings made before metadata existed.
+`rekey` rewrites the tool definitions in every recorded request from a
+current traced request and renames each cassette to its new key. A tool
+schema lives in the request body, so adding a parameter changes the key the
+recorder computes and otherwise forces a re-record against a real endpoint.
 `prune` replays each suite with tracing and deletes cassettes the suite no
 longer requests.
 """
@@ -307,6 +312,113 @@ def backfill_digests() -> int:
     return 0
 
 
+def fingerprint(path: str, canonical: dict) -> str:
+    """FNV-1a over the path and compact JSON, exactly as `llm-cassette` does."""
+    payload = (
+        path.encode("utf-8")
+        + b"\0"
+        + json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    )
+    value = 0xCBF29CE484222325
+    for byte in payload:
+        value ^= byte
+        value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"{value:016x}"
+
+
+def rekey(args: argparse.Namespace) -> int:
+    """Refresh recorded tool definitions from a current traced request.
+
+    A recording's key is the hash of its canonical request body, and the body
+    carries every tool schema. Adding or changing a tool parameter therefore
+    changes the key and makes replay miss even though the conversation is
+    unchanged. Re-recording would answer the same conversations again; this
+    instead rewrites just the tool definitions from a request observed during
+    replay (`CODEREX_CASSETTE_TRACE=1` writes it as `_missing_<key>.json`) and
+    renames each cassette to the key the client now computes.
+    """
+    template_path = Path(args.template)
+    try:
+        template = json.loads(template_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"error: cannot read {template_path}: {error}", file=sys.stderr)
+        return 2
+    template_tools = {
+        tool["name"]: tool
+        for tool in template.get("tools", [])
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+    }
+    if not template_tools:
+        print(f"error: {template_path} has no tools", file=sys.stderr)
+        return 2
+
+    suites = args.suites or sorted(SUITES)
+    rekeyed = 0
+    for suite in suites:
+        directory = CASSETTES / suite
+        if not directory.is_dir():
+            continue
+        print(f"rekeying {suite}")
+        for path in sorted(directory.glob("*.json")):
+            if path.name.startswith("_missing_"):
+                continue
+            document = json.loads(path.read_text(encoding="utf-8"))
+            request = document.get("request")
+            if not isinstance(request, dict):
+                continue
+            # The stored name must describe the stored request. A disagreement
+            # means a different path or canonicalization made the file, and
+            # rewriting it would paper over that difference.
+            stored_key = fingerprint("/v1/messages", request)
+            if path.stem != stored_key:
+                print(
+                    f"error: {path.relative_to(ROOT)} does not match its key "
+                    f"({stored_key}); refusing to rekey",
+                    file=sys.stderr,
+                )
+                return 1
+            tools = request.get("tools")
+            if not isinstance(tools, list):
+                continue
+            refreshed = []
+            changed = False
+            for tool in tools:
+                name = tool.get("name") if isinstance(tool, dict) else None
+                replacement = template_tools.get(name)
+                if replacement is not None and tool != replacement:
+                    refreshed.append(replacement)
+                    changed = True
+                else:
+                    refreshed.append(tool)
+            if not changed:
+                continue
+            request["tools"] = refreshed
+            new_key = fingerprint("/v1/messages", request)
+            target = directory / f"{new_key}.json"
+            if target != path and target.exists():
+                print(
+                    f"error: {target.relative_to(ROOT)} already exists",
+                    file=sys.stderr,
+                )
+                return 1
+            document["key"] = new_key
+            if args.dry_run:
+                print(f"would rekey {path.relative_to(ROOT)} -> {new_key}")
+            else:
+                target.write_text(
+                    json.dumps(document, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                if target != path:
+                    path.unlink()
+            rekeyed += 1
+    verb = "would rekey" if args.dry_run else "rekeyed"
+    print(f"{verb} {rekeyed} cassette files")
+    return 0
+
+
 def run_suite(suite: str, trace: Path, rewriting_digests: bool = False) -> bool:
     environment = dict(os.environ)
     environment.pop("CODEREX_CASSETTE_MODE", None)
@@ -418,6 +530,21 @@ def main() -> int:
         "(recordings made before the field existed get it without a re-record)",
     )
     backfill_parser.set_defaults(func=backfill)
+
+    rekey_parser = subparsers.add_parser("rekey")
+    rekey_parser.add_argument(
+        "--template",
+        required=True,
+        help="a request traced during replay (_missing_<key>.json) whose tool "
+        "definitions are the current ones",
+    )
+    rekey_parser.add_argument("--dry-run", action="store_true")
+    rekey_parser.add_argument(
+        "suites",
+        nargs="*",
+        help="suites to rewrite (default: every known suite)",
+    )
+    rekey_parser.set_defaults(func=rekey)
 
     prune_parser = subparsers.add_parser("prune")
     prune_parser.add_argument("--dry-run", action="store_true")
