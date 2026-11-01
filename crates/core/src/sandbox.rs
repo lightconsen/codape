@@ -1875,6 +1875,12 @@ mod seccomp_arch {
         libc::SYS_rt_sigprocmask,
         libc::SYS_rt_sigreturn,
         libc::SYS_setpgid,
+        // Bash queries its process group at startup. aarch64 has no
+        // `getpgrp` syscall (glibc implements it as `getpgid(0)`), so the
+        // x86_64 entry does not translate; without these the shell dies
+        // under the filter.
+        libc::SYS_getpgid,
+        libc::SYS_getsid,
         libc::SYS_uname,
         libc::SYS_umask,
         libc::SYS_getpid,
