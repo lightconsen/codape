@@ -128,8 +128,15 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
   `tool_result_block` constructors for the three CodeRex emits. Anything else
   round-trips untouched rather than being rejected.
 - **`result` subtype is a `String`, not a closed enum.** `result_subtype`
-  names `success`, `error_max_turns` and `error_during_execution`; other
-  termination reasons pass through.
+  names `success`, `error_max_turns`, `error_during_execution`,
+  `error_max_output_tokens` and `error_loop_detected`; other termination
+  reasons pass through.
+- **`is_error` is truthful.** `success` is only for a run that ended because
+  the model finished. A run the provider cut off (`error_max_output_tokens`), a
+  detected tool loop (`error_loop_detected`) and a turn a gate stopped
+  (`error_during_execution`) carry `is_error: true` and keep whatever text the
+  model produced in `result`, so a host can tell a truncated run from a
+  completed one without parsing the answer.
 - **The transcript mirror is not implemented here.** The protocol is the
   reporting path; nothing in this crate writes a transcript.
 - **The CLI is the consumer.** `--output-format stream-json` constructs a

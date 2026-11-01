@@ -165,7 +165,7 @@ async fn the_named_agent_sets_the_prompt_and_tool_whitelist() {
     );
     let turn = bodies
         .iter()
-        .find(|body| body["max_tokens"] == 4096)
+        .find(|body| body["max_tokens"] == 32_768)
         .expect("the turn request");
     let text = serde_json::to_string(turn).expect("body");
     assert!(

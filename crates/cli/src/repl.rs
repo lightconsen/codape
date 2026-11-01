@@ -7136,7 +7136,7 @@ impl ReplLoop {
             model_profile: ModelProfile::Main,
             inherit_session: true,
             stream: true,
-            max_tokens: 4096,
+            max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
             agent_id: None,
             provider_hints: HashMap::new(),
         }
@@ -8096,6 +8096,35 @@ impl ReplLoop {
                     u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     1,
                 ),
+                // A run that did not end because the model finished is not a
+                // success. These arrive as `Ok(_)` and used to be reported as
+                // one: a truncated answer, a detected tool loop or a turn a
+                // gate stopped all reached the host as `subtype: success,
+                // is_error: false`, so nothing downstream could tell them from
+                // a completed task.
+                Ok(reason @ (TerminalReason::TokenLimitStop
+                | TerminalReason::LoopDetected { .. }
+                | TerminalReason::StopHook)) => {
+                    let subtype = match reason {
+                        TerminalReason::TokenLimitStop => {
+                            coderex_events::protocol::result_subtype::ERROR_MAX_OUTPUT_TOKENS
+                        }
+                        TerminalReason::LoopDetected { .. } => {
+                            coderex_events::protocol::result_subtype::ERROR_LOOP_DETECTED
+                        }
+                        _ => coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                    };
+                    let mut frame = coderex_events::ResultFrame::error(
+                        session_id.clone(),
+                        subtype,
+                        u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        1,
+                    );
+                    // The text still goes out: it is what the model produced
+                    // before the run ended, and dropping it would lose work.
+                    frame.result = Some(output.trim().to_string());
+                    frame
+                }
                 Ok(_) => coderex_events::ResultFrame::success(
                     session_id.clone(),
                     output.trim(),

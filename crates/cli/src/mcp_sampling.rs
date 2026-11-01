@@ -18,9 +18,15 @@ use std::sync::Arc;
 
 /// The ceiling used when `CODEREX_MCP_SAMPLING_MAX_TOKENS` is unset.
 ///
-/// A server may ask for more, but this is as many output tokens as it can
-/// spend in one request.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// A server may ask for more, but this is as many output tokens it can spend
+/// in one request.
+///
+/// It matches [`coderex_core::engine::QueryEngine::DEFAULT_MAX_TOKENS`] for
+/// the same reason: a ceiling low enough to exhaust on reasoning alone
+/// truncates an answer before the model writes any of it, and a truncated
+/// sampling result reaches the MCP server as an empty, apparently finished
+/// one.
+pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
 /// The environment variable that raises or lowers the token ceiling.
 pub const MAX_TOKENS_ENV: &str = "CODEREX_MCP_SAMPLING_MAX_TOKENS";

@@ -67,6 +67,11 @@ PASSTHROUGH_ENV = (
     "ANTHROPIC_MODEL",
     "OPENAI_MODEL",
     "CODEREX_CUSTOM_HEADERS",
+    # CodeRex assumes a conservative 32K window for a model it does not know,
+    # and compacts against that guess. A model with a larger real window then
+    # spends most of the task compacting instead of working. These let the
+    # caller state the window the endpoint actually has.
+    "CODEREX_CONTEXT_WINDOW",
 )
 
 
@@ -239,10 +244,18 @@ class CodeRexAgent(AbstractInstalledAgent):
         exit_code = self._read_exit_code(session)
         summary = self._read_result_summary(session)
         usage = (summary or {}).get("usage")
+        subtype = (summary or {}).get("subtype")
         failure_mode = result.failure_mode
         # CodeRex exits 0 even when the result frame reports an API/transport
-        # error, so check the frame as well as the process status.
-        if (exit_code is not None and exit_code != 0) or (summary or {}).get("is_error"):
+        # error, so check the frame as well as the process status. A run the
+        # provider cut off (`error_max_output_tokens`) is a failed run too: the
+        # model was still working when it ran out of room, so the container
+        # state is not an answer to the task.
+        if (
+            (exit_code is not None and exit_code != 0)
+            or (summary or {}).get("is_error")
+            or subtype == "error_max_output_tokens"
+        ):
             failure_mode = FailureMode.UNKNOWN_AGENT_ERROR
         return AgentResult(
             total_input_tokens=(usage or {}).get("input_tokens") or 0,
@@ -306,5 +319,6 @@ def parse_result_summary(text: str) -> dict | None:
         }
     return {
         "is_error": bool(last_result.get("is_error")),
+        "subtype": last_result.get("subtype"),
         "usage": parsed_usage,
     }

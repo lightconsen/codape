@@ -118,7 +118,7 @@ async fn effort_reaches_an_openai_shaped_provider() {
     assert!(!bodies.is_empty(), "no provider request was made");
     let main = bodies
         .iter()
-        .find(|body| body["max_tokens"] == 4096)
+        .find(|body| body["max_tokens"] == 32_768)
         .expect("the turn request is present");
     assert_eq!(
         main["reasoning_effort"], "high",

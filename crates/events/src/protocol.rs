@@ -40,6 +40,17 @@ pub mod result_subtype {
     pub const ERROR_MAX_TURNS: &str = "error_max_turns";
     /// The turn failed while running.
     pub const ERROR_DURING_EXECUTION: &str = "error_during_execution";
+    /// The provider cut the answer off at the output ceiling.
+    ///
+    /// The run is over, but not because the model finished: it ran out of
+    /// room. A host that treats this as `success` cannot tell an answer from a
+    /// truncated one.
+    pub const ERROR_MAX_OUTPUT_TOKENS: &str = "error_max_output_tokens";
+    /// The repetitive-tool-call detector ended the run.
+    ///
+    /// The run stopped on purpose, but the work the model was doing was not
+    /// finished and it was not asked to stop.
+    pub const ERROR_LOOP_DETECTED: &str = "error_loop_detected";
 }
 
 /// Subtype of a [`ControlRequestFrame`] that asks whether a tool may run.
