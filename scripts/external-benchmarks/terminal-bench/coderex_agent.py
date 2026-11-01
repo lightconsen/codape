@@ -47,6 +47,10 @@ STREAM_PATH = f"{INSTALLED_DIR}/coderex-stream.jsonl"
 EXIT_CODE_PATH = f"{INSTALLED_DIR}/coderex-exit-code"
 CONFIG_DIR = "/tmp/coderex-config"
 LOCAL_BINARY_PATH = "/tmp/coderex-local-binary"
+# The harness mounts /logs back to the host's trial directory, so the full
+# transcript is copied there before the container is removed.
+LOGS_DIR = "/logs"
+LOGS_STREAM_PATH = f"{LOGS_DIR}/coderex-stream.jsonl"
 
 DEFAULT_VERSION = "v0.1.3"
 DEFAULT_MAX_TURNS = 200
@@ -67,6 +71,11 @@ PASSTHROUGH_ENV = (
     "ANTHROPIC_MODEL",
     "OPENAI_MODEL",
     "CODEREX_CUSTOM_HEADERS",
+    # CodeRex assumes a conservative 32K window for a model it does not know,
+    # and compacts against that guess. A model with a larger real window then
+    # spends most of the task compacting instead of working. These let the
+    # caller state the window the endpoint actually has.
+    "CODEREX_CONTEXT_WINDOW",
 )
 
 
@@ -217,9 +226,18 @@ class CodeRexAgent(AbstractInstalledAgent):
         )
         # The harness appends "; tmux wait -S done" to blocking commands, so
         # this line must return to the shell. Do not call exit here.
+        #
+        # The tail is for a human watching the pane; it is not the record. The
+        # full transcript is copied to /logs, which the harness mounts back to
+        # the host, so a finished trial can be diagnosed after the container is
+        # gone. `tail -n 20` was the only survivor of a run for exactly that
+        # reason: the container and everything in /installed-agent's own
+        # namespace went with it.
         command += (
             f" < {INSTRUCTION_PATH} > {self._stream_path} 2>&1"
             f'; rc=$?; printf "%s\\n" "$rc" > {self._exit_code_path}'
+            f"; mkdir -p {LOGS_DIR} && cp {self._stream_path} {LOGS_STREAM_PATH} 2>/dev/null"
+            f" && cp {self._exit_code_path} {LOGS_DIR}/coderex-exit-code 2>/dev/null"
             f"; tail -n 20 {self._stream_path} 2>/dev/null; true"
         )
         return [
@@ -239,10 +257,19 @@ class CodeRexAgent(AbstractInstalledAgent):
         exit_code = self._read_exit_code(session)
         summary = self._read_result_summary(session)
         usage = (summary or {}).get("usage")
+        subtype = (summary or {}).get("subtype")
         failure_mode = result.failure_mode
         # CodeRex exits 0 even when the result frame reports an API/transport
-        # error, so check the frame as well as the process status.
-        if (exit_code is not None and exit_code != 0) or (summary or {}).get("is_error"):
+        # error, so check the frame as well as the process status. A run that
+        # did not finish for a reason other than the model stopping is a
+        # failed run too: the container state is not an answer to the task.
+        # `error_loop_detected` is included because the run was cut short
+        # with work still in flight.
+        if (
+            (exit_code is not None and exit_code != 0)
+            or (summary or {}).get("is_error")
+            or subtype in ("error_max_output_tokens", "error_loop_detected")
+        ):
             failure_mode = FailureMode.UNKNOWN_AGENT_ERROR
         return AgentResult(
             total_input_tokens=(usage or {}).get("input_tokens") or 0,
@@ -306,5 +333,6 @@ def parse_result_summary(text: str) -> dict | None:
         }
     return {
         "is_error": bool(last_result.get("is_error")),
+        "subtype": last_result.get("subtype"),
         "usage": parsed_usage,
     }

@@ -5450,7 +5450,7 @@ mod tests {
 
     #[test]
     fn headless_puts_the_operating_note_on_the_system_prompt() {
-        let mut orch = StartupOrchestrator::new();
+        let orch = StartupOrchestrator::new();
         let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
         orch.configure_repl(&mut repl, false);
 

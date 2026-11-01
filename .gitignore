@@ -35,3 +35,7 @@ fuzz/artifacts/
 # Python bytecode from helper scripts
 __pycache__/
 *.pyc
+
+# A stray shell redirect (`cmd > 1`) in a crate directory. `1` is never a
+# source file, so ignore it rather than committing a multi-megabyte transcript.
+crates/cli/1

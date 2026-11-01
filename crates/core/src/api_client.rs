@@ -905,6 +905,18 @@ impl ApiClient for EffortClient {
 pub struct AnthropicApiClient {
     config: ApiConfig,
     client: Client,
+    /// Client used only for streaming requests.
+    ///
+    /// A whole-request timeout on a streaming response ends the answer while
+    /// it is still arriving: the timer covers the body, not just the request
+    /// line, so a turn that takes longer than the deadline is cut off
+    /// mid-stream. A reasoning model on a hard step can legitimately think for
+    /// minutes before its first token, which is not a stalled connection.
+    ///
+    /// This client bounds the *gap* instead: it fails when no bytes arrive for
+    /// `request_timeout_secs`, and lets a long answer take as long as it needs.
+    /// The caller's own budget still bounds the whole turn.
+    stream_client: Client,
 }
 
 impl AnthropicApiClient {
@@ -914,15 +926,26 @@ impl AnthropicApiClient {
     /// pooling across multiple engines, prefer [`Self::new_with_client`].
     #[must_use]
     pub fn new(config: ApiConfig) -> Self {
-        let client = if config.request_timeout_secs > 0 {
-            Client::builder()
-                .timeout(Duration::from_secs(config.request_timeout_secs))
-                .build()
-                .unwrap_or_else(|_| Client::new())
+        let deadline = Duration::from_secs(config.request_timeout_secs);
+        let (client, stream_client) = if config.request_timeout_secs > 0 {
+            (
+                Client::builder()
+                    .timeout(deadline)
+                    .build()
+                    .unwrap_or_else(|_| Client::new()),
+                Client::builder()
+                    .read_timeout(deadline)
+                    .build()
+                    .unwrap_or_else(|_| Client::new()),
+            )
         } else {
-            Client::new()
+            (Client::new(), Client::new())
         };
-        Self { config, client }
+        Self {
+            config,
+            client,
+            stream_client,
+        }
     }
 
     /// Create a client using an existing `reqwest::Client`.
@@ -930,8 +953,12 @@ impl AnthropicApiClient {
     /// This enables connection pooling when multiple `AnthropicApiClient`
     /// instances share the same underlying `reqwest::Client`.
     #[must_use]
-    pub const fn new_with_client(config: ApiConfig, client: Client) -> Self {
-        Self { config, client }
+    pub fn new_with_client(config: ApiConfig, client: Client) -> Self {
+        Self {
+            config,
+            client: client.clone(),
+            stream_client: client,
+        }
     }
 
     /// Clone this client with per-request context.
@@ -1358,6 +1385,7 @@ impl ApiClient for AnthropicApiClient {
         Box::new(Self {
             config: self.config.clone(),
             client: self.client.clone(),
+            stream_client: self.stream_client.clone(),
         })
     }
 
@@ -1633,7 +1661,9 @@ impl ApiClient for AnthropicApiClient {
 
         self.maybe_apply_cache_breakpoints(&mut body);
 
-        let client = self.client.clone();
+        // Streaming uses the client with no whole-request deadline: the
+        // answer is still arriving while the timer would be running out.
+        let client = self.stream_client.clone();
         let config = self.config.clone();
 
         Box::pin(
@@ -1641,6 +1671,7 @@ impl ApiClient for AnthropicApiClient {
                 let temp_client = Self {
                     config,
                     client: client.clone(),
+                    stream_client: client.clone(),
                 };
                 tracing::debug!(
                     provider = "anthropic",
@@ -2611,6 +2642,75 @@ mod tests {
     async fn config_custom_timeout() {
         let config = ApiConfig::new("test_key".into()).with_timeout(60);
         assert_eq!(config.request_timeout_secs, 60);
+    }
+
+    /// A streaming answer that takes longer than the request timeout must
+    /// still be delivered, as long as it keeps arriving.
+    ///
+    /// The streaming client used to be the plain one, whose `timeout` covers
+    /// the whole response body. A turn that thought for longer than the
+    /// deadline — a reasoning model on a hard step — was cut off mid-stream
+    /// and reported as `transport error (timeout): error decoding response
+    /// body`, even though the connection was healthy and the answer was on its
+    /// way. A streaming client bounds the gap between chunks instead.
+    #[tokio::test]
+    async fn a_slow_stream_outlives_the_request_timeout() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        // Answer four SSE events, one every 400 ms. With a 1 s request
+        // timeout that is a 1.6 s response: longer than the deadline whole,
+        // but never a 1 s gap.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut discard = [0_u8; 4096];
+                let _ = socket.read(&mut discard);
+                let events = [
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"a\"}}\n\n",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"b\"}}\n\n",
+                    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                ];
+                let _ = socket.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                );
+                for event in events {
+                    let _ = socket.flush();
+                    std::thread::sleep(Duration::from_millis(400));
+                    let _ = socket.write_all(event.as_bytes());
+                }
+                let _ = socket.flush();
+            }
+        });
+
+        let mut config = ApiConfig::new("test_key".into()).with_timeout(1);
+        config.base_url = format!("http://{address}");
+        let client = AnthropicApiClient::new(config);
+
+        let mut stream = client
+            .create_message_streaming(
+                "system",
+                &[serde_json::json!({"role": "user", "content": "hi"})],
+                &ModelId::sonnet(),
+                16,
+                &[],
+            )
+            .await;
+
+        let mut text = String::new();
+        let mut stop = None;
+        while let Some(event) = futures::StreamExt::next(&mut stream).await {
+            match event {
+                StreamEvent::TextDelta(delta) => text.push_str(&delta),
+                StreamEvent::StopReason(reason) => stop = Some(reason),
+                StreamEvent::Error(error) => panic!("the slow stream failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(text, "ab", "the slow stream lost text: {text:?}");
+        assert_eq!(stop.as_deref(), Some("end_turn"));
     }
 
     /// The retry decision comes from how the request failed, not from what the

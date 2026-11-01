@@ -1330,6 +1330,25 @@ fn next_loop_step(
     last_message_is_tool_result: bool,
     resumes: u32,
 ) -> LoopStep {
+    let step = next_loop_step_unlogged(reason, last_message_is_tool_result, resumes);
+    // The loop's decision is the last thing that happens before a run ends,
+    // and it used to leave no trace at all: a run that stopped after a tool
+    // result looked identical to one the provider had truncated.
+    tracing::debug!(
+        reason = %reason,
+        last_message_is_tool_result,
+        provider_resumes = resumes,
+        step = ?step,
+        "turn loop decided"
+    );
+    step
+}
+
+fn next_loop_step_unlogged(
+    reason: &TerminalReason,
+    last_message_is_tool_result: bool,
+    resumes: u32,
+) -> LoopStep {
     if matches!(reason, TerminalReason::Resume) {
         // A paused turn continues with the same context. The bound keeps a
         // provider that never stops pausing from looping forever.
@@ -1799,7 +1818,20 @@ impl QueryEngine {
     }
 
     /// The default maximum output tokens per provider request.
-    pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+    ///
+    /// `max_tokens` is a ceiling the provider enforces and the model cannot
+    /// see: it is not a target to aim at, it is how much room a single answer
+    /// is allowed before it is cut off mid-thought. A turn that only needs a
+    /// paragraph still costs a paragraph.
+    ///
+    /// It used to be 4096. A reasoning model spends that budget on thinking
+    /// before it emits anything, so a hard step in a long run could return
+    /// `max_tokens` with no text and no tool call at all — a turn that is
+    /// discarded, and, when it was the last one, a run reported as `success`.
+    /// 32K leaves room for reasoning plus a long tool call while staying well
+    /// inside the output ceiling of every model CodeRex targets, and a 120 s
+    /// request timeout still bounds a stream that genuinely runs long.
+    pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
     /// Set the elicitation handler.
     /// Replace the client requests are sent through.
@@ -3270,6 +3302,18 @@ impl QueryEngine {
             thinking,
         } = self.send_request_streaming(turn, options).await?;
         turn.last_stop_reason = Some(stop_reason.clone());
+        // How the provider says the answer ended decides whether the loop
+        // continues. A truncated response (`max_tokens`) and a finished one
+        // look the same to the turn: this is the only place that difference
+        // is visible, so it is worth a line in the log.
+        tracing::debug!(
+            turn = turn_number,
+            stop_reason = %stop_reason,
+            tool_calls = tool_calls.len(),
+            early_tool_calls = early_calls.len(),
+            content_chars = content.len(),
+            "provider answer ended"
+        );
 
         // Record budget and cost
         turn.budget.record_tokens(&usage);

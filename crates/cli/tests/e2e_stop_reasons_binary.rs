@@ -90,6 +90,45 @@ fn run_headless(cwd: &Path, base_url: &str, prompt: &str) -> std::process::Outpu
     child.wait_with_output().expect("wait")
 }
 
+/// Run headless with `--output-format stream-json`, so the test can read the
+/// `result` frame a host would receive.
+fn run_headless_stream(cwd: &Path, base_url: &str, prompt: &str) -> std::process::Output {
+    let home = tempfile::tempdir().expect("config home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+        .args([
+            "-p",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
+            "--no-session-persistence",
+        ])
+        .current_dir(cwd)
+        .env("ANTHROPIC_API_KEY", "mock")
+        .env("ANTHROPIC_BASE_URL", base_url)
+        .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+        .env("CLAUDE_CONFIG_DIR", home.path())
+        .env("CODEREX_LOG", "off")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn coderex");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{prompt}\n").as_bytes())
+        .expect("write prompt");
+    child.wait_with_output().expect("wait")
+}
+
 #[test]
 fn a_paused_turn_is_re_sent_and_the_resumed_answer_is_reported() {
     let dir = tempfile::tempdir().expect("workspace");
@@ -131,6 +170,45 @@ fn an_answer_cut_off_by_the_output_limit_says_so() {
     assert!(
         stdout.contains("TokenLimitStop"),
         "a truncated answer was reported as a finished one:\n{stdout}"
+    );
+}
+
+/// A truncated run is not a successful one, and the stream-json host has to
+/// be able to tell. `result` used to report every `Ok` reason as `subtype:
+/// success, is_error: false`, so a run cut off at the output ceiling — or
+/// ended by the loop detector — looked exactly like a finished task.
+#[test]
+fn a_truncated_run_reports_a_failed_result_frame() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let (mut provider, base_url) = start_static_provider();
+
+    let output = run_headless_stream(dir.path(), &base_url, "run out of output room");
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+
+    let result = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|frame| frame["type"] == "result")
+        .unwrap_or_else(|| panic!("no result frame:\n{stdout}"));
+    assert_eq!(
+        result["subtype"], "error_max_output_tokens",
+        "a truncated run reported itself as finished: {result}"
+    );
+    assert_eq!(
+        result["is_error"], true,
+        "a truncated run reported is_error: false: {result}"
+    );
+    // The text the model produced before it ran out still belongs to the
+    // host: a failure status must not throw the answer away.
+    assert!(
+        result["result"]
+            .as_str()
+            .is_some_and(|text| text.contains("The answer was cut off")),
+        "the truncated run dropped the text it produced: {result}"
     );
 }
 

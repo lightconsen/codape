@@ -295,9 +295,9 @@ case-insensitively; any other value (including `deny`) leaves sampling
 disabled and logs a warning. When enabled, CodeRex forwards the request to the
 session's own API client and model:
 
-- `maxTokens` is honoured only up to a ceiling: **4096** output tokens by
+- `maxTokens` is honoured only up to a ceiling: **32768** output tokens by
   default. Raise or lower it with `CODEREX_MCP_SAMPLING_MAX_TOKENS` (a positive
-  integer; an invalid or zero value falls back to 4096).
+  integer; an invalid or zero value falls back to 32768).
 - A model named in `modelPreferences.hints` is used only when CodeRex knows it
   (`opus`/`claude-opus-4-6`, `sonnet`/`claude-sonnet-4-6`,
   `haiku`/`claude-haiku-4-5-20251001`). Any other hint is ignored and the

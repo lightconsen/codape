@@ -328,16 +328,129 @@ def fingerprint(path: str, canonical: dict) -> str:
     return f"{value:016x}"
 
 
-def rekey(args: argparse.Namespace) -> int:
-    """Refresh recorded tool definitions from a current traced request.
+def rekey_from_missing(args: argparse.Namespace) -> int:
+    """Rekey cassettes from the requests a replay actually asked for.
 
-    A recording's key is the hash of its canonical request body, and the body
-    carries every tool schema. Adding or changing a tool parameter therefore
-    changes the key and makes replay miss even though the conversation is
-    unchanged. Re-recording would answer the same conversations again; this
-    instead rewrites just the tool definitions from a request observed during
-    replay (`CODEREX_CASSETTE_TRACE=1` writes it as `_missing_<key>.json`) and
-    renames each cassette to the key the client now computes.
+    `rekey --template` cannot express "the main turn's ceiling moved but the
+    side queries' did not": the template is one request, and a blanket
+    `--set` would rewrite conversations it has nothing to do with. A replay
+    with `CODEREX_CASSETTE_TRACE=1` records the exact current request for
+    every conversation that missed, as `_missing_<new-key>.json` in the
+    suite's directory. Each of those has a key the client now computes, so
+    the work is to find the recording it describes and rename it.
+
+    A recording matches a trace when the two agree on everything that
+    identifies the conversation — the messages and the system prompt — and
+    differ only in the request-wide and tool fields the trace supersedes.
+    Ambiguity is an error: two recordings that both match would make the
+    rename depend on directory order.
+    """
+    suites = args.suites or sorted(SUITES)
+    rekeyed = 0
+    for suite in suites:
+        directory = CASSETTES / suite
+        if not directory.is_dir():
+            continue
+        traces = []
+        for path in sorted(directory.glob("_missing_*.json")):
+            trace = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(trace, dict):
+                continue
+            # The filename carries the key; recomputing it is what catches a
+            # trace edited by hand or written by a different canonicalizer.
+            if fingerprint("/v1/messages", trace) != path.stem.removeprefix("_missing_"):
+                print(
+                    f"error: {path.relative_to(ROOT)} does not match its name",
+                    file=sys.stderr,
+                )
+                return 1
+            traces.append((path, trace))
+        if not traces:
+            continue
+        print(f"rekeying {suite} from {len(traces)} traced request(s)")
+        cassettes = []
+        for path in sorted(directory.glob("*.json")):
+            if path.name.startswith("_missing_"):
+                continue
+            document = json.loads(path.read_text(encoding="utf-8"))
+            request = document.get("request")
+            if isinstance(request, dict):
+                cassettes.append((path, document, request))
+        used: set[Path] = set()
+        for trace_path, trace in traces:
+            matches = [
+                (path, document, request)
+                for path, document, request in cassettes
+                if path not in used
+                and conversation_identity(request) == conversation_identity(trace)
+            ]
+            if not matches:
+                print(
+                    f"note: no recording matches {trace_path.name}",
+                    file=sys.stderr,
+                )
+                continue
+            if len(matches) > 1:
+                names = ", ".join(str(path.relative_to(ROOT)) for path, _, _ in matches)
+                print(
+                    f"error: several recordings match {trace_path.name}: {names}",
+                    file=sys.stderr,
+                )
+                return 1
+            path, document, _ = matches[0]
+            new_key = trace_path.stem.removeprefix("_missing_")
+            target = directory / f"{new_key}.json"
+            if args.dry_run:
+                print(f"would rekey {path.relative_to(ROOT)} -> {new_key}")
+                used.add(path)
+                rekeyed += 1
+                continue
+            document["key"] = new_key
+            document["request"] = trace
+            target.write_text(
+                json.dumps(document, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            if target != path:
+                path.unlink()
+            used.add(path)
+            rekeyed += 1
+    verb = "would rekey" if args.dry_run else "rekeyed"
+    print(f"{verb} {rekeyed} cassette files")
+    return 0
+
+
+def conversation_identity(request: dict) -> str:
+    """The part of a request that identifies which conversation it answers.
+
+    Everything else in a recorded body — `max_tokens`, the tool definitions,
+    the model, the metadata — can change between recordings of the same
+    conversation; the messages and the system prompt cannot.
+    """
+    return json.dumps(
+        {
+            "messages": request.get("messages"),
+            "system": request.get("system"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def rekey(args: argparse.Namespace) -> int:
+    """Refresh recorded request fields from a current traced request.
+
+    A recording's key is the hash of its canonical request body, and that body
+    carries the tool schemas and the request-wide settings. Adding a tool
+    parameter, or raising `max_tokens`, therefore changes the key and makes
+    replay miss even though the conversation is unchanged. Re-recording would
+    answer the same conversations again; this instead rewrites the named fields
+    from a request observed during replay (`CODEREX_CASSETTE_TRACE=1` writes it
+    as `_missing_<key>.json`) and renames each cassette to the key the client
+    now computes.
+
+    Only the fields in `--set` change. Everything else stays exactly as
+    recorded, so a rekey cannot quietly alter a conversation.
     """
     template_path = Path(args.template)
     try:
@@ -353,6 +466,14 @@ def rekey(args: argparse.Namespace) -> int:
     if not template_tools:
         print(f"error: {template_path} has no tools", file=sys.stderr)
         return 2
+    overwrite = sorted(args.set or [])
+    for name in overwrite:
+        if name not in template:
+            print(
+                f"error: {template_path} has no field {name!r} to copy",
+                file=sys.stderr,
+            )
+            return 2
 
     suites = args.suites or sorted(SUITES)
     rekeyed = 0
@@ -380,21 +501,25 @@ def rekey(args: argparse.Namespace) -> int:
                 )
                 return 1
             tools = request.get("tools")
-            if not isinstance(tools, list):
-                continue
-            refreshed = []
             changed = False
-            for tool in tools:
-                name = tool.get("name") if isinstance(tool, dict) else None
-                replacement = template_tools.get(name)
-                if replacement is not None and tool != replacement:
-                    refreshed.append(replacement)
+            if isinstance(tools, list):
+                refreshed = []
+                for tool in tools:
+                    name = tool.get("name") if isinstance(tool, dict) else None
+                    replacement = template_tools.get(name)
+                    if replacement is not None and tool != replacement:
+                        refreshed.append(replacement)
+                        changed = True
+                    else:
+                        refreshed.append(tool)
+                if changed:
+                    request["tools"] = refreshed
+            for name in overwrite:
+                if request.get(name) != template[name]:
+                    request[name] = template[name]
                     changed = True
-                else:
-                    refreshed.append(tool)
             if not changed:
                 continue
-            request["tools"] = refreshed
             new_key = fingerprint("/v1/messages", request)
             target = directory / f"{new_key}.json"
             if target != path and target.exists():
@@ -534,11 +659,23 @@ def main() -> int:
     rekey_parser = subparsers.add_parser("rekey")
     rekey_parser.add_argument(
         "--template",
-        required=True,
         help="a request traced during replay (_missing_<key>.json) whose tool "
         "definitions are the current ones",
     )
+    rekey_parser.add_argument(
+        "--missing",
+        action="store_true",
+        help="rekey from every _missing_<key>.json a traced replay left behind, "
+        "matching each to the recording it describes (no --template needed)",
+    )
     rekey_parser.add_argument("--dry-run", action="store_true")
+    rekey_parser.add_argument(
+        "--set",
+        action="append",
+        metavar="FIELD",
+        help="also copy this request field from the template (repeatable); use "
+        "for request-wide settings such as max_tokens",
+    )
     rekey_parser.add_argument(
         "suites",
         nargs="*",
@@ -551,6 +688,11 @@ def main() -> int:
     prune_parser.set_defaults(func=prune)
 
     args = parser.parse_args()
+    if args.func is rekey:
+        if args.missing:
+            return rekey_from_missing(args)
+        if not args.template:
+            rekey_parser.error("--template is required unless --missing is given")
     return args.func(args)
 
 
