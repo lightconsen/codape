@@ -1433,7 +1433,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("guardian.sh");
-        std::fs::write(&script, "#!/bin/sh\nsleep 60\n").unwrap();
+        // `exec` so the child pid is the sleep itself: killing the stand-in in
+        // the test leaves no orphan behind.
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let mut child = spawn_guardian(&script).expect("spawn the guardian");
