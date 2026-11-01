@@ -12,6 +12,8 @@
 #   scripts/record-cassettes.sh --check    # metadata, age, size, secrets
 #   scripts/record-cassettes.sh --backfill # add metadata to older recordings
 #   scripts/record-cassettes.sh --prune    # replay and delete unused cassettes
+#   scripts/record-cassettes.sh --rekey    # re-key recordings to the current request
+#   scripts/record-cassettes.sh --digests  # refresh recorded system-prompt digests
 #
 # --check exits non-zero for malformed files, unmatched-request markers or
 # credential-like strings. Staleness and size are warnings unless
@@ -40,6 +42,33 @@ case "${1:-}" in
   --prune)
     shift
     exec python3 scripts/cassette_tool.py prune "$@"
+    ;;
+  --digests)
+    shift
+    exec python3 scripts/cassette_tool.py backfill --digest "$@"
+    ;;
+  --rekey)
+    # A recorded request is keyed by its whole body, so a change to a
+    # request-wide setting (the output ceiling, a tool schema) re-keys every
+    # conversation without changing any answer. This replays the suites with
+    # tracing, matches each request to the recording it describes, and renames
+    # it — no provider call and no re-record. Repeat until it reports no
+    # missing requests: each pass only sees the turn that stopped the replay.
+    shift
+    for pass in 1 2 3 4 5 6 7 8 9 10; do
+      rm -f crates/cli/tests/cassettes/*/_missing_*.json
+      for suite in live_basic_chat live_bash_tool live_file_read \
+                   e2e_code_agent e2e_equivalence code_agent_benchmark; do
+        CODEREX_CASSETTE_TRACE=1 cargo test -q -p coderex-cli --test "$suite" >/dev/null 2>&1 || true
+      done
+      CODEREX_CASSETTE_TRACE=1 cargo test -q -p coderex-cli --test interactive_tui interactive_live >/dev/null 2>&1 || true
+      count=$(find crates/cli/tests/cassettes -name '_missing_*.json' | wc -l | tr -d ' ')
+      echo "pass $pass: $count request(s) without a recording"
+      [ "$count" = "0" ] && exit 0
+      python3 scripts/cassette_tool.py rekey --missing
+    done
+    echo "error: cassettes did not converge after 10 passes" >&2
+    exit 1
     ;;
 esac
 

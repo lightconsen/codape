@@ -40,7 +40,11 @@ Some suites need extra setup:
   `llm-cassette` binary, so they need no key or network. After changing a
   suite's prompts or assertions, refresh its recordings once with
   `scripts/record-cassettes.sh --fresh`; see
-  [`tests/README.md`](tests/README.md).
+  [`tests/README.md`](tests/README.md). A change to the *request* rather than
+  the conversation — the output ceiling, a tool schema, the system prompt —
+  needs no re-record: `--rekey` re-keys the existing recordings from the
+  requests a traced replay asks for, and `--digests` refreshes the recorded
+  system-prompt digests. Re-recording is for when the expected answers change.
 - Platform-gated tests (`#[cfg(target_os = ...)]`) only run on their platform.
   CI runs the suite on Linux, Windows and macOS.
 
@@ -80,6 +84,7 @@ self-hosted Linux runner or CI can run the same commands:
 ```bash
 scripts/record-cassettes.sh --check     # metadata, staleness, size, secrets
 scripts/record-cassettes.sh --backfill  # metadata for older recordings
+scripts/record-cassettes.sh --rekey     # re-key recordings after a request-wide change
 scripts/record-cassettes.sh --prune --dry-run
 scripts/mutation.sh permission-engine   # cargo-mutants, bounded scope
 MUTATION_TEST_FILTER=permission_engine::tests scripts/mutation.sh permission-engine
