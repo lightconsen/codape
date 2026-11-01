@@ -3756,8 +3756,22 @@ impl StartupOrchestrator {
                     }
                 }
             }
+            Some(crate::cli::McpAction::ExportToken { server, output }) => {
+                // The output is a credential; say so on stderr so a pipe into
+                // a log or a terminal scrollback is a conscious choice.
+                eprintln!("Exporting a credential for {server}. Treat the output as a secret.");
+                if let Err(error) = crate::mcp_tokens::export(&server, output.as_deref()) {
+                    println!("Error: {error}");
+                }
+            }
+            Some(crate::cli::McpAction::ImportToken { server, file }) => {
+                match crate::mcp_tokens::import(&server, file.as_deref()) {
+                    Ok(()) => println!("Imported the token for {server}."),
+                    Err(error) => println!("Error: {error}"),
+                }
+            }
             None => {
-                println!("Usage: coderex mcp <list|add|remove|test>");
+                println!("Usage: coderex mcp <list|add|remove|test|export-token|import-token>");
             }
         }
         Ok(())

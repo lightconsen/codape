@@ -472,6 +472,26 @@ pub enum McpAction {
     Remove { name: String },
     /// Test connection to an MCP server.
     Test { name: String },
+    /// Export one server's stored OAuth token as JSON.
+    ///
+    /// The output is a credential. With `--output` it is written to a 0600
+    /// file; without it, it goes to stdout.
+    ExportToken {
+        /// The server URL the token was stored for (the `server_url` McpAuth
+        /// used).
+        server: String,
+        /// Write the token to this file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Import a token exported by `export-token` on another machine.
+    ImportToken {
+        /// The server URL the token belongs to; a mismatched entry is refused.
+        server: String,
+        /// Read the token from this file instead of stdin.
+        #[arg(long, value_name = "PATH")]
+        file: Option<std::path::PathBuf>,
+    },
 }
 
 /// Plugin management subcommands.

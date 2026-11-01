@@ -10,6 +10,7 @@ pub mod interactive_e2e;
 pub mod mcp_elicitation;
 pub mod mcp_reauth;
 pub mod mcp_sampling;
+pub mod mcp_tokens;
 pub mod memory_tools;
 pub mod orchestrator;
 pub mod plugin_monitors;
