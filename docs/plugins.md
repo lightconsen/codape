@@ -307,10 +307,11 @@ this document does not claim a sandbox that was not applied.
   best-effort (a failure is ignored, because it cannot be logged from
   `pre_exec`); the child still has the hard CPU limit, the wall-clock kill and
   the sandbox-exec profile. Since Darwin has no kernel memory ceiling, a
-  user-space watchdog samples resident use and, once it exceeds the limit,
-  `SIGSTOP`s the group before `SIGKILL`ing it, so the process cannot keep
-  allocating while the signal is delivered. Other Unix platforms use
-  `RLIMIT_AS`, subject to the same best-effort handling.
+  user-space watchdog samples `proc_pid_rusage`'s `ri_phys_footprint` every
+  20 ms — dirty plus compressed pages, the quantity jetsam uses — and, once it
+  exceeds the limit, `SIGSTOP`s the group before `SIGKILL`ing it, so the
+  process cannot keep allocating while the signal is delivered. Other Unix
+  platforms use `RLIMIT_AS`, subject to the same best-effort handling.
 - The Windows compiler sandbox uses `coderex_core::sandbox`; its Win32 calls are
   exercised by the `test_windows` CI job (`wasm_compile_subprocess`), not by a
   macOS host.

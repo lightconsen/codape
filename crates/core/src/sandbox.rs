@@ -583,18 +583,18 @@ pub fn apply_darwin_memory_limit(bytes: u64) -> bool {
     attempt_memory_limit(true, bytes).is_ok()
 }
 
-// ─── macOS: resident-memory watchdog ────────────────────────────────────────
+// ─── macOS: physical-footprint watchdog ─────────────────────────────────────
 
-/// How often the macOS watchdog samples the child's resident footprint.
+/// How often the macOS watchdog samples the child's physical footprint.
 ///
-/// 50 ms is a compromise: fast enough that a runaway allocator is stopped
-/// before it can grow far past the ceiling, cheap enough that a well-behaved
-/// child is sampled twenty times a second for the whole of its life. The
-/// sample is a single `proc_pidinfo` call, not a subprocess.
+/// 20 ms keeps the overrun window small: the watchdog decides from a sample
+/// taken up to one interval ago, and a runaway allocator can allocate a lot in
+/// that time. Fifty `proc_pid_rusage` calls a second are cheap — one syscall,
+/// no subprocess — even for a long-lived child.
 // The watchdog itself is macOS-only; other hosts still unit-test the pure
 // decision logic, so there the constant is only referenced from tests.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) const MEMORY_WATCHDOG_POLL_MILLIS: u64 = 50;
+pub(crate) const MEMORY_WATCHDOG_POLL_MILLIS: u64 = 20;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) const MEMORY_WATCHDOG_POLL: std::time::Duration =
     std::time::Duration::from_millis(MEMORY_WATCHDOG_POLL_MILLIS);
@@ -643,7 +643,7 @@ pub(crate) const fn memory_watchdog_start_micros(tv_sec: u64, tv_usec: u64) -> u
 /// `SandboxConfig::max_memory_bytes` cannot be enforced by the kernel on modern
 /// Darwin: `RLIMIT_AS` and `RLIMIT_DATA` are both rejected with `EINVAL` (see
 /// [`apply_darwin_memory_limit`]). The watchdog closes that gap in user space —
-/// a thread samples the child's resident footprint through `libproc`, then
+/// a thread samples the child's physical footprint through libproc, then
 /// `SIGSTOP`s and `SIGKILL`s it once the sample exceeds the ceiling, so it
 /// cannot keep allocating between the decision and the kill. When the child
 /// leads its own process group, the whole group is stopped and killed, so
@@ -740,7 +740,7 @@ mod memory_watchdog {
                 return;
             }
             std::thread::sleep(MEMORY_WATCHDOG_POLL);
-            match (process_start_micros(pid), resident_footprint(pid)) {
+            match (process_start_micros(pid), physical_footprint(pid)) {
                 // The pid is gone, or it now names a different process: the
                 // original child has exited and there is nothing to kill.
                 (Some(now), _) if !memory_watchdog_same_process(start, now) => return,
@@ -832,31 +832,29 @@ mod memory_watchdog {
         ))
     }
 
-    /// The child's resident size in bytes, or `None` if it is gone.
+    /// The child's physical footprint in bytes, or `None` if it is gone.
     ///
-    /// `PROC_PIDTASKINFO`'s `pti_resident_size` is used rather than
-    /// `proc_pid_rusage`'s `ri_phys_footprint`: the task-info struct is a fixed
-    /// size the kernel either fills completely or refuses, whereas the rusage
-    /// buffer is a union sized by the caller and easy to under-size. Resident
-    /// size is the quantity a `RLIMIT_RSS`-style ceiling is defined against.
-    fn resident_footprint(pid: libc::pid_t) -> Option<u64> {
-        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
-        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>())
-            .unwrap_or(libc::c_int::MAX);
-        // SAFETY: as above, for `PROC_PIDTASKINFO`.
-        let written = unsafe {
-            libc::proc_pidinfo(
+    /// `proc_pid_rusage`'s `ri_phys_footprint` is the quantity jetsam uses:
+    /// it counts dirty and compressed pages, not just resident ones, so a child
+    /// whose memory is being compressed still looks like it is over its
+    /// ceiling. `libc` now types `rusage_info_v4`, so the buffer size is no
+    /// longer the hand-written union trap it used to be.
+    fn physical_footprint(pid: libc::pid_t) -> Option<u64> {
+        let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is the correctly sized struct for `RUSAGE_INFO_V4`,
+        // and the call returns non-zero without writing a usable value on
+        // failure.
+        let result = unsafe {
+            libc::proc_pid_rusage(
                 pid,
-                libc::PROC_PIDTASKINFO,
-                0,
+                libc::RUSAGE_INFO_V4,
                 std::ptr::from_mut(&mut info).cast(),
-                size,
             )
         };
-        if written != size {
+        if result != 0 {
             return None;
         }
-        Some(info.pti_resident_size)
+        Some(info.ri_phys_footprint)
     }
 
     /// Stop and then `SIGKILL` the child, and its process group when it leads
@@ -2814,7 +2812,7 @@ mod macos_impl {
     pub struct MacOsSandbox {
         config: SandboxConfig,
         profile_path: Option<PathBuf>,
-        /// The resident-memory watchdog for the child this handle prepared.
+        /// The physical-footprint watchdog for the child this handle prepared.
         ///
         /// `prepare` takes `&self` (the trait is shared with the other
         /// backends), so the handle is behind a mutex. It is `None` until
@@ -2872,7 +2870,7 @@ mod macos_impl {
         /// spawn. Because that rejection is the common case, a real hard cap is
         /// provided by [`MemoryWatchdog`]: the same `pre_exec` writes the
         /// child's pid down a close-on-exec pipe, and a supervisor thread
-        /// `SIGKILL`s the child once its resident footprint passes the ceiling.
+        /// `SIGKILL`s the child once its physical footprint passes the ceiling.
         /// The watchdog is stored on this handle, so it stops when the handle
         /// (and therefore the child) is dropped.
         ///
@@ -3970,7 +3968,7 @@ mod tests {
         };
         let mut buffer = vec![0u8; bytes];
         // Touch every page so the allocation is resident, not merely reserved:
-        // the watchdog samples the resident footprint, not the address space.
+        // the watchdog samples physical memory, not the address space.
         let mut index = 0;
         while index < buffer.len() {
             buffer[index] = 1;
@@ -4012,7 +4010,7 @@ mod tests {
         super::memory_watchdog::MemoryWatchdog::spawn(read_fd, limit_bytes)
     }
 
-    /// A child whose resident footprint passes the ceiling is killed.
+    /// A child whose physical footprint passes the ceiling is killed.
     #[test]
     #[cfg(target_os = "macos")]
     fn macos_watchdog_kills_a_child_over_the_limit() {
