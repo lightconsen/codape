@@ -110,7 +110,9 @@ async fn authenticate_with(
     let server_url = extract_string(&input.arguments, "server_url")?;
     // The caller naming a client id is what suppresses dynamic registration.
     let requested_client_id = extract_string(&input.arguments, "client_id").ok();
-    let scope = extract_string(&input.arguments, "scope").unwrap_or_else(|_| "mcp".into());
+    // A caller that named a scope gets exactly that; the default is extended
+    // once discovery says whether the server offers `offline_access`.
+    let requested_scope = extract_string(&input.arguments, "scope").ok();
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -140,6 +142,14 @@ async fn authenticate_with(
     if !(headless && discovery.device_authorization_endpoint.is_some()) {
         discovery.require_s256(&server_url)?;
     }
+
+    // OIDC servers commonly refuse to issue a refresh token unless the request
+    // asks for `offline_access`, even when they advertise it. Only the default
+    // scope is extended: an explicit `scope` is the caller's choice.
+    let scope = match requested_scope {
+        Some(scope) => scope,
+        None => scope_with_offline_access("mcp", &discovery.scopes_supported),
+    };
 
     // A client id the caller named wins; otherwise a stored (possibly
     // dynamically registered) one is reused. Registration happens only when
@@ -1233,6 +1243,26 @@ async fn discover_endpoints(
     discovery
 }
 
+/// Extend `scope` with `offline_access` when the server advertises it.
+///
+/// OIDC authorization servers often require the request to name
+/// `offline_access` before they will issue a refresh token, even though the
+/// scope appears in `scopes_supported`. Asking for a scope the server did not
+/// advertise risks a rejection, so this only adds a scope the metadata lists.
+fn scope_with_offline_access(scope: &str, supported: &[String]) -> String {
+    if scope
+        .split_whitespace()
+        .any(|item| item == "offline_access")
+    {
+        return scope.to_string();
+    }
+    if supported.iter().any(|item| item == "offline_access") {
+        format!("{scope} offline_access")
+    } else {
+        scope.to_string()
+    }
+}
+
 /// Build the authorization URL with the discovered endpoint, PKCE and the
 /// RFC 8707 resource indicator.
 fn authorization_url(
@@ -2228,6 +2258,77 @@ mod tests {
         assert_eq!(
             code_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn offline_access_is_only_added_to_the_default_scope() {
+        let advertised = vec!["mcp".to_string(), "offline_access".to_string()];
+        assert_eq!(
+            scope_with_offline_access("mcp", &advertised),
+            "mcp offline_access"
+        );
+        // A server that does not advertise it must not be asked for it.
+        let without = vec!["mcp".to_string()];
+        assert_eq!(scope_with_offline_access("mcp", &without), "mcp");
+        // Asking twice would not change the request.
+        assert_eq!(
+            scope_with_offline_access("mcp offline_access", &advertised),
+            "mcp offline_access"
+        );
+    }
+
+    /// The default scope asks for `offline_access` when the server advertises
+    /// it: many OIDC servers issue no refresh token without it.
+    #[tokio::test]
+    async fn the_default_scope_requests_offline_access_when_advertised() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let metadata = format!(
+            r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","scopes_supported":["mcp","offline_access"],"code_challenge_methods_supported":["S256"]}}"#
+        );
+        let handle = std::thread::spawn(move || {
+            // Discovery makes two GETs — resource metadata, then issuer
+            // metadata — and both are answered with the same document.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_request(&mut stream);
+                write_response(&mut stream, "200 OK", &metadata);
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_tokens.json");
+        let output = authenticate(
+            ToolInput {
+                call_id: "1".into(),
+                name: "McpAuth".into(),
+                arguments: serde_json::json!({ "server_url": base, "headless": true }),
+            },
+            &path,
+        )
+        .await
+        .unwrap();
+        handle.join().unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        let auth_url = url::Url::parse(parsed["auth_url"].as_str().unwrap()).unwrap();
+        let scope = auth_url
+            .query_pairs()
+            .find(|(key, _)| key == "scope")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default();
+        assert!(
+            scope
+                .split_whitespace()
+                .any(|item| item == "offline_access"),
+            "the default scope did not ask for offline_access: {scope:?}"
+        );
+        assert!(
+            scope.split_whitespace().any(|item| item == "mcp"),
+            "the mcp scope was dropped: {scope:?}"
         );
     }
 
