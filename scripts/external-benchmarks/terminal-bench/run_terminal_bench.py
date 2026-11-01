@@ -205,8 +205,13 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
     command = [
         str(tb_bin(cache_dir)),
         "run",
-        "--dataset",
-        args.dataset,
+        # `--dataset-path` and `--dataset` are mutex: the harness refuses a
+        # config that has both. The offline path wins when it is given.
+        *(
+            ["--dataset-path", str(Path(args.dataset_path).expanduser())]
+            if getattr(args, "dataset_path", None)
+            else ["--dataset", args.dataset]
+        ),
         "--output-path",
         str(output_dir),
         "--run-id",
@@ -383,6 +388,15 @@ Notes:
         "--dataset",
         default=DATASET,
         help=f"Pinned dataset, name==version (default: {DATASET})",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        help="Read task definitions from this local directory instead of "
+        "asking the Terminal-Bench registry. The registry is a GitHub raw "
+        "URL; when it is unreachable the whole run dies before a single task "
+        "starts. Point this at an unpacked copy of the pinned dataset to run "
+        "offline.",
     )
     parser.add_argument("-t", "--task", dest="tasks", action="append", metavar="ID", help="Task ID or glob; repeatable")
     parser.add_argument("--limit", type=positive_int, help="Run the first N tasks from the dataset")

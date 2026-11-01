@@ -166,6 +166,41 @@ recorded, then `test_timeout`). **Treat any `test_timeout` as an environment
 result, not a task result, and re-grade with a larger budget before drawing a
 conclusion.**
 
+### 2026-11-02 — first 5-task batch, **4/5 resolved**
+
+Five of the twelve `easy` tasks, chosen because they need no network at grading
+time (the rest download datasets or scrape a live site). Run offline against
+the cached dataset, `--n-concurrent 2`, 411 s total.
+
+| Task | Result | Notes |
+|---|---|---|
+| `fix-permissions` | ✅ resolved | make `process_data.sh` runnable |
+| `grid-pattern-transform` | ✅ resolved | 3/3 transformation cases |
+| `processing-pipeline` | ✅ resolved | 9/9 checks, including re-running the pipeline |
+| `csv-to-parquet` | ✅ resolved | 2/2 checks |
+| `extract-safely` | ❌ unresolved | wrote the answer to the wrong file — see below |
+
+All five had `failure_mode: unset`, so every one is a genuine agent result.
+
+#### `extract-safely`: found the answer, saved it to the wrong place
+
+The task asks to extract one file out of a tar that also contains a
+`sensitive/` directory (credentials, a 30 MB blob), and write its contents to
+`/app/solution.txt`. The agent's approach was correct and careful — it listed
+the archive first, then extracted **only the named member** into
+`/app/extracted`, and verified nothing from `sensitive/` touched the disk.
+
+It found the right text (`The answer is: extract_without_compromise`) but never
+wrote `/app/solution.txt`; the content only appeared in the extracted tree and
+in its own answer. Two of the three checks passed
+(`test_system_logs_exists`, `test_no_sensitive_exposure`); `test_solution_found`
+failed on `os.path.exists("/app/solution.txt")`.
+
+This is the same class as `configure-git-webserver`: the model satisfies its
+own idea of the task and drops a literal requirement ("write it to
+`/app/solution.txt`"). It is not a CodeRex defect — the stream ended cleanly
+with `end_turn`.
+
 ## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
@@ -204,6 +239,29 @@ All three were real, and all three are fixed on `main`:
   message list (39 → 44 → 47) before the turn hard-stopped with
   "context window is full".
 
+## Running the batch offline
+
+The harness resolves a dataset name through its **registry**, a GitHub raw URL:
+
+```
+terminal_bench/registry/client.py: DEFAULT_REGISTRY_URL =
+  https://raw.githubusercontent.com/laude-institute/terminal-bench/main/registry.json
+```
+
+When that host is unreachable the run dies before a single task starts, with
+`RemoteDisconnected` from inside the registry client — which looks like a
+model-endpoint failure but is not. Point the runner at the cached dataset
+instead:
+
+```bash
+scripts/external-benchmarks/terminal-bench/run.sh \
+  --dataset-path ~/.cache/terminal-bench/terminal-bench-core/0.1.1 \
+  --task <task-id> ...
+```
+
+`--dataset-path` and `--dataset` are mutually exclusive in the harness config,
+so the runner passes exactly one.
+
 ## Reproducing a run
 
 ```bash
@@ -214,6 +272,7 @@ export CODEREX_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
 
 scripts/external-benchmarks/terminal-bench/run.sh \
   --task <task-id> \
+  --dataset-path ~/.cache/terminal-bench/terminal-bench-core/0.1.1 \
   --coderex-binary /tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex \
   --timeout 2700 --max-turns 200 --test-timeout 900 \
   --run-id <run-id>
