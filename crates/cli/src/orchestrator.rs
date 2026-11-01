@@ -2727,6 +2727,11 @@ impl StartupOrchestrator {
         if interactive {
             repl.with_system_prompt(self.ctx.system_prompt.clone());
             repl.with_append_system_prompt(self.ctx.append_system_prompt.clone());
+        } else {
+            // The user's prompt flags are folded into the headless prompt;
+            // the operating note goes on the system prompt instead, so the
+            // model cannot read it as an optional part of the task prose.
+            repl.with_append_system_prompt(Some(Self::HEADLESS_OPERATING_NOTE.to_string()));
         }
         repl.with_chrome_enabled(self.ctx.chrome && !self.ctx.no_chrome);
         repl.with_agent(self.ctx.agent.clone());
@@ -3044,6 +3049,18 @@ impl StartupOrchestrator {
         Ok(())
     }
 
+    /// What a headless session says at the system level.
+    ///
+    /// It goes on the engine's system prompt, not the user message: the
+    /// distinction between "the task" and "how to behave" matters, and a
+    /// user-prompt note is easier for a model to read as optional prose.
+    const HEADLESS_OPERATING_NOTE: &'static str = "Operating mode: non-interactive. No user is available to answer questions; do not ask for \
+         clarification or wait for approval. Complete the task in the current environment. When the \
+         instructions give exact commands, paths, ports, credentials or verification steps, treat \
+         them as requirements: follow them literally and do not substitute a different design. \
+         Before finishing, run the exact verification commands from the request and confirm they \
+         succeed; if they fail, fix the setup instead of explaining why a different design is better.";
+
     /// Assemble the non-interactive prompt.
     ///
     /// Order matters: the pull-request block comes first so it is part of the
@@ -3053,19 +3070,6 @@ impl StartupOrchestrator {
         use std::fmt::Write as _;
 
         let mut final_prompt = String::new();
-
-        // A headless turn has no person to answer a question and no second
-        // chance to clarify. Say both, and say that an explicit command the
-        // user gave is part of the task rather than a suggestion — otherwise a
-        // model may substitute its own design (a different path, port or
-        // credential) and still consider the job done.
-        final_prompt.push_str(
-            "Operating mode: non-interactive. No user is available to answer questions; do not ask \
-             for clarification or wait for approval. Complete the task in the current environment. \
-             When the instructions give exact commands, paths, ports, credentials or verification \
-             steps, follow them literally; do not substitute a different design. Verify the result \
-             with those same commands.\n\n",
-        );
 
         if let Some(ref context) = self.ctx.from_pr_context {
             final_prompt.push_str(context);
@@ -5204,18 +5208,9 @@ mod tests {
     }
 
     #[test]
-    fn a_headless_prompt_states_the_operating_mode_before_the_user_text() {
+    fn no_pull_request_context_leaves_the_prompt_untouched() {
         let orch = StartupOrchestrator::new();
-        let prompt = orch.build_headless_prompt("hello");
-
-        let note = prompt
-            .find("Operating mode: non-interactive")
-            .expect("the headless operating note must be present");
-        let user = prompt.rfind("hello").expect("the user prompt");
-        assert!(note < user, "the note must frame the user text: {prompt}");
-        assert!(prompt.contains("follow them literally"), "{prompt}");
-        assert!(prompt.contains("Verify the result with those same commands"));
-        assert!(prompt.ends_with("hello"), "{prompt}");
+        assert_eq!(orch.build_headless_prompt("hello"), "hello");
     }
 
     #[test]
@@ -5451,6 +5446,19 @@ mod tests {
             system < append && append < user,
             "prompt blocks must precede the user prompt: {prompt}"
         );
+    }
+
+    #[test]
+    fn headless_puts_the_operating_note_on_the_system_prompt() {
+        let mut orch = StartupOrchestrator::new();
+        let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        orch.configure_repl(&mut repl, false);
+
+        let (replacement, appended) = repl.system_prompt_effects_for_test();
+        assert!(replacement.is_none());
+        let appended = appended.expect("headless must append the operating note");
+        assert!(appended.contains("non-interactive"), "{appended}");
+        assert!(appended.contains("verification commands"), "{appended}");
     }
 
     #[test]
