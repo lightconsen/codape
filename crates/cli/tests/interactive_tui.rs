@@ -2024,6 +2024,11 @@ fn resize_keeps_tui_alive() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
     session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    // The banner and the prompt are painted by the same startup sequence, but
+    // the prompt is what proves the input area exists. Resizing before it has
+    // appeared left the smaller screen with no prompt to assert on; wait for
+    // it here instead of matching the banner alone.
+    session.wait_for_text("❯", SCREEN_TIMEOUT);
 
     session.resize(16, 70);
     let after_shrink = session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
