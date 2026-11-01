@@ -1,0 +1,87 @@
+#!/bin/sh
+# Install CodeRex inside a Terminal-Bench task container.
+#
+# This file is rendered by the harness and sourced by the task's shell, so it
+# deliberately avoids `set -e` (a failing line would close the session instead
+# of letting AbstractInstalledAgent report AGENT_INSTALLATION_FAILED). Every
+# step that can fail is checked explicitly and returns non-zero.
+#
+# Template variables: version, target, use_local_binary.
+
+BIN=/usr/local/bin/coderex
+CONFIG=/tmp/coderex-config
+
+if [ ! -w /usr/local/bin ]; then
+    echo "cannot write to /usr/local/bin; run Terminal-Bench containers as root" >&2
+    return 1
+fi
+
+{% if use_local_binary %}
+if [ ! -f /tmp/coderex-local-binary ]; then
+    echo "local CodeRex binary was not copied into the container" >&2
+    return 1
+fi
+cp /tmp/coderex-local-binary "$BIN"
+chmod 0755 "$BIN"
+{% else %}
+ARCH="$(uname -m)"
+if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; then
+    echo "no prebuilt CodeRex release for $ARCH; build CodeRex for this architecture and pass it with --coderex-binary" >&2
+    return 1
+fi
+BASE="https://github.com/lightconsen/coderex/releases/download/{{ version }}"
+ARCHIVE="coderex-{{ target }}.tar.gz"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$1" "$2"
+    else
+        echo "no curl, wget, or python3 available to download CodeRex" >&2
+        return 1
+    fi
+}
+
+fetch "$BASE/$ARCHIVE" "$TMP/$ARCHIVE" || { echo "failed to download $ARCHIVE" >&2; return 1; }
+fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" || { echo "failed to download SHA256SUMS" >&2; return 1; }
+
+EXPECTED="$(awk -v name="$ARCHIVE" '$2 == name { print $1; exit }' "$TMP/SHA256SUMS")"
+if [ -z "$EXPECTED" ]; then
+    echo "SHA256SUMS has no entry for $ARCHIVE" >&2
+    return 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL="$(sha256sum "$TMP/$ARCHIVE" | awk '{ print $1 }')"
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL="$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{ print $1 }')"
+elif command -v python3 >/dev/null 2>&1; then
+    ACTUAL="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TMP/$ARCHIVE")"
+else
+    echo "no sha256 tool available to verify the CodeRex release" >&2
+    return 1
+fi
+
+if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "checksum mismatch for $ARCHIVE: expected $EXPECTED, got $ACTUAL" >&2
+    return 1
+fi
+
+tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
+if [ ! -f "$TMP/coderex-{{ target }}" ]; then
+    echo "release archive did not contain coderex-{{ target }}" >&2
+    return 1
+fi
+cp "$TMP/coderex-{{ target }}" "$BIN"
+chmod 0755 "$BIN"
+{% endif %}
+
+mkdir -p "$CONFIG"
+printf '%s\n' '{"config_version": 4, "telemetry_enabled": false}' > "$CONFIG/settings.json"
+
+"$BIN" --version
