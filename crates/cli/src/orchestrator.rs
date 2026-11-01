@@ -3054,6 +3054,19 @@ impl StartupOrchestrator {
 
         let mut final_prompt = String::new();
 
+        // A headless turn has no person to answer a question and no second
+        // chance to clarify. Say both, and say that an explicit command the
+        // user gave is part of the task rather than a suggestion — otherwise a
+        // model may substitute its own design (a different path, port or
+        // credential) and still consider the job done.
+        final_prompt.push_str(
+            "Operating mode: non-interactive. No user is available to answer questions; do not ask \
+             for clarification or wait for approval. Complete the task in the current environment. \
+             When the instructions give exact commands, paths, ports, credentials or verification \
+             steps, follow them literally; do not substitute a different design. Verify the result \
+             with those same commands.\n\n",
+        );
+
         if let Some(ref context) = self.ctx.from_pr_context {
             final_prompt.push_str(context);
             final_prompt.push_str("\n\n");
@@ -5191,9 +5204,18 @@ mod tests {
     }
 
     #[test]
-    fn no_pull_request_context_leaves_the_prompt_untouched() {
+    fn a_headless_prompt_states_the_operating_mode_before_the_user_text() {
         let orch = StartupOrchestrator::new();
-        assert_eq!(orch.build_headless_prompt("hello"), "hello");
+        let prompt = orch.build_headless_prompt("hello");
+
+        let note = prompt
+            .find("Operating mode: non-interactive")
+            .expect("the headless operating note must be present");
+        let user = prompt.rfind("hello").expect("the user prompt");
+        assert!(note < user, "the note must frame the user text: {prompt}");
+        assert!(prompt.contains("follow them literally"), "{prompt}");
+        assert!(prompt.contains("Verify the result with those same commands"));
+        assert!(prompt.ends_with("hello"), "{prompt}");
     }
 
     #[test]
