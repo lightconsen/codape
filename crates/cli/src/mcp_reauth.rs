@@ -18,6 +18,28 @@ use coderex_mcp::oauth::ReauthHandler;
 use coderex_tools::{ExecutionContext, McpAuthTool, Tool, ToolContext, ToolInput};
 use std::path::PathBuf;
 
+/// Whether a headless session should wait for the loopback callback.
+///
+/// `CODEREX_MCP_CALLBACK_WAIT` overrides the SSH detection (`1`/`0`); without
+/// it, an SSH session waits, because the operator can forward the port and
+/// approve in one click. A non-SSH headless run returns the hand-off instead
+/// of blocking a login that nothing is listening for.
+fn wait_for_callback() -> bool {
+    should_wait_for_callback(
+        std::env::var("CODEREX_MCP_CALLBACK_WAIT").ok().as_deref(),
+        std::env::var_os("SSH_CONNECTION").is_some(),
+    )
+}
+
+/// The pure form of [`wait_for_callback`], for tests.
+fn should_wait_for_callback(override_value: Option<&str>, over_ssh: bool) -> bool {
+    match override_value {
+        Some("0" | "false" | "no") => false,
+        Some("1" | "true" | "yes") => true,
+        _ => over_ssh,
+    }
+}
+
 /// Runs `McpAuth` on behalf of a rejected MCP HTTP request.
 #[derive(Debug)]
 pub struct CliReauthHandler {
@@ -46,9 +68,12 @@ impl CliReauthHandler {
             name: "McpAuth".to_string(),
             arguments: serde_json::json!({
                 "server_url": server_url,
-                // A headless handler asks for the hand-off immediately: it
-                // must not launch a browser or wait out the callback timeout.
+                // A headless handler never launches a browser. When the
+                // session is reached over SSH the operator can forward the
+                // callback port, so wait for it instead of handing back a URL
+                // to paste; otherwise return the hand-off immediately.
                 "headless": !self.interactive,
+                "wait_for_callback": !self.interactive && wait_for_callback(),
             }),
         };
         let execution_context = if self.interactive {
@@ -130,7 +155,20 @@ impl ReauthHandler for CliReauthHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_output;
+    use super::{classify_output, should_wait_for_callback};
+
+    /// An SSH session can forward the callback port and waits; a plain
+    /// headless run returns the hand-off instead of blocking. The environment
+    /// variable wins either way.
+    #[test]
+    fn the_callback_wait_follows_ssh_and_the_override() {
+        assert!(should_wait_for_callback(None, true));
+        assert!(!should_wait_for_callback(None, false));
+        assert!(!should_wait_for_callback(Some("0"), true));
+        assert!(should_wait_for_callback(Some("1"), false));
+        assert!(!should_wait_for_callback(Some("no"), true));
+        assert!(should_wait_for_callback(Some("yes"), false));
+    }
 
     #[test]
     fn a_completed_flow_is_success() {

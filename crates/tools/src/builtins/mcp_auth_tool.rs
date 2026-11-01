@@ -30,9 +30,6 @@ use coderex_config::secret_store::TokenPersistence;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Local redirect URI used to capture the OAuth callback.
-const LOCAL_REDIRECT_URI: &str = "http://localhost:8765/callback";
-
 /// Pending hand-off flows, beside the token store.
 const PENDING_FILE: &str = "mcp_oauth_pending.json";
 
@@ -56,7 +53,9 @@ impl Tool for McpAuthTool {
                     "redirect_url": { "type": "string", "description": "The full URL the browser was redirected to after approval. Its code and state are parsed and the state is verified against the pending flow." },
                     "code": { "type": "string", "description": "Authorization code, when finishing by hand after the browser callback did not arrive" },
                     "code_verifier": { "type": "string", "description": "PKCE verifier returned by the earlier call that produced the auth_url (optional when a pending flow is on disk)" },
-                    "headless": { "type": "boolean", "description": "Return the authorization URL immediately instead of opening a browser. Used by a headless session's re-authorization handler, which prints the URL for a person to open later." }
+                    "headless": { "type": "boolean", "description": "Return the authorization URL immediately instead of opening a browser. Used by a headless session's re-authorization handler, which prints the URL for a person to open later." },
+                    "wait_for_callback": { "type": "boolean", "description": "In a headless call, bind the loopback callback port, print the URL and the SSH port-forward command on stderr, and wait for the browser callback instead of returning immediately. Used when the operator can forward the port over SSH." },
+                    "callback_port": { "type": "integer", "description": "Loopback port for the OAuth callback (default 8765). Must match the port the person forwards." }
                 }
             }),
             output_schema: serde_json::json!({
@@ -151,6 +150,23 @@ async fn authenticate_with(
         None => scope_with_offline_access("mcp", &discovery.scopes_supported),
     };
 
+    // A headless caller may still be able to receive the browser's callback:
+    // the CLI sets `wait_for_callback` when the session is reached over SSH,
+    // and the person forwards the loopback port. `callback_port` is the same
+    // port in the redirect URI and the listener, so it must not be split.
+    let wait_for_callback_requested = input
+        .arguments
+        .get("wait_for_callback")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let callback_port = input
+        .arguments
+        .get("callback_port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .unwrap_or(8765);
+    let redirect_uri = callback_redirect_uri(callback_port);
+
     // A client id the caller named wins; otherwise a stored (possibly
     // dynamically registered) one is reused. Registration happens only when
     // neither exists.
@@ -170,6 +186,7 @@ async fn authenticate_with(
         let registration = register_client(
             &client,
             registration_endpoint,
+            &redirect_uri,
             &discovery,
             persistence,
             &server_url,
@@ -306,57 +323,95 @@ async fn authenticate_with(
             &state,
             &challenge,
             &resource,
+            &redirect_uri,
         )?;
         auth_url = Some(url.clone());
 
-        // A headless caller (the CLI's re-authorization handler when there is
-        // no terminal) cannot wait for a callback and should not launch a
-        // browser behind the user's back. Return the URL and hand-off state.
-        if headless {
-            let note = "Headless session: open auth_url in a browser to approve access.";
-            return Ok(pending_output(
-                &url,
-                &fresh_verifier,
-                &state,
-                &pending_note(
-                    &pending_path,
-                    &server_url,
-                    &state,
-                    &fresh_verifier,
-                    &authorization_endpoint,
-                    &token_endpoint,
-                    note,
-                ),
-            ));
-        }
-
-        if let Err(error) = open_browser(&url) {
-            let note = format!("Could not open a browser: {error}.");
-            return Ok(pending_output(
-                &url,
-                &fresh_verifier,
-                &state,
-                &pending_note(
-                    &pending_path,
-                    &server_url,
-                    &state,
-                    &fresh_verifier,
-                    &authorization_endpoint,
-                    &token_endpoint,
-                    &note,
-                ),
-            ));
-        }
-
-        // Spawn local HTTP listener to capture callback
         #[cfg(test)]
-        let callback_timeout = Duration::from_secs(2);
+        let callback_timeout = Duration::from_secs(5);
         #[cfg(not(test))]
         let callback_timeout = Duration::from_secs(300);
-        match wait_for_callback(&state, callback_timeout).await {
-            Ok(code) => (code, fresh_verifier),
-            Err(error) => {
-                let note = format!("Waiting for the OAuth callback failed: {error}.");
+
+        // A headless caller (the CLI's re-authorization handler when there is
+        // no terminal) must not launch a browser behind the user's back. It
+        // can still receive the callback when the operator forwarded the
+        // loopback port over SSH: `wait_for_callback` tells it to bind first,
+        // announce the URL and the tunnel command, then wait.
+        if headless {
+            let base_note = "Headless session: open auth_url in a browser to approve access.";
+            if !wait_for_callback_requested {
+                return Ok(pending_output(
+                    &url,
+                    &fresh_verifier,
+                    &state,
+                    &pending_note(
+                        &pending_path,
+                        &server_url,
+                        &state,
+                        &fresh_verifier,
+                        &authorization_endpoint,
+                        &token_endpoint,
+                        base_note,
+                    ),
+                ));
+            }
+
+            // Bind before announcing: a browser that follows a tunnel while
+            // nothing listens gets a connection refused, and there is no
+            // retry button on the approval page.
+            let listener = match bind_callback_listener(callback_port).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    let note = format!(
+                        "{base_note} Could not listen for the callback on 127.0.0.1:\
+                         {callback_port}: {error}."
+                    );
+                    return Ok(pending_output(
+                        &url,
+                        &fresh_verifier,
+                        &state,
+                        &pending_note(
+                            &pending_path,
+                            &server_url,
+                            &state,
+                            &fresh_verifier,
+                            &authorization_endpoint,
+                            &token_endpoint,
+                            &note,
+                        ),
+                    ));
+                }
+            };
+
+            let note = format!(
+                "{base_note} The callback is expected on {redirect_uri}; if the browser runs \
+                 on another machine, forward the port first: ssh -L {callback_port}:\
+                 127.0.0.1:{callback_port} <this-host>. This call waits up to {}s for it.",
+                callback_timeout.as_secs()
+            );
+            // The tool cannot return while it waits, so the instructions go
+            // to stderr for a person to see. Saving the hand-off first means a
+            // timeout or a crash still leaves a finishable flow.
+            let note = pending_note(
+                &pending_path,
+                &server_url,
+                &state,
+                &fresh_verifier,
+                &authorization_endpoint,
+                &token_endpoint,
+                &note,
+            );
+            eprintln!("McpAuth: {note}");
+            match wait_for_callback_on(listener, &state, callback_timeout).await {
+                Ok(code) => (code, fresh_verifier),
+                Err(error) => {
+                    let note = format!("{note} Waiting for the callback failed: {error}.");
+                    return Ok(pending_output(&url, &fresh_verifier, &state, &note));
+                }
+            }
+        } else {
+            if let Err(error) = open_browser(&url) {
+                let note = format!("Could not open a browser: {error}.");
                 return Ok(pending_output(
                     &url,
                     &fresh_verifier,
@@ -372,6 +427,27 @@ async fn authenticate_with(
                     ),
                 ));
             }
+
+            match wait_for_callback(&state, callback_port, callback_timeout).await {
+                Ok(code) => (code, fresh_verifier),
+                Err(error) => {
+                    let note = format!("Waiting for the OAuth callback failed: {error}.");
+                    return Ok(pending_output(
+                        &url,
+                        &fresh_verifier,
+                        &state,
+                        &pending_note(
+                            &pending_path,
+                            &server_url,
+                            &state,
+                            &fresh_verifier,
+                            &authorization_endpoint,
+                            &token_endpoint,
+                            &note,
+                        ),
+                    ));
+                }
+            }
         }
     };
 
@@ -381,7 +457,7 @@ async fn authenticate_with(
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code.clone()),
-        ("redirect_uri", LOCAL_REDIRECT_URI.to_string()),
+        ("redirect_uri", redirect_uri.clone()),
         ("code_verifier", verifier.clone()),
         ("resource", resource.clone()),
     ];
@@ -1272,6 +1348,7 @@ fn authorization_url(
     state: &str,
     challenge: &str,
     resource: &str,
+    redirect_uri: &str,
 ) -> Result<String, ToolError> {
     let mut url = url::Url::parse(endpoint).map_err(|error| ToolError::InvalidInput {
         message: format!("authorization endpoint {endpoint} is not a URL: {error}"),
@@ -1279,7 +1356,7 @@ fn authorization_url(
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
-        .append_pair("redirect_uri", LOCAL_REDIRECT_URI)
+        .append_pair("redirect_uri", redirect_uri)
         .append_pair("scope", scope)
         .append_pair("state", state)
         .append_pair("code_challenge", challenge)
@@ -1532,11 +1609,39 @@ fn code_challenge(verifier: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-/// Wait for an OAuth callback on localhost:8765 that matches the expected state.
-async fn wait_for_callback(expected_state: &str, timeout: Duration) -> Result<String, String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8765")
+/// The loopback redirect URI for `port`.
+fn callback_redirect_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/callback")
+}
+
+/// Bind the loopback callback listener on `port`.
+async fn bind_callback_listener(port: u16) -> Result<tokio::net::TcpListener, String> {
+    tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
-        .map_err(|e| format!("failed to bind callback listener: {e}"))?;
+        .map_err(|error| format!("failed to bind callback listener on 127.0.0.1:{port}: {error}"))
+}
+
+/// Wait for an OAuth callback on `port` that matches the expected state.
+async fn wait_for_callback(
+    expected_state: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<String, String> {
+    let listener = bind_callback_listener(port).await?;
+    wait_for_callback_on(listener, expected_state, timeout).await
+}
+
+/// Accept connections on an already-bound listener until a matching callback
+/// arrives, or `timeout` expires.
+///
+/// Binding is separate so a caller can bring the listener up *before* printing
+/// the URL a person is about to visit.
+async fn wait_for_callback_on(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt as _;
 
     let result = tokio::time::timeout(timeout, async {
         loop {
@@ -1545,15 +1650,31 @@ async fn wait_for_callback(expected_state: &str, timeout: Duration) -> Result<St
                 .await
                 .map_err(|e| format!("accept failed: {e}"))?;
 
-            let mut buf = [0u8; 2048];
-            let n = stream
-                .peek(&mut buf)
-                .await
-                .map_err(|e| format!("peek failed: {e}"))?;
-            if n == 0 {
+            // Read the whole request head: TCP may split `GET /callback?...`
+            // across segments, and a partial read would look like a request
+            // with no state and be answered with 400 while the rest of the
+            // request is discarded.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = stream
+                    .read(&mut chunk)
+                    .await
+                    .map_err(|e| format!("read failed: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n")
+                    || request.len() >= 8 * 1024
+                {
+                    break;
+                }
+            }
+            if request.is_empty() {
                 continue;
             }
-            let req = String::from_utf8_lossy(&buf[..n]);
+            let req = String::from_utf8_lossy(&request);
 
             // Extract query string from GET line: GET /callback?code=...
             let Some(line) = req.lines().next() else {
@@ -1564,7 +1685,11 @@ async fn wait_for_callback(expected_state: &str, timeout: Duration) -> Result<St
                 let _ = send_http_response(&mut stream, 400, "Missing query parameters").await;
                 continue;
             };
-            let query_end = line.find(' ').unwrap_or(line.len());
+            // The space that ends the request target, searched from the `?`:
+            // `find(' ')` from the start would name the space after `GET`.
+            let query_end = line[query_start..]
+                .find(' ')
+                .map_or(line.len(), |offset| query_start + offset);
             let query = &line[query_start + 1..query_end];
 
             let params: std::collections::HashMap<&str, &str> =
@@ -2107,6 +2232,7 @@ struct ClientRegistration {
 async fn register_client(
     client: &reqwest::Client,
     endpoint: &str,
+    redirect_uri: &str,
     discovery: &DiscoveredEndpoints,
     persistence: &TokenPersistence,
     server_url: &str,
@@ -2129,7 +2255,7 @@ async fn register_client(
     };
     let body = serde_json::json!({
         "client_name": "CodeRex",
-        "redirect_uris": [LOCAL_REDIRECT_URI],
+        "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": method,
@@ -2406,6 +2532,96 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&pending).unwrap()).unwrap();
         assert_eq!(stored["flows"][0]["state"], parsed["state"]);
         assert_eq!(stored["flows"][0]["code_verifier"], parsed["code_verifier"]);
+    }
+
+    /// A headless call with `wait_for_callback` binds the loopback port, saves
+    /// the pending flow, and finishes the sign-in when the browser's callback
+    /// arrives — the SSH-tunnel case, driven locally.
+    #[tokio::test]
+    async fn a_headless_waiting_callback_finishes_the_flow() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let metadata = format!(
+            r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}/token","token_endpoint_auth_methods_supported":["none"],"code_challenge_methods_supported":["S256"]}}"#
+        );
+        let handle = std::thread::spawn(move || {
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                if request.starts_with("POST ") {
+                    write_response(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"access_token":"cb-token","refresh_token":"cb-refresh","expires_in":3600}"#,
+                    );
+                    return request;
+                }
+                write_response(&mut stream, "200 OK", &metadata);
+            }
+        });
+
+        // A port nothing else is using, passed in so the redirect URI and the
+        // listener cannot disagree.
+        let port = {
+            let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_tokens.json");
+        let pending = pending_path(&path);
+        let task_path = path.clone();
+        let task = tokio::spawn(async move {
+            authenticate(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "McpAuth".into(),
+                    arguments: serde_json::json!({
+                        "server_url": base,
+                        "headless": true,
+                        "wait_for_callback": true,
+                        "callback_port": port,
+                    }),
+                },
+                &task_path,
+            )
+            .await
+        });
+
+        // The listener is bound before the pending flow is written, so once
+        // the flow exists the callback can be delivered.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !pending.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pending flow never appeared"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let flows: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pending).unwrap()).unwrap();
+        let state = flows["flows"][0]["state"].as_str().unwrap().to_string();
+
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            client,
+            "GET /callback?code=the_code&state={state} HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        client.flush().unwrap();
+
+        let output = task.await.unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        assert_eq!(parsed["authenticated"], true, "{parsed}");
+
+        let exchange = handle.join().unwrap();
+        assert!(exchange.starts_with("POST /token "), "{exchange}");
+        let store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(store["states"][0]["access_token"], "cb-token");
     }
 
     /// RFC 8628: a headless session whose server advertises a device endpoint
@@ -3042,7 +3258,7 @@ mod tests {
         assert_eq!(body["client_name"], "CodeRex");
         assert_eq!(
             body["redirect_uris"],
-            serde_json::json!(["http://localhost:8765/callback"])
+            serde_json::json!(["http://127.0.0.1:8765/callback"])
         );
         assert_eq!(
             body["grant_types"],
