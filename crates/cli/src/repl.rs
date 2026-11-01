@@ -33,9 +33,8 @@ use coderex_memory::{
     team_memory::TeamMemorySyncService,
 };
 use coderex_tools::{
-    AgentTool, ChromeClient, CronScheduler, ExecutionConfig, ExecutionContext, RateLimiter,
-    RegistryToolDispatcher, TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry,
-    register_builtin_tools,
+    AgentTool, ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
+    TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -2776,7 +2775,7 @@ impl ReplLoop {
                 mcp_prompts: Arc::clone(&subagent_mcp_prompts),
             }
             .install(&mut registry);
-            let executor = Arc::new(ToolsExecutor::new(ExecutionConfig::default()));
+            let executor = Arc::new(ToolsExecutor::new(crate::tool_sandbox::execution_config()));
             let mut dispatcher = RegistryToolDispatcher::new(
                 Arc::new(registry),
                 executor,
@@ -2860,7 +2859,7 @@ impl ReplLoop {
         // per call rather than being handed a table up front.
         let registry = Arc::new(registry);
         coderex_tools::install_rule_exemptions(engine.permission_engine_mut(), &registry);
-        let inner_executor = Arc::new(ToolsExecutor::new(ExecutionConfig::default()));
+        let inner_executor = Arc::new(ToolsExecutor::new(crate::tool_sandbox::execution_config()));
         let mut dispatcher = RegistryToolDispatcher::new(
             registry,
             inner_executor,

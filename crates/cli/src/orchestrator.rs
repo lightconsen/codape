@@ -3321,9 +3321,8 @@ impl StartupOrchestrator {
         provider: Option<&coderex_config::ProviderSettings>,
     ) -> Option<coderex_server::session::EngineFactory> {
         use coderex_tools::{
-            ChromeClient, CronScheduler, ExecutionConfig, ExecutionContext, RateLimiter,
-            RegistryToolDispatcher, TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry,
-            register_builtin_tools,
+            ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
+            TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
         };
 
         let env_key = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -3361,7 +3360,7 @@ impl StartupOrchestrator {
             let registry = std::sync::Arc::new(registry);
             let mut dispatcher = RegistryToolDispatcher::new(
                 std::sync::Arc::clone(&registry),
-                std::sync::Arc::new(ToolsExecutor::new(ExecutionConfig::default())),
+                std::sync::Arc::new(ToolsExecutor::new(crate::tool_sandbox::execution_config())),
                 ExecutionContext::Normal,
                 std::path::PathBuf::from(&cwd),
             );

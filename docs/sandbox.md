@@ -158,6 +158,16 @@ refusal and the unset control). The switch only changes the case where the
 backend is missing — macOS always reports kernel isolation, and Windows already
 fails closed when the AppContainer runtime is absent.
 
+**Turning the shell sandbox off.** `CODEREX_SANDBOX=off` (also `0`, `false`,
+`no`, `disabled`) disables sandboxing for tool execution in this process:
+Bash/PowerShell commands run directly, with the network and the full
+filesystem available. It exists for environments that are **already an
+isolation boundary** — a benchmark or CI container, a throwaway VM — where the
+extra filter blocks legitimate work such as `apt-get install`, `git clone` or
+`curl`. It does not touch the hook, MCP or WASM sandboxes, and it is never a
+default: unset or any other value leaves the sandbox on. Do not set it in a
+session running on a machine you care about.
+
 **cgroup v2 memory limits.** When `max_memory_bytes` is configured, Linux also
 creates a `coderex-<pid>-<id>` cgroup under the process's own cgroup (or
 `$CODEREX_CGROUP_ROOT`, or `/sys/fs/cgroup`), sets `memory.max`, `pids.max`
