@@ -81,6 +81,7 @@ class CodeRexAgent(AbstractInstalledAgent):
         max_turns: int | str = DEFAULT_MAX_TURNS,
         timeout_sec: float | str = DEFAULT_TIMEOUT_SEC,
         extra_args: str | list[str] | None = None,
+        extra_instructions: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -89,6 +90,9 @@ class CodeRexAgent(AbstractInstalledAgent):
         self._binary_path = Path(str(binary_path)).expanduser() if binary_path else None
         self._max_turns = int(max_turns)
         self._timeout_sec = float(timeout_sec)
+        self._extra_instructions = (
+            str(extra_instructions).strip() if extra_instructions else None
+        )
         if isinstance(extra_args, str):
             self._extra_args = shlex.split(extra_args)
         elif extra_args is None:
@@ -127,6 +131,10 @@ class CodeRexAgent(AbstractInstalledAgent):
         env["CLAUDE_CONFIG_DIR"] = CONFIG_DIR
         env["CODEREX_LOG"] = "off"
         env["NO_COLOR"] = "1"
+        # The task container is the isolation boundary. CodeRex's shell sandbox
+        # denies network and the privilege-drop syscalls apt needs, so package
+        # installation inside the bench would be impossible with it on.
+        env["CODEREX_SANDBOX"] = "off"
         return env
 
     def _create_env_setup_file(self) -> str:
@@ -181,6 +189,11 @@ class CodeRexAgent(AbstractInstalledAgent):
         if result.failure_mode is not FailureMode.NONE:
             return result
         return self._with_runtime_details(result, session)
+
+    def _render_instruction(self, instruction: str) -> str:
+        if not self._extra_instructions:
+            return instruction
+        return f"{instruction}\n\n{self._extra_instructions}"
 
     def _run_agent_commands(self, instruction: str) -> list[TerminalCommand]:
         command = " ".join(

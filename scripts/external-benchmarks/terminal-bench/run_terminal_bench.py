@@ -230,6 +230,11 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         command += ["--agent-kwarg", f"binary_path={args.coderex_binary}"]
     if args.extra_args:
         command += ["--agent-kwarg", f"extra_args={' '.join(args.extra_args)}"]
+    if args.extra_instructions:
+        command += [
+            "--agent-kwarg",
+            f"extra_instructions={args.extra_instructions}",
+        ]
     if args.tasks:
         for task in args.tasks:
             command += ["--task-id", task]
@@ -390,6 +395,12 @@ Notes:
         "Use --extra-arg=--flag for values starting with '-'.",
     )
     parser.add_argument("--run-id", help="Run identifier (default: tb-YYYYmmdd-HHMMSS)")
+    parser.add_argument(
+        "--extra-instructions",
+        default=None,
+        help="Text appended to every task instruction; use it to state the "
+        "headless/target-container frame the task assumes.",
+    )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target" / "external-benchmarks" / "terminal-bench", help="Root for harness output (default: target/external-benchmarks/terminal-bench)")
     parser.add_argument("--cache-dir", type=Path, help="Cache root for the harness venv (default: $CODEREX_BENCH_CACHE or ~/.cache/coderex-external-benchmarks)")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without installing, downloading, or running anything")

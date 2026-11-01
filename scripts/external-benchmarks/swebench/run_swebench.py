@@ -556,6 +556,10 @@ def agent_command(container: str, timeout: int, max_turns: int, extra_args: list
         "CODEREX_LOG=off",
         "-e",
         "NO_COLOR=1",
+        # The instance container is the isolation boundary; the shell sandbox
+        # would block the network and privilege-drop syscalls tests need.
+        "-e",
+        "CODEREX_SANDBOX=off",
         container,
         "timeout",
         "--signal=TERM",

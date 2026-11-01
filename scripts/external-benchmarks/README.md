@@ -184,10 +184,18 @@ point in `terminal-bench==0.2.18`. The harness:
 
 Options mirror the SWE-bench runner: `--limit`, repeatable `--task`,
 `--timeout`, `--max-turns`, `--model`, `--coderex-version`,
-`--coderex-binary`, repeatable `--extra-arg`, `--run-id`, `--output-dir`,
-`--cache-dir`, and `--dry-run`. The runner bootstraps
-`venv-terminal-bench-0.2.18` in the cache directory and runs the pinned `tb`
-from it, with `PYTHONPATH` pointing at the adapter directory.
+`--coderex-binary`, repeatable `--extra-arg`, `--extra-instructions`,
+`--run-id`, `--output-dir`, `--cache-dir`, and `--dry-run`. The runner
+bootstraps `venv-terminal-bench-0.2.18` in the cache directory and runs the
+pinned `tb` from it, with `PYTHONPATH` pointing at the adapter directory.
+
+`--extra-instructions` appends a frame to every task instruction — for
+example, that the container is the target machine and no user is available.
+The adapter also sets `CODEREX_SANDBOX=off` inside the task container: the
+container is already the isolation boundary, and CodeRex's shell sandbox
+otherwise denies the network and the privilege-drop syscalls `apt-get` needs.
+The SWE-bench runner sets the same switch for its in-container agent; see
+`docs/sandbox.md` for the switch itself.
 
 `--limit` maps to `tb --n-tasks`, whose order comes from the pinned dataset
 version. For a subset that stays meaningful across dataset revisions, name
