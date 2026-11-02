@@ -802,35 +802,112 @@ message even says "the regions look flat" over data that had loaded fine, so it
 was reasoning against an incomplete picture. No `results.json` was written and
 all three tests fail on the missing file.
 
+### 2026-11-02 — eleventh batch, **2/5 resolved**
+
+Five tasks that had never been run, all on KIMI (`k3`).
+
+| Task | Result | Notes |
+|---|---|---|
+| `blind-maze-explorer-algorithm` | ✅ resolved | explored the maze and produced a map the test accepts |
+| `path-tracing` | ✅ resolved (4/4) | reconstructed the image at 0.996 similarity; recorded as a failure only because of a CodeRex shutdown defect, now fixed |
+| `conda-env-conflict-resolution` | ❌ unresolved | 900 s timeout; `environment.yml` was fixed correctly, conda never finished |
+| `pytorch-model-cli` | ⚠️ not measured | test phase starved by `apt-get` at 49 kB/s; pytest never printed a summary |
+| `sanitize-git-repo.hard` | ⚠️ not measured | image build: `git clone dclm` died mid-transfer |
+
+**`path-tracing` — a run that passed every test was recorded as a failure, and
+the cause was CodeRex.** The four assertions all pass:
+
+```
+PASSED test_image_c_exists  test_image_compiles
+PASSED test_runs_and_produces_output  test_image_similarity
+```
+
+The result frame says `subtype: success`, and the image it rendered scores
+0.9959 against the target. Yet the trial is still `unknown_agent_error`,
+because `coderex-exit-code` is `124`: the 900 s timer fired. The timeline
+explains it — the `result` frame was written at 892.9 s, and the harness killed
+the process at 900 s, seven seconds later.
+
+Those seven seconds were not shutdown. With `CODEREX_LOG` on, the process
+issues **one more non-streaming, tool-less model request after the result
+frame** and waits 7.5 s for it:
+
+```
+15:15:53.064 provider request started  streaming=false tool_count=0
+15:16:00.536 provider response received status=200
+```
+
+That request is session-title generation (`repl.rs:8160`), which runs
+synchronously at the end of a headless turn. It is also pointless here: the
+harness runs with `--no-session-persistence`, and `persist_headless_session`
+returns early in that mode, so nothing can ever read the title back. The
+request buys latency and throws away the answer — and if a turn ends within a
+few seconds of its deadline, it costs the run its result.
+
+The fix skips the title query when `no_persistence` is set; a regression test
+counts side queries and fails against the old code. Measured on the same
+machine, the gap between the result frame and process exit went from ~5.9 s to
+~0.03 s. With persistence enabled the title is still generated, which a second
+test pins down.
+
+**`conda-env-conflict-resolution` — a correct fix, not enough time.** The
+`environment.yml` came from a pytorch build that requires a `__cuda` virtual
+package, and conda could not solve it even on a dry run. The agent read that
+correctly and rewrote the file; `test_environment_yml_modified` passes. What it
+could not do is install: with a slow repodata fetch, `conda env create` never
+finished before the timer, so `datasci` does not exist and the two dependent
+tests fail. This is a throughput failure, not a reasoning one.
+
+**`pytorch-model-cli` — apt at 49 kB/s.** Its test phase installs a large
+dependency set, and the recorded rate was `49.3 kB/s` with an ETA of 31
+minutes; the harness gave up before pytest printed a summary, which is why the
+harness reports `parse_error` rather than a test failure. The agent had also
+spent its budget waiting on `apt`/`pip` installs. Not measurable on this link.
+
+**`sanitize-git-repo.hard` — the image build loses the clone.** `setup.sh` runs
+`git clone` of the `dclm` dataset during `docker build`:
+
+```
+error: RPC failed; curl 56 GnuTLS recv error (-9): Error decoding the received TLS packet.
+fatal: early EOF
+```
+
+The clone is 12+ minutes in and then drops, so the image never exists and no
+agent runs. As with `qemu-alpine-ssh` in the tenth batch, this is recorded as
+not measured rather than as a CodeRex failure.
+
 ### Scoreboard so far
 
-44 distinct tasks attempted (55 % of the 80 in the dataset), 27 resolved
-(61 % of those attempted). `qemu-alpine-ssh` counts as attempted but not
-resolved. Scored by distinct task, taking the best result where
+49 distinct tasks attempted (61 % of the 80 in the dataset), 29 resolved
+(59 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli` and
+`sanitize-git-repo.hard` count as attempted but not resolved. Scored by
+distinct task, taking the best result where
 a task ran more than once — several did, both to re-check a fix and because the
-same task ran on DeepSeek and then on KIMI. The seventeen that have never
+same task ran on DeepSeek and then on KIMI. The twenty that have never
 resolved:
 
-`configure-git-webserver`, `cron-broken-network`,
-`count-dataset-tokens`, `decommissioning-service-with-sensitive-data`,
-`git-multibranch`, `intrusion-detection`, `jupyter-notebook-server`,
-`nginx-request-logging`, `path-tracing-reverse`, `polyglot-c-py`,
-`polyglot-rust-c`, `qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
-`sanitize-git-repo`, `tmux-advanced-workflow`, `vim-terminal-task`.
+`conda-env-conflict-resolution`, `configure-git-webserver`,
+`cron-broken-network`, `count-dataset-tokens`,
+`decommissioning-service-with-sensitive-data`, `git-multibranch`,
+`intrusion-detection`, `jupyter-notebook-server`, `nginx-request-logging`,
+`path-tracing-reverse`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
+`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
+`sanitize-git-repo.hard`, `sanitize-git-repo`, `tmux-advanced-workflow`,
+`vim-terminal-task`.
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` (pip slower than the 60 s Bash timeout, so numpy never installed) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the five found are fixed, three more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the six found are fixed, three more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
-All five were real, and all five are fixed on `main`:
+All six were real, and all six are fixed on `main`:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -914,6 +991,31 @@ All five were real, and all five are fixed on `main`:
    domain as the title and an empty snippet, because the HTML it scrapes does
    not pair a title with a link per line. A JSON backend returns real titles
    and snippets; the DuckDuckGo path does not.
+
+6. **A headless run spent its last seconds asking for a title nobody reads.**
+   `path-tracing` passed all four tests and was still recorded as a failed run.
+   The `result` frame was written at 892.9 s, the harness killed the process at
+   900 s, and `coderex-exit-code` is `124` — the timer, not the tests.
+
+   The seven seconds in between were one more synchronous, non-streaming,
+   tool-less model request:
+
+   ```
+   15:15:53.064 provider request started  streaming=false tool_count=0
+   15:16:00.536 provider response received status=200
+   ```
+
+   That is session-title generation (`repl.rs:8160`), which runs after the
+   `result` frame at the end of a headless turn. With
+   `--no-session-persistence` it cannot matter — `persist_headless_session`
+   returns early, so the title is never written and never read back. It is
+   pure latency in a mode that is entirely about a wall-clock budget.
+
+   The fix skips the query when `no_persistence` is set; a test counts side
+   queries and fails against the old code, and a second test pins the
+   persistence-enabled path so the feature is not silently disabled. Measured
+   on the same machine, the gap from `result` frame to process exit dropped
+   from ~5.9 s to ~0.03 s.
 
 ### Known, unfixed
 
