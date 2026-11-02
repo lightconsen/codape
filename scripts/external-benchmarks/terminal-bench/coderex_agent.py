@@ -265,7 +265,16 @@ class CodeRexAgent(AbstractInstalledAgent):
         # failed run too: the container state is not an answer to the task.
         # `error_loop_detected` is included because the run was cut short
         # with work still in flight.
-        if (
+        #
+        # `interrupted` is the frame CodeRex writes when a SIGTERM cut the
+        # turn short. The inner `timeout` is what sends that signal, so it
+        # means the same thing as the harness's own timer firing:
+        # AGENT_TIMEOUT. Reporting it as a crash instead would hide the
+        # reason the run stopped, and `is_error` on this frame must not
+        # override the more specific mode.
+        if subtype == "interrupted":
+            failure_mode = FailureMode.AGENT_TIMEOUT
+        elif (
             (exit_code is not None and exit_code != 0)
             or (summary or {}).get("is_error")
             or subtype in ("error_max_output_tokens", "error_loop_detected")
