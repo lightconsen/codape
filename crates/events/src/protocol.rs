@@ -51,6 +51,14 @@ pub mod result_subtype {
     /// The run stopped on purpose, but the work the model was doing was not
     /// finished and it was not asked to stop.
     pub const ERROR_LOOP_DETECTED: &str = "error_loop_detected";
+    /// A signal asked the process to stop while the turn was still running.
+    ///
+    /// Distinct from [`ERROR_DURING_EXECUTION`]: nothing went wrong inside the
+    /// run. It was cut off from outside — by a supervisor's timeout sending
+    /// SIGTERM, most often — and the work is incomplete for that reason. A
+    /// host that sees this knows the container state is a partial answer, not
+    /// a failed one, which `error_during_execution` cannot say.
+    pub const INTERRUPTED: &str = "interrupted";
 }
 
 /// Subtype of a [`ControlRequestFrame`] that asks whether a tool may run.

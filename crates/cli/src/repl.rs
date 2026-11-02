@@ -1995,6 +1995,33 @@ impl HeadlessHookWatcher {
 pub(crate) static TUI_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Whether a headless turn is running and owns the closing `result` frame.
+///
+/// The process-wide SIGTERM handler exits the process immediately, which is
+/// right for a daemon and wrong for a `--print` turn: exiting there skips the
+/// turn's one closing frame, so the stream stops mid-turn and a supervisor
+/// reading it cannot tell a timeout from a crash. While this is set the turn
+/// loop handles the signal itself — it writes `subtype: "interrupted"`, then
+/// exits — and the global handler steps aside.
+pub(crate) static HEADLESS_TURN_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Marks a headless turn as owning the closing frame until this is dropped.
+struct HeadlessTurnGuard;
+
+impl HeadlessTurnGuard {
+    fn enter() -> Self {
+        HEADLESS_TURN_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for HeadlessTurnGuard {
+    fn drop(&mut self) {
+        HEADLESS_TURN_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Marks the TUI as owning the terminal until this value is dropped.
 struct TuiActiveGuard;
 
@@ -6681,6 +6708,38 @@ impl ReplLoop {
     }
 }
 
+/// Write the one closing `result` for a turn a signal cut short.
+///
+/// The turn never reaches its normal exit, so nothing else will write this
+/// frame; leaving it unwritten is what makes a timed-out run look like a crash
+/// to whoever reads the stream. `interrupted` is its own subtype rather than
+/// `error_during_execution` because nothing failed — the run was stopped from
+/// outside, and its container state is a partial answer.
+fn write_interrupted_result(
+    protocol: &mut Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
+    session_id: &str,
+    elapsed: std::time::Duration,
+    message: &str,
+) {
+    let Some(sink) = protocol.as_mut() else {
+        return;
+    };
+    let turn = sink.begin_turn(session_id.to_string());
+    let mut frame = coderex_events::ResultFrame::error(
+        session_id.to_string(),
+        coderex_events::protocol::result_subtype::INTERRUPTED,
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        1,
+    );
+    frame.data.insert(
+        "error".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    if let Err(error) = turn.emit_turn_complete(frame) {
+        tracing::warn!("could not write the interrupted result: {error}");
+    }
+}
+
 /// Append a rendered mod UI block to a headless turn's output.
 ///
 /// Headless runs have no transcript pane; the block joins the turn's output
@@ -7932,6 +7991,32 @@ impl ReplLoop {
             engine.set_confirmation_bus(bus.clone());
         }
         let prompt_owned = prompt.to_string();
+        // A `--print` turn owns its one closing frame. The process-wide SIGTERM
+        // handler exits immediately, which skips that frame: the stream stops
+        // on whatever event was last written, and a supervisor reading it
+        // cannot tell "killed at its deadline" from "crashed". The guard makes
+        // that handler step aside for the duration of this turn, and the
+        // branch in the loop below writes `interrupted` before exiting.
+        //
+        // `play-zork` in the twelfth terminal-bench batch and `polyglot-rust-c`
+        // in the ninth are the same shape: the last line of the stream is a
+        // tool result, `coderex-exit-code` is 124 from the harness's `timeout`,
+        // and the outcome has to be inferred from timestamps.
+        #[cfg(unix)]
+        let mut sigterm = {
+            use tokio::signal::unix::{SignalKind, signal};
+            signal(SignalKind::terminate()).ok()
+        };
+        #[cfg(not(unix))]
+        let mut sigterm: Option<std::future::Pending<()>> = None;
+        let closing_sink_owned = headless_mode && protocol.is_some() && sigterm.is_some();
+        let _headless_turn_guard = if closing_sink_owned {
+            Some(HeadlessTurnGuard::enter())
+        } else {
+            None
+        };
+        let cwd_for_signal = self.cwd.clone();
+
         // A channel rather than a one-shot: the wait for it happens inside
         // `select!`, and a one-shot receiver is consumed by its own future —
         // so a poll that loses to another branch drops the receiver and
@@ -7945,6 +8030,34 @@ impl ReplLoop {
         });
         let (mut engine, result) = loop {
             tokio::select! {
+            // External stop. This has to be a branch of the turn loop, not a
+            // detached handler: only here is the protocol sink in hand, and
+            // the closing frame is the whole point of catching the signal.
+            () = async {
+                match sigterm.as_mut() {
+                    Some(signal) => { signal.recv().await; }
+                    None => std::future::pending().await,
+                }
+            }, if closing_sink_owned => {
+                let message = "SIGTERM ended the run before the turn finished";
+                tracing::info!("Received SIGTERM mid-turn — writing an interrupted result");
+                write_interrupted_result(
+                    &mut protocol,
+                    &session_id,
+                    turn_started.elapsed(),
+                    message,
+                );
+                if let Some(handle) = permission_forwarder.take() {
+                    handle.abort();
+                }
+                if let Some(handle) = permission_reader.take() {
+                    handle.abort();
+                }
+                let _ = crate::daemon::remove_pid_file();
+                let _ = crate::recovery::remove(&cwd_for_signal);
+                crate::plugin_monitors::terminate_all_monitors();
+                std::process::exit(128 + 15);
+            }
             Some(event) = async {
                 match live_events.as_mut() {
                     Some(rx) => rx.recv().await,
@@ -11934,6 +12047,45 @@ mod tests {
             }
         }
         assert_eq!(results, 1, "a turn must close with exactly one result");
+    }
+
+    /// A signal that ends a headless turn still closes the stream.
+    ///
+    /// The process-wide handler used to `exit` immediately, so the last frame
+    /// of a killed run was whatever the model had just emitted and the closing
+    /// `result` never appeared. A supervisor reading that stream cannot tell a
+    /// timeout from a crash — `play-zork` in the twelfth terminal-bench batch
+    /// and `polyglot-rust-c` in the ninth both ended that way.
+    #[test]
+    fn an_interrupted_turn_writes_the_result_frame_the_turn_never_reached() {
+        let buffer = SharedBuffer::default();
+        let mut sink: Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>> =
+            Some(coderex_events::MessageSink::new(
+                Box::new(buffer.clone()) as Box<dyn std::io::Write + Send + Sync>
+            ));
+
+        write_interrupted_result(
+            &mut sink,
+            "session-1",
+            std::time::Duration::from_millis(42),
+            "SIGTERM ended the run before the turn finished",
+        );
+
+        let lines = buffer.lines();
+        assert_eq!(lines.len(), 1, "the interrupted turn wrote {lines:?}");
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(parsed["type"], "result");
+        assert_eq!(
+            parsed["subtype"],
+            coderex_events::protocol::result_subtype::INTERRUPTED
+        );
+        assert_eq!(parsed["is_error"], true);
+        assert_eq!(parsed["session_id"], "session-1");
+        assert_eq!(parsed["duration_ms"], 42);
+        assert_eq!(
+            parsed["error"],
+            "SIGTERM ended the run before the turn finished"
+        );
     }
 
     #[test]

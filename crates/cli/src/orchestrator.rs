@@ -903,6 +903,18 @@ impl StartupOrchestrator {
                                 // with 143.
                                 continue;
                             }
+                            if crate::repl::HEADLESS_TURN_ACTIVE
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                            {
+                                // A `--print` turn is mid-flight and owns the
+                                // closing `result` frame. Exiting here would
+                                // skip it and leave the stream stopping on a
+                                // tool result, which reads as a crash. That
+                                // turn's own branch writes `interrupted`, does
+                                // this cleanup, and exits — so this handler
+                                // only has to keep out of the way.
+                                continue;
+                            }
                             tracing::info!("Received SIGTERM — shutting down gracefully");
                             let _ = crate::daemon::remove_pid_file();
                             // Save recovery snapshot before exit
