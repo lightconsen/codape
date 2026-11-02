@@ -370,6 +370,36 @@ Both failures are **underspecified requirements**, not CodeRex defects — and
 unlike the earlier batches, the model's work is correct in every functional
 respect that the instruction states.
 
+Exact signatures, for matching a future run:
+
+```
+vim-terminal-task
+  FAILED test_python_script_executable
+         AssertionError: text_processor.py is not executable
+  passed: test_python_script_exists, test_sample_text_exists,
+          test_sample_text_content, test_script_output
+
+decommissioning-service-with-sensitive-data
+  FAILED test_archive_is_correctly_encrypted_and_contains_data
+         AssertionError: Sensitive user_secrets.txt not found in decrypted archive.
+         where exists = PosixPath(
+           '/app/decrypted_test_output/extracted_files/opt/sensitive_service_data/user_secrets.txt')
+  passed: test_original_sensitive_data_is_gone, test_config_file_is_gone,
+          test_pid_file_is_gone, test_encrypted_archive_exists,
+          test_intermediate_unencrypted_archive_is_gone
+```
+
+### Scoreboard so far
+
+16 tasks attempted, 12 resolved (75%).
+
+| Failure class | Tasks |
+|---|---|
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data` |
+| Dataset: dependency no longer exists | `fix-git` |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set) |
+| CodeRex defect | none outstanding — the three found are fixed (see below) |
+
 ## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
