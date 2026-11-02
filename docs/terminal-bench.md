@@ -555,18 +555,64 @@ proxy (`Connection timed out` on 199.59.148.247, then
 result. Fixing this needs the model fetched out-of-band and injected, which the
 dataset does not support.
 
+### 2026-11-02 — seventh batch, **3/5 resolved**
+
+Run with the loop-detector fix. `--n-concurrent 2`, `--test-timeout 900`.
+
+| Task | Result | Notes |
+|---|---|---|
+| `write-compressor` | ✅ resolved | 3/3 — built a compliant `data.comp` under the 2500-byte cap |
+| `modernize-fortran-build` | ✅ resolved | 3/3 — Makefile rewritten, builds and runs |
+| `fix-pandas-version` | ✅ resolved | 3/3 — pinned the pandas the code needs |
+| `path-tracing-reverse` | ❌ unresolved | never wrote `mystery.c`; spent the whole budget decompiling |
+| `git-multibranch` | ❌ unresolved | the test's own `git checkout -b main` fails on Ubuntu 26.04's git |
+
+**`path-tracing-reverse` — ran out of budget solving the hard part.** The agent
+did serious reverse engineering: it recovered the ray-tracing algorithm from
+the binary, found the constants were single-precision (`1.3333333f` vs the
+binary's `0x3FAAAAAB`), and was validating a Python model against the reference
+image when the clock ran out — `agent_ended_at` is exactly `timeout + 180`
+after `agent_started_at`. It never produced `/app/mystery.c`, so all three
+tests fail on a missing file.
+
+**The timeout was ours, not the task's.** `path-tracing-reverse` declares
+`max_agent_timeout_sec: 360`, but the harness gives `--global-agent-timeout-sec`
+precedence over the per-task value
+(`harness.py:639`), and the runner passes `--timeout + 180`. Every task in
+every batch therefore runs for the flag's duration, not its own. That is
+deliberate for slow tasks and `apt-get`, but it turned a 6-minute task into a
+48-minute one. When a task's intended budget matters, pass `--timeout` per
+run and do not mix tasks of very different sizes.
+
+**`git-multibranch` — the test cannot run on this git.** The failure is not in
+the agent's server. `verify.sh` clones, then runs
+`git checkout -b main` in the fresh clone:
+
+```
+fatal: You are on a branch yet to be born
+error: src refspec main does not match any
+```
+
+That message is new. Ubuntu 24.04's git 2.43 allows `checkout -b main` on an
+unborn branch; the image is `FROM ubuntu:latest`, which is now 26.04 with git
+2.53, and it refuses. The second `send "password\r"` then hits a closed spawn
+(`send: spawn id exp8 not open`), which is the same cascade seen in
+`configure-git-webserver`. The agent had in fact verified its own server with a
+stricter script — unrelated-repo push, clone with password auth, both branches
+deployed in ~150 ms — so the plumbing it built works. The dataset's test needs
+the pre-`checkout -b` fix (or a pinned base image) before this task can score
+anything.
+
 ### Scoreboard so far
 
-27 tasks attempted, 17 resolved (63 % of attempts; 68 % of the 25 that were
-actually scored — `fix-git` and `incompatible-python-fasttext` never build, and
-`tmux-advanced-workflow` never got a verdict).
+32 tasks attempted, 20 resolved (63 % of attempts).
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server` |
-| Dataset: fixture is stale | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (new git refuses the test's own command) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the four found are fixed (see below) |
 
@@ -629,6 +675,53 @@ All four were real, and all four are fixed on `main`:
   guess: a pass reported success while removing 35 tokens and *growing* the
   message list (39 → 44 → 47) before the turn hard-stopped with
   "context window is full".
+
+## Local fixture patches
+
+The cached dataset at `~/.cache/terminal-bench/terminal-bench-core/0.1.1` is a
+copy, not the upstream source, and three of its tasks have been edited so they
+can run at all on this machine. Every edit is recorded here so a result can be
+traced back to the fixture it was measured against, and each edited file has a
+`.orig` sibling holding the pristine version.
+
+**`sanitize-git-repo` — proxy build args.** Its `setup.sh` clones from GitHub
+during the image build. The compose file passes `http_proxy` /
+`https_proxy` / `HTTP_PROXY` / `HTTPS_PROXY` as build args pointing at
+`http://host.docker.internal:1087`, and the Dockerfile declares them with
+`ARG`. An undeclared build arg is invisible to `RUN`, so both halves are
+required.
+
+**`incompatible-python-fasttext` — the same patch.** Its Dockerfile downloads
+a 106 MB model from `huggingface.co`, which times out from inside the builder
+even though the host reaches it through the proxy:
+
+```
+Connecting to huggingface.co|199.59.148.247|:443... failed: Connection timed out.
+Connecting to huggingface.co|2a03:2880:...|:443... failed: Network is unreachable.
+```
+
+The identical `ARG` block and compose `args:` fixed it — the image builds,
+`/app/model.bin` is 106 MB, and `import fasttext` works. A direct build confirms
+it:
+
+```bash
+cd ~/.cache/terminal-bench/terminal-bench-core/0.1.1/incompatible-python-fasttext
+docker build \
+  --build-arg http_proxy=http://host.docker.internal:1087 \
+  --build-arg https_proxy=http://host.docker.internal:1087 \
+  --build-arg HTTP_PROXY=http://host.docker.internal:1087 \
+  --build-arg HTTPS_PROXY=http://host.docker.internal:1087 \
+  -t fasttext-proxy-test .
+```
+
+What the build does **not** change is the bug the task is about: with numpy 2.5
+installed, `fasttext` raises
+`ValueError: Unable to avoid copy while creating an array as requested`, which
+is exactly the incompatibility the agent is asked to diagnose. Adding the
+proxy only lets the container start; it does not make the tests pass.
+
+Note that `run-tests.sh` here is the cheap kind (`pip install pytest`, no
+`apt-get`, no `uv`), so this task does not need `--test-timeout 900`.
 
 ## Running the batch offline
 
