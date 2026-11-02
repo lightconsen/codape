@@ -306,6 +306,39 @@ and `test_correct_replacement_of_secret_information` pass, while
 `test_no_other_files_changed` raises
 `ValueError: File exp_data/datasets/tokenized/rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json has been changed`.
 
+### 2026-11-02 — third batch, **3/5 resolved**
+
+Five more self-contained tasks, this time with the direct DeepSeek endpoint
+and `deepseek-flash`. Two of the three failures are dataset inconsistencies,
+not agent errors.
+
+| Task | Result | Notes |
+|---|---|---|
+| `modernize-fortran-build` | ✅ resolved | 3/3 checks |
+| `git-workflow-hack` | ✅ resolved | `test_token_leak` |
+| `sqlite-db-truncate` | ✅ resolved | `test_json_data` |
+| `polyglot-c-py` | ❌ unresolved | instruction and test use different file names |
+| `nginx-request-logging` | ❌ unresolved | instruction and test put settings in different files |
+
+**`polyglot-c-py` is internally inconsistent.** The instruction says to write
+`/app/main.c.py`; `test_fibonacci_polyglot` runs `python3 /app/main.py.c` and
+`gcc /app/main.py.c`. An agent that follows the instruction writes
+`main.c.py`, and the test then cannot find the file. The task cannot be scored
+as specified without also creating the other name.
+
+**`nginx-request-logging` has the same class of contradiction.** The
+instruction explicitly says *"Place the configuration in
+`/etc/nginx/conf.d/benchmark-site.conf`"*, and the agent did exactly that.
+`test_nginx_config_settings` then looks for the log-format fields and the
+`limit_req_zone` rate limit in **`/etc/nginx/nginx.conf`**, a different file.
+Port/root checks read the conf.d file, but the log-format and rate-limit
+checks read the main config. A correct conf.d-only setup therefore fails even
+though the site serves, logs, and rate-limits correctly (the other seven
+assertions pass).
+
+These two are recorded as **dataset problems**, not model or CodeRex problems.
+The remaining tasks pass end-to-end.
+
 ## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
