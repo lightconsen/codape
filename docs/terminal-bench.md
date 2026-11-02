@@ -48,16 +48,29 @@ about the model until the plumbing is fixed.
 
 - macOS on arm64; Docker runs `linux/arm64` task images.
 - There is no published aarch64 CodeRex release, so runs use
-  `--coderex-binary` with a locally cross-built binary:
+  `--coderex-binary` with a locally cross-built **static musl** binary. A
+  glibc build against `rust:1.99.1` links against glibc 2.39, which the
+  `bookworm` task images (2.36) cannot load — `GLIBC_2.39 not found` before
+  the agent starts. Build static instead:
 
   ```bash
+  export http_proxy=http://127.0.0.1:1087 https_proxy=http://127.0.0.1:1087
   docker run --rm --platform linux/arm64 \
-    -v "$PWD":/src:ro -v /tmp/coderex-arm-target:/target \
+    -v "$PWD":/src:ro -v /tmp/coderex-musl-target:/target \
     -v /tmp/coderex-cargo-registry:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/target -w /src rust:1.99.1 \
-    bash -c 'apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config \
-             && cargo build --release --locked -p coderex-cli --bin coderex'
+    bash -c 'rustup target add aarch64-unknown-linux-musl \
+             && apt-get update -qq && apt-get install -y -qq musl-tools pkg-config libdbus-1-dev \
+             && cargo build --release --locked --target aarch64-unknown-linux-musl \
+                  -p coderex-cli --bin coderex'
   ```
+
+  The result is `/tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex`.
+  Two things to get right: `rustup target add` must run **in the same
+  container invocation** every time (the target is not in the image), and the
+  first build downloads the whole registry — it takes 20+ minutes on this
+  link, so run it in the background and check `stat` on the binary rather than
+  assuming an earlier file is current.
 
 - The model endpoint is reached through a gateway on the host. Task containers
   get `http://host.docker.internal:8317`, which Docker Desktop resolves.
