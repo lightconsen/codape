@@ -688,28 +688,86 @@ left that state in the repository. The test clones, lands on `main`, and
 `checkout -b main` fails with `a branch named 'main' already exists`; the page
 it finally reads is the agent's own test page, not `main branch content`.
 
+### 2026-11-02 — ninth batch, **3/5 resolved**
+
+Five tasks that had never been run, all on KIMI (`k3`).
+
+| Task | Result | Notes |
+|---|---|---|
+| `blind-maze-explorer-5x5` | ✅ resolved | 2/2 — explored the maze and wrote a map the test accepts |
+| `crack-7z-hash.easy` | ✅ resolved | 2/2 — recovered the 4-digit password with john |
+| `simple-sheets-put` | ✅ resolved | 3/3 — spreadsheet, sheet and cells through the HTTP API |
+| `intrusion-detection` | ❌ unresolved | 5/7 — one dataset contradiction, one missing input check |
+| `polyglot-rust-c` | ❌ unresolved | timed out at 900 s; right idea, never wrote `/app/main.c.rs` |
+
+**`intrusion-detection` — the test greps for a string the instruction does not
+require.** `test_intrusion_detector_content` asserts the *source text* contains
+`logs/auth\.log`:
+
+```python
+assert re.search(r"logs/auth\.log", content), "Script should process auth.log"
+```
+
+The agent wrote `LOGS_DIR=/app/logs` and used `"$LOGS_DIR/auth.log"`, which is
+the natural reading of "parse both auth.log and http.log files located in
+/app/logs" — and its `test_intrusion_detector_execution` **passes**, so the
+script really does read both logs and produce valid JSON. The test is checking
+spelling rather than behaviour.
+
+The second failure is the model's. `test_response_script_error_handling` feeds
+`999.999.999.999` and expects an error or non-zero exit; the script printed
+
+```
+Block rule generated: iptables -A INPUT -s 999.999.999.999 -j DROP
+```
+
+and wrote an incident report for it. Nothing in the instruction asks for
+validation, but a security response script that will emit a firewall rule for an
+impossible address is a real robustness defect, not a test artifact.
+
+**`polyglot-rust-c` — the model spent the whole budget on the hard part and
+never delivered.** It identified the correct mechanism: an `ld` link script that
+makes the same file valid Rust and valid C, so both `rustc` and `gcc` accept it.
+It got gcc building and computing the right answer (`run=42`). But every
+experiment ran under `cd /tmp` and it never wrote `/app/main.c.rs`, so the test
+reads a missing file and fails. Exit code 124 — the harness's 900 s timer.
+
+*The cwd was not stuck.* This was first written up here as a suspected CodeRex
+defect, on the evidence that every Bash call began with `cd /tmp`. The stream
+disproves it: the first `pwd`/`ls -la /app` runs in `/app`, and the `CurrentDir`
+tool returns `/app`. `cd /tmp` was the model's own choice, and
+`bash_tool.rs`'s child gets `ctx.cwd` on every call (`sandbox_shell.rs:66`) —
+there is no persistent shell whose directory could drift. Recorded so the
+suspicion is not raised twice.
+
+Two CodeRex problems did fall out of this run, and both are under
+[Known, unfixed](#known-unfixed): the single hard-coded WebSearch backend, and
+the missing closing event when a run is killed by a timeout.
+
 ### Scoreboard so far
 
-34 distinct tasks attempted, 22 resolved (65 %). Scored by distinct task, taking
-the best result where a task ran more than once — several did, both to re-check a
-fix and because batches 5–7 and 8 ran the same task on different providers. The
-twelve that have never resolved:
+39 distinct tasks attempted (49 % of the 80 in the dataset), 25 resolved
+(64 % of those attempted). Scored by distinct task, taking the best result where
+a task ran more than once — several did, both to re-check a fix and because the
+same task ran on DeepSeek and then on KIMI. The fourteen that have never
+resolved:
 
 `configure-git-webserver`, `cron-broken-network`,
 `decommissioning-service-with-sensitive-data`, `git-multibranch`,
-`jupyter-notebook-server`, `nginx-request-logging`, `path-tracing-reverse`,
-`polyglot-c-py`, `raman-fitting.easy`, `sanitize-git-repo`,
-`tmux-advanced-workflow`, `vim-terminal-task`.
+`intrusion-detection`, `jupyter-notebook-server`, `nginx-request-logging`,
+`path-tracing-reverse`, `polyglot-c-py`, `polyglot-rust-c`,
+`raman-fitting.easy`, `sanitize-git-repo`, `tmux-advanced-workflow`,
+`vim-terminal-task`.
 
 | Failure class | Tasks |
 |---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server` |
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the four found are fixed (see below) |
+| CodeRex defect | none outstanding — the four found are fixed, four more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
@@ -770,6 +828,32 @@ All four were real, and all four are fixed on `main`:
   guess: a pass reported success while removing 35 tokens and *growing* the
   message list (39 → 44 → 47) before the turn hard-stopped with
   "context window is full".
+- **WebSearch has one hard-coded backend.** `web_search_tool.rs:71` builds
+  `https://html.duckduckgo.com/html/?q=…` every time; there is no endpoint,
+  provider or proxy setting. In the ninth batch the only `WebSearch` call in
+  `polyglot-rust-c` failed with:
+
+  ```
+  tool 'WebSearch' invalid input: search failed: error sending request for url
+  (https://html.duckduckgo.com/html/?q=C%20Rust%20polyglot%20source%20file...)
+  ```
+
+  The agent then had to reason out the polyglot trick from memory. Two things
+  are wrong here, and only the first is this machine's network: the tool is
+  unreachable in any environment that blocks duckduckgo.com, and a search that
+  fails for transport reasons is reported as `InvalidInput`, which reads like
+  the model called it wrong rather than like a provider outage. Needs an
+  overridable endpoint and an error class that says "search backend
+  unavailable".
+- **A killed run emits no closing event.** When the harness timer fires,
+  `timeout` sends SIGTERM, and CodeRex dies without writing a `result` line to
+  the stream. `polyglot-rust-c` in batch 9 ends on a `user` (tool-result)
+  event with `coderex-exit-code: 124` and nothing after it, while a normal run
+  ends with `{"type":"result","subtype":"success",…}`. The harness therefore
+  labels the trial `unknown_agent_error`, and a reader cannot tell "the agent
+  crashed" from "the agent ran out of time". A SIGTERM handler that flushes a
+  final `result` with `subtype: "interrupted"` would make the outcome
+  self-describing.
 
 ## Local fixture patches
 
