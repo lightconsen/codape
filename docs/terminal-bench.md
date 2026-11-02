@@ -744,27 +744,86 @@ Two CodeRex problems did fall out of this run: the single hard-coded WebSearch
 backend (now fixed — see the defects section) and the missing closing event
 when a timeout ends a run.
 
+### 2026-11-02 — tenth batch, **2/5 resolved**
+
+Five tasks that had never been run, all on KIMI (`k3`).
+
+| Task | Result | Notes |
+|---|---|---|
+| `crack-7z-hash` | ✅ resolved | recovered the hash; the test passes |
+| `create-bucket` | ✅ resolved | 2/2 — bucket exists and is public |
+| `count-dataset-tokens` | ❌ unresolved | 900 s timeout; the container cannot reach huggingface.co |
+| `raman-fitting` | ❌ unresolved | 900 s timeout; numpy never installed, no `results.json` |
+| `qemu-alpine-ssh` | ⚠️ not measured | image build fails — upstream 404, before the agent runs |
+
+**`qemu-alpine-ssh` — the task does not build on any machine today.** Its
+Dockerfile starts from `debian:bullseye-slim` and installs `qemu-system-x86`,
+which resolves to `qemu 5.2+dfsg-11+deb11u5`. Those files are gone from
+Debian's security pool:
+
+```
+E: Failed to fetch http://deb.debian.org/debian-security/pool/updates/main/q/qemu/qemu-utils_5.2+dfsg-11+deb11u5_arm64.deb  404  Not Found
+```
+
+The pool now carries only 7.2 (bookworm) and 10.0 (trixie). This fails in
+`docker compose build`, before the agent container exists, so it is a dataset
+bit-rot failure and not a CodeRex result. It is listed as not measured rather
+than as a failure — the harness itself records `unknown_agent_error`, but no
+agent ever ran.
+
+**`count-dataset-tokens` — the container has no route to huggingface.co.** The
+task needs a dataset size from huggingface; the container reports:
+
+```
+huggingface.co FAIL [Errno 101] Network is unreachable
+datasets-server.huggingface.co FAIL [Errno 101] Network is unreachable
+```
+
+while `pypi.org`, `files.pythonhosted.org`, `github.com` and `hf-mirror.com`
+all answer. The agent routed around it well — it found the README through
+`hf-mirror.com` and confirmed a 2.88 MB/s download from there — but the
+per-file parquet listing it needed was on the blocked host, and the run hit the
+900 s timer with `/app/answer.txt` never written. The host does reach
+huggingface.co through the proxy (`/api/datasets/...` returns 200 in 2.2 s), so
+this is the container's egress policy, not the task or the agent.
+
+**`raman-fitting` — pip could not finish inside the tool timeout.** The agent
+needed numpy and scipy. Every foreground `pip install` was killed:
+
+```
+tool 'Bash' timed out after 60s
+```
+
+so it moved pip to the background — the right move — and the background job was
+still downloading when the 900 s timer fired. Two things are worth separating:
+numpy is a 15.7 MB wheel that should not take minutes on a working link, and the
+agent burned about 150 s on foreground retries before backgrounding. Its final
+message even says "the regions look flat" over data that had loaded fine, so it
+was reasoning against an incomplete picture. No `results.json` was written and
+all three tests fail on the missing file.
+
 ### Scoreboard so far
 
-39 distinct tasks attempted (49 % of the 80 in the dataset), 25 resolved
-(64 % of those attempted). Scored by distinct task, taking the best result where
+44 distinct tasks attempted (55 % of the 80 in the dataset), 27 resolved
+(61 % of those attempted). `qemu-alpine-ssh` counts as attempted but not
+resolved. Scored by distinct task, taking the best result where
 a task ran more than once — several did, both to re-check a fix and because the
-same task ran on DeepSeek and then on KIMI. The fourteen that have never
+same task ran on DeepSeek and then on KIMI. The seventeen that have never
 resolved:
 
 `configure-git-webserver`, `cron-broken-network`,
-`decommissioning-service-with-sensitive-data`, `git-multibranch`,
-`intrusion-detection`, `jupyter-notebook-server`, `nginx-request-logging`,
-`path-tracing-reverse`, `polyglot-c-py`, `polyglot-rust-c`,
-`raman-fitting.easy`, `sanitize-git-repo`, `tmux-advanced-workflow`,
-`vim-terminal-task`.
+`count-dataset-tokens`, `decommissioning-service-with-sensitive-data`,
+`git-multibranch`, `intrusion-detection`, `jupyter-notebook-server`,
+`nginx-request-logging`, `path-tracing-reverse`, `polyglot-c-py`,
+`polyglot-rust-c`, `qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
+`sanitize-git-repo`, `tmux-advanced-workflow`, `vim-terminal-task`.
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` (pip slower than the 60 s Bash timeout, so numpy never installed) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the five found are fixed, three more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
