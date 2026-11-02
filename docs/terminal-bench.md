@@ -742,7 +742,7 @@ suspicion is not raised twice.
 
 Two CodeRex problems did fall out of this run, and both are under
 [Known, unfixed](#known-unfixed): the single hard-coded WebSearch backend, and
-the missing closing event when a run is killed by a timeout.
+the missing closing event when a timeout ends a run.
 
 ### Scoreboard so far
 
@@ -845,15 +845,34 @@ All four were real, and all four are fixed on `main`:
   the model called it wrong rather than like a provider outage. Needs an
   overridable endpoint and an error class that says "search backend
   unavailable".
-- **A killed run emits no closing event.** When the harness timer fires,
-  `timeout` sends SIGTERM, and CodeRex dies without writing a `result` line to
-  the stream. `polyglot-rust-c` in batch 9 ends on a `user` (tool-result)
-  event with `coderex-exit-code: 124` and nothing after it, while a normal run
-  ends with `{"type":"result","subtype":"success",…}`. The harness therefore
-  labels the trial `unknown_agent_error`, and a reader cannot tell "the agent
-  crashed" from "the agent ran out of time". A SIGTERM handler that flushes a
-  final `result` with `subtype: "interrupted"` would make the outcome
-  self-describing.
+- **A timed-out run leaves no record of *why* it ended.** When the harness
+  timer fires, `timeout` sends SIGTERM. There is already a SIGTERM handler
+  (`crates/cli/src/orchestrator.rs:887`), so the process does not die
+  uncleanly: it logs `Received SIGTERM — shutting down gracefully`, removes its
+  PID file and recovery snapshot, and exits 0. But it exits *before* the turn
+  finishes, so the code that writes the closing `result` frame
+  (`repl.rs:8088`) never runs and the stream stops on a `user` (tool-result)
+  event. `polyglot-rust-c` in batch 9 is exactly that: last event a tool
+  result, `coderex-exit-code: 124`, no `result` line, and the harness therefore
+  reports `unknown_agent_error` with the agent window equal to the full
+  timer.
+
+  Three things are wrong, and they are separate fixes:
+
+  1. **The exit code contradicts the log.** The handler prints "shutting down
+     gracefully" and exits 0; the harness's `timeout` wrapper turns that into
+     124 because the timer fired. Anything reading the exit code sees a
+     timeout, anything reading the log line sees a clean shutdown.
+  2. **The reason is only logged, never emitted.** `tracing` defaults to
+     `CODEREX_LOG=off` and writes to stderr (`tracing_setup.rs:9,29`), so even
+     the one informative line is invisible unless the run opts into logging. A
+     `result` frame with a dedicated subtype (there is no `interrupted` subtype
+     in `crates/events/src/protocol.rs` today; the closest,
+     `error_during_execution`, would at least be visible to a stream-json
+     consumer) is what makes the outcome self-describing.
+  3. **The handler cannot emit one anyway.** It runs in a detached
+     `tokio::spawn` that has no access to the protocol sink, so flushing a
+     final frame needs the sink shared with it, not just a handler added.
 
 ## Local fixture patches
 
