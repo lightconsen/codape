@@ -730,7 +730,9 @@ never delivered.** It identified the correct mechanism: an `ld` link script that
 makes the same file valid Rust and valid C, so both `rustc` and `gcc` accept it.
 It got gcc building and computing the right answer (`run=42`). But every
 experiment ran under `cd /tmp` and it never wrote `/app/main.c.rs`, so the test
-reads a missing file and fails. Exit code 124 — the harness's 900 s timer.
+reads a missing file and fails. Exit code 124 — the harness's 900 s timer. The
+stream also stopped on a tool result with no closing `result` frame, which is
+the defect fixed as #7 below.
 
 *The cwd was not stuck.* This was first written up here as a suspected CodeRex
 defect, on the evidence that every Bash call began with `cd /tmp`. The stream
@@ -741,8 +743,9 @@ there is no persistent shell whose directory could drift. Recorded so the
 suspicion is not raised twice.
 
 Two CodeRex problems did fall out of this run: the single hard-coded WebSearch
-backend (now fixed — see the defects section) and the missing closing event
-when a timeout ends a run.
+backend and the missing closing event when a timeout ends a run. Both are now
+fixed — see defects 5 and 7 in [CodeRex defects the benchmark
+exposed](#coderx-defects-the-benchmark-exposed).
 
 ### 2026-11-02 — tenth batch, **2/5 resolved**
 
@@ -876,38 +879,100 @@ The clone is 12+ minutes in and then drops, so the image never exists and no
 agent runs. As with `qemu-alpine-ssh` in the tenth batch, this is recorded as
 not measured rather than as a CodeRex failure.
 
+### 2026-11-02 — twelfth batch, **4/5 resolved**
+
+Five tasks that had never been run, all on KIMI (`k3`), using the binary built
+with the title-query fix from the eleventh batch.
+
+| Task | Result | Notes |
+|---|---|---|
+| `blind-maze-explorer-algorithm.easy` | ✅ resolved (11/11) | 241 s |
+| `blind-maze-explorer-algorithm.hard` | ✅ resolved (11/11) | 288 s |
+| `swe-bench-langcodes` | ✅ resolved | 184 s; the whole test is one patched assertion |
+| `swe-bench-fsspec` | ✅ resolved (135/135) | 474 s; the largest test count any task here has produced |
+| `play-zork` | ❌ unresolved | 2700 s, the full budget; 2/2 tests fail on a missing `/app/answer.txt` |
+
+The four passes are unremarkable in the best way — no plumbing failures, no
+`parse_error`, and `failure_mode: unset` throughout. Two `swe-bench` tasks
+passing matters for a different reason: they need a real repository checkout,
+a patch applied to it, and a test suite run under a freshly created venv, all
+of which is ordinary work for the agent and all of which worked.
+
+**`play-zork` is a genuine model result, and it also re-exposed the timeout
+defect from the ninth batch.** The task asks for Zork finished at the maximum
+score of 350, with the ending message in `/app/answer.txt`. The agent played
+the game — it reached 54 points and repeatedly issued `@move_obj` commands
+through the frotz debugger — but never wrote the file, so both assertions fail
+on `FileNotFoundError`.
+
+Two things are worth separating here:
+
+- **The budget question is a model question.** 2700 s is the full agent
+  timeout. Whether Zork at 350 is reachable in that window is not something
+  this run can answer; the run spent it exploring, not finishing.
+- **The defect is CodeRex's.** The stream ends on a `user` (tool-result) frame
+  and `coderex-exit-code` is 124 — exactly the shape recorded for
+  `polyglot-rust-c` in the ninth batch. The last tool call before the timer
+  is also instructive:
+
+  ```
+  [SECURITY WARNING: Dangerous: > /tmp/mapoutside.out (overwrites file)]
+
+  [Exit code: -1]
+  ```
+
+  A redirect to a scratch file was judged dangerous and the command never ran.
+  Worth knowing: the warning is informational for stdout commands and
+  effectively a block here.
+
+The timeout defect is now fixed — see defect 7 below. A `--print` turn with a
+stream writes `subtype: "interrupted"` and exits 143 when a signal ends it,
+so a run stopped from outside is no longer indistinguishable from a crash.
+
 ### Scoreboard so far
 
-49 distinct tasks attempted (61 % of the 80 in the dataset), 29 resolved
-(59 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli` and
-`sanitize-git-repo.hard` count as attempted but not resolved. Scored by
-distinct task, taking the best result where
-a task ran more than once — several did, both to re-check a fix and because the
-same task ran on DeepSeek and then on KIMI. The twenty that have never
+54 distinct tasks attempted (68 % of the 80 in the dataset), 33 resolved
+(61 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
+`sanitize-git-repo.hard` and `play-zork` count as attempted but not
+resolved. Scored by distinct task, taking the best result where a task ran
+more than once — several did, both to re-check a fix and because the same
+task ran on DeepSeek and then on KIMI. The twenty-one that have never
 resolved:
 
 `conda-env-conflict-resolution`, `configure-git-webserver`,
 `cron-broken-network`, `count-dataset-tokens`,
 `decommissioning-service-with-sensitive-data`, `git-multibranch`,
 `intrusion-detection`, `jupyter-notebook-server`, `nginx-request-logging`,
-`path-tracing-reverse`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
-`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
+`path-tracing-reverse`, `play-zork`, `polyglot-c-py`, `polyglot-rust-c`,
+`pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
 `sanitize-git-repo.hard`, `sanitize-git-repo`, `tmux-advanced-workflow`,
 `vim-terminal-task`.
+
+The twenty-six never run:
+`build-initramfs-qemu`, `build-linux-kernel-qemu`, `build-tcc-qemu`,
+`cartpole-rl-training`, `crack-7z-hash.hard`, `download-youtube`, `eval-mteb`,
+`eval-mteb.hard`, `extract-moves-from-video`, `fix-git`, `get-bitcoin-nodes`,
+`gpt2-codegolf`, `hf-model-inference`,
+`incompatible-python-fasttext.base_with_hint`, `oom`, `pytorch-model-cli.easy`,
+`pytorch-model-cli.hard`, `qemu-startup`, `reshard-c4-data`,
+`run-pdp11-code`, `security-vulhub-minio`, `solana-data`,
+`super-benchmark-upet`, `swe-bench-astropy-1`, `swe-bench-astropy-2`,
+`train-fasttext`. Most need a dataset download, a multi-GB model, or a
+prebuilt third-party image; `fix-git`'s fixture is gone from GitHub.
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the six found are fixed, three more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
-All six were real, and all six are fixed on `main`:
+All seven were real, and all seven are fixed on `main`:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -1017,6 +1082,48 @@ All six were real, and all six are fixed on `main`:
    on the same machine, the gap from `result` frame to process exit dropped
    from ~5.9 s to ~0.03 s.
 
+7. **A signal that ends a headless run leaves the stream without its closing
+   frame.** When the harness timer fires, `timeout` sends SIGTERM. There is a
+   handler (`orchestrator.rs:887`), so the process does not die uncleanly: it
+   logs `Received SIGTERM — shutting down gracefully`, removes its PID file and
+   recovery snapshot, and exits 0. But it exits *before the turn finishes*, so
+   the code that writes the closing `result` frame never runs and the stream
+   stops on a `user` (tool-result) event. `polyglot-rust-c` in the ninth batch
+   and `play-zork` in the twelfth are both that shape: last event a tool
+   result, `coderex-exit-code: 124`, no `result` line. The harness therefore
+   reports `unknown_agent_error`, which is what a crash looks like — a reader
+   cannot tell "ran out of time" from "broke".
+
+   Three things were wrong, and all three are fixed:
+
+   1. **The exit code contradicted the log.** The handler printed "shutting
+      down gracefully" and exited 0; the harness's `timeout` wrapper turned
+      that into 124. Anything reading the exit code saw a timeout, anything
+      reading the log line saw a clean shutdown.
+   2. **The reason was only logged, never emitted.** `tracing` defaults to
+      `CODEREX_LOG=off` and writes to stderr, so even that one line was
+      invisible unless the run opted into logging. There was no `interrupted`
+      subtype either.
+   3. **The handler could not emit one anyway.** It runs in a detached
+      `tokio::spawn` with no access to the protocol sink.
+
+   A headless turn with a stream now owns its closing frame. It sets a
+   process-wide flag for the duration of the turn; the global handler steps
+   aside while it is set (as it already did for the TUI); and the turn loop
+   has its own SIGTERM branch that writes `subtype: "interrupted"` with an
+   `error` naming the cutoff, does the cleanup, and exits 143. `interrupted`
+   is a new subtype rather than `error_during_execution` because nothing
+   failed: the run was stopped from outside, and its container state is a
+   partial answer.
+
+   Verified against a real process — a headless run against a hanging
+   endpoint, signalled from outside, writes the frame and exits 143:
+
+   ```
+   {"type":"result","subtype":"interrupted","is_error":true,"duration_ms":4984,
+    "num_turns":1,"error":"SIGTERM ended the run before the turn finished"}
+   ```
+
 ### Known, unfixed
 
 - **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
@@ -1027,34 +1134,6 @@ All six were real, and all six are fixed on `main`:
   guess: a pass reported success while removing 35 tokens and *growing* the
   message list (39 → 44 → 47) before the turn hard-stopped with
   "context window is full".
-- **A timed-out run leaves no record of *why* it ended.** When the harness
-  timer fires, `timeout` sends SIGTERM. There is already a SIGTERM handler
-  (`crates/cli/src/orchestrator.rs:887`), so the process does not die
-  uncleanly: it logs `Received SIGTERM — shutting down gracefully`, removes its
-  PID file and recovery snapshot, and exits 0. But it exits *before* the turn
-  finishes, so the code that writes the closing `result` frame
-  (`repl.rs:8088`) never runs and the stream stops on a `user` (tool-result)
-  event. `polyglot-rust-c` in batch 9 is exactly that: last event a tool
-  result, `coderex-exit-code: 124`, no `result` line, and the harness therefore
-  reports `unknown_agent_error` with the agent window equal to the full
-  timer.
-
-  Three things are wrong, and they are separate fixes:
-
-  1. **The exit code contradicts the log.** The handler prints "shutting down
-     gracefully" and exits 0; the harness's `timeout` wrapper turns that into
-     124 because the timer fired. Anything reading the exit code sees a
-     timeout, anything reading the log line sees a clean shutdown.
-  2. **The reason is only logged, never emitted.** `tracing` defaults to
-     `CODEREX_LOG=off` and writes to stderr (`tracing_setup.rs:9,29`), so even
-     the one informative line is invisible unless the run opts into logging. A
-     `result` frame with a dedicated subtype (there is no `interrupted` subtype
-     in `crates/events/src/protocol.rs` today; the closest,
-     `error_during_execution`, would at least be visible to a stream-json
-     consumer) is what makes the outcome self-describing.
-  3. **The handler cannot emit one anyway.** It runs in a detached
-     `tokio::spawn` that has no access to the protocol sink, so flushing a
-     final frame needs the sink shared with it, not just a handler added.
 
 ## Local fixture patches
 
