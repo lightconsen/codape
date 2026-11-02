@@ -8157,7 +8157,18 @@ impl ReplLoop {
             self.trigger_background_features(prompt);
         }
 
-        if !self.session_effects.title_generated
+        // The title is a session-store artifact. With `--no-session-persistence`
+        // nothing ever reads it back — `persist_headless_session` returns
+        // early — so asking the model for one is a request whose answer is
+        // thrown away. It is also *synchronous*, after the `result` frame has
+        // already gone out: a run that finishes seconds before its deadline
+        // spends those seconds waiting on this call and is then killed for
+        // exceeding it, which reads downstream as a failed run even though
+        // every test passed. `path-tracing` in the eleventh terminal-bench
+        // batch is exactly that: `result: success` at 892.9 s, SIGTERM at
+        // 900 s, exit 124.
+        if !self.no_persistence
+            && !self.session_effects.title_generated
             && let Some(ref client) = self.api_client
             && let Ok(title) = prompts::generate_session_title(client.as_ref(), prompt).await
         {
@@ -10992,6 +11003,8 @@ mod tests {
         turn_requests: Arc<std::sync::Mutex<usize>>,
         /// What a side query (a hook's `prompt`, a title, a classifier) answers.
         side_answer: &'static str,
+        /// Side queries (non-streaming `create_message`) that reached the model.
+        side_requests: Arc<std::sync::Mutex<usize>>,
     }
 
     impl CountingApi {
@@ -10999,6 +11012,7 @@ mod tests {
             Self {
                 turn_requests: Arc::new(std::sync::Mutex::new(0)),
                 side_answer: "Side query answer",
+                side_requests: Arc::new(std::sync::Mutex::new(0)),
             }
         }
 
@@ -11008,11 +11022,17 @@ mod tests {
             Self {
                 turn_requests: Arc::new(std::sync::Mutex::new(0)),
                 side_answer: answer,
+                side_requests: Arc::new(std::sync::Mutex::new(0)),
             }
         }
 
         fn turn_requests(&self) -> usize {
             *self.turn_requests.lock().unwrap()
+        }
+
+        /// Side queries sent after the turn — title generation and the like.
+        fn side_requests(&self) -> usize {
+            *self.side_requests.lock().unwrap()
         }
     }
 
@@ -11030,6 +11050,7 @@ mod tests {
             _max_tokens: u32,
             _tools: &[ToolInfo],
         ) -> Result<ApiResponse, ApiError> {
+            *self.side_requests.lock().unwrap() += 1;
             Ok(ApiResponse {
                 content: self.side_answer.into(),
                 tool_calls: Vec::new(),
@@ -11609,6 +11630,62 @@ mod tests {
             std::fs::read_to_string(&watched).unwrap(),
             "changed during the turn",
             "the test's file change did not happen during the turn"
+        );
+    }
+
+    /// A headless run with `--no-session-persistence` must not ask the model
+    /// for a title.
+    ///
+    /// The title is only ever read back from the session store, which
+    /// `persist_headless_session` skips in this mode — so the request is pure
+    /// latency after the `result` frame. `path-tracing` in the eleventh
+    /// terminal-bench batch passed all four tests and was still recorded as a
+    /// failed run: its result frame went out at 892.9 s and the title call was
+    /// still in flight when the 900 s timer fired.
+    #[tokio::test]
+    async fn headless_without_persistence_does_not_generate_a_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = CountingApi::new();
+        let mut repl = ReplLoop::with_engine(
+            Box::new(api.clone()),
+            temp.path().to_string_lossy().into_owned(),
+            ModelId::sonnet(),
+        );
+        repl.with_no_persistence(true);
+        repl.apply_cli_config();
+
+        repl.run_headless("Hello").await.unwrap();
+
+        assert_eq!(
+            api.side_requests(),
+            0,
+            "a headless run with no session store still asked for a title"
+        );
+        assert_eq!(
+            repl.current_session_title(),
+            None,
+            "a title was generated that nothing can persist or read back"
+        );
+    }
+
+    /// The counterpart: with persistence on, the title is still generated, so
+    /// the guard above did not turn the feature off for everyone.
+    #[tokio::test]
+    async fn headless_with_persistence_still_generates_a_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = CountingApi::new();
+        let mut repl = ReplLoop::with_engine(
+            Box::new(api.clone()),
+            temp.path().to_string_lossy().into_owned(),
+            ModelId::sonnet(),
+        );
+        repl.apply_cli_config();
+
+        repl.run_headless("Hello").await.unwrap();
+
+        assert!(
+            api.side_requests() > 0,
+            "the title query stopped running even with persistence enabled"
         );
     }
 
