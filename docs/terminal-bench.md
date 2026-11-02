@@ -33,6 +33,12 @@ ever got a fair test:
 | `unknown_agent_error` | CodeRex's `result` frame reported an error (see the subtype) |
 | `test_timeout` | the grading test itself timed out — the run was not scored on merit |
 | `agent_timeout` | CodeRex exceeded its own timeout |
+| `parse_error` | the harness found no pytest summary, so it never scored the run — usually the test script died during its own bootstrap (`apt-get update`, installing `uv`) |
+
+`parse_error` and `test_timeout` are both "the test never produced a verdict".
+Check `panes/post-test.txt`: if its last line is a download progress bar, the
+test was cut off while installing its own dependencies, and the result says
+nothing about the agent.
 
 A trial with `failure_mode: unset` and `accuracy: 0` is a **model or prompt
 result**. A trial with any other mode is a **plumbing result** and says nothing
@@ -389,20 +395,112 @@ decommissioning-service-with-sensitive-data
           test_intermediate_unencrypted_archive_is_gone
 ```
 
+### 2026-11-02 — fifth batch, **2/5 resolved**
+
+| Task | Result | Notes |
+|---|---|---|
+| `prove-plus-comm` | ✅ resolved | scored by its tests |
+| `password-recovery` | ✅ resolved | scored by its tests |
+| `jupyter-notebook-server` | ❌ unresolved | **CodeRex defect** — `error_loop_detected`, now fixed |
+| `raman-fitting.easy` | ❌ unresolved | **dataset contradiction** — instruction says `amplitude`, test reads `["A"]` |
+| `tmux-advanced-workflow` | ⚪ not scored | `parse_error` — the test died in its own `apt-get update` |
+
+**`jupyter-notebook-server` — the loop detector false-positive.** The run ended
+with `subtype: error_loop_detected` while the agent was legitimately waiting for
+a long `pip install`. Six consecutive polls of the same command —
+
+```
+sleep 55; tail -3 /tmp/pip_install.log
+sleep 55; tail -4 /tmp/pip_install.log
+```
+
+— each returned a *different* line (`Downloading httpcore-1.0.9…`,
+`Downloading anyio-4.16.0…`, `10.2/10.2 MB 113.2 kB/s`). The detector already
+knows that a call whose result changes is progress
+(`from_tool_call_and_result`), but the engine never handed it the results: see
+[the fixed defect](#the-loop-detector-never-saw-a-tool-result).
+
+**`raman-fitting.easy` — the instruction contradicts the test.** The
+instruction's JSON skeleton names the peak height `"amplitude"`:
+
+```
+"G": { "x0": …, "gamma": …, "amplitude": …, "offset": … }
+```
+
+The test reads `G_peak["A"]`, and so does the dataset's own reference
+`solution.sh` (`json.dump({... "A": A_g ...})`). A model that follows the
+instruction cannot pass. Here the agent did exactly that and wrote
+`"amplitude": 8333.5`, so the failure is a plain `KeyError: 'A'` before any
+value is compared:
+
+```
+FAILED ../tests/test_outputs.py::test_G_Peak - KeyError: 'A'
+FAILED ../tests/test_outputs.py::test_2D_Peak - KeyError: 'A'
+```
+
+The fitted numbers themselves are defensible — `amplitude 8333.5 / 12594.3`
+against expected `8382.69 / 12314.42` (G within 0.6 %, 2D within 2.3 %) — so
+the failure is entirely the key name. A model that follows the instruction
+cannot pass, and one that reads `solution.sh` rather than the instruction
+would.
+
+**`tmux-advanced-workflow` — never graded.** The harness found no pytest
+summary (`Error parsing results … No short test summary info found`). The
+grading script begins with `apt-get update`, which in `post-test.txt` is still
+printing `61% [4 Packages 5294 kB/8689 kB]` when the pane was captured; at the
+~120 kB/s this network gives the task container, the Debian index alone takes
+several minutes. This is the same starvation that hit `hello-world` and is why
+`--test-timeout 900` exists — but this trial was not launched with it. **That
+this batch got `parse_error` rather than `test_timeout` is a harness difference,
+not a CodeRex result.** Re-run with `--test-timeout 900` to score it.
+
+There is a second, independent problem in this trial: the agent began with
+`tmux kill-server 2>/dev/null`, which destroys **every** tmux session on the
+machine — including the harness's own, which is how Terminal-Bench sends
+keystrokes and captures panes. `panes/post-agent.txt` is the whole failure:
+
+```
+no server running on /tmp/tmux-0/default
+```
+
+and `coderex-exit-code` is `137` (SIGKILL) rather than a clean exit. The
+harness created the `agent` session and, at 05:12:00, the `tests` session; the
+agent's `kill-server` took them both out and `tmux ls` afterwards showed only a
+`tests` session that had been re-created. This is **model behaviour conflicting
+with the harness's transport**, not a CodeRex bug — CodeRex ran the command the
+model asked for — but it is worth knowing when scoring tmux tasks: a run that
+kills the server cannot be graded no matter how good the work was.
+
+The work that did happen before the truncation looked correct: session
+`workflow` created, top pane split off, bottom pane split into two
+(`split-v=0`, `split-h=0`, geometry `100×24` + `99×24`). The agent was starting
+the monitor script when the 360 s task budget ran out.
+
+Exact signature for the loop failure:
+
+```
+result
+  subtype: error_loop_detected
+  exit code 0 (the harness treats the subtype as the verdict)
+```
+
 ### Scoreboard so far
 
-16 tasks attempted, 12 resolved (75%).
+21 tasks attempted, 14 resolved (67% of attempts; 74% of the 19 that were
+actually scored — `fix-git` never builds and `tmux-advanced-workflow` never
+got a verdict).
 
 | Failure class | Tasks |
 |---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data` |
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy` |
 | Dataset: dependency no longer exists | `fix-git` |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set) |
-| CodeRex defect | none outstanding — the three found are fixed (see below) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server) |
+| Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
+| CodeRex defect | none outstanding — the four found are fixed (see below) |
 
 ## CodeRex defects the benchmark exposed
 
-All three were real, and all three are fixed on `main`:
+All four were real, and all four are fixed on `main`:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -425,6 +523,28 @@ All three were real, and all three are fixed on `main`:
    `5196c02`/`2e9201b` changed the system prompt without refreshing the
    recorded digests, leaving `e2e_code_agent` and `e2e_equivalence` failing
    with `cassette_stale`.
+
+4. <a id="the-loop-detector-never-saw-a-tool-result"></a>**The loop detector
+   never saw a tool result.** Found by `jupyter-notebook-server`
+   (`error_loop_detected`). `close_turn` builds each turn's loop fingerprint
+   from `turn.messages`, but Phase 6 wrote results only to
+   `self.session.messages`; `turn.messages` is a snapshot of the session taken
+   at the *start* of the turn, so it held the calls and none of the results.
+   The detector compared `(call, no result)` three times and called a
+   changing-answer poll a period-1 loop.
+
+   ```
+   a poll whose answer changes was called a loop: LoopDetected { period: 1, repetitions: 3 }
+   ```
+
+   That is the regression test failing against the old code. The fix pushes the
+   result into both histories, matching what `persist_assistant_tool_calls`
+   already did for the calls.
+
+   The consequence is worth stating plainly: this defect does not just end
+   runs, it ends them **exactly when the agent is doing the right thing** —
+   polling a slow install instead of guessing that it finished.
+
 
 
 ### Known, unfixed
