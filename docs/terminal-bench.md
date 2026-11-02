@@ -497,16 +497,75 @@ result
   exit code 0 (the harness treats the subtype as the verdict)
 ```
 
+### 2026-11-02 — sixth batch, **3/6 resolved**
+
+Run with the loop-detector fix in the binary. `--n-concurrent 2`,
+`--test-timeout 900`.
+
+| Task | Result | Notes |
+|---|---|---|
+| `sqlite-db-truncate` | ✅ resolved | recovered all 8 rows from the truncated database file |
+| `organization-json-generator` | ✅ resolved | 4/4 — schema, relationships and statistics all check out |
+| `simple-web-scraper` | ✅ resolved | 5/5 — scrape, CSV, and report |
+| `jupyter-notebook-server` | ❌ unresolved | **loop defect gone**; 2/4 — config file uses `ServerApp` only |
+| `cron-broken-network` | ❌ unresolved | 1/2 — the test's expected body for `example.com` is from 2017 |
+| `incompatible-python-fasttext` | ⚪ not scored | `docker compose build` fails: `huggingface.co` unreachable |
+
+**`jupyter-notebook-server` — the fix holds.** This is the task the loop
+detector killed in batch 5. Re-run, the agent polled the install **eleven**
+times (`sleep 25…60; tail -5 /tmp/pip_install.log`), got a different line every
+time, and ran to completion — `failure_mode: unset`, no `error_loop_detected`.
+The remaining two failures are unrelated and both are the same modelling
+choice: the agent wrote a `ServerApp`-based config (correct for
+jupyter-server ≥ 2.0, which is what it installed) and kept
+`c.NotebookApp.password` only for compatibility, but the test greps the file
+for the exact strings `c.NotebookApp.password` / `c.NotebookApp.ip` /
+`c.NotebookApp.certfile` and then parses the hash with
+`re.search(r"c.NotebookApp.password = '(.*?)'")` — single quotes, `NotebookApp`
+spelling. The config it produced is:
+`c.ServerApp.password = "argon2:…"` (double-quoted) plus
+`c.NotebookApp.password = "argon2:…"`. So `test_jupyter_config_exists` fails on
+an exact substring, and `test_password_authentication` on the quote style. The
+server does work — `test_jupyter_server_running` passes over HTTPS with the
+password set. This is a **test that pins a deprecated config spelling**, and
+the instruction does not say which spelling to use.
+
+**`cron-broken-network` — the expected page no longer exists.** The agent was
+asked to fix why `curl example.com` fails; the container's `/usr/bin/curl` had
+been replaced by a no-op script on a cron schedule (the task's planted bug).
+The agent found and fixed it — `test_curl_file_exists` passes, and the captured
+`curl` output in the test shows a real 577-byte 200 OK. The second test then
+compares the body against a 46-line HTML document hard-coded in
+`test_outputs.py`, expecting >90 % of its lines to appear. The live page is now
+minified onto one line:
+
+```
+<!doctype html><html lang=en><head><meta charset=utf-8><link rel=icon href=data:,>…
+```
+
+so only 8 of 46 expected lines match (`assert (8 / 46) > 0.9`). The dataset
+predates the 2023+ example.com redesign. The agent's work was correct; the
+fixture is stale. Note the test also `time.sleep(60)` before re-running curl,
+so this task needs a test budget of at least ~90 s.
+
+**`incompatible-python-fasttext` — never built.** Its Dockerfile downloads a
+model from `huggingface.co`, which times out from this network even with the
+proxy (`Connection timed out` on 199.59.148.247, then
+`Network is unreachable` on the IPv6 address). No container, no agent, no
+result. Fixing this needs the model fetched out-of-band and injected, which the
+dataset does not support.
+
 ### Scoreboard so far
 
-21 tasks attempted, 14 resolved (67% of attempts; 74% of the 19 that were
-actually scored — `fix-git` never builds and `tmux-advanced-workflow` never
-got a verdict).
+27 tasks attempted, 17 resolved (63 % of attempts; 68 % of the 25 that were
+actually scored — `fix-git` and `incompatible-python-fasttext` never build, and
+`tmux-advanced-workflow` never got a verdict).
 
 | Failure class | Tasks |
 |---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy` |
-| Dataset: dependency no longer exists | `fix-git` |
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server` |
+| Dataset: fixture is stale | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co) |
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the four found are fixed (see below) |
