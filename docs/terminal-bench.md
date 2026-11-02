@@ -74,6 +74,16 @@ about the model until the plumbing is fixed.
 
 - The model endpoint is reached through a gateway on the host. Task containers
   get `http://host.docker.internal:8317`, which Docker Desktop resolves.
+- **Provider.** Batches 1–7 used DeepSeek. From the eighth batch on, runs use
+  the KIMI provider from `~/.claude/settings.kimi.json`: `k3` at
+  `https://api.kimi.com/coding`, context window 1 048 576. The key is read from
+  that file at run time and exported into the runner's environment; it is never
+  written to the dataset, the run directory, or a command line. The adapter's
+  `PASSTHROUGH_ENV` forwards `ANTHROPIC_*` and `CODEREX_*` into the container.
+  Give `CODEREX_CONTEXT_WINDOW` the real window — CodeRex assumes 32 000 for a
+  model it does not recognise. A trailing slash on the base URL is harmless:
+  `request_url` trims it before appending `/v1/messages`
+  (`crates/core/src/api_client.rs:1002`).
 - `--coderex-binary` requires the path **on the host**; the adapter copies it
   into the container as `/tmp/coderex-local-binary`.
 
@@ -565,7 +575,7 @@ Run with the loop-detector fix. `--n-concurrent 2`, `--test-timeout 900`.
 | `modernize-fortran-build` | ✅ resolved | 3/3 — Makefile rewritten, builds and runs |
 | `fix-pandas-version` | ✅ resolved | 3/3 — pinned the pandas the code needs |
 | `path-tracing-reverse` | ❌ unresolved | never wrote `mystery.c`; spent the whole budget decompiling |
-| `git-multibranch` | ❌ unresolved | the test's own `git checkout -b main` fails on Ubuntu 26.04's git |
+| `git-multibranch` | ❌ unresolved | the test's `git checkout -b main` collides with the branch the clone lands on |
 
 **`path-tracing-reverse` — ran out of budget solving the hard part.** The agent
 did serious reverse engineering: it recovered the ray-tracing algorithm from
@@ -584,35 +594,120 @@ deliberate for slow tasks and `apt-get`, but it turned a 6-minute task into a
 48-minute one. When a task's intended budget matters, pass `--timeout` per
 run and do not mix tasks of very different sizes.
 
-**`git-multibranch` — the test cannot run on this git.** The failure is not in
-the agent's server. `verify.sh` clones, then runs
-`git checkout -b main` in the fresh clone:
+**`git-multibranch` — the test's own script assumes a repository state it does
+not create.** The server is not what fails. `verify.sh` clones
+`git@localhost:/git/project` and then runs `git checkout -b main` in the clone.
+That command only succeeds when the clone lands on some branch *other* than
+`main`; several states fail it:
 
 ```
-fatal: You are on a branch yet to be born
-error: src refspec main does not match any
+fatal: a branch named 'main' already exists   # clone is already on main with a commit
+fatal: You are on a branch yet to be born     # .git/refs/heads/main is empty/garbage
+fatal: 'refs/remotes/origin/main' has neither a valid OID nor a target  # empty ref on the server
 ```
 
-That message is new. Ubuntu 24.04's git 2.43 allows `checkout -b main` on an
-unborn branch; the image is `FROM ubuntu:latest`, which is now 26.04 with git
-2.53, and it refuses. The second `send "password\r"` then hits a closed spawn
-(`send: spawn id exp8 not open`), which is the same cascade seen in
-`configure-git-webserver`. The agent had in fact verified its own server with a
-stricter script — unrelated-repo push, clone with password auth, both branches
-deployed in ~150 ms — so the plumbing it built works. The dataset's test needs
-the pre-`checkout -b` fix (or a pinned base image) before this task can score
-anything.
+The **batch-8** run is fully explained, and it is the model's choice.
+The agent left `main` and `dev` both pushed and deployed. The clone therefore
+lands on a real `main`, `checkout -b main` fails with *already exists*, and the
+page the test finally reads is the agent's own test page, `<h1>MAIN branch
+v2</h1>`, not `main branch content`. The agent had built a working server —
+password SSH, both branches deploying in ~140 ms, a `post-receive` hook using
+`git archive | tar -x` — and verified it end-to-end; it just left the repository
+in a state its own test cannot pass.
+
+**The batch-7 run is a different failure and is not fully explained here.**
+`checkout -b main` reported *"on a branch yet to be born"*, and the clone had
+printed a capitalised `(git@localhost) Password:` prompt that the script's
+case-sensitive `expect "password:"` does not match. What is verified:
+
+- It is **not** a git-version regression. On git 2.53.0 (the image's version,
+  `FROM ubuntu:latest` → 26.04) `checkout -b main` succeeds on an unborn branch
+  in every state a plain `git init` / `git clone` produces.
+- The message needs an existing `.git/refs/heads/main` that is zero-length or
+  unparseable. A zero-length ref on the *server* is worse — the clone dies with
+  *"refs/remotes/origin/main has neither a valid OID nor a target"* — so whatever
+  produced it was local to the clone.
+- The agent's own transcript says it ran its verifier against a pristine
+  repository and cleaned up test pushes, which makes the state hard to explain
+  by the agent's actions alone.
+
+The likely cause is the password prompt going unanswered: the test never sends
+the password, and a clone aborted at the prompt is a plausible way to be left
+mid-initialisation. But that chain is an inference, not a reproduction — I could
+not get git to leave exactly this state from a failed clone. The spec's
+under-specification is verified regardless: the instruction never says whether
+the server starts with an empty repository or with populated branches, the test
+requires exactly one of those, and it computes that from a branch the agent was
+never told to leave empty. Batch 7 is recorded as a dataset problem; batch 8 as
+both a dataset problem and the model's choice.
+
+The `send: spawn id exp8 not open` that follows is the same second-password
+failure seen in `configure-git-webserver`: once the first `expect` block ends
+early, the next `send` has no live spawn.
+
+### 2026-11-02 — eighth batch, first on KIMI, **1/2 scored**
+
+The remaining two unscored tasks, re-run on the KIMI provider (`k3`,
+`https://api.kimi.com/coding`, 1 M context) instead of DeepSeek.
+
+| Task | Result | Notes |
+|---|---|---|
+| `incompatible-python-fasttext` | ✅ resolved | 3/3 — the fixture patch is the only thing that was missing |
+| `git-multibranch` | ❌ unresolved | `test_multi_branch_https_deploy`; the clone arrives already on `main` — see the batch-7 note above |
+
+**`incompatible-python-fasttext` — the fixture patch was the whole blocker.**
+With the proxy build args in place the image builds, the model downloads, and
+the agent diagnosed the numpy incompatibility. All three tests pass:
+`test_predict_raises_no_error`, `test_correct_output`,
+`test_site_packages_not_overly_changed` — the last one matters, because it means
+the agent removed the offending dependency without gutting the rest of
+`site-packages`. 322 s.
+
+This is the **second** time it scored: `batch7b` (the DeepSeek re-run started
+before the switch to KIMI) also passed 3/3, in 288 s, on a binary the agent had
+already fixed. That run is recorded by the harness as `failure_mode:
+unknown_agent_error`, but the agent was not at fault — the *provider* died
+mid-run with a 401:
+
+```
+API error (401): Authentication Fails, Your api key: ****7b81 is invalid
+```
+
+The agent's last turn had already fixed the package, `coderex-exit-code` is
+`0`, and the test passed. This is a provider-key failure, not a CodeRex failure,
+and it is the reason the switch to KIMI was made. Worth knowing when reading
+`unknown_agent_error` in these results: check `coderex-exit-code` and the last
+`result` line before blaming the agent.
+
+**`git-multibranch` — a different failure from batch 7, see above.** The agent
+built a working server — password SSH, both branches deploying in ~140 ms, the
+`post-receive` hook using `git archive | tar -x` rather than a work tree — and
+verified it with its own end-to-end script, whose output is in its final
+message (`<h1>MAIN branch v2</h1>`, `<h1>DEV branch deployed</h1>`). It then
+left that state in the repository. The test clones, lands on `main`, and
+`checkout -b main` fails with `a branch named 'main' already exists`; the page
+it finally reads is the agent's own test page, not `main branch content`.
 
 ### Scoreboard so far
 
-32 tasks attempted, 20 resolved (63 % of attempts).
+34 distinct tasks attempted, 22 resolved (65 %). Scored by distinct task, taking
+the best result where a task ran more than once — several did, both to re-check a
+fix and because batches 5–7 and 8 ran the same task on different providers. The
+twelve that have never resolved:
+
+`configure-git-webserver`, `cron-broken-network`,
+`decommissioning-service-with-sensitive-data`, `git-multibranch`,
+`jupyter-notebook-server`, `nginx-request-logging`, `path-tracing-reverse`,
+`polyglot-c-py`, `raman-fitting.easy`, `sanitize-git-repo`,
+`tmux-advanced-workflow`, `vim-terminal-task`.
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server` |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (new git refuses the test's own command) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass) |
+| Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the four found are fixed (see below) |
 
@@ -718,7 +813,9 @@ What the build does **not** change is the bug the task is about: with numpy 2.5
 installed, `fasttext` raises
 `ValueError: Unable to avoid copy while creating an array as requested`, which
 is exactly the incompatibility the agent is asked to diagnose. Adding the
-proxy only lets the container start; it does not make the tests pass.
+proxy only lets the container start; it does not make the tests pass. The
+eighth batch confirms that: with the patch it builds and the agent solves it,
+3/3.
 
 Note that `run-tests.sh` here is the cheap kind (`pip install pytest`, no
 `apt-get`, no `uv`), so this task does not need `--test-timeout 900`.
