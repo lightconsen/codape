@@ -339,6 +339,37 @@ assertions pass).
 These two are recorded as **dataset problems**, not model or CodeRex problems.
 The remaining tasks pass end-to-end.
 
+### 2026-11-02 — fourth batch, **3/5 resolved**
+
+| Task | Result | Notes |
+|---|---|---|
+| `fibonacci-server` | ✅ resolved | 6/6 — server on :3000, F(0)/F(100), 400 handling |
+| `sqlite-with-gcov` | ✅ resolved | 3/3 — compiled, on PATH, gcov enabled |
+| `chess-best-move` | ✅ resolved | correct move from a board image |
+| `vim-terminal-task` | ❌ unresolved | 4/5 pass; the script lacks the executable bit |
+| `decommissioning-service-with-sensitive-data` | ❌ unresolved | 5/6 pass; archive layout mismatch |
+
+**`vim-terminal-task`**: `test_python_script_executable` requires
+`os.access("/app/text_processor.py", os.X_OK)`. The instruction never asks for
+an executable file ("Using vim, create a Python script named
+'text_processor.py' that: 1. Takes a filename as a command line argument …"),
+and the script is invoked as `python /app/text_processor.py` by the other
+tests — so it runs correctly and every functional check passes. The
+requirement exists only in the test.
+
+**`decommissioning-service-with-sensitive-data`**: five of six checks pass,
+including shredding the originals, removing the config and PID file, and
+producing the GPG archive. The failing assertion decrypts the archive and then
+looks for `opt/sensitive_service_data/user_secrets.txt` — the archive is
+expected to carry the full path. The agent archived the directory's *contents*.
+Whether `tar` records the parent path depends on how the command is written
+(`-C /opt sensitive_service_data` vs `-C /`), and the instruction does not say
+which. The archive itself is valid and encrypted with AES256 as required.
+
+Both failures are **underspecified requirements**, not CodeRex defects — and
+unlike the earlier batches, the model's work is correct in every functional
+respect that the instruction states.
+
 ## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
