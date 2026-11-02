@@ -281,7 +281,7 @@ build arg is not visible to `RUN`. With those in place the clone succeeds.
 | Task | Build | Result |
 |---|---|---|
 | `fix-git` | still fails | the source repository no longer exists on GitHub |
-| `sanitize-git-repo` | builds with the proxy | agent blocked by the model gateway, not by CodeRex |
+| `sanitize-git-repo` | builds with the proxy | **2/3 pass** — over-scopes one extra file |
 
 `fix-git`'s setup clones `TheMikeMerrill/personal-site`, which now returns
 `Repository not found` from every path tried (direct, proxied). This is a stale
@@ -300,6 +300,11 @@ extra file outside the allowed set
 because its broader sweep found a credential there too. The grader only
 permits changes to the contaminated paths, so the extra edit fails the run.
 That is over-scoping by the model, not a CodeRex defect.
+
+Recorded failure signature for this task: `test_removal_of_secret_information`
+and `test_correct_replacement_of_secret_information` pass, while
+`test_no_other_files_changed` raises
+`ValueError: File exp_data/datasets/tokenized/rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json has been changed`.
 
 ## CodeRex defects the benchmark exposed
 
