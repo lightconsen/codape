@@ -184,6 +184,11 @@ All five had `failure_mode: unset`, so every one is a genuine agent result.
 
 #### `extract-safely`: found the answer, saved it to the wrong place
 
+> **Superseded.** This diagnosis was wrong: the prompt was truncated, so the
+> model never saw the sentence naming `/app/solution.txt`. With the fix it
+> resolves 3/3 — see *the stdin truncation* below. The paragraph is kept
+> because it is the mistake this record is meant to prevent.
+
 The task asks to extract one file out of a tar that also contains a
 `sensitive/` directory (credentials, a 30 MB blob), and write its contents to
 `/app/solution.txt`. The agent's approach was correct and careful — it listed
@@ -200,6 +205,69 @@ This is the same class as `configure-git-webserver`: the model satisfies its
 own idea of the task and drops a literal requirement ("write it to
 `/app/solution.txt`"). It is not a CodeRex defect — the stream ended cleanly
 with `end_turn`.
+
+### 2026-11-02 — the stdin truncation, and what it invalidated
+
+Every result above was measured with a CodeRex that **only read the first line
+of a piped prompt**. `coderex -p` used `read_line`, so a multi-line task
+description reached the model as its first line and nothing else. The model
+then answered what it could see, and the turn still ended as `success`, so no
+`failure_mode` revealed it.
+
+It was caught by reading the model's own words in `openssl-selfsigned-cert`:
+
+> No requirements list came through with the message (it ends at "the following
+> requirements:")
+
+That was literally true: the 1.5 KB numbered list after that phrase never
+arrived. Fixed in `orchestrator.rs` (`read_to_string`), with
+`a_multi_line_stdin_prompt_reaches_the_model_whole` as the regression test.
+
+**Three tasks that had been scored as failures now pass, with no other
+change** — same model, same instructions, same images:
+
+| Task | Before | After |
+|---|---|---|
+| `heterogeneous-dates` | 0/3 assertions | **resolved** |
+| `openssl-selfsigned-cert` | 0/6 assertions | **resolved** |
+| `new-encrypt-command` | 0/1 | **resolved** |
+| `extract-safely` | `test_solution_found: failed` | **resolved** (3/3) |
+
+`extract-safely` had been written up here as "the model satisfies its own idea
+of the task" — that was wrong. It never saw the sentence naming
+`/app/solution.txt`. The same caveat applies to the earlier
+`configure-git-webserver` write-up: its paths and port were in lines the model
+never received.
+
+### Current state after the fix
+
+Seven tasks measured with a correct prompt path:
+
+| Task | Result |
+|---|---|
+| `hello-world` | ✅ |
+| `fix-permissions` | ✅ |
+| `grid-pattern-transform` | ✅ |
+| `processing-pipeline` | ✅ |
+| `csv-to-parquet` | ✅ |
+| `heterogeneous-dates` | ✅ (was failing) |
+| `openssl-selfsigned-cert` | ✅ (was failing) |
+| `new-encrypt-command` | ✅ (was failing) |
+| `extract-safely` | ✅ (was failing) |
+| `configure-git-webserver` | ❌ still failing |
+
+`configure-git-webserver` now gets much further — `/git/server` appears in the
+transcript (previously zero occurrences), nginx listens on 8080, and the web
+check returns **HTTP 400** instead of 000. The blocker is authentication: the
+grading test's `expect` script sends the password to a `git clone` process that
+has already exited (`send: spawn id exp8 not open`), because the agent set up
+key-only SSH and never ran `chpasswd`. That is a genuine behavioural
+difference, not a plumbing failure.
+
+**Lesson for this document:** before scoring a task, confirm the model
+actually received the instruction. A prompt-delivery bug looks exactly like a
+model that ignores requirements, and it produced three wrong conclusions here
+before it was found.
 
 ## CodeRex defects the benchmark exposed
 
