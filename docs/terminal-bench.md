@@ -929,43 +929,99 @@ The timeout defect is now fixed — see defect 7 below. A `--print` turn with a
 stream writes `subtype: "interrupted"` and exits 143 when a signal ends it,
 so a run stopped from outside is no longer indistinguishable from a crash.
 
+### 2026-11-02 — thirteenth batch, **4/5 resolved**
+
+Five more never-run tasks on KIMI (`k3`), using the binary built with the
+signal fix from the twelfth batch — this is the first batch that could
+exercise it. All five images were pre-built before the run to separate
+"cannot build here" from "the agent failed"; `qemu-startup` was dropped for
+that reason (see below).
+
+| Task | Result | Notes |
+|---|---|---|
+| `swe-bench-astropy-1` | ✅ resolved | the nested-`CompoundModel` separability bug |
+| `swe-bench-astropy-2` | ✅ resolved | the `ascii.qdp` upper-case QDP bug |
+| `crack-7z-hash.hard` | ✅ resolved | `john` built from source in the image; answer `honeybear` |
+| `pytorch-model-cli.easy` | ✅ resolved | C CLI against a bundled `model.pth` |
+| `gpt2-codegolf` | ❌ unresolved | 2700 s, the full budget |
+
+Four passes, `failure_mode: unset` throughout. The two `swe-bench` tasks are
+the first astropy ones tried; like the fsspec and langcodes tasks they need a
+real checkout, a patch and a test suite, and both worked.
+
+**`gpt2-codegolf` is a model result, and the timeout classification is now
+right.** The agent wrote `/app/gpt2.c`, then iterated on it for the full
+window — 84 tool calls, almost all `Edit` to the same file — and the test
+fails on the *first* assertion, before any sampling is compared:
+
+```
+E       AssertionError: File /app/gpt2.c is larger than 5000 bytes
+E       assert 5030 < 5000
+```
+
+It came within 30 bytes of the size limit and ran out of time before making
+them. The run ends exactly as `play-zork` did — except that this time the
+stream has its closing frame:
+
+```
+{"type":"result","subtype":"interrupted","is_error":true,
+ "duration_ms":2700022,"num_turns":1,
+ "error":"SIGTERM ended the run before the turn finished"}
+```
+
+and the harness reports `agent_timeout`, not `unknown_agent_error`. That is
+the whole point of defect 7: the same run, recorded for what happened to it
+rather than for what it looked like.
+
+**`qemu-startup` is unrunnable here, like `qemu-alpine-ssh`.** Its image
+installs `qemu-system-x86` from `debian:bullseye-slim`, and the bullseye
+security pool has deleted the exact versions apt resolves to, so the build
+dies before the agent runs:
+
+```
+E: Failed to fetch http://deb.debian.org/debian-security/pool/updates/main/... 404  Not Found
+```
+
+That is the same failure recorded for `qemu-alpine-ssh` in the seventh batch,
+now confirmed on a second task from the same base image. It is a dataset
+problem, not a CodeRex one.
+
 ### Scoreboard so far
 
-54 distinct tasks attempted (68 % of the 80 in the dataset), 33 resolved
-(61 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
-`sanitize-git-repo.hard` and `play-zork` count as attempted but not
-resolved. Scored by distinct task, taking the best result where a task ran
-more than once — several did, both to re-check a fix and because the same
-task ran on DeepSeek and then on KIMI. The twenty-one that have never
+59 distinct tasks attempted (74 % of the 80 in the dataset), 37 resolved
+(63 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
+`sanitize-git-repo.hard`, `play-zork` and `gpt2-codegolf` count as attempted
+but not resolved. Scored by distinct task, taking the best result where a task
+ran more than once — several did, both to re-check a fix and because the same
+task ran on DeepSeek and then on KIMI. The twenty-two that have never
 resolved:
 
 `conda-env-conflict-resolution`, `configure-git-webserver`,
 `cron-broken-network`, `count-dataset-tokens`,
 `decommissioning-service-with-sensitive-data`, `git-multibranch`,
-`intrusion-detection`, `jupyter-notebook-server`, `nginx-request-logging`,
-`path-tracing-reverse`, `play-zork`, `polyglot-c-py`, `polyglot-rust-c`,
-`pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`,
-`sanitize-git-repo.hard`, `sanitize-git-repo`, `tmux-advanced-workflow`,
-`vim-terminal-task`.
+`gpt2-codegolf`, `intrusion-detection`, `jupyter-notebook-server`,
+`nginx-request-logging`, `path-tracing-reverse`, `play-zork`, `polyglot-c-py`,
+`polyglot-rust-c`, `pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`,
+`raman-fitting.easy`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
+`tmux-advanced-workflow`, `vim-terminal-task`.
 
-The twenty-six never run:
+The twenty-one never run:
 `build-initramfs-qemu`, `build-linux-kernel-qemu`, `build-tcc-qemu`,
-`cartpole-rl-training`, `crack-7z-hash.hard`, `download-youtube`, `eval-mteb`,
-`eval-mteb.hard`, `extract-moves-from-video`, `fix-git`, `get-bitcoin-nodes`,
-`gpt2-codegolf`, `hf-model-inference`,
-`incompatible-python-fasttext.base_with_hint`, `oom`, `pytorch-model-cli.easy`,
-`pytorch-model-cli.hard`, `qemu-startup`, `reshard-c4-data`,
-`run-pdp11-code`, `security-vulhub-minio`, `solana-data`,
-`super-benchmark-upet`, `swe-bench-astropy-1`, `swe-bench-astropy-2`,
+`cartpole-rl-training`, `download-youtube`, `eval-mteb`, `eval-mteb.hard`,
+`extract-moves-from-video`, `fix-git`, `get-bitcoin-nodes`,
+`hf-model-inference`, `incompatible-python-fasttext.base_with_hint`, `oom`,
+`pytorch-model-cli.hard`, `qemu-startup`, `reshard-c4-data`, `run-pdp11-code`,
+`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`,
 `train-fasttext`. Most need a dataset download, a multi-GB model, or a
-prebuilt third-party image; `fix-git`'s fixture is gone from GitHub.
+prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
+`qemu-startup`'s image no longer builds (see the thirteenth batch).
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
@@ -1123,6 +1179,12 @@ All seven were real, and all seven are fixed on `main`:
    {"type":"result","subtype":"interrupted","is_error":true,"duration_ms":4984,
     "num_turns":1,"error":"SIGTERM ended the run before the turn finished"}
    ```
+
+   The benchmark adapter maps that subtype to `AGENT_TIMEOUT` rather than
+   letting `is_error` make it `unknown_agent_error`. The inner `timeout` is
+   what sends the signal, so it means exactly what the harness's own timer
+   means; recording it as a crash hides the one fact the frame was added to
+   carry.
 
 ### Known, unfixed
 
