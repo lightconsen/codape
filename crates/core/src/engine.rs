@@ -3129,6 +3129,14 @@ impl QueryEngine {
         turn.transition_to(TurnState::ApplyToolResults);
         for result in &tool_results {
             let msg = Message::tool(result.clone());
+            // Both histories: the session's, which is what the next request is
+            // built from, and the turn's, which is what `close_turn` reads to
+            // pair results with the calls that produced them. Writing only to
+            // the session left `close_turn` with no results at all, so every
+            // turn's loop fingerprint was built from the calls alone — and a
+            // poll whose answer changes each time (`sleep 55; tail …` while a
+            // download runs) looked identical to a stuck one and ended the run.
+            turn.messages.push(msg.clone());
             self.session.messages.push(msg);
         }
 
@@ -3476,6 +3484,14 @@ impl QueryEngine {
         turn.transition_to(TurnState::ApplyToolResults);
         for result in &tool_results {
             let msg = Message::tool(result.clone());
+            // Both histories: the session's, which is what the next request is
+            // built from, and the turn's, which is what `close_turn` reads to
+            // pair results with the calls that produced them. Writing only to
+            // the session left `close_turn` with no results at all, so every
+            // turn's loop fingerprint was built from the calls alone — and a
+            // poll whose answer changes each time (`sleep 55; tail …` while a
+            // download runs) looked identical to a stuck one and ended the run.
+            turn.messages.push(msg.clone());
             self.session.messages.push(msg);
         }
 
@@ -7090,6 +7106,179 @@ mod tests {
         engine.interrupt();
 
         assert!(engine.interrupt_handle().is_interrupted());
+    }
+
+    /// A poll whose answer keeps changing is progress, not a loop.
+    ///
+    /// Waiting for a long install is done by asking the same question
+    /// repeatedly — `sleep 55; tail -3 install.log` — and the answer moves on
+    /// each time as the download progresses. The detector already knew that
+    /// (`from_tool_call_and_result`), but the engine never handed it the
+    /// answers: `close_turn` reads results from `turn.messages`, and the
+    /// streaming path wrote them only to `session.messages`. Every turn's
+    /// fingerprint was therefore built from its calls alone, and three
+    /// identical-looking polls ended the run.
+    #[tokio::test]
+    async fn polling_a_changing_answer_is_not_treated_as_a_loop() {
+        /// Answers with a poll call whose result differs every time, then
+        /// finishes.
+        struct PollThenFinish {
+            calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApiClient for PollThenFinish {
+            fn clone_box(&self) -> Box<dyn ApiClient> {
+                Box::new(Self {
+                    calls: std::sync::Arc::clone(&self.calls),
+                })
+            }
+
+            async fn create_message(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> Result<ApiResponse, crate::api_client::ApiError> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ApiResponse {
+                    // The final answer must carry text: an empty one leaves the
+                    // last message a tool result, which the loop reads as "the
+                    // model has not seen it yet" and keeps running.
+                    content: if call < 4 {
+                        String::new()
+                    } else {
+                        "installed".into()
+                    },
+                    tool_calls: if call < 4 {
+                        vec![crate::types::ToolCall {
+                            id: format!("tc_{call}"),
+                            name: "bash".into(),
+                            // The model literally repeats the same command:
+                            // the input carries no turn number.
+                            input: serde_json::json!({"command": "sleep 55; tail -3 install.log"}),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    usage: UsageSummary {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                    },
+                    stop_reason: if call < 4 { "tool_use" } else { "end_turn" }.into(),
+                    thinking: None,
+                })
+            }
+
+            async fn create_message_streaming(
+                &self,
+                system: &str,
+                messages: &[serde_json::Value],
+                model: &ModelId,
+                max_tokens: u32,
+                tools: &[crate::tool_executor::ToolInfo],
+            ) -> std::pin::Pin<
+                Box<dyn futures::Stream<Item = crate::api_client::StreamEvent> + Send + 'static>,
+            > {
+                let response = self
+                    .create_message(system, messages, model, max_tokens, tools)
+                    .await
+                    .expect("the mock answers");
+                let mut events = Vec::new();
+                if !response.content.is_empty() {
+                    events.push(crate::api_client::StreamEvent::TextDelta(
+                        response.content.clone(),
+                    ));
+                }
+                events.push(crate::api_client::StreamEvent::StopReason(
+                    response.stop_reason.clone(),
+                ));
+                for call in &response.tool_calls {
+                    events.insert(
+                        0,
+                        crate::api_client::StreamEvent::ToolCallBlockStart {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                        },
+                    );
+                    events.insert(
+                        1,
+                        crate::api_client::StreamEvent::ToolCallBlockEnd {
+                            id: call.id.clone(),
+                            input: call.input.clone(),
+                        },
+                    );
+                }
+                events.push(crate::api_client::StreamEvent::StreamEnd);
+                Box::pin(futures::stream::iter(events))
+            }
+        }
+
+        /// Returns a different progress line on every call.
+        struct ProgressingInstall(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        #[async_trait::async_trait]
+        impl crate::tool_executor::ToolExecutor for ProgressingInstall {
+            async fn execute(
+                &self,
+                tool_call_id: &str,
+                _tool_name: &str,
+                _input: &serde_json::Value,
+            ) -> crate::tool_executor::ToolDispatchOutcome {
+                let step = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::tool_executor::ToolDispatchOutcome {
+                    result: ToolResult {
+                        tool_call_id: tool_call_id.to_string(),
+                        output: format!("downloaded {step} of 40 MB"),
+                        is_error: false,
+                        images: Vec::new(),
+                    },
+                }
+            }
+
+            fn list_tools(&self) -> Vec<crate::tool_executor::ToolInfo> {
+                Vec::new()
+            }
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = SessionState::new(std::path::PathBuf::from("/tmp/test"));
+        let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = QueryEngine::new(
+            Box::new(PollThenFinish {
+                calls: std::sync::Arc::clone(&calls),
+            }),
+            ModelId::sonnet(),
+            session,
+            PermissionEngine::new(checker),
+            tx,
+        );
+        engine.set_tool_executor(Box::new(ProgressingInstall(std::sync::Arc::new(
+            std::sync::atomic::AtomicUsize::new(0),
+        ))));
+
+        let reason = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            engine.submit_streaming("install it".into(), SubmitOptions::default()),
+        )
+        .await
+        .expect("the run must finish; a hang here is the bug this test exists for")
+        .expect("the run finishes");
+
+        assert!(
+            !matches!(reason, TerminalReason::LoopDetected { .. }),
+            "a poll whose answer changes was called a loop: {reason:?}"
+        );
+        assert_eq!(
+            reason,
+            TerminalReason::Completed,
+            "the run did not finish normally: {reason:?}"
+        );
     }
 
     /// An interrupt that lands *between* turns — while a tool is running —
