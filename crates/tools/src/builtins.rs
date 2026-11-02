@@ -92,7 +92,7 @@ pub use team_delete_tool::TeamDeleteTool;
 pub use todo_write_tool::TodoWriteTool;
 pub use tool_search_tool::ToolSearchTool;
 pub use web_fetch_tool::WebFetchTool;
-pub use web_search_tool::WebSearchTool;
+pub use web_search_tool::{SearchBackendSpec, WebSearchTool};
 pub use worktree_tools::{EnterWorktreeTool, ExitWorktreeTool};
 pub use write_tool::WriteTool;
 
@@ -257,7 +257,7 @@ pub fn register_builtin_tools(reg: &mut crate::registry::ToolRegistry) {
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(LspTool));
     reg.register(Arc::new(WebFetchTool::new()));
-    reg.register(Arc::new(WebSearchTool));
+    reg.register(Arc::new(WebSearchTool::new()));
     reg.register(Arc::new(TodoWriteTool));
     reg.register(Arc::new(AskUserQuestionTool));
     reg.register(Arc::new(ToolSearchTool));
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn web_search_tool_is_read_only() {
-        let desc = WebSearchTool.descriptor();
+        let desc = WebSearchTool::new().descriptor();
         assert!(desc.is_read_only);
         assert!(!desc.requires_approval);
         assert!(desc.is_concurrency_safe);
@@ -513,7 +513,7 @@ mod tests {
             Box::new(GlobTool),
             Box::new(GrepTool),
             Box::new(WebFetchTool::new()),
-            Box::new(WebSearchTool),
+            Box::new(WebSearchTool::new()),
             Box::new(AgentTool::new()),
             Box::new(AskUserQuestionTool),
             Box::new(TodoWriteTool),
@@ -548,7 +548,7 @@ mod tests {
             Box::new(GlobTool),
             Box::new(GrepTool),
             Box::new(WebFetchTool::new()),
-            Box::new(WebSearchTool),
+            Box::new(WebSearchTool::new()),
             Box::new(AgentTool::new()),
             Box::new(AskUserQuestionTool),
             Box::new(TodoWriteTool),

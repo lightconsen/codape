@@ -21,12 +21,12 @@ pub use builtins::{
     AgentTool, AskUserQuestionTool, BashTool, BriefTool, ChromeClient, ConfigTool, CronCreateTool,
     CronDeleteTool, CronListTool, CurrentDirTool, EchoTool, EditTool, EnterPlanModeTool,
     ExitPlanModeTool, GlobTool, GrepTool, ListDirTool, LspTool, McpAuthTool, NoOpTool,
-    NotebookEditTool, PowerShellTool, ReadTool, RemoteTriggerTool, ReplTool, SendMessageTool,
-    SkillTool, SleepTool, StructuredOutputTool, SyntheticOutputTool, TaskCreateTool, TaskGetTool,
-    TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool, TodoWriteTool, ToolSearchTool,
-    WebFetchTool, WebSearchTool, WriteTool, cache_discovery_at, default_token_path,
-    persist_token_at, persist_token_with_endpoints_at, platform_shell_is_powershell,
-    platform_shell_tool, register_builtin_tools, register_shell_tool,
+    NotebookEditTool, PowerShellTool, ReadTool, RemoteTriggerTool, ReplTool, SearchBackendSpec,
+    SendMessageTool, SkillTool, SleepTool, StructuredOutputTool, SyntheticOutputTool,
+    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
+    TodoWriteTool, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, cache_discovery_at,
+    default_token_path, persist_token_at, persist_token_with_endpoints_at,
+    platform_shell_is_powershell, platform_shell_tool, register_builtin_tools, register_shell_tool,
 };
 pub use coderex_core::permissions::ToolRuleExemptions;
 pub use context::{ExecutionContext, ToolError, ToolOutput};

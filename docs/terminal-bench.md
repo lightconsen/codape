@@ -740,9 +740,9 @@ tool returns `/app`. `cd /tmp` was the model's own choice, and
 there is no persistent shell whose directory could drift. Recorded so the
 suspicion is not raised twice.
 
-Two CodeRex problems did fall out of this run, and both are under
-[Known, unfixed](#known-unfixed): the single hard-coded WebSearch backend, and
-the missing closing event when a timeout ends a run.
+Two CodeRex problems did fall out of this run: the single hard-coded WebSearch
+backend (now fixed — see the defects section) and the missing closing event
+when a timeout ends a run.
 
 ### Scoreboard so far
 
@@ -767,11 +767,11 @@ resolved:
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the four found are fixed, four more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the five found are fixed, three more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
-All four were real, and all four are fixed on `main`:
+All five were real, and all five are fixed on `main`:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -816,7 +816,45 @@ All four were real, and all four are fixed on `main`:
    runs, it ends them **exactly when the agent is doing the right thing** —
    polling a slow install instead of guessing that it finished.
 
+5. **WebSearch had one hard-coded backend.** `web_search_tool.rs` built
+   `https://html.duckduckgo.com/html/?q=…` on every call — no endpoint,
+   provider or proxy setting. In the ninth batch the only `WebSearch` call in
+   `polyglot-rust-c` failed with:
 
+   ```
+   tool 'WebSearch' invalid input: search failed: error sending request for url
+   (https://html.duckduckgo.com/html/?q=C%20Rust%20polyglot%20source%20file...)
+   ```
+
+   Two separate defects, and only the first was this machine's network:
+
+   - **No way out of a blocked host.** Any environment that blocks
+     duckduckgo.com — corporate proxy, egress firewall, a container whose only
+     route is a proxy — makes every search fail, with no recourse.
+   - **A provider outage looked like a model mistake.** Transport errors were
+     mapped to `InvalidInput`, so the error reads as "you passed bad
+     arguments". The model then reasoned the polyglot trick out from memory
+     instead of retrying something else.
+
+   The fix makes the backend list configurable and ordered. `CODEREX_SEARCH_BACKENDS`
+   is a comma-separated chain (`CODEREX_SEARCH_BACKEND` for a single entry),
+   each entry `kind` or `kind:endpoint`, tried in order; the run only fails
+   once every entry has. Endpoints may be `$VAR` references, so a token URL can
+   live in the environment rather than a settings file. A JSON backend
+   (`json:https://…`) takes any endpoint answering `?q=` with
+   `{"results":[{"title","url","snippet"}]}` or a bare array, which covers an
+   internal search service as well as a self-hosted proxy in front of a search
+   API. All backends failing is now `ToolError::Execution` — the variant
+   documented for "the work it delegated to failed" — and the message names
+   every endpoint tried plus the variable that overrides them.
+
+   Two smaller bugs in the same function were fixed while there:
+   `url_encode` encoded by `char`, turning `中` into the invalid `%4E2D`
+   instead of a byte-wise `%E4%B8%AD`, so non-ASCII queries were mangled; and
+   `parse_ddg_results` is unchanged in one respect — it still reports the
+   domain as the title and an empty snippet, because the HTML it scrapes does
+   not pair a title with a link per line. A JSON backend returns real titles
+   and snippets; the DuckDuckGo path does not.
 
 ### Known, unfixed
 
@@ -828,23 +866,6 @@ All four were real, and all four are fixed on `main`:
   guess: a pass reported success while removing 35 tokens and *growing* the
   message list (39 → 44 → 47) before the turn hard-stopped with
   "context window is full".
-- **WebSearch has one hard-coded backend.** `web_search_tool.rs:71` builds
-  `https://html.duckduckgo.com/html/?q=…` every time; there is no endpoint,
-  provider or proxy setting. In the ninth batch the only `WebSearch` call in
-  `polyglot-rust-c` failed with:
-
-  ```
-  tool 'WebSearch' invalid input: search failed: error sending request for url
-  (https://html.duckduckgo.com/html/?q=C%20Rust%20polyglot%20source%20file...)
-  ```
-
-  The agent then had to reason out the polyglot trick from memory. Two things
-  are wrong here, and only the first is this machine's network: the tool is
-  unreachable in any environment that blocks duckduckgo.com, and a search that
-  fails for transport reasons is reported as `InvalidInput`, which reads like
-  the model called it wrong rather than like a provider outage. Needs an
-  overridable endpoint and an error class that says "search backend
-  unavailable".
 - **A timed-out run leaves no record of *why* it ended.** When the harness
   timer fires, `timeout` sends SIGTERM. There is already a SIGTERM handler
   (`crates/cli/src/orchestrator.rs:887`), so the process does not die
