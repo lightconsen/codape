@@ -153,3 +153,60 @@ fn a_read_only_transcript_directory_does_not_fail_the_turn() {
         "the answer was lost when the transcript could not be written: {output}"
     );
 }
+
+/// A piped prompt is the whole document, not its first line.
+///
+/// `-p` read stdin with `read_line`, so a multi-line prompt — a task
+/// description, a pasted spec — reached the model truncated at its first
+/// newline. The model then answered only what it could see, and the turn still
+/// ended cleanly, so nothing downstream could tell.
+#[test]
+fn a_multi_line_stdin_prompt_reaches_the_model_whole() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let record = dir.path().join("requests.jsonl");
+    let responses = workspace_root().join("tests/responses.json");
+    let mut provider = Command::new(env!("CARGO_BIN_EXE_static-anthropic-server"))
+        .args([
+            "--port",
+            "0",
+            "--responses",
+            responses.to_str().expect("responses path"),
+            "--record",
+            record.to_str().expect("record path"),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn static provider");
+    let stderr = provider.stderr.take().expect("server stderr");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut announced = false;
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if !announced && let Some(address) = line.split("listening on ").nth(1) {
+                let _ = tx.send(address.trim().to_string());
+                announced = true;
+            }
+        }
+    });
+    let base_url = format!(
+        "http://{}",
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("static provider did not announce its address")
+    );
+
+    let prompt = "FIRST-LINE-MARKER\nblank line follows\n\nTHIRD-LINE-MARKER\n";
+    let _ = run_headless(dir.path(), &base_url, prompt);
+    let _ = provider.kill();
+    let _ = provider.wait();
+
+    let recorded = std::fs::read_to_string(&record).expect("recorded requests");
+    let body = recorded
+        .lines()
+        .find(|line| line.contains("FIRST-LINE-MARKER"))
+        .unwrap_or_else(|| panic!("no request carried the prompt: {recorded}"));
+    assert!(
+        body.contains("THIRD-LINE-MARKER"),
+        "the prompt was cut at the first newline: {body}"
+    );
+}

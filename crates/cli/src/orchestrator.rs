@@ -960,10 +960,17 @@ impl StartupOrchestrator {
 
         // Route based on CLI args
         if args.print || !args.prompt.is_empty() {
-            // Non-interactive: read from stdin or use positional prompt
+            // Non-interactive: read the whole prompt from stdin, or use the
+            // positional one.
+            //
+            // This used to call `read_line`, which reads *one line*. A piped
+            // prompt is a multi-line document — a task description, a pasted
+            // spec, a diff — and only its first line reached the model, which
+            // then answered the half of the request it could see. The stream
+            // still ended cleanly, so nothing downstream could tell.
             let prompt = if args.prompt.is_empty() {
                 let mut stdin = String::new();
-                std::io::stdin().read_line(&mut stdin)?;
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin)?;
                 stdin.trim().to_string()
             } else {
                 args.prompt.join(" ")
