@@ -269,6 +269,39 @@ actually received the instruction. A prompt-delivery bug looks exactly like a
 model that ignores requirements, and it produced three wrong conclusions here
 before it was found.
 
+### 2026-11-02 — `fix-git` and `sanitize-git-repo`
+
+Both tasks clone a public GitHub repository while building their task image,
+so they were the first to fail at `docker compose build`, before any agent ran.
+The container can reach the host proxy at `host.docker.internal:1087`, and two
+changes are needed for it to take effect: the compose file has to pass the
+proxy as a build arg, **and** the Dockerfile has to declare it — an undeclared
+build arg is not visible to `RUN`. With those in place the clone succeeds.
+
+| Task | Build | Result |
+|---|---|---|
+| `fix-git` | still fails | the source repository no longer exists on GitHub |
+| `sanitize-git-repo` | builds with the proxy | agent blocked by the model gateway, not by CodeRex |
+
+`fix-git`'s setup clones `TheMikeMerrill/personal-site`, which now returns
+`Repository not found` from every path tried (direct, proxied). This is a stale
+dataset dependency, not a network or proxy failure, and it cannot be fixed
+from CodeRex's side.
+
+`sanitize-git-repo` builds and starts, then its first provider request is
+refused:
+
+```
+API error (401): kiwanod: unknown API key; only agents taken over by Kiwano
+are routed through this gateway
+```
+
+The session's current token is rejected by the gateway and by the direct
+provider, so this run is blocked on credentials rather than on anything the
+agent did. Its test assertions (`test_removal_of_secret_information`,
+`test_correct_replacement_of_secret_information`) fail because the repository
+was never modified — not evidence about the model's behaviour.
+
 ## CodeRex defects the benchmark exposed
 
 All three were real, and all three are fixed on `main`:
