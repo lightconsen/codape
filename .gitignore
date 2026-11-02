@@ -39,3 +39,8 @@ __pycache__/
 # A stray shell redirect (`cmd > 1`) in a crate directory. `1` is never a
 # source file, so ignore it rather than committing a multi-megabyte transcript.
 crates/cli/1
+
+# Local secrets (provider API keys). The benchmark runners read the key from
+# the environment; `.env` is only a developer convenience and must never be
+# committed.
+.env
