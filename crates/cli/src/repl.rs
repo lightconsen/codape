@@ -6719,6 +6719,7 @@ fn write_interrupted_result(
     protocol: &mut Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
     session_id: &str,
     elapsed: std::time::Duration,
+    num_turns: u32,
     message: &str,
 ) {
     let Some(sink) = protocol.as_mut() else {
@@ -6729,7 +6730,7 @@ fn write_interrupted_result(
         session_id.to_string(),
         coderex_events::protocol::result_subtype::INTERRUPTED,
         u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-        1,
+        num_turns,
     );
     frame.data.insert(
         "error".to_string(),
@@ -7981,6 +7982,18 @@ impl ReplLoop {
 
         let options = self.build_submit_options();
         let mut engine = self.engine.take().unwrap();
+        // Where this turn starts counting. `current_turn` is cumulative across
+        // the session, so the turns this call consumed is the difference after
+        // it returns. Every closing frame below used to report a hardcoded 1,
+        // which is wrong for any run long enough to use tools: a benchmark
+        // trial that made 30 model calls reported `num_turns: 1`, and
+        // `--max-turns` is enforced against the same counter.
+        //
+        // The handle is taken before the engine crosses into its task: from
+        // there on `engine` is owned by that task and the REPL cannot ask it
+        // anything, including when a SIGTERM cuts the turn short.
+        let turn_counter = engine.turn_counter();
+        let turns_before = turn_counter.value();
         // Reapply the session's fallback model: the engine crosses the task
         // boundary below, and an agent selection or `/model` may have rebuilt
         // the engine's model after `configure_repl` ran.
@@ -8045,6 +8058,7 @@ impl ReplLoop {
                     &mut protocol,
                     &session_id,
                     turn_started.elapsed(),
+                    turn_counter.consumed_since(turns_before),
                     message,
                 );
                 if let Some(handle) = permission_forwarder.take() {
@@ -8202,12 +8216,13 @@ impl ReplLoop {
         // turn guard, so a turn cannot report itself finished twice.
         if let Some(mut sink) = protocol {
             let turn = sink.begin_turn(session_id.clone());
+            let turns_used = turn_counter.consumed_since(turns_before);
             let frame = match &result {
                 Ok(TerminalReason::MaxTurnsReached) => coderex_events::ResultFrame::error(
                     session_id.clone(),
                     coderex_events::protocol::result_subtype::ERROR_MAX_TURNS,
                     u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    1,
+                    turns_used,
                 ),
                 // A run that did not end because the model finished is not a
                 // success. These arrive as `Ok(_)` and used to be reported as
@@ -8215,9 +8230,11 @@ impl ReplLoop {
                 // gate stopped all reached the host as `subtype: success,
                 // is_error: false`, so nothing downstream could tell them from
                 // a completed task.
-                Ok(reason @ (TerminalReason::TokenLimitStop
-                | TerminalReason::LoopDetected { .. }
-                | TerminalReason::StopHook)) => {
+                Ok(
+                    reason @ (TerminalReason::TokenLimitStop
+                    | TerminalReason::LoopDetected { .. }
+                    | TerminalReason::StopHook),
+                ) => {
                     let subtype = match reason {
                         TerminalReason::TokenLimitStop => {
                             coderex_events::protocol::result_subtype::ERROR_MAX_OUTPUT_TOKENS
@@ -8231,7 +8248,7 @@ impl ReplLoop {
                         session_id.clone(),
                         subtype,
                         u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        1,
+                        turns_used,
                     );
                     // The text still goes out: it is what the model produced
                     // before the run ended, and dropping it would lose work.
@@ -8242,14 +8259,14 @@ impl ReplLoop {
                     session_id.clone(),
                     output.trim(),
                     u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    1,
+                    turns_used,
                 ),
                 Err(error) => {
                     let mut frame = coderex_events::ResultFrame::error(
                         session_id.clone(),
                         coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
                         u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        1,
+                        turns_used,
                     );
                     // The reason goes in the detail field, not the discriminant.
                     frame.data.insert(
@@ -12068,6 +12085,7 @@ mod tests {
             &mut sink,
             "session-1",
             std::time::Duration::from_millis(42),
+            3,
             "SIGTERM ended the run before the turn finished",
         );
 
@@ -12082,6 +12100,10 @@ mod tests {
         assert_eq!(parsed["is_error"], true);
         assert_eq!(parsed["session_id"], "session-1");
         assert_eq!(parsed["duration_ms"], 42);
+        assert_eq!(
+            parsed["num_turns"], 3,
+            "the interrupted run's turns are reported"
+        );
         assert_eq!(
             parsed["error"],
             "SIGTERM ended the run before the turn finished"

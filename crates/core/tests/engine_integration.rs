@@ -1253,10 +1253,28 @@ async fn state_machine_turn_counter_increments() {
 
     assert_eq!(engine.current_turn(), 0);
 
+    // Taken before the run, like the headless REPL does: the handle has to
+    // keep tracking after the engine is handed to its turn task, which is the
+    // only way the closing `result` frame can report the real count.
+    let counter = engine.turn_counter();
+    assert_eq!(counter.value(), 0);
+
     engine.submit("run ls".into(), options).await.unwrap();
 
     // After a multi-turn submit, current_turn should reflect at least 1 turn
     assert!(engine.current_turn() >= 1);
+    assert_eq!(
+        counter.value(),
+        engine.current_turn(),
+        "the handle and the engine must read the same counter"
+    );
+    // The run made two model calls: one that asked for `ls`, one that answered.
+    assert_eq!(counter.consumed_since(0), engine.current_turn());
+    assert!(
+        counter.consumed_since(0) >= 2,
+        "a tool-using run consumes more than one model turn, got {}",
+        counter.consumed_since(0)
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

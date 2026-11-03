@@ -1479,7 +1479,7 @@ prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the eight found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
@@ -1639,7 +1639,40 @@ All seven were real, and all seven are fixed on `main`:
    letting `is_error` make it `unknown_agent_error`. The inner `timeout` is
    what sends the signal, so it means exactly what the harness's own timer
    means; recording it as a crash hides the one fact the frame was added to
-   carry.
+   carry. Its `num_turns` was likewise the hardcoded 1 that defect 8 below
+   fixes.
+
+8. **`num_turns` in every closing frame was a hardcoded 1.** Found in the
+   twenty-fifth batch, on the frame the seventh defect added. The field is
+   documented as "number of model turns consumed", and all four arms of
+   `repl.rs`'s `match` on the run's outcome — success, max turns, token limit /
+   loop / stop hook, and error — passed the literal `1`:
+
+   ```
+   assistant messages=30 tool_uses=30 tool_results=30
+   {"type":"result","subtype":"error_during_execution","num_turns":1, ...}
+   ```
+
+   The number is not decorative. `--max-turns` is enforced against the same
+   `current_turn` counter, so a host reading `num_turns` to decide how a run
+   ended gets the wrong answer for every run that used a tool. The benchmark
+   adapter does not read it, which is why it went unnoticed through 25 batches;
+   anything that does — a cost estimate, a "did this run work or just answer?"
+   check — was misled.
+
+   The engine already tracked the count; the REPL just never asked. The fix is
+   `QueryEngine::turn_counter()`, a cloneable handle over the same atomic, so
+   the count stays readable after the engine crosses into its turn task. The
+   REPL captures it before the handoff and reports `consumed_since(before)`.
+   The SIGTERM path — which has no engine in hand at all — now takes the same
+   number, so the `interrupted` frame reports the turns the killed run had
+   actually made.
+
+   Covered by three tests: a unit test that the handle keeps reading the
+   engine's counter after the engine moves, the existing integration test
+   extended to assert the handle and the engine agree and that a tool-using
+   submit consumes at least two turns, and the binary test now asserting
+   `num_turns: 1` for a plain question-and-answer run.
 
 ### Known, unfixed
 

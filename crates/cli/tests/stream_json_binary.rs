@@ -202,6 +202,15 @@ fn stream_json_writes_one_frame_per_line() {
             .is_some_and(|s| !s.is_empty()),
         "the result frame must name the session"
     );
+    // `num_turns` is a measurement a host acts on, not a decorative field:
+    // it bounds `--max-turns` and tells a supervisor whether a run answered
+    // immediately or spent its budget working. Every closing frame used to
+    // write a hardcoded 1, so a 30-call run looked like a single exchange.
+    assert_eq!(
+        results[0]["num_turns"], 1,
+        "a plain question-and-answer run consumed exactly one model turn; result: {}",
+        results[0]
+    );
 
     // The protocol reports the turn as it happens; a text answer arrives as
     // streaming frames, not as one printed blob.

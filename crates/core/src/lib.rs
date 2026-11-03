@@ -83,7 +83,7 @@ pub use syntax::{SyntaxError, SyntaxHighlighter, Token};
 
 pub use engine::{
     DeniedToolCall, PendingElevation, PendingToolCall, QueryEngine, StreamingToolCallAssembler,
-    StructuredOutputValidator, SubmitOptions, TerminalReason, TurnRuntime, TurnState,
+    StructuredOutputValidator, SubmitOptions, TerminalReason, TurnCounter, TurnRuntime, TurnState,
     ValidationResult,
 };
 pub use runtime::{Runtime, RuntimeHandle, UiEvent};

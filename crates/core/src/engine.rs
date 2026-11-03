@@ -1407,6 +1407,31 @@ impl InterruptHandle {
     }
 }
 
+// ─── Turn counting ──────────────────────────────────────────────────────────
+
+/// A live view of an engine's turn counter, readable after the engine moves.
+///
+/// The engine is handed to a task for the duration of a turn, so the caller
+/// that writes the closing `result` frame no longer holds it. Cloning this
+/// handle before the handoff keeps the count visible; it reads the same atomic
+/// the engine writes, so it cannot drift.
+#[derive(Debug, Clone)]
+pub struct TurnCounter(Arc<std::sync::atomic::AtomicU32>);
+
+impl TurnCounter {
+    /// The turn number the engine has reached for this session.
+    #[must_use]
+    pub fn value(&self) -> u32 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// How many turns were consumed since `self` was captured at `before`.
+    #[must_use]
+    pub fn consumed_since(&self, before: u32) -> u32 {
+        self.value().saturating_sub(before)
+    }
+}
+
 // ─── QueryEngine ────────────────────────────────────────────────────────────
 
 /// QueryEngine — manages conversation turns with the AI model.
@@ -1441,8 +1466,10 @@ pub struct QueryEngine {
     permission_engine: PermissionEngine,
     /// Event sender for streaming events to UI/SDK.
     event_tx: mpsc::UnboundedSender<EngineEvent>,
-    /// Current turn number (1-indexed).
-    current_turn: u32,
+    /// Current turn number (1-indexed), shared so a caller can read it after
+    /// handing the engine to a task. `--max-turns` bounds this counter and the
+    /// closing `result` frame reports it, so both must see the same number.
+    current_turn: Arc<std::sync::atomic::AtomicU32>,
     /// Denied tool calls from previous turns, injected into next prompt.
     denied_tools: Vec<DeniedToolCall>,
     /// Schema validator for structured output.
@@ -1789,7 +1816,7 @@ impl QueryEngine {
             interrupt: InterruptHandle::default(),
             permission_engine,
             event_tx,
-            current_turn: 0,
+            current_turn: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             denied_tools: Vec::new(),
             structured_output: None,
             prompt_compiler: PromptCompiler::new(config),
@@ -2639,7 +2666,7 @@ impl QueryEngine {
         turn.agent_id = options.agent_id.clone();
         turn.transition_observer = self.transition_observer.clone();
         turn.transition_observer = self.transition_observer.clone();
-        let mut turn_number = self.current_turn + 1;
+        let mut turn_number = self.current_turn.load(std::sync::atomic::Ordering::SeqCst) + 1;
         let mut last_reason = TerminalReason::Completed;
         let mut provider_resumes: u32 = 0;
 
@@ -2669,7 +2696,8 @@ impl QueryEngine {
             // Execute the turn
             match self.execute_turn(&mut turn, &options, turn_number).await {
                 Ok(reason) => {
-                    self.current_turn = turn_number;
+                    self.current_turn
+                        .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     last_reason = reason.clone();
 
                     // An interrupt that arrived while this turn was running —
@@ -2726,7 +2754,8 @@ impl QueryEngine {
                             reason.clone(),
                         )
                         .await;
-                    self.current_turn = turn_number;
+                    self.current_turn
+                        .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     return match error {
                         TurnError::ApiUnavailable { .. } => Ok(reason),
                         TurnError::Fatal { message } => Err(message),
@@ -2766,7 +2795,7 @@ impl QueryEngine {
 
         let mut turn = TurnRuntime::new(budget);
         turn.agent_id = options.agent_id.clone();
-        let mut turn_number = self.current_turn + 1;
+        let mut turn_number = self.current_turn.load(std::sync::atomic::Ordering::SeqCst) + 1;
         let mut last_reason = TerminalReason::Completed;
         let mut provider_resumes: u32 = 0;
 
@@ -2799,7 +2828,8 @@ impl QueryEngine {
                 .await
             {
                 Ok(reason) => {
-                    self.current_turn = turn_number;
+                    self.current_turn
+                        .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     last_reason = reason.clone();
 
                     // A turn that was interrupted ends here rather than
@@ -2855,7 +2885,8 @@ impl QueryEngine {
                             reason.clone(),
                         )
                         .await;
-                    self.current_turn = turn_number;
+                    self.current_turn
+                        .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     return match error {
                         TurnError::ApiUnavailable { .. } => Ok(reason),
                         TurnError::Fatal { message } => Err(message),
@@ -4576,7 +4607,10 @@ impl QueryEngine {
         let tools = self.tools.list_tools();
         let request_client = self
             .api_client
-            .with_request_context(self.build_request_context(self.current_turn, options));
+            .with_request_context(self.build_request_context(
+                self.current_turn.load(std::sync::atomic::Ordering::SeqCst),
+                options,
+            ));
         // Mark the request time: a successful response refreshes the provider's
         // prompt cache, and the TTL trigger measures idleness from here.
         self.note_request_started();
@@ -4658,7 +4692,10 @@ impl QueryEngine {
             stream_text.begin_attempt();
             let request_client = self
                 .api_client
-                .with_request_context(self.build_request_context(self.current_turn, options));
+                .with_request_context(self.build_request_context(
+                    self.current_turn.load(std::sync::atomic::Ordering::SeqCst),
+                    options,
+                ));
             let mut stream = request_client
                 .create_message_streaming(&system, &messages, &self.model, self.max_tokens, &tools)
                 .await;
@@ -5464,8 +5501,19 @@ impl QueryEngine {
 
     /// Get the current turn number.
     #[must_use]
-    pub const fn current_turn(&self) -> u32 {
-        self.current_turn
+    pub fn current_turn(&self) -> u32 {
+        self.current_turn.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A handle that keeps tracking the turn count after the engine is moved.
+    ///
+    /// The headless turn task owns the engine while it runs, so the REPL
+    /// cannot call [`Self::current_turn`] at the moment it writes the closing
+    /// `result` frame — and a SIGTERM can cut the turn short while the task
+    /// still owns it. Both paths need the number.
+    #[must_use]
+    pub fn turn_counter(&self) -> TurnCounter {
+        TurnCounter(Arc::clone(&self.current_turn))
     }
 
     /// Interrupt the current turn (e.g., from Ctrl+C).
@@ -5522,6 +5570,32 @@ mod tests {
     use crate::api_client::StreamEvent;
     use crate::permission_engine::PermissionEngine;
     use crate::permissions::{PermissionChecker, PermissionMode};
+
+    /// The handle keeps reading the engine's counter after the engine moves.
+    ///
+    /// This is the shape the headless REPL depends on: it captures the handle
+    /// before handing the engine to the turn task, then reports the difference
+    /// in the closing `result` frame. Hardcoding that frame's `num_turns` to 1
+    /// is what made a 30-call benchmark trial report a single turn.
+    #[test]
+    fn a_turn_counter_handle_tracks_the_engine_after_the_handoff() {
+        let (engine, _rx, _session) = make_test_engine();
+        let counter = engine.turn_counter();
+        assert_eq!(counter.value(), 0);
+
+        // Advance the engine, as the turn task does while the caller holds
+        // only the handle.
+        engine
+            .current_turn
+            .store(4, std::sync::atomic::Ordering::SeqCst);
+
+        assert_eq!(counter.value(), 4);
+        assert_eq!(counter.consumed_since(0), 4);
+        assert_eq!(counter.consumed_since(3), 1);
+        // A later submit in the same session starts from where the last one
+        // ended, so a baseline from the future must not underflow.
+        assert_eq!(counter.consumed_since(9), 0);
+    }
 
     fn make_test_engine() -> (
         QueryEngine,
