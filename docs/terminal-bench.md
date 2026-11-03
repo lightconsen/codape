@@ -1248,6 +1248,94 @@ This is worth recording as a caution: a fixture patch that makes a file
 *import* is not the same as one that preserves its behaviour, and this test
 executes the patched string rather than just containing it.
 
+### 2026-11-03 — twenty-second and twenty-third batches, the kernel and fasttext training
+
+| Task | Result | Notes |
+|---|---|---|
+| `build-linux-kernel-qemu` | ❌ unresolved | `test_timeout`; the agent built `bzImage` and the initramfs in 7200 s, then the *test's own* apt-get ran out of its 1800 s before QEMU started |
+| `train-fasttext` | ❌ unresolved | `agent_timeout`; accuracy reached 0.6233 inside the size limit, but no `/app/model.bin` was ever written |
+
+**The kernel task now gets all the way to a built kernel.** With the corrected
+string and a 7200 s budget, the agent installed the toolchain (apt took ~25
+minutes from `ports.ubuntu.com`), extracted linux-6.9, added
+`printk(KERN_INFO "Hello, this is a custom kernel")` to `init/main.c`, built
+`arch/x86/boot/bzImage`, and produced `ramfs/initramfs.cpio.gz`. The agent
+finished; the *test* then timed out.
+
+The test's `init` string is a full provisioning script: it re-runs
+`apt-get update` and reinstalls `build-essential`, `qemu-system`, `expect`,
+`bc`, `cpio`, `wget` from scratch before booting anything. On this network that
+takes far longer than the 1800 s test budget, so QEMU never ran and the trial
+is recorded as `test_timeout`. The reference task assumes a fast apt; here the
+same 25 minutes the agent already paid are paid again. That is a measurement
+artefact of the network, not a CodeRex result — the deliverable it grades was
+present.
+
+The remedy is to pre-install the toolchain in the fixture image, so the test's
+`apt-get install` is a no-op and the test measures the kernel rather than the
+package mirror. That build is running.
+
+**`train-fasttext` — right answer, missing file.** The agent converted the two
+parquet files to fasttext format, trained a 848 MB model, and then quantised it
+five ways to fit the 150 MB limit. Two candidates cleared 0.62:
+
+```
+A_cut1M_noretrain: acc=0.6233 sizeMB=59.7
+B_cut1M_retrain:   acc=0.6187 sizeMB=59.7
+```
+
+`A_cut1M_noretrain` meets both requirements — 0.6233 against a 0.62 floor,
+59.7 MB against a 150 MB ceiling. But the run shared its 2700 s budget with
+the 495 MB text conversion and a 1.29 GB base training pass, and the timer
+fired while candidate `C_cut1.5M_noretrain` was still quantising. `model.bin`,
+the one thing the instruction asks to be saved, was never copied into place, so
+both tests fail on a missing file rather than on model quality. The work to
+produce a passing model was done; the last step was not. Recorded as a
+budget/model-behaviour failure, not a fixture problem.
+
+The fixture needed the same proxy patch as the fasttext tasks — its Dockerfile
+`wget`s two Yelp parquet files from `huggingface.co` at build time — and with
+it the image builds (477 KB test split, 299 MB train split).
+
+### 2026-11-03 — the proxy is not free, and `--task-proxy-direct-hosts`
+
+The kernel task exposed a cost the earlier proxy work had hidden. On this
+machine, the same `apt-get install` of the kernel toolchain took:
+
+| Route | Time for `build-essential libncurses-dev bison flex libssl-dev libelf-dev qemu-system bc cpio wget expect curl busybox-static` |
+|---|---|
+| direct | **66 s** |
+| through `http://host.docker.internal:1087` | **> 20 min** (not finished when the build was killed at 19 min) |
+| through the proxy, with the apt hosts in `no_proxy` | **68 s** |
+
+Measured in `ghcr.io/laude-institute/t-bench/ubuntu-24-04:latest`. So the proxy
+that makes `huggingface.co` reachable makes `ports.ubuntu.com` roughly twenty
+times slower, and the earlier batches that used `--task-proxy` on tasks doing
+real `apt-get` work were paying that without noticing.
+
+The adapter now accepts `--task-proxy-direct-hosts`, a comma-separated list
+of hosts appended to `no_proxy` / `NO_PROXY` in both the agent's environment
+and `/etc/profile.d/99-coderex-proxy.sh`. With
+`--task-proxy http://host.docker.internal:1087 --task-proxy-direct-hosts
+ports.ubuntu.com,deb.debian.org,pypi.org`, apt stays on the fast direct route
+while `huggingface.co` still goes through the proxy. The provider host and
+loopback are always direct regardless, as before.
+
+The no-proxy string is composed once in `_no_proxy_value()` and used in both
+places, so the agent shell and the test shell cannot disagree. Verified by
+construction:
+
+```
+with direct: localhost,127.0.0.1,::1,host.docker.internal,ports.ubuntu.com,deb.debian.org,api.kimi.com
+without    : localhost,127.0.0.1,::1,host.docker.internal,api.kimi.com
+```
+
+For the kernel task this turned out not to be enough on its own, because its
+*test* re-runs the whole toolchain install and the test budget is per-task;
+the image pre-install below is the actual fix there. But for any task that
+installs packages and also needs a blocked host, this is the correct shape of
+the flag.
+
 ### Scoreboard so far
 
 71 distinct tasks attempted (89 % of the 80 in the dataset), 41 resolved

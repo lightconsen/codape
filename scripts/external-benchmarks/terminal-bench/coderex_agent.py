@@ -99,6 +99,7 @@ class CodeRexAgent(AbstractInstalledAgent):
         extra_args: str | list[str] | None = None,
         extra_instructions: str | None = None,
         task_proxy: str | None = None,
+        task_proxy_direct_hosts: str | list[str] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -117,6 +118,21 @@ class CodeRexAgent(AbstractInstalledAgent):
         # cannot start. `localhost` is excluded so a task's own service on
         # port 5000 is never sent through it.
         self._task_proxy = str(task_proxy) if task_proxy else None
+        # Hosts that should keep going direct even though a task proxy is set.
+        # A proxy is not free: on this machine the same toolchain apt install
+        # takes 66 s direct and over 20 minutes through the proxy, while only a
+        # few hosts (huggingface.co, youtube.com) actually need it. A task that
+        # installs packages *and* downloads from one of those needs both
+        # halves, and this is how it gets them.
+        if isinstance(task_proxy_direct_hosts, str):
+            direct = task_proxy_direct_hosts.split(",")
+        elif task_proxy_direct_hosts is None:
+            direct = []
+        else:
+            direct = [str(host) for host in task_proxy_direct_hosts]
+        self._task_proxy_direct_hosts = [
+            host.strip() for host in direct if str(host).strip()
+        ]
         if isinstance(extra_args, str):
             self._extra_args = shlex.split(extra_args)
         elif extra_args is None:
@@ -187,7 +203,7 @@ class CodeRexAgent(AbstractInstalledAgent):
         return "\n".join(lines)
 
     def _no_proxy_value(self) -> str:
-        hosts = [NO_PROXY]
+        hosts = [NO_PROXY, *self._task_proxy_direct_hosts]
         for name in ("ANTHROPIC_BASE_URL", "CODEREX_BASE_URL", "OPENAI_BASE_URL"):
             value = os.environ.get(name)
             if not value:

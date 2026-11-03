@@ -249,6 +249,11 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         ]
     if args.task_proxy:
         command += ["--agent-kwarg", f"task_proxy={args.task_proxy}"]
+    if args.task_proxy_direct_hosts:
+        command += [
+            "--agent-kwarg",
+            f"task_proxy_direct_hosts={args.task_proxy_direct_hosts}",
+        ]
     if args.tasks:
         for task in args.tasks:
             command += ["--task-id", task]
@@ -434,6 +439,17 @@ Notes:
         "own traffic (package installs, dataset downloads). The provider "
         "endpoint always bypasses it. Use this when the container cannot "
         "reach a host the machine can, e.g. http://host.docker.internal:1087.",
+    )
+    parser.add_argument(
+        "--task-proxy-direct-hosts",
+        default=None,
+        metavar="HOST[,HOST...]",
+        help="Comma-separated hosts (or domains) that should bypass "
+        "--task-proxy. Use it when only some destinations are unreachable: "
+        "on this machine apt from ports.ubuntu.com is reachable directly and "
+        "takes 66 s for a toolchain that takes over 20 minutes through the "
+        "proxy, so 'ports.ubuntu.com,deb.debian.org,pypi.org' keeps package "
+        "installs fast while huggingface.co still goes through.",
     )
     parser.add_argument("--run-id", help="Run identifier (default: tb-YYYYmmdd-HHMMSS)")
     parser.add_argument(
