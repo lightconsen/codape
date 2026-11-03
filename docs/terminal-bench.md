@@ -1106,42 +1106,182 @@ build args. `eval-mteb`'s apt stage stalls on `libx11-6` from
 `deb.debian.org`. Both stay in the never-run list; neither says anything
 about CodeRex.
 
+### 2026-11-03 — nineteenth batch, two fixtures that could not run
+
+The nineteenth batch took `build-linux-kernel-qemu` and `reshard-c4-data`, the
+two most expensive tasks still untried. Neither produced a score, and in both
+cases the reason is the fixture, not the agent.
+
+| Task | Result | Notes |
+|---|---|---|
+| `build-linux-kernel-qemu` | ❌ unresolved | `agent_timeout`; test file crashes at import (`TypeError: bad operand type for unary +: 'str'`) |
+| `reshard-c4-data` | ⚪ not scored | image build fails on `load_dataset("allenai/c4")` — `huggingface.co` unreachable from the builder |
+
+**The kernel test file does not parse.** `tests/test_outputs.py` line 37 ends
+with `"... libssl-dev """` and line 38 begins `+"""libelf-dev ...`. That is
+string concatenation split at a line boundary where the operator landed at the
+start of the next line, which Python reads as unary plus on a string:
+
+```
+TypeError: bad operand type for unary +: 'str'
+```
+
+pytest cannot collect the file, so the trial fails regardless of what the
+container contains. The agent's own run is a different story: 52 tool calls,
+all of them waiting. `apt-get install` of the kernel build dependencies
+(`build-essential`, `qemu-system`, `expect`, ...) ran against
+`ports.ubuntu.com` for the whole 3000 s budget at roughly 30-60 kB/s and never
+finished; the agent polled it every 55 s with `sleep 55; tail -1
+/app/apt-install.log`, which is the right patience but the wrong speed. The
+kernel tarball itself downloaded fine (144 MB in under a minute). This is the
+slow-apt class already recorded for `pytorch-model-cli` and `eval-mteb`, and it
+is why the task cannot be scored here — but the fixture bug means even a
+finished install would have failed.
+
+The one-character fix is to join the two lines with the operator at the end of
+the first (`"""...libssl-dev """ +`), which is what the pristine file meant.
+With that, `ast.parse` succeeds. Recorded under [Local fixture
+patches](#local-fixture-patches) and re-run in the twenty-first batch.
+
+**`reshard-c4-data` never started.** Its `Dockerfile` runs `python setup.py`
+at build time, which calls `load_dataset("allenai/c4", ...)` and downloads
+`en/c4-train.00000-of-01024.json.gz` from `huggingface.co`. From inside the
+builder that address is unreachable (`[Errno 101] Network is unreachable`,
+five retries, then `ConnectionError: Couldn't reach 'allenai/c4' on the Hub`).
+The harness records the compose failure as `unknown_agent_error` with
+`is_resolved: null` and no trial timings, because no container ever existed.
+Unlike the earlier huggingface tasks this one fails in the *image build*, so
+`--task-proxy` cannot help: the proxy is installed into a running container,
+past the point this fails.
+
+The same `ARG`-plus-compose-`args` patch used for `incompatible-python-fasttext`
+fixes it. A direct build with the four proxy build args completed in 27
+minutes (the 800 MB C4 shard dominates) and produced an image whose
+`/app/c4_sample` holds 9898 JSONL files totalling 799 MB — the state the task
+expects. Patched in the fixture and re-run in the twenty-first batch. The
+27-minute build means this task cannot be batched casually; the image is now
+cached as `tb-probe-reshard:patched`.
+
+### 2026-11-03 — twentieth batch, the hint variant, **1/1 resolved**
+
+`incompatible-python-fasttext.base_with_hint` is the same task with the
+instruction pointing at `model.bin` and forbidding new packages. It had never
+run for the same huggingface reason as its parent; with the proxy patch it
+built and the agent solved it 3/3.
+
+| Task | Result | Notes |
+|---|---|---|
+| `incompatible-python-fasttext.base_with_hint` | ✅ resolved | 3/3; 4 minutes of agent time; three edits to `FastText.py` |
+
+The agent's path is short and correct: it looked for `model.bin` (the hint's
+one addition), found `copy=False` with Grep, then edited three lines of
+`fasttext/FastText.py` to use `np.asarray` instead of `np.array(..., copy=False)`
+— the same fix the task's `solution.yaml` prescribes. It did not install
+anything, which the instruction required and the third test
+(`test_site_packages_not_overly_changed`) enforces.
+
+The image build is the slow part, not the task: 25 minutes for the 106 MB
+model plus the `fasttext` wheel. Once the build cache holds it, a re-run costs
+seconds.
+
+### 2026-11-03 — twenty-first batch, two patched fixtures, **0/2 resolved**
+
+The two tasks the nineteenth batch could not score, re-run against the patched
+fixtures.
+
+| Task | Result | Notes |
+|---|---|---|
+| `reshard-c4-data` | ❌ unresolved | 1/2; `test_revert` fails — the agent nested `c4_reshard/` into `shard_XX/part_XXX/`, which the test's flat `os.listdir` can never accept |
+| `build-linux-kernel-qemu` | ❌ unresolved | `agent_timeout` at 3000 s; test ran but `expect` was never installed — because **my patch was wrong** (see below), not because of the task |
+
+**`reshard-c4-data` is a real instruction-versus-test gap.** The instruction
+asks for at most 30 files per folder and at most 15 MB per file. Every one of
+the 9898 files is about 300 KB, so only the folder limit bites, and the agent
+solved exactly that: it built `c4_reshard/shard_XX/part_XXX/<original files>`
+with at most 30 entries per directory, wrote `manifest.json`, verified all 9898
+sha256 sums, and wrote `revert.py` next to `c4_sample/` — which then restored
+9898/9898 files with *"all checksums verified OK"*.
+
+The test requires something else: after `uv run revert.py`, `os.listdir("/app/c4_reshard/")`
+must equal the 9898 original basenames. A nested layout cannot satisfy that no
+matter what `revert.py` does, and the agent's `revert.py` restored into
+`./c4_sample` (a defensible reading of *"revert … back to the original state"*)
+rather than into `c4_reshard/` itself, which is what the reference solution
+does — it writes the originals back into `/app/c4_reshard/` and deletes the
+shards.
+
+The test also has a units bug that makes one constraint vacuous:
+`MAX_SIZE_PER_FILE = 15 * 1024 * 1024 * 1024` is 15 **GB**, not the 15 MB the
+instruction states. Harmless here because no file is near either bound, but it
+means the file-size half of the task is never checked.
+
+So this belongs in the instruction-contradicts-test class: the instruction
+never says the resharded folder must stay flat or that `revert.py` must write
+back into `c4_reshard/`. Recorded as an unresolved task.
+
+The image build, once patched, took 27 minutes and produced
+`/app/c4_sample` with 9898 files — so the fixture is sound apart from the
+contradiction above.
+
+**The kernel fixture collected this time, and my first patch was wrong.** The
+`TypeError` was gone and pytest ran `test_expect`, which builds its own
+initramfs from the `init` string and drives QEMU with an expect script. That
+script failed with `init.sh: line 4: libelf-dev: command not found` and then
+`/bin/sh: 1: expect: not found`, so no kernel output was ever produced. The
+cause was my edit, not the task: I split the concatenation onto a new line,
+which inserted a newline inside the `apt-get install -y ... libssl-dev`
+command and broke the list in two. The correct patch keeps the two literals on
+one line with their original spacing:
+
+```python
+apt-get install -y build-essential libncurses-dev bison flex libssl-dev """+"""libelf-dev qemu-system bc cpio wget expect
+```
+
+which concatenates to `... libssl-dev libelf-dev ...` — exactly the single
+command the file meant. Verified by `ast.parse` and by evaluating the literal.
+The agent side of the run was healthy: 168 transcript frames, apt for the
+build dependencies finally completed after ~30 minutes, the 6.9 tree extracted,
+`make` was running when the 3000 s timer fired. Re-run in the twenty-second
+batch with a 7200 s budget.
+
+This is worth recording as a caution: a fixture patch that makes a file
+*import* is not the same as one that preserves its behaviour, and this test
+executes the patched string rather than just containing it.
+
 ### Scoreboard so far
 
-68 distinct tasks attempted (85 % of the 80 in the dataset), 40 resolved
-(59 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
+71 distinct tasks attempted (89 % of the 80 in the dataset), 41 resolved
+(58 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
 `run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork`, `gpt2-codegolf`,
 `hf-model-inference`, `download-youtube`, `extract-moves-from-video`,
 `build-initramfs-qemu` and `get-bitcoin-nodes` count as attempted but not
 resolved. Scored by distinct task, taking the best result where a task ran
 more than once — several did, both to re-check a fix and because the same task
-ran on DeepSeek and then on KIMI. The twenty-eight that have never resolved:
+ran on DeepSeek and then on KIMI. The thirty that have never resolved:
 
-`build-initramfs-qemu`, `conda-env-conflict-resolution`,
+`build-initramfs-qemu`, `build-linux-kernel-qemu`, `conda-env-conflict-resolution`,
 `configure-git-webserver`, `cron-broken-network`, `count-dataset-tokens`,
 `decommissioning-service-with-sensitive-data`, `download-youtube`,
 `extract-moves-from-video`, `get-bitcoin-nodes`, `git-multibranch`,
 `gpt2-codegolf`, `hf-model-inference`, `intrusion-detection`,
 `jupyter-notebook-server`, `nginx-request-logging`, `path-tracing-reverse`,
 `play-zork`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
-`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`, `run-pdp11-code`,
-`sanitize-git-repo.hard`, `sanitize-git-repo`, `tmux-advanced-workflow`,
-`vim-terminal-task`.
+`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`, `reshard-c4-data`,
+`run-pdp11-code`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
+`tmux-advanced-workflow`, `vim-terminal-task`.
 
-The twelve never run:
-`build-linux-kernel-qemu`, `eval-mteb`, `eval-mteb.hard`, `fix-git`,
-`incompatible-python-fasttext.base_with_hint`, `oom`, `qemu-startup`,
-`reshard-c4-data`, `security-vulhub-minio`, `solana-data`,
-`super-benchmark-upet`, `train-fasttext`. Most need a dataset download, a
-multi-GB model, or a prebuilt third-party image; `fix-git`'s fixture is gone
-from GitHub, and `qemu-startup`'s image no longer builds (see the thirteenth
-batch).
+The nine never run:
+`eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
+`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`,
+`train-fasttext`. Most need a dataset download, a multi-GB model, or a
+prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
+`qemu-startup`'s image no longer builds (see the thirteenth batch).
 
 | Failure class | Tasks |
 |---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname), `reshard-c4-data` (test demands a flat `c4_reshard/` holding the original basenames after `revert.py` runs; the instruction only bounds files-per-folder, so a nested layout is legal and fails no stated rule) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`), `build-linux-kernel-qemu` (`tests/test_outputs.py` line 37-38 splits string concatenation so the `+` becomes unary plus; pytest cannot collect — patched, see below) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` and `...base_with_hint` (huggingface.co — patched, see below; **both pass once they build**), `reshard-c4-data` (image build downloads `allenai/c4` from huggingface.co — patched, see below), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `build-linux-kernel-qemu` (apt from `ports.ubuntu.com` at 30-60 kB/s: the 3000 s budget went to installing the kernel build dependencies), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
@@ -1321,7 +1461,7 @@ All seven were real, and all seven are fixed on `main`:
 ## Local fixture patches
 
 The cached dataset at `~/.cache/terminal-bench/terminal-bench-core/0.1.1` is a
-copy, not the upstream source, and three of its tasks have been edited so they
+copy, not the upstream source, and five of its tasks have been edited so they
 can run at all on this machine. Every edit is recorded here so a result can be
 traced back to the fixture it was measured against, and each edited file has a
 `.orig` sibling holding the pristine version.
@@ -1366,6 +1506,61 @@ eighth batch confirms that: with the patch it builds and the agent solves it,
 
 Note that `run-tests.sh` here is the cheap kind (`pip install pytest`, no
 `apt-get`, no `uv`), so this task does not need `--test-timeout 900`.
+
+**`incompatible-python-fasttext.base_with_hint` — the same patch.** Its
+Dockerfile is identical apart from the instruction, so the same `ARG` block and
+compose `args:` were applied. Bought a 1/1 result (twentieth batch).
+
+**`reshard-c4-data` — the same patch again.** Its Dockerfile runs
+`python setup.py`, which calls `load_dataset("allenai/c4", ...)`. From the
+builder, `huggingface.co` answers `[Errno 101] Network is unreachable` and the
+build dies with `ConnectionError: Couldn't reach 'allenai/c4' on the Hub`.
+The `ARG` block plus compose `args:` fixes it; the build then takes about 27
+minutes because it downloads and shards the 800 MB C4 sample, and the result
+is `/app/c4_sample` with 9898 JSONL files.
+
+This is a *build-time* download, so `--task-proxy` cannot help: the adapter
+installs the proxy into a container that this failure prevents from existing.
+The fixture patch is the only route.
+
+**`build-linux-kernel-qemu` — a Python syntax bug in the test.** Line 37 of
+`tests/test_outputs.py` ends with a complete string literal and line 38 begins
+with `+"""libelf-dev ...`. Intended as implicit concatenation, written with the
+operator at the start of the wrapped line, it is unary plus applied to a
+string:
+
+```
+TypeError: bad operand type for unary +: 'str'
+```
+
+pytest fails at collection, before any container state is read. Moving the
+operator to the end of line 37 restores the concatenation — and it must stay on
+the *same* line as the first literal, not be moved to a line of its own:
+
+```python
+init = """
+apt-get update -y
+apt-get install -y build-essential libncurses-dev bison flex libssl-dev """+"""libelf-dev qemu-system bc cpio wget expect
+```
+
+The string is not inert: `test_expect()` writes it to `init.sh` and runs it, so
+the concatenation has to reproduce the original command exactly. Putting the
+`+` at the start of a fresh line parses but inserts a newline, splitting
+`apt-get install` into `... libssl-dev` followed by a `libelf-dev: command not
+found` line. That mistake was made once and caught by the twenty-first batch,
+whose test phase never had `expect` or the rest of the package list. Keep the
+space after `libssl-dev` and keep both literals on one line.
+
+Also note the test calls `test_expect()` at module scope rather than inside a
+`test_` function; that is harmless once the syntax is valid, because the
+harness parses the printed result, but it is why the whole task hangs if the
+expect script's `set timeout -1` never matches.
+
+**`sanitize-git-repo`.** Its `Dockerfile.orig` reconstruction was added later
+than the patch itself; the pristine file is the current one minus the `ARG`
+block and its two-line comment, and the pristine compose file omits the
+`args:` map. The current patched files are what the recorded results were
+measured against.
 
 ## Running the batch offline
 
