@@ -1297,6 +1297,78 @@ The fixture needed the same proxy patch as the fasttext tasks — its Dockerfile
 `wget`s two Yelp parquet files from `huggingface.co` at build time — and with
 it the image builds (477 KB test split, 299 MB train split).
 
+### 2026-11-03 — twenty-fourth batch, the kernel boots the wrong initramfs, **0/1 resolved**
+
+| Task | Result | Notes |
+|---|---|---|
+| `build-linux-kernel-qemu` | ❌ unresolved | `test_timeout`; with the toolchain pre-installed the agent finished in 24 minutes and the test booted — but it booted a ramfs that never reaches a login prompt |
+
+With the toolchain in the image the test's apt-get became a no-op and QEMU
+finally ran. It still failed, for a reason that had nothing to do with CodeRex.
+The instruction says:
+
+> I've created an initial ramfs for you, so once its built, all you should have
+> to do is run `qemu-system-x86_64 -kernel ./linux-6.9/arch/x86/boot/bzImage
+> -initrd ramfs/initramfs.cpio.gz …`
+
+No such ramfs shipped. `ls -la /app` in both the patched image and the pristine
+`ghcr.io/laude-institute/t-bench/ubuntu-24-04:latest` is empty, so a compliant
+agent has to build one — the agent did, and `poweroff` there would have worked.
+Then the test's own provisioning script ran in the same directory:
+
+```
+mkdir: cannot create directory 'ramfs': File exists
+gzip: initramfs.cpio.gz already exists; not overwritten
+gzip rc=2
+```
+
+`gzip` exits 2 rather than overwriting, and the test has no `set -e`, so it
+carried on and booted **the agent's** initramfs with the test's own
+`bzImage` path. That initramfs ends with `exec /linuxrc`, and busybox's
+`--install` does not create `/linuxrc` at the filesystem root in this
+configuration, so init failed and QEMU idled at 0.5 % CPU until the 2400 s test
+budget expired — recorded as a test timeout with no output at all.
+
+Three fixture defects, all upstream of the agent: a promised file that never
+existed, a test script that silently reuses an agent's artifact, and an
+unbounded `set timeout -1` that turns any boot failure into silence. None of
+them is a CodeRex defect.
+
+### 2026-11-03 — fixing the kernel fixture's ramfs
+
+The fixture now supplies the artifact the instruction promises, and its test
+provisions itself idempotently:
+
+- **The image builds `ramfs/initramfs.cpio.gz`.** It uses the same `basic-init`
+  and the same busybox binary as the test's `initramfs.list`, with the same
+  layout — including `nod /dev/console c 5 1`, which the first draft omitted.
+  That omission is fatal: without the console node PID 1 has no stdio and the
+  boot stops silently after "Starting up...". `gen_init_cpio` needs the kernel
+  source, which does not exist at image-build time, so `cpio --format=newc`
+  packs the tree; both emit newc archives and the kernel cannot tell them
+  apart.
+- **The test's `mkdir ramfs` is `mkdir -p`**, and its `gzip -9 initramfs.cpio`
+  is preceded by `rm -f initramfs.cpio.gz`. The test now always boots the ramfs
+  it just built instead of whatever the agent left behind.
+- **The test's expect script is bounded.** `set timeout -1` became 600 s for
+  the boot and 120 s for each prompt, and every `expect` reports which stage
+  failed (`BOOT TIMEOUT: no login prompt`, `NO SHELL PROMPT AFTER LOGIN`, …)
+  and exits non-zero. A boot that fails now says so; a boot that is merely slow
+  still gets the budget.
+
+Verified before re-running: the new image's archive lists
+`dev/console`, `root` (0700), `init`, `bin/busybox`; booting it under
+`qemu-system-x86_64` with a throwaway x86_64 kernel reaches
+`localhost login:`, `root` logs in, `dmesg | grep Hello` returns to a prompt,
+and `poweroff` shuts down cleanly. Before the fix the same boot hung after
+`Starting up...`.
+
+The patch is local to the fixture, in the same `.orig`-sibling style as the
+other edited tasks: `Dockerfile` and `tests/test_outputs.py`. This fixture has
+no compose change — unlike the fasttext tasks it does not fetch anything the
+proxy is needed for at build time, and its `ARG` declarations stay unused on a
+direct apt route.
+
 ### 2026-11-03 — the proxy is not free, and `--task-proxy-direct-hosts`
 
 The kernel task exposed a cost the earlier proxy work had hidden. On this
@@ -1338,8 +1410,8 @@ the flag.
 
 ### Scoreboard so far
 
-71 distinct tasks attempted (89 % of the 80 in the dataset), 41 resolved
-(58 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
+72 distinct tasks attempted (90 % of the 80 in the dataset), 41 resolved
+(57 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
 `run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork`, `gpt2-codegolf`,
 `hf-model-inference`, `download-youtube`, `extract-moves-from-video`,
 `build-initramfs-qemu` and `get-bitcoin-nodes` count as attempted but not
@@ -1358,7 +1430,7 @@ ran on DeepSeek and then on KIMI. The thirty that have never resolved:
 `run-pdp11-code`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
 `tmux-advanced-workflow`, `vim-terminal-task`.
 
-The nine never run:
+The eight never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
 `security-vulhub-minio`, `solana-data`, `super-benchmark-upet`,
 `train-fasttext`. Most need a dataset download, a multi-GB model, or a
@@ -1368,7 +1440,7 @@ prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname), `reshard-c4-data` (test demands a flat `c4_reshard/` holding the original basenames after `revert.py` runs; the instruction only bounds files-per-folder, so a nested layout is legal and fails no stated rule) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`), `build-linux-kernel-qemu` (`tests/test_outputs.py` line 37-38 splits string concatenation so the `+` becomes unary plus; pytest cannot collect — patched, see below) |
+| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`), `build-linux-kernel-qemu` (`tests/test_outputs.py` line 37-38 splits string concatenation so the `+` becomes unary plus and pytest cannot collect; once that parses, the image ships no `ramfs` though the instruction promises one, and the test's `gzip -9` then silently reuses the agent's archive — patched, see below) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` and `...base_with_hint` (huggingface.co — patched, see below; **both pass once they build**), `reshard-c4-data` (image build downloads `allenai/c4` from huggingface.co — patched, see below), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `build-linux-kernel-qemu` (apt from `ports.ubuntu.com` at 30-60 kB/s: the 3000 s budget went to installing the kernel build dependencies), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
@@ -1549,7 +1621,7 @@ All seven were real, and all seven are fixed on `main`:
 ## Local fixture patches
 
 The cached dataset at `~/.cache/terminal-bench/terminal-bench-core/0.1.1` is a
-copy, not the upstream source, and five of its tasks have been edited so they
+copy, not the upstream source, and six of its tasks have been edited so they
 can run at all on this machine. Every edit is recorded here so a result can be
 traced back to the fixture it was measured against, and each edited file has a
 `.orig` sibling holding the pristine version.
@@ -1643,6 +1715,40 @@ Also note the test calls `test_expect()` at module scope rather than inside a
 `test_` function; that is harmless once the syntax is valid, because the
 harness parses the printed result, but it is why the whole task hangs if the
 expect script's `set timeout -1` never matches.
+
+**`build-linux-kernel-qemu` — the missing ramfs.** Once the syntax bug was
+fixed the task still could not pass, for a reason buried two layers down. The
+instruction promises an existing `ramfs/initramfs.cpio.gz`; `/app` is empty.
+An agent therefore creates one, and the test's own provisioning then runs
+`mkdir ramfs` (fails, `File exists`) and `gzip -9 initramfs.cpio` (fails,
+`already exists; not overwritten`, exit 2). No `set -e`, so the test proceeds
+and boots the agent's archive rather than its own.
+
+Three edits, all in the fixture:
+
+1. **`Dockerfile`** builds `ramfs/initramfs.cpio.gz` at image time from the
+   same `basic-init` and busybox the test uses, laid out as `initramfs.list`
+   asks — `dir /dev`, `nod /dev/console 0600 0 0 c 5 1`, `dir /root 0700`,
+   `dir /bin`, `dir /sbin`, `file /init`, `file /bin/busybox`. The console node
+   matters: the first draft omitted it, and PID 1 with no stdio stops dead
+   after printing `Starting up...`, which is precisely the silent hang the
+   harness reported as a test timeout. `gen_init_cpio` needs the kernel source,
+   absent at build time, so `cpio --null -o --format=newc` packs the tree; the
+   kernel accepts both. The same `RUN` also pre-installs the toolchain (it is
+   the test that reinstalls it, and against `ports.ubuntu.com` that alone
+   exceeded the test budget).
+2. **`tests/test_outputs.py`** uses `mkdir -p ramfs` and
+   `rm -f initramfs.cpio.gz` before `gzip -9 initramfs.cpio`, so the test always
+   grades the archive it just built.
+3. **The expect script is bounded.** `set timeout -1` became 600 s for the
+   boot and 120 s for each prompt, with every `expect` handling `timeout` and
+   `eof` by printing which stage failed and exiting non-zero. A boot that never
+   logs in is now a reported failure instead of a 2400 s silence.
+
+Verified against the built image with a throwaway x86_64 kernel
+(`vmlinuz-virt` from Alpine, since the container is arm64): the archive boots
+to `localhost login:`, `root` logs in with no password, `dmesg | grep Hello`
+returns a prompt, and `poweroff` shuts down cleanly.
 
 **`sanitize-git-repo`.** Its `Dockerfile.orig` reconstruction was added later
 than the patch itself; the pristine file is the current one minus the `ARG`
