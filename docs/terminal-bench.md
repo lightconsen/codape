@@ -1035,29 +1035,71 @@ exit code is 0, which is the honest record: the run finished, and the answer
 was wrong. This is a model result — the investigation was sound and the
 reproduction was not verified against anything.
 
+### 2026-11-03 — fifteenth to seventeenth batches, the proxy-dependent tasks
+
+Four more tasks, all of which need something the container could not fetch
+before: `huggingface.co` and `youtube.com` are unreachable from a container on
+this machine while the host reaches them through its own proxy. They were run
+after the adapter grew an opt-in `--task-proxy`, which writes the proxy into
+`/etc/profile.d` so the harness's *test* session gets it too — exporting it in
+the agent's shell alone left `uv` missing in the test phase and scored a
+finished run as `parse_error`.
+
+| Task | Result | Notes |
+|---|---|---|
+| `hf-model-inference` | ❌ unresolved | batch 15: model saved without `tokenizer.json`; batch 17: timed out mid-`pip install torch` |
+| `download-youtube` | ❌ unresolved | batch 16: SSIM 0.948 against a 0.95 threshold, 149 frames against 204 |
+| `extract-moves-from-video` | ❌ unresolved | timed out after installing deno and building tooling; `solution.txt` never written |
+| `build-initramfs-qemu` | ❌ unresolved | batched, booted, root logged in — but the prompt says `initramfs login:`, not `localhost login:` |
+
+**`download-youtube` is the closest miss here.** YouTube blocked every player
+client with "Sign in to confirm you're not a bot", so the agent fetched the
+identical transcode from archive.org and cut it with `ffmpeg -sseof -10`. The
+result is the right video at the right resolution and frame rate; the last ten
+seconds are offset by about four frames, which lands at 0.948 similarity
+against the 0.95 threshold. This is a model result worth recording precisely
+because it is not a failure of understanding.
+
+**`build-initramfs-qemu` failed on the hostname.** The test's expect script
+waits for `localhost login: ` with `set timeout -1`; the agent's init script
+never sets the hostname, so the prompt reads `initramfs login:` and the expect
+never matches — the test hung until the 900 s test budget expired, which is
+recorded as `test_timeout`. Everything the instruction asks for does work: the
+kernel boots, root logs in with no password, and `dmesg` carries the custom
+`printk` line. The test checks for a detail the instruction does not state.
+
+**A note on the sixteenth batch's artifacts.** The run's `target/` output
+directory disappeared part-way through it, so neither trial's `results.json`
+survived and the batch produced no score — the two containers were still
+running when the output path was already gone. The seventeenth batch repeated
+both tasks against `/Users/lando/tb-runs` and produced the results above. No
+repository file was lost; only that run's logs were. Output directories for
+future batches go outside the repo for that reason.
+
 ### Scoreboard so far
 
-62 distinct tasks attempted (78 % of the 80 in the dataset), 39 resolved
-(63 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
-`run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork` and `gpt2-codegolf`
-count as attempted but not resolved. Scored by distinct task, taking the best
-result where a task ran more than once — several did, both to re-check a fix
-and because the same task ran on DeepSeek and then on KIMI. The twenty-three
-that have never resolved:
+66 distinct tasks attempted (83 % of the 80 in the dataset), 39 resolved
+(59 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
+`run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork`, `gpt2-codegolf`,
+`hf-model-inference`, `download-youtube`, `extract-moves-from-video` and
+`build-initramfs-qemu` count as attempted but not resolved. Scored by distinct
+task, taking the best result where a task ran more than once — several did,
+both to re-check a fix and because the same task ran on DeepSeek and then on
+KIMI. The twenty-seven that have never resolved:
 
-`conda-env-conflict-resolution`, `configure-git-webserver`,
-`cron-broken-network`, `count-dataset-tokens`,
-`decommissioning-service-with-sensitive-data`, `git-multibranch`,
-`gpt2-codegolf`, `intrusion-detection`, `jupyter-notebook-server`,
+`build-initramfs-qemu`, `conda-env-conflict-resolution`,
+`configure-git-webserver`, `cron-broken-network`, `count-dataset-tokens`,
+`decommissioning-service-with-sensitive-data`, `download-youtube`,
+`extract-moves-from-video`, `git-multibranch`, `gpt2-codegolf`,
+`hf-model-inference`, `intrusion-detection`, `jupyter-notebook-server`,
 `nginx-request-logging`, `path-tracing-reverse`, `play-zork`, `polyglot-c-py`,
 `polyglot-rust-c`, `pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`,
 `raman-fitting.easy`, `run-pdp11-code`, `sanitize-git-repo.hard`,
 `sanitize-git-repo`, `tmux-advanced-workflow`, `vim-terminal-task`.
 
-The eighteen never run:
-`build-initramfs-qemu`, `build-linux-kernel-qemu`, `build-tcc-qemu`,
-`download-youtube`, `eval-mteb`, `eval-mteb.hard`, `extract-moves-from-video`,
-`fix-git`, `get-bitcoin-nodes`, `hf-model-inference`,
+The fourteen never run:
+`build-linux-kernel-qemu`, `build-tcc-qemu`, `eval-mteb`, `eval-mteb.hard`,
+`fix-git`, `get-bitcoin-nodes`,
 `incompatible-python-fasttext.base_with_hint`, `oom`, `qemu-startup`,
 `reshard-c4-data`, `security-vulhub-minio`, `solana-data`,
 `super-benchmark-upet`, `train-fasttext`. Most need a dataset download, a
@@ -1067,10 +1109,10 @@ batch).
 
 | Failure class | Tasks |
 |---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
+| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`) |
+| Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
