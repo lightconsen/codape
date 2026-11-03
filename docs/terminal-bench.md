@@ -1451,7 +1451,7 @@ the flag.
 `build-initramfs-qemu` and `get-bitcoin-nodes` count as attempted but not
 resolved. Scored by distinct task, taking the best result where a task ran
 more than once — several did, both to re-check a fix and because the same task
-ran on DeepSeek and then on KIMI. The thirty that have never resolved:
+ran on DeepSeek and then on KIMI. The thirty-one that have never resolved:
 
 `build-initramfs-qemu`, `build-linux-kernel-qemu`, `conda-env-conflict-resolution`,
 `configure-git-webserver`, `cron-broken-network`, `count-dataset-tokens`,
@@ -1462,13 +1462,13 @@ ran on DeepSeek and then on KIMI. The thirty that have never resolved:
 `play-zork`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
 `qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`, `reshard-c4-data`,
 `run-pdp11-code`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
-`tmux-advanced-workflow`, `vim-terminal-task`.
+`tmux-advanced-workflow`, `train-fasttext`, `vim-terminal-task`.
 
 The eight never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
-`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`,
-`train-fasttext`. Most need a dataset download, a multi-GB model, or a
-prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
+`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`. Most need a
+dataset download, a multi-GB model, or a prebuilt third-party image;
+`fix-git`'s fixture is gone from GitHub, and
 `qemu-startup`'s image no longer builds (see the thirteenth batch).
 
 | Failure class | Tasks |
@@ -1476,7 +1476,7 @@ prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname), `reshard-c4-data` (test demands a flat `c4_reshard/` holding the original basenames after `revert.py` runs; the instruction only bounds files-per-folder, so a nested layout is legal and fails no stated rule) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`), `build-linux-kernel-qemu` (`tests/test_outputs.py` line 37-38 splits string concatenation so the `+` becomes unary plus and pytest cannot collect; once that parses, the image ships no `ramfs` though the instruction promises one, and the test's `gzip -9` then silently reuses the agent's archive — patched, see below) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` and `...base_with_hint` (huggingface.co — patched, see below; **both pass once they build**), `reshard-c4-data` (image build downloads `allenai/c4` from huggingface.co — patched, see below), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `build-linux-kernel-qemu` (apt from `ports.ubuntu.com` at 30-60 kB/s: the 3000 s budget went to installing the kernel build dependencies), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200), `train-fasttext` (a 0.6233 model inside the 150 MB limit, but the budget ran out before the last step copied it to `/app/model.bin`) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the eight found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
@@ -1673,6 +1673,10 @@ All seven were real, and all seven are fixed on `main`:
    extended to assert the handle and the engine agree and that a tool-using
    submit consumes at least two turns, and the binary test now asserting
    `num_turns: 1` for a plain question-and-answer run.
+
+   Verified end to end after rebuilding the static musl binary: a run that
+   listed a directory and answered reported `num_turns: 2`, where the old
+   build reported 1 for every run regardless of length.
 
 ### Known, unfixed
 
