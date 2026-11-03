@@ -1035,7 +1035,7 @@ exit code is 0, which is the honest record: the run finished, and the answer
 was wrong. This is a model result — the investigation was sound and the
 reproduction was not verified against anything.
 
-### 2026-11-03 — fifteenth to seventeenth batches, the proxy-dependent tasks
+### 2026-11-03 — fifteenth to eighteenth batches, the proxy-dependent tasks
 
 Four more tasks, all of which need something the container could not fetch
 before: `huggingface.co` and `youtube.com` are unreachable from a container on
@@ -1051,6 +1051,10 @@ finished run as `parse_error`.
 | `download-youtube` | ❌ unresolved | batch 16: SSIM 0.948 against a 0.95 threshold, 149 frames against 204 |
 | `extract-moves-from-video` | ❌ unresolved | timed out after installing deno and building tooling; `solution.txt` never written |
 | `build-initramfs-qemu` | ❌ unresolved | batched, booted, root logged in — but the prompt says `initramfs login:`, not `localhost login:` |
+| `build-tcc-qemu` | ✅ resolved | **after the agent timeout fired**, like `cartpole-rl-training` |
+| `get-bitcoin-nodes` | ❌ unresolved | 4/5; `/transaction/<genesis txid>` answers 404 while a recent coinbase transaction answers 200 |
+
+The last two were the eighteenth batch, run on the same proxy-enabled setup.
 
 **`download-youtube` is the closest miss here.** YouTube blocked every player
 client with "Sign in to confirm you're not a bot", so the agent fetched the
@@ -1076,30 +1080,56 @@ both tasks against `/Users/lando/tb-runs` and produced the results above. No
 repository file was lost; only that run's logs were. Output directories for
 future batches go outside the repo for that reason.
 
+**`build-tcc-qemu` is the second timeout-and-still-pass.** The kernel is
+pre-built in the image; the agent spent the budget producing and testing the
+`tcc` ISO, and the timer fired while it was still verifying in QEMU. All of
+that work survived, the test passed, and the trial resolved — the run is
+recorded as `agent_timeout`, which is now a description rather than a verdict.
+Same shape as `cartpole-rl-training` in the fourteenth batch, and the second
+piece of evidence that reporting a cutoff honestly costs nothing.
+
+**`get-bitcoin-nodes` fails on one endpoint out of five.** The service is up,
+`/status`, `/block/<hash>` (including the genesis transaction ID) and the
+error handling all pass. The failing assertion asks
+`/transaction/4a5e1e4b…` — the genesis coinbase — and gets 404, while the
+agent's own verification, against a *recent* coinbase transaction, returned
+200 with `vin[0].coinbase` and `vout[0]`. The agent pointed the block endpoint
+at a public RPC node; the genesis transaction is a special case for most
+indexed backends because it is not spendable and is often omitted from a
+txindex. Not verified further — the trial's service is gone — but the failure
+is narrow and reproducible from the transcript.
+
+**`oom` and `eval-mteb` did not build here.** `oom`'s image installs
+`transformers` and `torch`, and `pip` gave up after 20 minutes at 62 kB/s
+(`ReadTimeoutError` from `files.pythonhosted.org`) with and without the proxy
+build args. `eval-mteb`'s apt stage stalls on `libx11-6` from
+`deb.debian.org`. Both stay in the never-run list; neither says anything
+about CodeRex.
+
 ### Scoreboard so far
 
-66 distinct tasks attempted (83 % of the 80 in the dataset), 39 resolved
+68 distinct tasks attempted (85 % of the 80 in the dataset), 40 resolved
 (59 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
 `run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork`, `gpt2-codegolf`,
-`hf-model-inference`, `download-youtube`, `extract-moves-from-video` and
-`build-initramfs-qemu` count as attempted but not resolved. Scored by distinct
-task, taking the best result where a task ran more than once — several did,
-both to re-check a fix and because the same task ran on DeepSeek and then on
-KIMI. The twenty-seven that have never resolved:
+`hf-model-inference`, `download-youtube`, `extract-moves-from-video`,
+`build-initramfs-qemu` and `get-bitcoin-nodes` count as attempted but not
+resolved. Scored by distinct task, taking the best result where a task ran
+more than once — several did, both to re-check a fix and because the same task
+ran on DeepSeek and then on KIMI. The twenty-eight that have never resolved:
 
 `build-initramfs-qemu`, `conda-env-conflict-resolution`,
 `configure-git-webserver`, `cron-broken-network`, `count-dataset-tokens`,
 `decommissioning-service-with-sensitive-data`, `download-youtube`,
-`extract-moves-from-video`, `git-multibranch`, `gpt2-codegolf`,
-`hf-model-inference`, `intrusion-detection`, `jupyter-notebook-server`,
-`nginx-request-logging`, `path-tracing-reverse`, `play-zork`, `polyglot-c-py`,
-`polyglot-rust-c`, `pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`,
-`raman-fitting.easy`, `run-pdp11-code`, `sanitize-git-repo.hard`,
-`sanitize-git-repo`, `tmux-advanced-workflow`, `vim-terminal-task`.
+`extract-moves-from-video`, `get-bitcoin-nodes`, `git-multibranch`,
+`gpt2-codegolf`, `hf-model-inference`, `intrusion-detection`,
+`jupyter-notebook-server`, `nginx-request-logging`, `path-tracing-reverse`,
+`play-zork`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
+`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`, `run-pdp11-code`,
+`sanitize-git-repo.hard`, `sanitize-git-repo`, `tmux-advanced-workflow`,
+`vim-terminal-task`.
 
-The fourteen never run:
-`build-linux-kernel-qemu`, `build-tcc-qemu`, `eval-mteb`, `eval-mteb.hard`,
-`fix-git`, `get-bitcoin-nodes`,
+The twelve never run:
+`build-linux-kernel-qemu`, `eval-mteb`, `eval-mteb.hard`, `fix-git`,
 `incompatible-python-fasttext.base_with_hint`, `oom`, `qemu-startup`,
 `reshard-c4-data`, `security-vulhub-minio`, `solana-data`,
 `super-benchmark-upet`, `train-fasttext`. Most need a dataset download, a
@@ -1112,7 +1142,7 @@ batch).
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
