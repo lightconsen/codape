@@ -30,6 +30,7 @@ import os
 import shlex
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from terminal_bench.agents.base_agent import AgentResult
 from terminal_bench.agents.failure_mode import FailureMode
@@ -51,6 +52,12 @@ LOCAL_BINARY_PATH = "/tmp/coderex-local-binary"
 # transcript is copied there before the container is removed.
 LOGS_DIR = "/logs"
 LOGS_STREAM_PATH = f"{LOGS_DIR}/coderex-stream.jsonl"
+
+# Hosts that must bypass the optional task proxy when one is configured.
+# `host.docker.internal` because a container on Linux may need to reach the
+# Docker host directly; the rest because a task often starts a service on the
+# container itself and polls it over loopback.
+NO_PROXY = "localhost,127.0.0.1,::1,host.docker.internal"
 
 DEFAULT_VERSION = "v0.1.3"
 DEFAULT_MAX_TURNS = 200
@@ -91,6 +98,7 @@ class CodeRexAgent(AbstractInstalledAgent):
         timeout_sec: float | str = DEFAULT_TIMEOUT_SEC,
         extra_args: str | list[str] | None = None,
         extra_instructions: str | None = None,
+        task_proxy: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -102,6 +110,13 @@ class CodeRexAgent(AbstractInstalledAgent):
         self._extra_instructions = (
             str(extra_instructions).strip() if extra_instructions else None
         )
+        # Optional proxy for everything the task container fetches — package
+        # installs, dataset downloads, the model endpoint. On this machine the
+        # container's own route to huggingface.co and youtube.com is blocked
+        # while the host has a working proxy, and without this such tasks
+        # cannot start. `localhost` is excluded so a task's own service on
+        # port 5000 is never sent through it.
+        self._task_proxy = str(task_proxy) if task_proxy else None
         if isinstance(extra_args, str):
             self._extra_args = shlex.split(extra_args)
         elif extra_args is None:
@@ -150,9 +165,37 @@ class CodeRexAgent(AbstractInstalledAgent):
         # Same purpose as the base implementation, but shlex-quoted so a value
         # containing a single quote or shell metacharacter cannot break the
         # setup line or leak into the terminal.
-        return "\n".join(
+        lines = [
             f"export {key}={shlex.quote(value)}" for key, value in self._env.items()
-        )
+        ]
+        if self._task_proxy:
+            proxy = shlex.quote(self._task_proxy)
+            lines.extend(
+                [
+                    f"export http_proxy={proxy}",
+                    f"export https_proxy={proxy}",
+                    f"export HTTP_PROXY={proxy}",
+                    f"export HTTPS_PROXY={proxy}",
+                    # A task that starts its own service and polls it must not
+                    # send that request through the proxy, and neither must the
+                    # model call — the provider endpoint is reachable directly,
+                    # and a proxy that has not seen the key rejects it.
+                    f"export no_proxy={shlex.quote(self._no_proxy_value())}",
+                    f"export NO_PROXY={shlex.quote(self._no_proxy_value())}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _no_proxy_value(self) -> str:
+        hosts = [NO_PROXY]
+        for name in ("ANTHROPIC_BASE_URL", "CODEREX_BASE_URL", "OPENAI_BASE_URL"):
+            value = os.environ.get(name)
+            if not value:
+                continue
+            host = urlsplit(value).hostname
+            if host:
+                hosts.append(host)
+        return ",".join(hosts)
 
     def _get_template_variables(self) -> dict[str, object]:
         return {
@@ -165,6 +208,42 @@ class CodeRexAgent(AbstractInstalledAgent):
     def _install_agent_script_path(self) -> Path:
         return self._get_templated_script_path("coderex-setup.sh.j2")
 
+    def _install_task_proxy(self, session) -> None:
+        """Install the task proxy for every shell in the container.
+
+        Exporting it in the agent's own environment is not enough: the tests
+        run in a *separate* tmux session created by the harness, and several
+        task scripts install their tooling there (the `uv` bootstrap is the
+        common one). A profile fragment is read by every login shell the
+        harness starts, so it covers the test phase too.
+
+        The provider host stays out of the proxy: a proxy that has not seen
+        the key answers 401, and the endpoint is reachable directly.
+        """
+        if not self._task_proxy:
+            return
+        proxy = shlex.quote(self._task_proxy)
+        no_proxy = shlex.quote(self._no_proxy_value())
+        content = "\n".join(
+            [
+                f"export http_proxy={proxy}",
+                f"export https_proxy={proxy}",
+                f"export HTTP_PROXY={proxy}",
+                f"export HTTPS_PROXY={proxy}",
+                f"export no_proxy={no_proxy}",
+                f"export NO_PROXY={no_proxy}",
+                "",
+            ]
+        )
+        session.container.exec_run(
+            [
+                "sh",
+                "-c",
+                f"mkdir -p /etc/profile.d && echo {shlex.quote(content)} "
+                "> /etc/profile.d/99-coderex-proxy.sh",
+            ]
+        )
+
     def perform_task(
         self,
         instruction: str,
@@ -173,6 +252,7 @@ class CodeRexAgent(AbstractInstalledAgent):
     ) -> AgentResult:
         # Write the instruction as a file inside the container. Sending a
         # multi-line string through tmux would execute each line separately.
+        self._install_task_proxy(session)
         rendered = self._render_instruction(instruction)
         handle = tempfile.NamedTemporaryFile(
             "w", suffix=".txt", delete=False, encoding="utf-8"

@@ -247,6 +247,8 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
             "--agent-kwarg",
             f"extra_instructions={args.extra_instructions}",
         ]
+    if args.task_proxy:
+        command += ["--agent-kwarg", f"task_proxy={args.task_proxy}"]
     if args.tasks:
         for task in args.tasks:
             command += ["--task-id", task]
@@ -423,6 +425,15 @@ Notes:
         metavar="ARG",
         help="Extra argument for CodeRex; repeatable, must not contain '='. "
         "Use --extra-arg=--flag for values starting with '-'.",
+    )
+    parser.add_argument(
+        "--task-proxy",
+        default=None,
+        metavar="URL",
+        help="Proxy URL exported inside every task container for the task's "
+        "own traffic (package installs, dataset downloads). The provider "
+        "endpoint always bypasses it. Use this when the container cannot "
+        "reach a host the machine can, e.g. http://host.docker.internal:1087.",
     )
     parser.add_argument("--run-id", help="Run identifier (default: tb-YYYYmmdd-HHMMSS)")
     parser.add_argument(
