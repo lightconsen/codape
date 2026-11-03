@@ -986,15 +986,64 @@ That is the same failure recorded for `qemu-alpine-ssh` in the seventh batch,
 now confirmed on a second task from the same base image. It is a dataset
 problem, not a CodeRex one.
 
+### 2026-11-02 — fourteenth batch, **2/3 resolved, and one pass after a timeout**
+
+Three more never-run tasks on KIMI (`k3`).
+
+| Task | Result | Notes |
+|---|---|---|
+| `pytorch-model-cli.hard` | ✅ resolved (6/6) | C CLI + `weights.json` + `prediction.txt` |
+| `cartpole-rl-training` | ✅ resolved (5/5) | **after the agent timeout fired**; see below |
+| `run-pdp11-code` | ❌ unresolved | the agent never wrote `/app/out.txt` |
+
+**`cartpole-rl-training` is the case the timeout fix was for.** The trial is
+recorded as `agent_timeout` — and it resolved anyway. The agent trained the
+model, saved it, and was still polling its own training log when the timer
+fired at 2700 s; the stream closes with
+
+```
+{"type":"result","subtype":"interrupted","is_error":true,
+ "duration_ms":2700019,"num_turns":1,
+ "error":"SIGTERM ended the run before the turn finished"}
+```
+
+All five tests then pass against the container as the agent left it. Nothing
+in the harness treats `agent_timeout` as fatal — `harness.py:752` continues
+into the test phase precisely so a partial answer can still be scored — so
+the run resolved. Before the twelfth batch's fix that same run would have
+been `unknown_agent_error`, which reads as "the agent crashed" rather than
+"the agent ran out of clock with the work already done".
+
+**`run-pdp11-code` is a genuine wrong answer, not a plumbing failure.** The
+agent identified the file correctly — a PDP-11 Unix `a.out` (octal dump,
+magic `000407`) — built `apout` from source and ran it. Its output is real
+and deterministic, and it is wrong by a constant:
+
+```
+expected: 17 -60 -30 -15 -58 -29 -15 -8 -54 -27
+          -64 -32 -16 -8 -4 -2 -1 -1 -1 -1
+reported: 17 36 66 81 38 67 81 88 42 69
+          32 64 80 88 92 94 95 95 95 95
+```
+
+Every value after the first is the expected one plus 96. That is a constant
+offset, not a sign-extension difference (which would add 256), so the
+emulated run was fed or produced the wrong bytes somewhere between the octal
+dump and the executed binary. The agent also never wrote `/app/out.txt`, so
+both tests fail on `FileNotFoundError`; `failure_mode` is `unset` and the
+exit code is 0, which is the honest record: the run finished, and the answer
+was wrong. This is a model result — the investigation was sound and the
+reproduction was not verified against anything.
+
 ### Scoreboard so far
 
-59 distinct tasks attempted (74 % of the 80 in the dataset), 37 resolved
+62 distinct tasks attempted (78 % of the 80 in the dataset), 39 resolved
 (63 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
-`sanitize-git-repo.hard`, `play-zork` and `gpt2-codegolf` count as attempted
-but not resolved. Scored by distinct task, taking the best result where a task
-ran more than once — several did, both to re-check a fix and because the same
-task ran on DeepSeek and then on KIMI. The twenty-two that have never
-resolved:
+`run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork` and `gpt2-codegolf`
+count as attempted but not resolved. Scored by distinct task, taking the best
+result where a task ran more than once — several did, both to re-check a fix
+and because the same task ran on DeepSeek and then on KIMI. The twenty-three
+that have never resolved:
 
 `conda-env-conflict-resolution`, `configure-git-webserver`,
 `cron-broken-network`, `count-dataset-tokens`,
@@ -1002,26 +1051,26 @@ resolved:
 `gpt2-codegolf`, `intrusion-detection`, `jupyter-notebook-server`,
 `nginx-request-logging`, `path-tracing-reverse`, `play-zork`, `polyglot-c-py`,
 `polyglot-rust-c`, `pytorch-model-cli`, `qemu-alpine-ssh`, `raman-fitting`,
-`raman-fitting.easy`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
-`tmux-advanced-workflow`, `vim-terminal-task`.
+`raman-fitting.easy`, `run-pdp11-code`, `sanitize-git-repo.hard`,
+`sanitize-git-repo`, `tmux-advanced-workflow`, `vim-terminal-task`.
 
-The twenty-one never run:
+The eighteen never run:
 `build-initramfs-qemu`, `build-linux-kernel-qemu`, `build-tcc-qemu`,
-`cartpole-rl-training`, `download-youtube`, `eval-mteb`, `eval-mteb.hard`,
-`extract-moves-from-video`, `fix-git`, `get-bitcoin-nodes`,
-`hf-model-inference`, `incompatible-python-fasttext.base_with_hint`, `oom`,
-`pytorch-model-cli.hard`, `qemu-startup`, `reshard-c4-data`, `run-pdp11-code`,
-`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`,
-`train-fasttext`. Most need a dataset download, a multi-GB model, or a
-prebuilt third-party image; `fix-git`'s fixture is gone from GitHub, and
-`qemu-startup`'s image no longer builds (see the thirteenth batch).
+`download-youtube`, `eval-mteb`, `eval-mteb.hard`, `extract-moves-from-video`,
+`fix-git`, `get-bitcoin-nodes`, `hf-model-inference`,
+`incompatible-python-fasttext.base_with_hint`, `oom`, `qemu-startup`,
+`reshard-c4-data`, `security-vulhub-minio`, `solana-data`,
+`super-benchmark-upet`, `train-fasttext`. Most need a dataset download, a
+multi-GB model, or a prebuilt third-party image; `fix-git`'s fixture is gone
+from GitHub, and `qemu-startup`'s image no longer builds (see the thirteenth
+batch).
 
 | Failure class | Tasks |
 |---|---|
 | Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works) |
 | Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`) |
 | Dataset: dependency unreachable | `incompatible-python-fasttext` (huggingface.co — patched, see below; **passes once it builds**), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out) |
+| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
 | CodeRex defect | none outstanding — the seven found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
