@@ -1369,6 +1369,40 @@ no compose change — unlike the fasttext tasks it does not fetch anything the
 proxy is needed for at build time, and its `ARG` declarations stay unused on a
 direct apt route.
 
+### 2026-11-03 — twenty-fifth batch, the fixture fix verified, then the provider ran out
+
+| Task | Result | Notes |
+|---|---|---|
+| `build-linux-kernel-qemu` | ❌ unresolved | `unknown_agent_error`: Kimi's weekly quota was exhausted mid-build; the test still completed in 40 s and said exactly what was missing |
+
+The fixture fix worked as intended. The agent found the shipped
+`ramfs/initramfs.cpio.gz`, downloaded linux-6.9, ran `make defconfig`, enabled
+`BLK_DEV_INITRD` / `DEVTMPFS` / `TTY` / `SERIAL_8250_CONSOLE`, and started the
+cross build — then the provider stopped the run:
+
+```
+API error (429): You've reached your weekly (7-day) usage limit.
+```
+
+724 s of work, `is_error: true`, no kernel. Nothing in this trial is a CodeRex
+or fixture result.
+
+What it did prove is the diagnostic half of the fix. The old test would have
+spent 2400 s booting a kernel that does not exist and reported only
+`test_timeout`. Instead the test phase finished in **39.5 s**:
+
+```
+could not open kernel file './linux-6.9/arch/x86/boot/bzImage'
+AssertionError: Expected 'Hello, this is a custom kernel' to be in post-agent.txt
+```
+
+The expect script exits non-zero on EOF at the first prompt, so the harness
+gets a named failure instead of silence. That is the behaviour the twenty-fourth
+batch lacked.
+
+Kimi's 7-day quota is now spent, so no further KIMI batches can run until the
+window resets. The kernel task still needs one clean run to be scored.
+
 ### 2026-11-03 — the proxy is not free, and `--task-proxy-direct-hosts`
 
 The kernel task exposed a cost the earlier proxy work had hidden. On this
