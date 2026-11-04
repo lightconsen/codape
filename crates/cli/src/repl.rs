@@ -8274,6 +8274,34 @@ impl ReplLoop {
                     frame.result = Some(output.trim().to_string());
                     frame
                 }
+                // A turn that ran out of its token budget, ended in an engine
+                // error, or lost its provider is not a completion either. All
+                // three arrive as `Ok(_)` and used to fall through to the
+                // success arm, so a failed compaction, an exhausted API retry
+                // or a spent budget looked like a finished task with whatever
+                // text happened to be printed so far.
+                Ok(
+                    reason @ (TerminalReason::BudgetExhausted
+                    | TerminalReason::Error(_)
+                    | TerminalReason::ApiUnavailable { .. }),
+                ) => {
+                    let message = match &reason {
+                        TerminalReason::Error(message)
+                        | TerminalReason::ApiUnavailable { message } => message.clone(),
+                        _ => "the token budget was exhausted before the task finished".into(),
+                    };
+                    let mut frame = coderex_events::ResultFrame::error(
+                        session_id.clone(),
+                        coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                        u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        turns_used,
+                    );
+                    frame.result = Some(output.trim().to_string());
+                    frame
+                        .data
+                        .insert("error".to_string(), serde_json::Value::String(message));
+                    frame
+                }
                 Ok(_) => coderex_events::ResultFrame::success(
                     session_id.clone(),
                     output.trim(),
@@ -11152,6 +11180,10 @@ mod tests {
         turn_requests: Arc<std::sync::Mutex<usize>>,
         /// What a side query (a hook's `prompt`, a title, a classifier) answers.
         side_answer: &'static str,
+        /// Text the turn's own stream delivers. `None` keeps the stream empty,
+        /// which is what most of these tests want: the answer string is not a
+        /// usable signal and the request count is.
+        stream_answer: Option<&'static str>,
         /// Side queries (non-streaming `create_message`) that reached the model.
         side_requests: Arc<std::sync::Mutex<usize>>,
     }
@@ -11161,7 +11193,17 @@ mod tests {
             Self {
                 turn_requests: Arc::new(std::sync::Mutex::new(0)),
                 side_answer: "Side query answer",
+                stream_answer: None,
                 side_requests: Arc::new(std::sync::Mutex::new(0)),
+            }
+        }
+
+        /// A turn whose stream actually answers, so a non-streaming request
+        /// can only be a side query (the title).
+        fn with_stream_answer(answer: &'static str) -> Self {
+            Self {
+                stream_answer: Some(answer),
+                ..Self::new()
             }
         }
 
@@ -11171,6 +11213,7 @@ mod tests {
             Self {
                 turn_requests: Arc::new(std::sync::Mutex::new(0)),
                 side_answer: answer,
+                stream_answer: None,
                 side_requests: Arc::new(std::sync::Mutex::new(0)),
             }
         }
@@ -11223,6 +11266,13 @@ mod tests {
             _tools: &[ToolInfo],
         ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>> {
             *self.turn_requests.lock().unwrap() += 1;
+            if let Some(answer) = self.stream_answer {
+                return Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta(answer.into()),
+                    StreamEvent::StopReason("end_turn".into()),
+                    StreamEvent::StreamEnd,
+                ]));
+            }
             Box::pin(futures::stream::empty())
         }
     }
@@ -11794,7 +11844,7 @@ mod tests {
     #[tokio::test]
     async fn headless_without_persistence_does_not_generate_a_title() {
         let temp = tempfile::tempdir().unwrap();
-        let api = CountingApi::new();
+        let api = CountingApi::with_stream_answer("Done.");
         let mut repl = ReplLoop::with_engine(
             Box::new(api.clone()),
             temp.path().to_string_lossy().into_owned(),
