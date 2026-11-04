@@ -918,7 +918,11 @@ impl TurnRuntime {
         self.pending_elevation = None;
         self.pending_elicitation = None;
         self.last_stop_reason = None;
-        self.last_compact_strategy = None;
+        // `last_compact_strategy` deliberately survives the turn boundary: it
+        // is the escalation ladder, and a pass that made no progress must be
+        // followed by a heavier one even when the next attempt starts a new
+        // turn. Clearing it here made every turn retry the same ineffective
+        // strategy, three times, until the circuit breaker ended the run.
         self.budget.reset_turn();
     }
 
@@ -1356,6 +1360,47 @@ impl CompactOutcome {
             )),
             Self::StopHookTerminated { reason } => Some(reason.clone()),
             _ => None,
+        }
+    }
+
+    /// Whether this outcome means auto-compaction has been paused.
+    ///
+    /// The breaker is compaction's own stop signal, not the turn's terminal
+    /// reason: a caller that asked for recovery because the token budget is
+    /// spent still ends as `BudgetExhausted`, and one that asked because the
+    /// provider rejected the request still reports that error.
+    #[must_use]
+    pub const fn is_circuit_breaker_open(&self) -> bool {
+        matches!(self, Self::CircuitBreakerOpen { .. })
+    }
+}
+
+/// The terminal reason a failed compaction leaves a budget-exhausted turn.
+///
+/// The breaker is compaction's stop signal, not the turn's reason. The budget
+/// is still spent, and `BudgetExhausted` is what the caller can act on;
+/// reporting compaction's message instead named a remedy ("/compact manually")
+/// that a headless run does not have.
+#[must_use]
+fn budget_terminal_reason(outcome: &CompactOutcome) -> Option<TerminalReason> {
+    if outcome.is_circuit_breaker_open() {
+        Some(TerminalReason::BudgetExhausted)
+    } else {
+        outcome.failure_message().map(TerminalReason::Error)
+    }
+}
+
+/// The next, heavier rung of the rule-based compaction ladder.
+///
+/// The ladder is monotone in what it removes, so stepping down is the move
+/// that can actually succeed after a pass failed to make progress. `Reactive`
+/// keeps whole recent turns and sits between `Auto` and `Snip` in force.
+#[must_use]
+const fn escalate_compact_strategy(strategy: CompactStrategy) -> CompactStrategy {
+    match strategy {
+        CompactStrategy::Micro => CompactStrategy::Auto,
+        CompactStrategy::Auto | CompactStrategy::Reactive | CompactStrategy::Snip => {
+            CompactStrategy::Snip
         }
     }
 }
@@ -3447,7 +3492,7 @@ impl QueryEngine {
                             CompactTrigger::TokenThreshold,
                         )
                         .await;
-                    if let Some(reason) = outcome.failure_message() {
+                    if let Some(reason) = budget_terminal_reason(&outcome) {
                         return Ok(self
                             .finish_turn(
                                 turn,
@@ -3455,7 +3500,7 @@ impl QueryEngine {
                                 &api_response.stop_reason,
                                 &api_response.usage,
                                 &[],
-                                TerminalReason::Error(reason),
+                                reason,
                             )
                             .await);
                     }
@@ -3562,7 +3607,7 @@ impl QueryEngine {
                         CompactTrigger::TokenThreshold,
                     )
                     .await;
-                if let Some(reason) = outcome.failure_message() {
+                if let Some(reason) = budget_terminal_reason(&outcome) {
                     return Ok(self
                         .finish_turn(
                             turn,
@@ -3570,7 +3615,7 @@ impl QueryEngine {
                             &api_response.stop_reason,
                             &api_response.usage,
                             &pending_for_loop,
-                            TerminalReason::Error(reason),
+                            reason,
                         )
                         .await);
                 }
@@ -3834,7 +3879,7 @@ impl QueryEngine {
                             CompactTrigger::TokenThreshold,
                         )
                         .await;
-                    if let Some(reason) = outcome.failure_message() {
+                    if let Some(reason) = budget_terminal_reason(&outcome) {
                         return Ok(self
                             .finish_turn(
                                 turn,
@@ -3842,7 +3887,7 @@ impl QueryEngine {
                                 &stop_reason,
                                 &usage,
                                 &pending_for_loop,
-                                TerminalReason::Error(reason),
+                                reason,
                             )
                             .await);
                     }
@@ -3932,7 +3977,7 @@ impl QueryEngine {
                         CompactTrigger::TokenThreshold,
                     )
                     .await;
-                if let Some(reason) = outcome.failure_message() {
+                if let Some(reason) = budget_terminal_reason(&outcome) {
                     return Ok(self
                         .finish_turn(
                             turn,
@@ -3940,7 +3985,7 @@ impl QueryEngine {
                             &stop_reason,
                             &usage,
                             &pending_for_loop,
-                            TerminalReason::Error(reason),
+                            reason,
                         )
                         .await);
                 }
@@ -4336,6 +4381,12 @@ impl QueryEngine {
             .run_compact_recovery(turn, options, turn_number, CompactTrigger::TokenThreshold)
             .await;
         if let Some(reason) = outcome.failure_message() {
+            // The breaker says compaction has stopped trying; the provider's
+            // overflow is still the reason this turn failed, and it is the
+            // reason the caller can act on.
+            if outcome.is_circuit_breaker_open() {
+                return Err(error);
+            }
             return Err(TurnError::Fatal { message: reason });
         }
         if !matches!(outcome, CompactOutcome::Compacted { .. }) {
@@ -4387,6 +4438,16 @@ impl QueryEngine {
         let history = turn.history().to_vec();
         let prefix_tokens = turn.context_prefix_tokens();
         let estimated_tokens = PromptCompiler::estimate_message_tokens(&history) + prefix_tokens;
+        // `estimated_tokens` is the heuristic over the message content; the
+        // trigger that brought us here measured the whole request with the
+        // provider's own count. They are different rulers: on JSON- and
+        // code-heavy tool traffic the provider's tokenizer can report 30–40 %
+        // more than `chars / 4`. The thresholds and the strategy ladder are
+        // stated in the provider's units, so selection and the strategies'
+        // targets are translated into heuristic units below; choosing either
+        // from the raw heuristic made a context over the line look like it was
+        // still in the `Ok` band and selected a pass that removed nothing.
+        let measured_tokens = self.turn_context_tokens(turn);
 
         // The strategy follows the trigger. A cold cache is a moment to tidy
         // up cheaply, not a reason to rewrite history: it takes the lightest
@@ -4401,7 +4462,7 @@ impl QueryEngine {
                 || {
                     compact::select_compact_strategy(
                         stop_reason,
-                        estimated_tokens,
+                        measured_tokens,
                         &self.model,
                         &self.compact_config,
                     )
@@ -4409,7 +4470,7 @@ impl QueryEngine {
                 |resolver| {
                     compact::select_compact_strategy_with(
                         stop_reason,
-                        estimated_tokens,
+                        measured_tokens,
                         &self.model,
                         &self.compact_config,
                         resolver,
@@ -4423,7 +4484,7 @@ impl QueryEngine {
         // in a row would spend the recovery budget on the same arithmetic that
         // just failed; the rule strategies are monotone in what they remove,
         // so stepping down the ladder is the move that can actually succeed.
-        let strategy = if trigger == CompactTrigger::TokenThreshold {
+        let mut strategy = if trigger == CompactTrigger::TokenThreshold {
             match turn.last_compact_strategy {
                 Some(CompactStrategy::Micro) => CompactStrategy::Auto,
                 Some(CompactStrategy::Auto) => CompactStrategy::Snip,
@@ -4496,6 +4557,11 @@ impl QueryEngine {
         );
 
         let mut summary_failure: Option<SummaryOutcome> = None;
+        // The history the rule-based fallback compacts. A summary that did not
+        // reach the line is still worth keeping — it elides the interval it
+        // covered — so the heavier pass starts from it rather than from the
+        // original history, which would throw the paid-for summary away.
+        let mut escalated_history: Option<Vec<Message>> = None;
         if trigger == CompactTrigger::TokenThreshold {
             if summary_input.len() >= 2 {
                 // A summary computed in the background while the context was
@@ -4567,9 +4633,32 @@ impl QueryEngine {
                         if let Some(restore_msg) = compact::file_restore_message(&restored_paths) {
                             result.messages.push(restore_msg);
                         }
-                        return self
-                            .finish_compaction(turn, result, trigger, SummaryOutcome::Summarized)
-                            .await;
+                        // A summary that leaves the context above the line and
+                        // removes less than a tenth of it has not recovered
+                        // anything. The rules can remove more than the summary
+                        // is willing to when the bulk sits in the preserved
+                        // tail, so step down the ladder now instead of
+                        // spending a whole turn on the same ineffective pass.
+                        if !self.result_needs_heavier_pass(turn, &history, &result.messages) {
+                            return self
+                                .finish_compaction(
+                                    turn,
+                                    result,
+                                    trigger,
+                                    SummaryOutcome::Summarized,
+                                )
+                                .await;
+                        }
+                        tracing::debug!(
+                            "CompactRecovery: summary made no progress — escalating to the rule-based pass"
+                        );
+                        summary_failure = Some(SummaryOutcome::Summarized);
+                        // Keep the summary as the input to the heavier pass.
+                        // It cost a model call and already elides the interval
+                        // it covered; running the rules over the original
+                        // history would discard it and redo that work.
+                        escalated_history = Some(result.messages);
+                        strategy = escalate_compact_strategy(strategy);
                     }
                     Ok(_) => {
                         summary_failure = Some(SummaryOutcome::Empty);
@@ -4595,21 +4684,117 @@ impl QueryEngine {
         // ── Rule-based fallback (existing strategies) ──
         // The rule-based strategies take a target. Use the resolved line for
         // this model, not the configured fallback, which is sized for a window
-        // that may not be this one.
-        let thresholds = self.compact_thresholds();
-        let history = turn.history().to_vec();
+        // that may not be this one. The targets are provider-unit budgets and
+        // the strategies count in their own units, so translate them with the
+        // same ruler that selected the strategy: without this, `Snip`'s 80 000
+        // target was met by a heuristic history the provider scored at 30 %
+        // more, and the pass was a no-op that counted as a failure.
+        let (auto_target, snip_target) = self.rule_based_targets(measured_tokens, estimated_tokens);
+        let history = escalated_history.unwrap_or_else(|| turn.history().to_vec());
         let result: CompactResult = match strategy {
             CompactStrategy::Micro => compact::micro_compact(&history, self.micro_params()),
-            CompactStrategy::Auto => compact::auto_compact(&history, thresholds.auto),
+            CompactStrategy::Auto => compact::auto_compact(&history, auto_target),
             CompactStrategy::Reactive => compact::reactive_compact(&history, 3),
-            CompactStrategy::Snip => compact::snip_compact(
-                &history,
-                self.compact_config.snip_target_tokens.min(thresholds.auto),
-            ),
+            CompactStrategy::Snip => compact::snip_compact(&history, snip_target),
         };
 
         let summary = summary_failure.unwrap_or(SummaryOutcome::NotRequested);
         self.finish_compaction(turn, result, trigger, summary).await
+    }
+
+    /// Whether a candidate result should give way to a heavier strategy.
+    ///
+    /// The judgement is deliberately narrower than [`Self::context_back_below_line`]:
+    /// a result already under the line is a recovery even if the summary text
+    /// is momentarily larger than the interval it replaced, and escalating
+    /// from it would drop the summary for no benefit. The heavier pass is for
+    /// a result that is still past the line and removed less than a tenth of
+    /// the context.
+    fn result_needs_heavier_pass(
+        &self,
+        turn: &TurnRuntime,
+        before: &[Message],
+        after: &[Message],
+    ) -> bool {
+        let prefix_tokens = turn.context_prefix_tokens();
+        let tokens_before = PromptCompiler::estimate_message_tokens(before) + prefix_tokens;
+        let tokens_after = PromptCompiler::estimate_message_tokens(after) + prefix_tokens;
+        // The same translated line the progress rule uses: a result that the
+        // provider would still measure over the line has not recovered the
+        // context, however comfortable it looks to `chars / 4`.
+        let line = self.heuristic_auto_line(self.turn_context_tokens(turn), tokens_before);
+        let below_line = tokens_after <= line;
+        let removed = tokens_before.saturating_sub(tokens_after);
+        let removed_a_meaningful_share = removed > 0 && removed.saturating_mul(10) >= tokens_before;
+        !(below_line || removed_a_meaningful_share)
+    }
+
+    /// Translate a token budget stated in the provider's units into the
+    /// heuristic units the compaction strategies count in.
+    ///
+    /// The trigger and the window are provider-measured, while `Auto`, `Snip`
+    /// and the strategies' target arithmetic count `chars / 4`. On JSON- and
+    /// code-heavy tool traffic the provider's tokenizer can report 30–40 %
+    /// more than that heuristic, so a budget copied unchanged is satisfied by
+    /// a history the provider still measures over the line — and a strategy
+    /// whose target the history already meets removes nothing. Scaling every
+    /// budget by the measured ratio puts both on one ruler.
+    ///
+    /// A measurement at or below the heuristic is not evidence of a larger
+    /// real context (the heuristic can overcount on prose), so the budget is
+    /// left alone unless the provider's count is the larger one.
+    const fn heuristic_budget(budget: usize, measured: usize, heuristic: usize) -> usize {
+        if heuristic == 0 || measured <= heuristic {
+            return budget;
+        }
+        budget.saturating_mul(heuristic) / measured
+    }
+
+    /// The `auto` line expressed in the heuristic units the strategies use.
+    fn heuristic_auto_line(&self, measured: usize, heuristic: usize) -> usize {
+        Self::heuristic_budget(self.compact_thresholds().auto, measured, heuristic)
+    }
+
+    /// The targets the rule-based strategies trim to, translated into
+    /// heuristic units from the provider-anchored budgets.
+    ///
+    /// `Snip`'s configured target is capped by the `auto` line so a pass never
+    /// trims to a budget above the line it is trying to recover under.
+    fn rule_based_targets(&self, measured: usize, heuristic: usize) -> (usize, usize) {
+        let thresholds = self.compact_thresholds();
+        (
+            Self::heuristic_budget(thresholds.auto, measured, heuristic),
+            Self::heuristic_budget(
+                if self.compact_config.snip_target_tokens < thresholds.auto {
+                    self.compact_config.snip_target_tokens
+                } else {
+                    thresholds.auto
+                },
+                measured,
+                heuristic,
+            ),
+        )
+    }
+
+    /// The progress rule shared by every compaction strategy.
+    ///
+    /// Success is "back under the compaction line, or this pass removed a
+    /// meaningful share of the context" — not merely "it got smaller". A pass
+    /// that removes 35 tokens of 20 000 is not success: it spends a recovery
+    /// attempt, resets the circuit breaker, and lets the next turn grow past
+    /// where it started.
+    ///
+    /// `line` is the translated `auto` line: the heuristic size at which the
+    /// provider would measure the request at `auto`.
+    const fn context_back_below_line(
+        tokens_before: usize,
+        tokens_after: usize,
+        line: usize,
+    ) -> bool {
+        let below_line = tokens_after <= line;
+        let removed = tokens_before.saturating_sub(tokens_after);
+        let removed_a_meaningful_share = removed > 0 && removed.saturating_mul(10) >= tokens_before;
+        (below_line || removed_a_meaningful_share) && tokens_after < tokens_before
     }
 
     /// Shared tail of every compaction path: tokens bookkeeping, boundary
@@ -4648,19 +4833,28 @@ impl QueryEngine {
         let tokens_before = history_tokens_before + prefix_tokens;
         result.tokens_removed = tokens_before.saturating_sub(tokens_after);
 
-        let thresholds = self.compact_thresholds();
-        let below_line = tokens_after <= thresholds.auto;
-        let removed_a_meaningful_share =
-            result.tokens_removed > 0 && result.tokens_removed.saturating_mul(10) >= tokens_before;
+        // The provider's measurement is taken before the history is replaced,
+        // while the anchor still describes it. The strategies count in
+        // heuristic units, so the line they are judged against is translated
+        // the same way their targets were.
+        let line = self.heuristic_auto_line(self.turn_context_tokens(turn), tokens_before);
 
         // Circuit breaker accounting: a pass that neither reached the line nor
         // removed a tenth of the context counts as a failure.
-        let made_progress =
-            (below_line || removed_a_meaningful_share) && tokens_after < tokens_before;
+        let made_progress = Self::context_back_below_line(tokens_before, tokens_after, line);
         if made_progress {
             turn.compact_failures = 0;
+            // The context is back where it belongs; the next crossing starts
+            // from the lightest strategy the line allows.
+            turn.last_compact_strategy = None;
         } else {
             turn.compact_failures = turn.compact_failures.saturating_add(1);
+            // Keep the rung that failed so the next attempt steps down the
+            // ladder instead of repeating the same arithmetic. The rung is
+            // part of the turn runtime's cross-turn state: a new turn must
+            // escalate too, or three turns spend the whole breaker on the
+            // same ineffective strategy.
+            turn.last_compact_strategy = Some(result.strategy);
         }
 
         // Check if compact boundary was inserted
@@ -4679,7 +4873,6 @@ impl QueryEngine {
         // write the next turn restores everything this pass removed, which is
         // why an automatic compaction used to last exactly one request.
         turn.replace_history(result.messages);
-        turn.last_compact_strategy = Some(strategy);
         // The summary answered the messages it summarized. A pre-generation
         // still running for that interval would describe history that no
         // longer exists, and a stale failure must not block the next attempt
@@ -4741,7 +4934,7 @@ impl QueryEngine {
         // third compaction with "the compaction retry budget is spent", with
         // work still to do and thousands of tokens of room under the window.
         if trigger == CompactTrigger::TokenThreshold && made_progress {
-            if below_line {
+            if tokens_after <= line {
                 turn.recovery_count = 0;
             } else {
                 turn.recovery_count += 1;
@@ -5099,6 +5292,28 @@ impl QueryEngine {
             "context crossed the compaction line"
         );
 
+        // The circuit breaker pauses auto-compaction after repeated passes
+        // that made no progress. Above the blocked line that is not a reason
+        // to end the run: the window is not full and the request can still be
+        // sent. Without this, a context a few thousand tokens over the soft
+        // line killed a productive session with "3/3 consecutive compact
+        // failures" — a message about compaction, not about the turn.
+        if turn.compact_failures >= self.compact_config.max_consecutive_failures {
+            if level == compact::ContextLevel::Blocked {
+                return Some(TerminalReason::Error(format!(
+                    "context window is full ({estimated} estimated tokens) and compaction is \
+                     not recovering it"
+                )));
+            }
+            tracing::warn!(
+                compact_failures = turn.compact_failures,
+                estimated_tokens = estimated,
+                auto = thresholds.auto,
+                "compaction has stopped making progress; continuing without it"
+            );
+            return None;
+        }
+
         if turn.recovery_count >= self.compact_config.max_recovery_retries {
             return if level == compact::ContextLevel::Blocked {
                 Some(TerminalReason::Error(format!(
@@ -5123,6 +5338,15 @@ impl QueryEngine {
             .run_compact_recovery(turn, options, turn_number, CompactTrigger::TokenThreshold)
             .await;
         if let Some(reason) = outcome.failure_message() {
+            if outcome.is_circuit_breaker_open()
+                && thresholds.level(self.turn_context_tokens(turn))
+                    != compact::ContextLevel::Blocked
+            {
+                tracing::warn!(
+                    "compaction circuit breaker open; continuing with the context as-is"
+                );
+                return None;
+            }
             return Some(TerminalReason::Error(reason));
         }
 
@@ -7816,8 +8040,10 @@ mod tests {
         assert_eq!(turn.terminal_reason, Some(TerminalReason::BudgetExhausted));
     }
 
-    /// A compaction failure also closes through the hooks, from
-    /// `CompactRecovery` (an edge the graph did not have).
+    /// A paused compaction still closes the turn through the hooks, from
+    /// `CompactRecovery` (an edge the graph did not have). The budget is what
+    /// ended the turn, so that is the reason reported; compaction's own
+    /// message is not the turn's story.
     #[tokio::test]
     async fn a_recovery_failure_runs_stop_and_turn_end_hooks() {
         let (mut engine, _rx, _session) = make_test_engine();
@@ -7834,7 +8060,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(reason, TerminalReason::Error(_)), "{reason:?}");
+        assert_eq!(reason, TerminalReason::BudgetExhausted, "{reason:?}");
         let names = recorded_event_names(&recorded);
         assert!(
             names.iter().any(|name| name == hook_events::STOP),
@@ -11005,6 +11231,242 @@ mod tests {
         assert_eq!(
             turn.recovery_count, 0,
             "an ineffective pass must not spend a recovery retry"
+        );
+    }
+
+    /// The strategy that failed is kept for the next attempt, and it survives
+    /// the turn boundary: three turns used to retry the same `Auto` pass until
+    /// the breaker ended a run that was still productive.
+    #[tokio::test]
+    async fn an_ineffective_pass_leaves_its_strategy_for_escalation() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![
+            Message::user("the request"),
+            Message::assistant("x".repeat(10_000)),
+        ];
+
+        let unchanged = turn.messages.clone();
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Auto,
+                    messages: unchanged,
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::NoProgress { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(turn.last_compact_strategy, Some(CompactStrategy::Auto));
+
+        turn.reset();
+        assert_eq!(
+            turn.last_compact_strategy,
+            Some(CompactStrategy::Auto),
+            "the turn reset dropped the escalation ladder"
+        );
+    }
+
+    /// A pass that recovered the context starts the next crossing from the
+    /// lightest strategy the line allows, not from the heavy one that worked
+    /// once.
+    #[tokio::test]
+    async fn a_progressing_pass_clears_the_escalation_ladder() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![
+            Message::user("the request"),
+            Message::assistant("x".repeat(10_000)),
+        ];
+        turn.last_compact_strategy = Some(CompactStrategy::Snip);
+
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Snip,
+                    messages: vec![Message::user("the request")],
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(turn.last_compact_strategy, None);
+        assert_eq!(turn.compact_failures, 0);
+    }
+
+    /// The provider's count is the ruler the line is stated in; the strategies
+    /// count `chars / 4`. On tool-heavy traffic those differ by a third, and a
+    /// budget copied unchanged is one the history already meets on the
+    /// strategy's own ruler — so the pass removes nothing.
+    #[test]
+    fn a_provider_measurement_scales_the_rule_targets() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let thresholds = engine.compact_thresholds();
+        let configured_snip = engine.compact_config.snip_target_tokens;
+        assert!(
+            configured_snip < thresholds.auto,
+            "the fixture expects Snip's target to sit below the line"
+        );
+
+        // 90 000 heuristic tokens that the provider measured at 123 000.
+        let (auto_target, snip_target) = engine.rule_based_targets(123_000, 90_000);
+        assert_eq!(auto_target, thresholds.auto * 90_000 / 123_000);
+        assert_eq!(snip_target, configured_snip * 90_000 / 123_000);
+        assert!(snip_target < configured_snip);
+
+        // A heuristic that already over-counts, or an equal count, is not
+        // evidence of a larger real context: the budget stays as stated.
+        assert_eq!(engine.rule_based_targets(90_000, 90_000).0, thresholds.auto);
+        assert_eq!(engine.rule_based_targets(60_000, 90_000).0, thresholds.auto);
+    }
+
+    /// Under the scaled target Snip actually trims a history that the
+    /// configured target would have found already small enough.
+    #[test]
+    fn a_scaled_snip_target_trims_a_history_the_unscaled_one_would_not() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+
+        // 7 500 tokens per message × 10 ≈ 75 000 heuristic tokens, measured at
+        // 103 000 by the provider.
+        let mut messages = vec![Message::user("the request")];
+        for i in 0..10 {
+            messages.push(Message::assistant(format!("{i}: {}", "x".repeat(30_000))));
+        }
+        let heuristic = PromptCompiler::estimate_message_tokens(&messages);
+        assert!(
+            heuristic > 74_000 && heuristic < 76_000,
+            "the fixture is off: {heuristic}"
+        );
+
+        let configured_snip = engine.compact_config.snip_target_tokens;
+        let unscaled = compact::snip_compact(&messages, configured_snip);
+        assert!(
+            unscaled.tokens_removed == 0,
+            "the configured target should already be met on the heuristic ruler"
+        );
+
+        let (_, snip_target) = engine.rule_based_targets(103_000, heuristic);
+        let scaled = compact::snip_compact(&messages, snip_target);
+        let after = PromptCompiler::estimate_message_tokens(&scaled.messages);
+        assert!(
+            after < heuristic,
+            "the scaled target removed nothing: {heuristic} -> {after}"
+        );
+        assert!(
+            after <= snip_target,
+            "Snip trimmed to {after}, above its own target {snip_target}"
+        );
+    }
+
+    /// The line a pass is judged against is the provider's, translated. A
+    /// result that looks under `auto` to the heuristic but is still over it to
+    /// the provider — and removed less than a tenth — is not a recovery.
+    #[tokio::test]
+    async fn a_pass_between_the_measured_and_heuristic_lines_is_not_progress() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let auto = engine.compact_thresholds().auto;
+
+        // 41 × 10 000 chars ≈ 102 500 heuristic tokens, measured at 140 000.
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("the request")];
+        for _ in 0..41 {
+            turn.messages.push(Message::assistant("x".repeat(10_000)));
+        }
+        let before = PromptCompiler::estimate_message_tokens(&turn.messages);
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 140_000,
+                output_tokens: 30,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+
+        // Drop two messages: the heuristic result lands under the raw line,
+        // and the pass removed under a tenth of the context.
+        let mut trimmed = turn.messages.clone();
+        trimmed.remove(1);
+        trimmed.remove(1);
+        let after = PromptCompiler::estimate_message_tokens(&trimmed);
+        assert!(after <= auto, "fixture: {after} vs the raw line {auto}");
+        assert!(
+            (before - after) * 10 < before,
+            "fixture: the pass has to remove under a tenth"
+        );
+
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Auto,
+                    messages: trimmed,
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::NoProgress { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            turn.compact_failures, 1,
+            "a pass judged over the line by the provider must count as a failure"
+        );
+    }
+
+    /// An open breaker stops compaction, not the turn. Below the blocked line
+    /// the provider still accepts the request, so the turn continues; only a
+    /// full window is terminal.
+    #[tokio::test]
+    async fn an_open_breaker_does_not_end_a_turn_below_the_blocked_line() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("x".repeat(400_000))];
+        turn.compact_failures = engine.compact_config.max_consecutive_failures;
+
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(reason.is_none(), "{reason:?}");
+
+        // The same breaker with a context past the blocked line is terminal.
+        turn.messages = vec![Message::user("x".repeat(600_000))];
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(
+            matches!(reason, Some(TerminalReason::Error(_))),
+            "{reason:?}"
         );
     }
 

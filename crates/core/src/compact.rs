@@ -23,6 +23,9 @@ use crate::types::{
 
 // ─── Compact Strategy ───────────────────────────────────────────────────────
 
+/// The opening tag that marks a compaction handoff summary.
+const CONTEXT_SUMMARY_OPEN: &str = "<context_summary>";
+
 /// Which compact strategy to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactStrategy {
@@ -315,6 +318,31 @@ pub fn should_reactive_compact(
     stop_reason == "max_tokens" || estimated_tokens > threshold
 }
 
+/// Whether a message is a `<context_summary>` handoff.
+///
+/// The summary is the only record of the interval a previous compaction
+/// elided, so a later pass that drops it loses history no rule-based strategy
+/// can reconstruct. The strategies below treat it like the first user message:
+/// always kept.
+#[must_use]
+pub fn is_context_summary(message: &Message) -> bool {
+    matches!(
+        &message.content,
+        MessageContent::Text(text) if text.contains(CONTEXT_SUMMARY_OPEN)
+    )
+}
+
+/// The `<context_summary>` messages that sit in a range about to be elided.
+fn context_summaries_in(messages: &[Message], range: std::ops::Range<usize>) -> Vec<Message> {
+    let end = range.end.min(messages.len());
+    let start = range.start.min(end);
+    messages[start..end]
+        .iter()
+        .filter(|m| is_context_summary(m))
+        .cloned()
+        .collect()
+}
+
 /// Apply reactive compact: more aggressive than auto.
 ///
 /// Preserves the first user message and the most recent N turns.
@@ -371,6 +399,10 @@ pub fn reactive_compact(messages: &[Message], keep_recent_turns: usize) -> Compa
         && keep_from > first_idx + 1
     {
         insert_compact_boundary_messages(&mut result);
+        // A handoff summary inside the elided span is the only record of the
+        // history before it. Dropping it here would delete that history a
+        // second time, with nothing left to reconstruct it.
+        result.extend(context_summaries_in(messages, first_idx + 1..keep_from));
     }
 
     // Add the last N turns
@@ -393,7 +425,9 @@ pub fn reactive_compact(messages: &[Message], keep_recent_turns: usize) -> Compa
 /// Apply snip compact: truncate history, preserve boundaries.
 ///
 /// Walks backwards from the end, accumulating tokens until reaching
-/// `target_tokens`. Always preserves the first user message.
+/// `target_tokens`. Always preserves the first user message and any
+/// `<context_summary>` handoff, which together are all that is left of the
+/// history before the snipped span.
 #[must_use]
 pub fn snip_compact(messages: &[Message], target_tokens: usize) -> CompactResult {
     if messages.is_empty() {
@@ -452,6 +486,12 @@ pub fn snip_compact(messages: &[Message], target_tokens: usize) -> CompactResult
         // Add boundary marker if there's a gap
         if snip_point > idx + 1 {
             insert_compact_boundary_messages(&mut result);
+            // The summary a previous pass wrote is the only record of the
+            // history before it, so it survives a snip even when the span it
+            // sits in does not. Without this, escalating from a summary to
+            // `Snip` silently deleted the summary and left a boundary marker
+            // claiming history had been "summarized" that nothing described.
+            result.extend(context_summaries_in(messages, idx + 1..snip_point));
         }
     }
 
@@ -930,7 +970,7 @@ pub fn assemble_summary_result(
     // Generated summary as a user message (models treat user-provided
     // handoff context as most salient).
     result.push(Message::user(format!(
-        "<context_summary>\n{summary_text}\n</context_summary>\n\
+        "{CONTEXT_SUMMARY_OPEN}\n{summary_text}\n</context_summary>\n\
          (The above is a summary of earlier conversation. Earlier messages \
          have been compacted away. Continue from where the summary leaves off.)"
     )));
@@ -1695,6 +1735,63 @@ mod tests {
         let tokens = total_token_estimate(&result.messages);
         // Allow some overhead for boundary marker
         assert!(tokens <= 500 + 100);
+    }
+
+    /// A handoff summary is the only record of the history before it, so a
+    /// snip that elides the span it sits in has to carry it across.
+    #[test]
+    fn snip_compact_keeps_a_context_summary_inside_the_elided_span() {
+        let mut messages = vec![make_user_text("the original task")];
+        messages.push(make_user_text(
+            "<context_summary>\nfiles touched: src/lib.rs\n</context_summary>",
+        ));
+        for i in 0..20 {
+            messages.push(make_assistant_text(
+                &format!("long response {i}").repeat(50),
+            ));
+        }
+        messages.push(make_user_text("final"));
+
+        let result = snip_compact(&messages, 500);
+
+        let kept: Vec<String> = result
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept.first().map(String::as_str), Some("the original task"));
+        assert!(
+            kept.iter().any(|text| text.contains("<context_summary>")),
+            "the snip dropped the handoff summary: {kept:?}"
+        );
+        assert_eq!(kept.last().map(String::as_str), Some("final"));
+    }
+
+    /// The summary is kept even when it is the only message before the snip
+    /// point, which is the shape an escalated pass produces.
+    #[test]
+    fn reactive_compact_keeps_a_context_summary_inside_the_elided_span() {
+        let mut messages = vec![make_user_text("the original task")];
+        messages.push(make_user_text(
+            "<context_summary>\nfirst half of the work\n</context_summary>",
+        ));
+        messages.push(make_user_text("turn two"));
+        messages.push(make_assistant_text("answer two"));
+        messages.push(make_user_text("turn three"));
+        messages.push(make_assistant_text("answer three"));
+        messages.push(make_user_text("turn four"));
+        messages.push(make_assistant_text("answer four"));
+        messages.push(make_user_text("turn five"));
+
+        let result = reactive_compact(&messages, 2);
+
+        let text = result.messages.iter().any(
+            |m| matches!(&m.content, MessageContent::Text(t) if t.contains("<context_summary>")),
+        );
+        assert!(text, "reactive compact dropped the handoff summary");
     }
 
     #[test]
