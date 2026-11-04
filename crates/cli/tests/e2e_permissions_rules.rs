@@ -103,9 +103,13 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
 /// Run a turn whose tool call is expected to ask, and answer "deny" on the
 /// control channel. Returns the collected stdout and whether a control request
 /// was seen.
+///
+/// The prompt is a positional argument, not stdin: the control channel needs
+/// stdin free for `control_response` lines, and a prompt read to EOF leaves it
+/// closed — the reader then ends before the request it should answer exists.
 fn run_denying(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> (String, bool) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
-        .args(["-p", "--output-format", "stream-json"])
+        .args(["-p", "--output-format", "stream-json", prompt])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
@@ -118,11 +122,6 @@ fn run_denying(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> (String
         .spawn()
         .expect("spawn coderex");
     let mut stdin = Some(child.stdin.take().expect("stdin"));
-    stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(format!("{prompt}\n").as_bytes())
-        .expect("write prompt");
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {

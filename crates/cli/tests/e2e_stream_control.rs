@@ -74,8 +74,10 @@ fn run_with_control_responses(
     )
     .expect("seed config");
 
+    // The prompt is positional: the control channel answers on stdin, and a
+    // prompt read from stdin to EOF closes it before any request exists.
     let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
-        .args(["-p", "--output-format", "stream-json"])
+        .args(["-p", "--output-format", "stream-json", prompt])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
@@ -89,16 +91,6 @@ fn run_with_control_responses(
         .expect("spawn coderex");
 
     let mut stdin = Some(child.stdin.take().expect("stdin"));
-    stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(format!("{prompt}\n").as_bytes())
-        .expect("write prompt");
-    stdin
-        .as_mut()
-        .expect("stdin")
-        .flush()
-        .expect("flush prompt");
 
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel();
