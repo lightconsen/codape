@@ -331,8 +331,15 @@ every recovery attempt on passes that never approached the line; a later one
 judged a pass against the raw heuristic line and called a context that the
 provider still measured over it a recovery.
 
-- Progress resets the consecutive-failure counter and the escalation ladder,
-  and a threshold-triggered pass spends one recovery retry.
+- Progress resets the consecutive-failure counter and the escalation ladder.
+  A threshold-triggered pass that removes a meaningful share but leaves the
+  context over the line spends one recovery retry. A pass that brings the
+  context back under the `auto` line ends the recovery episode and restores
+  the budget: the budget bounds the passes spent returning under the line, not
+  the number of times a session may compact. A headless run is one engine turn
+  for the whole task, and charging every successful pass made such a run die
+  after its third compaction with the message below, with work still to do and
+  thousands of tokens of room under the window.
 - No progress increments the counter and records the strategy that failed; at
   `max_consecutive_failures` the circuit breaker opens.
 - The failed rung survives the turn boundary. A new turn continues from it

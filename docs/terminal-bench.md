@@ -1679,7 +1679,7 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## CodeRex defects the benchmark exposed
 
-All twelve were real, and all are fixed:
+All fourteen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2058,6 +2058,39 @@ All twelve were real, and all are fixed:
     contains two `compact_boundary` frames — compaction ran twice and the run
     continued past both — and it finished with a 4 979-byte `/app/gpt2.c` that
     passes the size, build, and sampling tests.
+
+14. **A long headless turn could compact only three times.** Found by the
+    first `run-pdp11-code` rerun on the ruler fix, 2026-11-04. The run was 53
+    model rounds and 1 584 s in, writing a PDP-11 disassembler and emulator,
+    when it stopped with:
+
+    ```
+    {"type":"result","subtype":"error_during_execution","is_error":true,
+     "result":"...","error":"context window is full (131941 estimated tokens)
+     and the compaction retry budget is spent"}
+    ```
+
+    Its transcript has three `compact_boundary` frames (frames 111, 139 and
+    156 of 227): compaction ran three times, each pass brought the context
+    back under the `auto` line, and the run continued each time. The fourth
+    crossing found `max_recovery_retries` spent and ended the turn at the
+    `blocked` line, with `/app/out.txt` never written.
+
+    `recovery_count` lives on `TurnRuntime` and was incremented by every
+    threshold-triggered pass that made progress — including a pass that
+    recovered the context. Interactive sessions get a fresh turn per user
+    message, but `-p` runs the whole task as one turn, so the budget was a
+    lifetime cap on compaction: three passes, then death. A successful
+    recovery is not a retry spent.
+
+    A pass that brings the context back under the `auto` line now ends the
+    recovery episode and restores the budget; a pass that removes a tenth but
+    stays over the line still spends a retry, so the budget keeps bounding the
+    passes spent getting back under the line. Covered by
+    `a_pass_back_under_the_line_replenishes_the_recovery_budget` and
+    `a_pass_that_stays_over_the_line_spends_a_recovery_retry`; the existing
+    `the_context_threshold_compacts_before_a_request` keeps its in-episode
+    assertion, with the reason noted in the test.
 
 ### Known, unfixed
 

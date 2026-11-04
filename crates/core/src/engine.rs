@@ -4918,8 +4918,20 @@ impl QueryEngine {
 
         // Spend a recovery retry only when the pass made progress, and only
         // for threshold-triggered compaction — see the note on this function.
+        //
+        // A pass that puts the context back under the line ends the recovery
+        // episode, and the budget belongs to the episode: it bounds the passes
+        // spent getting back under the line, not the number of times a long
+        // session may compact. Charging every successful pass instead made a
+        // headless run — one engine turn for the whole task — die after its
+        // third compaction with "the compaction retry budget is spent", with
+        // work still to do and thousands of tokens of room under the window.
         if trigger == CompactTrigger::TokenThreshold && made_progress {
-            turn.recovery_count += 1;
+            if tokens_after <= line {
+                turn.recovery_count = 0;
+            } else {
+                turn.recovery_count += 1;
+            }
         }
         // The measurement described the history that was just replaced. It no
         // longer accounts for what is there now, and pretending it does would
@@ -9573,7 +9585,94 @@ mod tests {
             after < before,
             "the context was not reduced: {before} -> {after}"
         );
+        // This fixture was never sent, so there is no provider measurement and
+        // the pass is judged on the unanchored line: it removes more than a
+        // tenth but the request still sits just over the line, which is an
+        // in-episode pass and spends a retry. Reaching the line ends the
+        // episode and restores the budget — see
+        // `a_pass_back_under_the_line_replenishes_the_recovery_budget`.
         assert_eq!(turn.recovery_count, 1, "the compaction was not recorded");
+        assert_eq!(turn.compact_failures, 0);
+    }
+
+    /// A pass that brings the context back under the line ends the recovery
+    /// episode, and the retry budget belongs to the episode. A long headless
+    /// run is one engine turn for the whole task, so without this it could
+    /// compact only `max_recovery_retries` times in its entire life and then
+    /// died mid-work with "the compaction retry budget is spent" while its
+    /// context was still growing.
+    #[tokio::test]
+    async fn a_pass_back_under_the_line_replenishes_the_recovery_budget() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(32_000);
+        let max = engine.compact_config.max_recovery_retries;
+        assert!(max > 0, "the fixture needs a real budget");
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("x".repeat(400_000))];
+        turn.set_history_range(0, turn.messages.len());
+        turn.recovery_count = max;
+
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Auto,
+                    messages: vec![Message::user("x".repeat(8_000))],
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            turn.recovery_count, 0,
+            "the episode ended under the line; the budget was not restored"
+        );
+    }
+
+    /// A pass that removes a meaningful share but leaves the context over the
+    /// line is still inside the episode and spends a retry.
+    #[tokio::test]
+    async fn a_pass_that_stays_over_the_line_spends_a_recovery_retry() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(32_000);
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("x".repeat(400_000))];
+        turn.set_history_range(0, turn.messages.len());
+        turn.recovery_count = 0;
+
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Micro,
+                    messages: vec![Message::user("x".repeat(320_000))],
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::Compacted { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            turn.recovery_count, 1,
+            "a pass that stayed over the line must spend a retry"
+        );
     }
 
     /// `Reactive` compaction is reachable from the engine, not dead code: a
