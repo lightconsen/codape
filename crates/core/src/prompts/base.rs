@@ -120,6 +120,14 @@ pub struct CompactConfig {
     /// `QueryEngine::set_history_snip`. Off (the default) leaves strategy
     /// selection byte-for-byte identical to the pre-flag behaviour.
     pub prefer_snip: bool,
+    /// Generate the summary for the next compaction before it is needed.
+    ///
+    /// Crossing the warning line is the signal: the summary interval is known
+    /// and will only grow, and doing the model call then means the compaction
+    /// that eventually fires can reuse it instead of making the turn wait for
+    /// a round-trip. Off means the summary is made synchronously when
+    /// compaction needs it — slower, but one fewer background request.
+    pub background_summary: bool,
 }
 
 impl Default for CompactConfig {
@@ -144,6 +152,7 @@ impl Default for CompactConfig {
             cache_ttl_secs: 300,
             cache_ttl_early_exit_secs: 30,
             prefer_snip: false,
+            background_summary: true,
         }
     }
 }

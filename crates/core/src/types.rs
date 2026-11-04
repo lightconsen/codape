@@ -231,6 +231,26 @@ pub struct UsageSummary {
     pub cache_creation_tokens: usize,
 }
 
+impl UsageSummary {
+    /// The input size the provider actually billed for this request.
+    ///
+    /// Providers differ in what `input_tokens` counts. Anthropic's API reports
+    /// only the tokens that were *not* served from cache, with
+    /// `cache_read_input_tokens` and `cache_creation_input_tokens` alongside;
+    /// the request as a whole is the sum. OpenAI-compatible endpoints report
+    /// the full `prompt_tokens` in `input_tokens` and leave the cache fields
+    /// at zero, so the sum is the same number there.
+    ///
+    /// This is the only measurement of the request that does not come from
+    /// the `chars / 4` heuristic, which is why compaction anchors on it.
+    #[must_use]
+    pub const fn prompt_tokens(&self) -> usize {
+        self.input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_creation_tokens)
+    }
+}
+
 /// Identifier for an Anthropic model.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelId(pub String);
@@ -1128,6 +1148,29 @@ mod tests {
         let json = serde_json::to_string(&usage).unwrap();
         let decoded: UsageSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, usage);
+    }
+
+    #[test]
+    fn prompt_tokens_counts_cached_input_too() {
+        // Anthropic reports the uncached remainder in `input_tokens` and the
+        // cached parts alongside; the request was all three.
+        let anthropic = UsageSummary {
+            input_tokens: 400,
+            output_tokens: 90,
+            cache_read_tokens: 5_000,
+            cache_creation_tokens: 600,
+        };
+        assert_eq!(anthropic.prompt_tokens(), 6_000);
+
+        // An OpenAI-compatible endpoint packs everything into `input_tokens`
+        // and leaves the cache fields at zero.
+        let openai = UsageSummary {
+            input_tokens: 6_000,
+            output_tokens: 90,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        assert_eq!(openai.prompt_tokens(), 6_000);
     }
 
     #[test]

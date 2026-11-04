@@ -696,6 +696,35 @@ pub type TransitionObserver = Arc<dyn Fn(TurnState, TurnState) + Send + Sync>;
 
 // ─── TurnRuntime ────────────────────────────────────────────────────────────
 
+/// Where the request stood when the provider last measured it.
+///
+/// Compaction needs to know how big the next request will be. Guessing from
+/// characters is unreliable — CJK is roughly one token per character where
+/// ASCII is one per four, so the same byte count can mean 2–3× the tokens —
+/// and the provider already charges for the exact request it received. This
+/// records that measurement and the shape of the request it described, so the
+/// estimate for the next one is "measured prefix + estimated suffix".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageAnchor {
+    /// Messages of history the measured request carried.
+    pub history_messages: usize,
+    /// Estimated tokens outside the history at the time.
+    pub prefix_tokens: usize,
+    /// Tokens the provider reported for the input, cached parts included.
+    pub prompt_tokens: usize,
+}
+
+impl UsageAnchor {
+    /// Anchor on a provider's measurement.
+    #[must_use]
+    pub const fn measured(self, prompt_tokens: usize) -> Self {
+        Self {
+            prompt_tokens,
+            ..self
+        }
+    }
+}
+
 /// Per-turn runtime data — state, messages, pending items, budget.
 #[allow(missing_debug_implementations)]
 pub struct TurnRuntime {
@@ -829,6 +858,47 @@ impl TurnRuntime {
             }
             _ => 0,
         }
+    }
+
+    /// The request as it will be sent, measured where possible.
+    ///
+    /// `chars / 4` is a heuristic and it is wrong by 2–3× on CJK text and on
+    /// JSON-heavy tool output — which is exactly the workload that decides
+    /// when compaction fires. The provider's own count for the last request is
+    /// a measurement, so everything it covered is taken as read and only what
+    /// was appended since is estimated. With no measurement yet, this is the
+    /// heuristic over the whole list.
+    ///
+    /// The anchor lives on the engine, not the turn: a measurement from the
+    /// previous turn still describes the start of this one's history, and that
+    /// is the common case — the request that overflows is the one after the
+    /// measurement, not the one that produced it. Pass `None` to measure the
+    /// whole list heuristically.
+    #[must_use]
+    pub fn context_tokens(&self, anchor: Option<UsageAnchor>) -> usize {
+        let Some(anchor) = anchor else {
+            return PromptCompiler::estimate_message_tokens(&self.messages);
+        };
+        let history = self.history();
+        // A shorter history means compaction replaced the messages the
+        // measurement described; the anchor no longer accounts for this list.
+        // A zero count means the shape was recorded but the provider has not
+        // answered yet.
+        if anchor.history_messages > history.len() || anchor.prompt_tokens == 0 {
+            return PromptCompiler::estimate_message_tokens(&self.messages);
+        }
+        let appended = PromptCompiler::estimate_message_tokens(&history[anchor.history_messages..]);
+        // Per-turn injections (denied-tool summaries, custom system prompts)
+        // sit outside the history and are rebuilt each turn. Only growth can
+        // make the request bigger than what the provider measured; a shrink
+        // over-estimates slightly, which errs toward compacting early.
+        let prefix_growth = self
+            .context_prefix_tokens()
+            .saturating_sub(anchor.prefix_tokens);
+        anchor
+            .prompt_tokens
+            .saturating_add(appended)
+            .saturating_add(prefix_growth)
     }
 
     /// Reset for a new turn.
@@ -1299,6 +1369,62 @@ const fn compact_trigger_name(trigger: CompactTrigger) -> &'static str {
     }
 }
 
+/// Summarize a conversation interval, through a backend when one is attached.
+///
+/// With no backend this is exactly the built-in local LLM summary. With a
+/// backend, a failure or an empty summary falls back to the built-in local
+/// path — the backend is an optimization, never a new failure mode. Both paths
+/// collapse to `Result<String, String>` so the PTL retry and the rule-based
+/// fallback treat them uniformly.
+///
+/// This is a free function rather than a method because the background
+/// pre-generation runs on a spawned task: it has to capture the client and the
+/// backend before they are borrowed by anything else, and it holds no engine
+/// state.
+async fn summarize_conversation(
+    api_client: &dyn ApiClient,
+    backend: Option<&Arc<dyn crate::compaction_backend::CompactionBackend>>,
+    conversation: &str,
+    max_tokens: u32,
+) -> Result<String, String> {
+    let local = || async {
+        crate::prompts::generate_compact_summary(api_client, conversation, None, max_tokens)
+            .await
+            .map_err(|e| e.to_string())
+    };
+    let Some(backend) = backend else {
+        return local().await;
+    };
+    tracing::info!(
+        "CompactRecovery: summarizing via compaction backend '{}'",
+        backend.name()
+    );
+    match backend
+        .summarize(crate::compaction_backend::CompactionRequest {
+            conversation: conversation.to_string(),
+            focus: None,
+            max_output_tokens: max_tokens,
+        })
+        .await
+    {
+        Ok(text) if !text.trim().is_empty() => Ok(text),
+        Ok(_) => {
+            tracing::warn!(
+                "CompactionBackend '{}': empty summary — falling back to local summary",
+                backend.name()
+            );
+            local().await
+        }
+        Err(e) => {
+            tracing::warn!(
+                "CompactionBackend '{}': failed ({e}) — falling back to local summary",
+                backend.name()
+            );
+            local().await
+        }
+    }
+}
+
 /// Project a [`CompactOutcome`] onto the event stream's [`CompactionEvent`].
 ///
 /// The strategies and triggers become strings because the event crosses the
@@ -1623,6 +1749,13 @@ pub struct QueryEngine {
     transcript_path: Option<PathBuf>,
     /// Usage summary from the most recent model request.
     last_usage: Option<UsageSummary>,
+    /// Where the last measured request stood, for token estimation.
+    ///
+    /// The provider measures the exact request it receives; the next request's
+    /// size is that measurement plus an estimate of what was appended since.
+    /// Held on the engine because a turn ends between the two, and because a
+    /// new turn's history begins with the messages the measurement covered.
+    usage_anchor: Option<UsageAnchor>,
     /// Loop detector for detecting repetitive tool call patterns.
     ///
     /// Behind a lock so compaction can clear it from the `&self` methods that
@@ -1670,6 +1803,25 @@ pub struct QueryEngine {
     /// The background prompt-cache TTL timer, once a session has sent a turn
     /// and a TTL is configured. Dropping the engine stops it.
     cache_ttl_timer: Option<CacheTtlTimer>,
+    /// A summary computed ahead of the compaction that will spend it.
+    ///
+    /// Filled by the background pre-generation once the context crosses the
+    /// warning line, consumed by the next LLM-summary compaction whose interval
+    /// it still describes. Shared because the task that produces it outlives
+    /// the call that started it.
+    pending_summary: Arc<Mutex<Option<compact::SummaryDigest>>>,
+    /// Whether a pre-generation task is already running.
+    ///
+    /// The warning check runs before every request, several times per turn; a
+    /// second task would produce the same summary for the same interval.
+    summary_prefetch_in_flight: Arc<AtomicBool>,
+    /// Why the background summary could not be produced, for the next
+    /// compaction to stop asking for one.
+    ///
+    /// A provider that refuses a summarization request will refuse it again a
+    /// turn later; retrying every turn would spend a request per turn on a
+    /// call known to fail.
+    summary_prefetch_failure: Arc<Mutex<Option<String>>>,
     /// Maximum output tokens requested from the provider per request.
     ///
     /// Defaults to [`Self::DEFAULT_MAX_TOKENS`]; a session selected with
@@ -1967,6 +2119,7 @@ impl QueryEngine {
             elicitation_handler: Box::new(ReplElicitationHandler::default()),
             transcript_path: None,
             last_usage: None,
+            usage_anchor: None,
             loop_detector: std::sync::Mutex::new(Some(LoopDetector::new())),
             last_successful_response: None,
             team_context: None,
@@ -1978,6 +2131,9 @@ impl QueryEngine {
             last_request_at: Arc::new(Mutex::new(None)),
             session_started: false,
             cache_ttl_timer: None,
+            pending_summary: Arc::new(Mutex::new(None)),
+            summary_prefetch_in_flight: Arc::new(AtomicBool::new(false)),
+            summary_prefetch_failure: Arc::new(Mutex::new(None)),
             transition_observer: None,
             max_tokens: Self::DEFAULT_MAX_TOKENS,
         }
@@ -4131,47 +4287,13 @@ impl QueryEngine {
         conversation: &str,
         max_tokens: u32,
     ) -> Result<String, String> {
-        let local = || async {
-            crate::prompts::generate_compact_summary(
-                self.api_client.as_ref(),
-                conversation,
-                None,
-                max_tokens,
-            )
-            .await
-            .map_err(|e| e.to_string())
-        };
-        let Some(backend) = self.compaction_backend.as_ref() else {
-            return local().await;
-        };
-        tracing::info!(
-            "CompactRecovery: summarizing via compaction backend '{}'",
-            backend.name()
-        );
-        match backend
-            .summarize(crate::compaction_backend::CompactionRequest {
-                conversation: conversation.to_string(),
-                focus: None,
-                max_output_tokens: max_tokens,
-            })
-            .await
-        {
-            Ok(text) if !text.trim().is_empty() => Ok(text),
-            Ok(_) => {
-                tracing::warn!(
-                    "CompactionBackend '{}': empty summary — falling back to local summary",
-                    backend.name()
-                );
-                local().await
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "CompactionBackend '{}': failed ({e}) — falling back to local summary",
-                    backend.name()
-                );
-                local().await
-            }
-        }
+        summarize_conversation(
+            self.api_client.as_ref(),
+            self.compaction_backend.as_ref(),
+            conversation,
+            max_tokens,
+        )
+        .await
     }
 
     /// React to a provider-reported context overflow.
@@ -4376,15 +4498,28 @@ impl QueryEngine {
         let mut summary_failure: Option<SummaryOutcome> = None;
         if trigger == CompactTrigger::TokenThreshold {
             if summary_input.len() >= 2 {
+                // A summary computed in the background while the context was
+                // still below the line describes this exact interval: the
+                // whole point of making it early is that this turn does not
+                // have to wait for the round-trip. An interval that moved on
+                // since is not used — it would elide messages it never saw.
+                let prefetched = self.take_matching_summary(&history, &split);
+                if prefetched.is_some() {
+                    tracing::debug!("CompactRecovery: using the pre-generated summary");
+                }
                 // PTL resilience: if the summary request fails (e.g., the input
                 // itself is too long), retry once with half the input budget —
                 // `build_summary_input` re-caps by dropping the oldest messages.
-                let mut summary_result = self
-                    .summarize_for_compaction(
-                        &summary_input.join("\n\n"),
-                        self.compact_config.summary_output_max_tokens,
-                    )
-                    .await;
+                let mut summary_result = match &prefetched {
+                    Some((summary, _)) => Ok(summary.clone()),
+                    None => {
+                        self.summarize_for_compaction(
+                            &summary_input.join("\n\n"),
+                            self.compact_config.summary_output_max_tokens,
+                        )
+                        .await
+                    }
+                };
                 if summary_result.is_err() {
                     tracing::warn!(
                         "CompactRecovery: summary failed — retrying with half input budget"
@@ -4403,6 +4538,12 @@ impl QueryEngine {
                             .await;
                     }
                 }
+                // A pre-generated summary covered the split it was made for,
+                // not necessarily today's: keep verbatim whatever lies between
+                // its end and the recomputed one.
+                let applied_split = prefetched
+                    .as_ref()
+                    .map_or_else(|| split.clone(), |(_, split)| split.clone());
                 match summary_result {
                     Ok(summary_text) if !summary_text.trim().is_empty() => {
                         // Refresh the persistent session memory from the same
@@ -4414,7 +4555,7 @@ impl QueryEngine {
                                 .await;
                         let mut result = compact::assemble_summary_result(
                             &history,
-                            &split,
+                            &applied_split,
                             &summary_text,
                             tokens_before,
                             0,
@@ -4422,7 +4563,7 @@ impl QueryEngine {
                         // Post-compact restore: breadcrumb the file paths whose
                         // contents were compacted away so the agent can re-read.
                         let restored_paths =
-                            compact::extract_recent_file_paths(&history, &split, 5);
+                            compact::extract_recent_file_paths(&history, &applied_split, 5);
                         if let Some(restore_msg) = compact::file_restore_message(&restored_paths) {
                             result.messages.push(restore_msg);
                         }
@@ -4539,6 +4680,18 @@ impl QueryEngine {
         // why an automatic compaction used to last exactly one request.
         turn.replace_history(result.messages);
         turn.last_compact_strategy = Some(strategy);
+        // The summary answered the messages it summarized. A pre-generation
+        // still running for that interval would describe history that no
+        // longer exists, and a stale failure must not block the next attempt
+        // either — compaction just made a fresh one possible.
+        self.pending_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        self.summary_prefetch_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.session.messages.clone_from(&turn.history().to_vec());
 
         // The detector's history describes turns that are no longer in the
@@ -4582,6 +4735,10 @@ impl QueryEngine {
         if trigger == CompactTrigger::TokenThreshold && made_progress {
             turn.recovery_count += 1;
         }
+        // The measurement described the history that was just replaced. It no
+        // longer accounts for what is there now, and pretending it does would
+        // undercount a context that shrank rather than grew.
+        self.usage_anchor = None;
 
         // Fire PostCompact hook
         let mut ctx = std::collections::HashMap::new();
@@ -4758,6 +4915,131 @@ impl QueryEngine {
         Some(CacheTtlTimer { cancel, handle })
     }
 
+    /// Start generating the next compaction's summary in the background.
+    ///
+    /// Compaction's visible cost is latency: the turn that crosses the line
+    /// cannot send until a summarization round-trip finishes. Once the context
+    /// is past the warning line, the interval the summary would cover is
+    /// already known, so the work can be done while the turn continues and
+    /// spent later if the interval still matches.
+    ///
+    /// Nothing here may fail the turn: a pre-generation error is recorded and
+    /// the synchronous path runs exactly as it did before.
+    fn prefetch_summary_if_useful(&self, turn: &TurnRuntime) {
+        if !self.compact_config.background_summary {
+            return;
+        }
+        if self
+            .summary_prefetch_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .pending_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return;
+        }
+        if self.summary_prefetch_in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let history = turn.history().to_vec();
+        let split = compact::summary_split(&history, 3, self.compact_config.keep_recent_messages);
+        let input = compact::build_summary_input(
+            &history,
+            &split,
+            self.compact_config.summary_input_max_tokens,
+        );
+        if input.len() < 2 {
+            // Too little between the preserved head and tail to summarize;
+            // the compaction would fall through to the rule-based path, so
+            // there is nothing to compute early.
+            self.summary_prefetch_in_flight
+                .store(false, Ordering::SeqCst);
+            return;
+        }
+
+        let slot = Arc::clone(&self.pending_summary);
+        let failure = Arc::clone(&self.summary_prefetch_failure);
+        let in_flight = Arc::clone(&self.summary_prefetch_in_flight);
+        let client = self.api_client.clone_box();
+        let backend = self.compaction_backend.clone();
+        let max_output = self.compact_config.summary_output_max_tokens;
+        let summarize_from = split.summarize_from;
+        let summarize_len = split.summarize_to.saturating_sub(split.summarize_from);
+
+        // The task holds its own client, backend and budget: the engine keeps
+        // running turns meanwhile, and the summary belongs to the interval it
+        // was computed from, not to whatever the context is by the time it
+        // arrives.
+        tokio::spawn(async move {
+            let result = summarize_conversation(
+                client.as_ref(),
+                backend.as_ref(),
+                &input.join("\n\n"),
+                max_output,
+            )
+            .await;
+            let mut slot = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match result {
+                Ok(summary) if summary.trim().is_empty() => {
+                    tracing::debug!("background summary came back empty; ignoring it");
+                }
+                Ok(summary) => {
+                    tracing::debug!("background summary ready for the next compaction");
+                    *slot = Some(compact::SummaryDigest::new(
+                        summarize_from,
+                        summarize_len,
+                        summary,
+                    ));
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "background summary failed ({error}); compaction will retry it"
+                    );
+                    *failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                }
+            }
+            in_flight.store(false, Ordering::SeqCst);
+        });
+    }
+
+    /// A pre-generated summary, if one describes exactly this interval.
+    ///
+    /// The returned split is the digest's own, not the one just computed: the
+    /// digest never read the messages past its end, so they must be kept
+    /// verbatim rather than elided.
+    fn take_matching_summary(
+        &self,
+        history: &[Message],
+        split: &compact::SummarySplit,
+    ) -> Option<(String, compact::SummarySplit)> {
+        let mut slot = self
+            .pending_summary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let digest = slot.take()?;
+        if digest.covers(history, split) {
+            Some((digest.summary.clone(), digest.split()))
+        } else {
+            // The interval moved on: what was computed is not a summary of
+            // these messages, and using it would elide something it never saw.
+            // Dropping it also lets the next warning line start a fresh one.
+            tracing::debug!("the pre-generated summary no longer matches; discarding it");
+            None
+        }
+    }
+
     /// Compact before a request when the estimated context has crossed a line.
     ///
     /// `CompactThresholds` answers "how full is the window"; until this call
@@ -4772,7 +5054,7 @@ impl QueryEngine {
         options: &SubmitOptions,
         turn_number: u32,
     ) -> Option<TerminalReason> {
-        let estimated = Self::turn_context_tokens(turn);
+        let estimated = self.turn_context_tokens(turn);
         let thresholds = self.compact_thresholds();
         let level = thresholds.level(estimated);
 
@@ -4785,6 +5067,12 @@ impl QueryEngine {
                     window_source = %thresholds.window_source,
                     "context is approaching the compaction line"
                 );
+                // The warning is the only early signal before compaction is
+                // unavoidable, and it is exactly the moment a summary can be
+                // made in the background: its interval is known and only
+                // grows, and paying the round-trip now takes it off the
+                // critical path of the turn that later has to compact.
+                self.prefetch_summary_if_useful(turn);
                 return None;
             }
             compact::ContextLevel::Compact | compact::ContextLevel::Blocked => {}
@@ -4831,7 +5119,7 @@ impl QueryEngine {
         // from a worse place, and the retry budget is finite. Only the blocked
         // line is fatal — above the compaction line the request can still be
         // sent, so the turn continues and the next attempt escalates.
-        let after = Self::turn_context_tokens(turn);
+        let after = self.turn_context_tokens(turn);
         if thresholds.level(after) == compact::ContextLevel::Blocked {
             return Some(TerminalReason::Error(format!(
                 "context window is still full after compaction ({after} estimated tokens, \
@@ -4848,9 +5136,71 @@ impl QueryEngine {
     /// The whole request counts against the window — preamble, system prompt,
     /// history and per-turn injections — not just the history. Measuring only
     /// the compactable part made the numbers look comfortable while the
-    /// request was already at the limit.
-    fn turn_context_tokens(turn: &TurnRuntime) -> usize {
-        PromptCompiler::estimate_message_tokens(&turn.messages)
+    /// request was already at the limit. Once the provider has reported a
+    /// usage count, [`TurnRuntime::context_tokens`] anchors on it instead of
+    /// the character heuristic.
+    fn turn_context_tokens(&self, turn: &TurnRuntime) -> usize {
+        turn.context_tokens(self.usage_anchor)
+    }
+
+    /// Capture the shape of the request about to be sent.
+    ///
+    /// Paired with [`UsageAnchor::measured`] once the provider answers. The
+    /// prompt is assembled before the request, so this has to run there, not
+    /// when the response arrives — by then the response messages are already
+    /// in the list, and the measurement would be anchored past them.
+    fn record_request_shape(&mut self, turn: &TurnRuntime) {
+        self.usage_anchor = Some(UsageAnchor {
+            history_messages: turn.history().len(),
+            prefix_tokens: turn.context_prefix_tokens(),
+            prompt_tokens: 0,
+        });
+    }
+
+    /// Anchor the estimate on a provider's measurement of the last request.
+    ///
+    /// Two measurements teach nothing and are ignored, so neither can drag the
+    /// estimate to an unreachable number: a zero count (a provider that
+    /// reports no usage), and a count smaller than the prompt's own prefix —
+    /// a request that carries a multi-thousand-token system prompt cannot have
+    /// been 100 tokens, so that report is not about the whole request.
+    fn record_prompt_tokens(&mut self, turn: &TurnRuntime, usage: &UsageSummary) {
+        let prompt_tokens = usage.prompt_tokens();
+        if prompt_tokens == 0 {
+            return;
+        }
+        let prefix_tokens = turn.context_prefix_tokens();
+        // With no history range (an embedder that assembled its own list)
+        // there is no separately counted prefix; the system prompt is still a
+        // floor no honest count can be below.
+        let floor = if prefix_tokens > 0 {
+            prefix_tokens
+        } else {
+            PromptCompiler::estimate_message_tokens(
+                &turn
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m.role, crate::types::Role::System))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if prompt_tokens < floor {
+            tracing::debug!(
+                prompt_tokens,
+                floor,
+                "provider usage is smaller than the system prompt; not anchoring on it"
+            );
+            return;
+        }
+        self.usage_anchor = Some(match self.usage_anchor {
+            Some(anchor) => anchor.measured(prompt_tokens),
+            None => UsageAnchor {
+                history_messages: turn.history().len(),
+                prefix_tokens,
+                prompt_tokens,
+            },
+        });
     }
 
     /// Compact proactively when the prompt cache has gone cold.
@@ -4880,7 +5230,7 @@ impl QueryEngine {
             return None;
         }
 
-        let estimated_tokens = Self::turn_context_tokens(turn);
+        let estimated_tokens = self.turn_context_tokens(turn);
         let thresholds = self.compact_thresholds();
         if matches!(
             thresholds.level(estimated_tokens),
@@ -4982,6 +5332,9 @@ impl QueryEngine {
         // Mark the request time: a successful response refreshes the provider's
         // prompt cache, and the TTL trigger measures idleness from here.
         self.note_request_started();
+        // Record what this request covers before it is sent: the anchor pairs
+        // with the provider's measurement of exactly these messages.
+        self.record_request_shape(turn);
         let response = match request_client
             .create_message(&system, &messages, &self.model, self.max_tokens, &tools)
             .await
@@ -5003,6 +5356,8 @@ impl QueryEngine {
                 }
             }
         };
+
+        self.record_prompt_tokens(turn, &response.usage);
 
         // Cache successful response for graceful degradation
         self.last_successful_response = Some((response.content.clone(), response.usage));
@@ -5051,6 +5406,10 @@ impl QueryEngine {
         // interruption costs the reader nothing that had already arrived.
         // `StreamTextMerger` emits only the growth, once per delta.
         let mut stream_text = StreamTextMerger::new();
+
+        // The stream's usage report describes the request below, so the anchor
+        // has to be taken before the first byte arrives.
+        self.record_request_shape(turn);
 
         let mut attempt: u32 = 0;
         loop {
@@ -5250,6 +5609,8 @@ impl QueryEngine {
             if retry_requested {
                 continue;
             }
+
+            self.record_prompt_tokens(turn, &usage);
 
             // Partition completed calls: early-executed vs deferred.
             let early_ids: HashSet<String> = early_results
@@ -10664,6 +11025,332 @@ mod tests {
         assert_eq!(
             after.blocked,
             CompactConfig::default().resolve_blocked_threshold(64_000)
+        );
+    }
+
+    // ─── Provider-usage estimation ─────────────────────────────────────────
+
+    /// The provider's own count of the last request beats the character
+    /// heuristic: CJK is about one token per character where the heuristic
+    /// assumes four, so a Chinese prompt is underestimated three-fold and the
+    /// compaction line is crossed far too late.
+    #[tokio::test]
+    async fn estimation_prefers_provider_usage() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        // 400 Chinese characters: the heuristic calls this 300 tokens, the
+        // provider would report about 400.
+        let cjk = "压缩上下文窗口的正确做法是先把真实大小量出来，而不是靠字符数估算。".repeat(10);
+        turn.messages = vec![Message::user(cjk)];
+        let heuristic = PromptCompiler::estimate_message_tokens(&turn.messages);
+        assert!(
+            heuristic < 400,
+            "the fixture must be underestimated by the heuristic: {heuristic}"
+        );
+
+        assert_eq!(
+            engine.turn_context_tokens(&turn),
+            heuristic,
+            "with no measurement the estimate is the heuristic"
+        );
+
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 400,
+                output_tokens: 12,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        assert_eq!(
+            engine.turn_context_tokens(&turn),
+            400,
+            "the provider's measurement must replace the heuristic"
+        );
+
+        // What arrives after the measured request is estimated on top of it.
+        turn.messages.push(Message::assistant("x".repeat(400)));
+        assert_eq!(
+            engine.turn_context_tokens(&turn),
+            500,
+            "the appended message must be added to the measured prefix"
+        );
+    }
+
+    /// The measurement describes the request that produced it. The next turn
+    /// rebuilds its history from the same session messages and appends to it,
+    /// so the anchor still applies — this is the case that matters, because
+    /// the request that overflows is the one after the measurement.
+    #[tokio::test]
+    async fn a_measurement_carries_into_the_next_turn() {
+        let (mut engine, _rx, mut session) = make_test_engine();
+        session.messages = vec![Message::user("the task"), Message::assistant("step one")];
+        engine.set_session(session);
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("the task"), Message::assistant("step one")];
+        turn.set_history_range(0, 2);
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 2_000,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+
+        // The next turn: a fresh runtime, the same history plus new messages.
+        let mut next = TurnRuntime::new(TokenBudget::with_defaults());
+        next.messages = vec![
+            Message::user("the task"),
+            Message::assistant("step one"),
+            Message::assistant("step two: a new message the provider has not seen"),
+        ];
+        next.set_history_range(0, 3);
+
+        let appended = PromptCompiler::estimate_message_tokens(&next.messages[2..]);
+        assert_eq!(
+            engine.turn_context_tokens(&next),
+            2_000 + appended,
+            "the previous turn's measurement must still anchor this turn"
+        );
+    }
+
+    /// Cached input is part of the request. Anthropic reports the uncached
+    /// remainder in `input_tokens`; measuring only that would make a
+    /// cache-heavy session look almost empty.
+    #[tokio::test]
+    async fn cached_input_counts_toward_the_measurement() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("x".repeat(4_000))];
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 200,
+                output_tokens: 40,
+                cache_read_tokens: 900,
+                cache_creation_tokens: 100,
+            },
+        );
+        assert_eq!(engine.turn_context_tokens(&turn), 1_200);
+    }
+
+    /// A measurement the request could not have produced — fewer tokens than
+    /// the system prompt alone — is not about this request; anchoring on it
+    /// would make the context look permanently tiny.
+    #[tokio::test]
+    async fn a_usage_report_below_the_system_prompt_is_ignored() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("s".repeat(8_000)), Message::user("hi")];
+        engine.record_request_shape(&turn);
+        let before = engine.turn_context_tokens(&turn);
+
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 100,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+
+        assert_eq!(
+            engine.turn_context_tokens(&turn),
+            before,
+            "a 100-token report cannot describe a request with a 2 000-token prompt"
+        );
+    }
+
+    /// Compaction replaces the messages the measurement described, so the
+    /// anchor must stop applying rather than undercount the new history.
+    #[tokio::test]
+    async fn compaction_invalidates_the_usage_anchor() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![
+            Message::user("start"),
+            Message::assistant("y".repeat(8_000)),
+            Message::assistant("z".repeat(8_000)),
+        ];
+        turn.set_history_range(0, 3);
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 4_000,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        assert_eq!(engine.turn_context_tokens(&turn), 4_000);
+
+        // Compaction folds three messages into one short summary.
+        turn.replace_history(vec![Message::user("a much shorter summary")]);
+
+        let heuristic = PromptCompiler::estimate_message_tokens(&turn.messages);
+        assert_eq!(
+            engine.turn_context_tokens(&turn),
+            heuristic,
+            "the anchor described messages that are gone; the estimate must fall \
+             back to the history as it is now"
+        );
+    }
+
+    // ─── Background summary pre-generation ─────────────────────────────────
+
+    /// Records how many summaries were requested and serves a canned one.
+    struct CountingSummaryBackend {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::compaction_backend::CompactionBackend for CountingSummaryBackend {
+        fn kind(&self) -> crate::compaction_backend::CompactionKind {
+            crate::compaction_backend::CompactionKind::Remote
+        }
+
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        async fn summarize(
+            &self,
+            _request: crate::compaction_backend::CompactionRequest,
+        ) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("a summary of the middle of the conversation".into())
+        }
+    }
+
+    /// A conversation big enough to sit between the warning and compaction
+    /// lines of a 32K window.
+    fn warned_turn() -> TurnRuntime {
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages.push(Message::user("the task for this run"));
+        for i in 0..14 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(3_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+        turn
+    }
+
+    /// Crossing the warning line starts the summary in the background, and
+    /// the compaction that follows uses it instead of paying for a
+    /// round-trip on the critical path.
+    #[tokio::test]
+    async fn the_warning_line_starts_a_background_summary() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(32_000);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.set_compaction_backend(Arc::new(CountingSummaryBackend {
+            calls: Arc::clone(&calls),
+        }));
+
+        let mut turn = warned_turn();
+        let tokens = turn.context_tokens(None);
+        let thresholds = engine.compact_thresholds();
+        assert_eq!(
+            thresholds.level(tokens),
+            compact::ContextLevel::Warn,
+            "the fixture must sit between the lines: {tokens} tokens, {thresholds:?}"
+        );
+
+        engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+
+        // The pre-generation runs on its own task: wait for it rather than
+        // assuming a schedule.
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the warning line did not start a background summary"
+        );
+
+        // Now cross the compaction line, and let compaction use the digest.
+        for i in 14..24 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "y".repeat(3_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+        assert!(matches!(
+            engine.compact_thresholds().level(turn.context_tokens(None)),
+            compact::ContextLevel::Compact | compact::ContextLevel::Blocked
+        ));
+
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(reason.is_none(), "compaction failed: {reason:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "compaction re-requested a summary it already had"
+        );
+    }
+
+    /// With pre-generation off, the summary is made when compaction needs it
+    /// — the behaviour before this existed, kept intact behind the switch.
+    #[tokio::test]
+    async fn a_disabled_prefetch_summarizes_only_at_compaction() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(32_000);
+        engine.set_compact_config(CompactConfig {
+            background_summary: false,
+            ..CompactConfig::default()
+        });
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.set_compaction_backend(Arc::new(CountingSummaryBackend {
+            calls: Arc::clone(&calls),
+        }));
+
+        let mut turn = warned_turn();
+        engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a disabled prefetch must not call the summarizer"
+        );
+
+        for i in 14..24 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "y".repeat(3_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(reason.is_none(), "compaction failed: {reason:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the synchronous path must still summarize"
         );
     }
 

@@ -1479,7 +1479,7 @@ dataset download, a multi-GB model, or a prebuilt third-party image;
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200), `train-fasttext` (a 0.6233 model inside the 150 MB limit, but the budget ran out before the last step copied it to `/app/model.bin`) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the eight found are fixed, plus the two compaction defects found afterwards (both now fixed); the only remainder is the 32 K default guess, which no longer blocks a request (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the eight found are fixed, plus the five compaction defects found afterwards and the two estimation/summary defects that followed (all now fixed); the only remainder is the 32 K default guess, which no longer blocks a request (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
@@ -1717,6 +1717,35 @@ All eight were real, and all eight are fixed on `main`:
    `window_source_is_reported`, `a_prompt_too_long_error_teaches_the_real_window`,
    `a_learned_window_survives_the_next_turn`). The behaviour is documented in
    [`docs/compact.md`](compact.md).
+
+10. **The compaction line was measured with the wrong ruler.** `chars / 4` is
+    roughly right for English prose and wrong by 2–3× on CJK and JSON tool
+    output — and those are the workloads that decide when compaction fires. A
+    Chinese prompt was undercounted about four-fold, so the line was crossed
+    long after the provider's window was spent; a JSON-heavy tool result was
+    overcounted. The engine now anchors on the provider's own count for the
+    last request (`UsageSummary::prompt_tokens`, which adds the cached parts
+    Anthropic reports separately) and estimates only what arrived since. Two
+    reports are rejected: a zero count, and a count below the system prompt
+    the request certainly carried. Compaction clears the anchor, since the
+    measurement described history that no longer exists. Covered by
+    `estimation_prefers_provider_usage`, `cached_input_counts_toward_the_measurement`,
+    `a_usage_report_below_the_system_prompt_is_ignored`,
+    `compaction_invalidates_the_usage_anchor`, and
+    `a_measurement_carries_into_the_next_turn`.
+
+11. **The summary round-trip sat on the critical path.** Crossing the line in
+    the middle of a turn meant stopping to wait for a summarization call before
+    the next request could go out. The warning line is the earlier signal and
+    the interval a summary would cover is known there, so the summary is now
+    generated on a background task as soon as the context is past `warn`. It is
+    used only if its end still falls inside the interval about to be
+    summarized — the messages past that point are kept verbatim rather than
+    elided unseen — and a failed pre-generation is not retried per turn.
+    `CompactConfig::background_summary` turns it off. Covered by
+    `the_warning_line_starts_a_background_summary`,
+    `a_disabled_prefetch_summarizes_only_at_compaction`, and the three
+    `SummaryDigest` tests.
 
 ### Known, unfixed
 

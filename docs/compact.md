@@ -199,6 +199,65 @@ Example: an unknown gateway alias defaults to 32K (auto line 16K). Overriding
 it to 64K moves the auto line to 31K, so 20K tokens compact before the override
 and do not after it.
 
+## Measuring the Context
+
+The lines above are compared against a number of tokens, and that number is
+the only unobserved input in the decision. Counting characters and dividing by
+four is close for English prose and badly wrong elsewhere: a Chinese character
+is roughly one token but three UTF-8 bytes (so the heuristic undercounts it
+about four-fold), and a JSON tool result is denser than prose. Under a
+2–3× error the compaction line can be crossed long after the provider's window
+was actually spent.
+
+The provider already measures the exact request it received, so the engine
+anchors on that. Each request records the shape of the history it carries, and
+the response's usage anchors the estimate to the provider's count:
+
+```
+context_tokens = measured_prompt_tokens
+               + estimate(messages appended since the measurement)
+               + max(0, prefix growth since the measurement)
+```
+
+The anchor lives on the engine rather than the turn: a new turn's history
+begins with the messages the measurement covered, so the same measurement
+still describes its prefix. That is the case that matters — the request that
+overflows is the one after the measurement, not the one that produced it.
+
+`measured_prompt_tokens` is `input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens`: Anthropic reports only the uncached remainder in
+`input_tokens`, while OpenAI-compatible endpoints put everything in
+`prompt_tokens` and leave the cache fields at zero, so the sum is the request
+in both cases (`UsageSummary::prompt_tokens`).
+
+Two reports are ignored rather than believed: a zero count, and a count below
+the system prompt the request definitely carried. Both describe something
+other than the whole request, and anchoring on either would make the context
+look permanently small. A compaction that replaces the measured messages also
+invalidates the anchor, because the measurement no longer describes what is
+there.
+
+## Background Summary
+
+Compaction's visible cost is latency: a turn that crosses the line cannot send
+until a summarization round-trip finishes. The warning line is the early
+signal, and the interval a summary would cover is known there and only grows,
+so the summary is generated on a background task as soon as the context is
+past `warn`.
+
+The result is kept with the interval it summarized. When compaction later
+needs a summary, it is used only if its end still falls inside the interval
+about to be summarized — the messages after that point are kept verbatim
+rather than elided unseen, so a summary made early never claims to cover more
+than it read. If the preserved head moved (a new first user message, or a
+different `keep_recent_messages`), the digest is discarded and the
+synchronous path runs.
+
+A failed pre-generation is recorded and not retried: a provider that refused
+the summary once will refuse it again a turn later, and the synchronous path
+is still there. `CompactConfig::background_summary` (on by default) turns the
+whole thing off.
+
 ## What Is Compacted
 
 `build_context` assembles each request from three parts: the preamble

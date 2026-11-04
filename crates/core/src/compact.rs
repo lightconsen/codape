@@ -706,6 +706,66 @@ pub fn should_compact_on_cache_ttl(
     !ttl.is_zero() && idle >= cache_ttl_wake_after(ttl, early_exit)
 }
 
+/// A summary computed ahead of the compaction that will spend it.
+///
+/// Compaction's most visible cost is latency: crossing the line in the middle
+/// of a turn means paying for a summarization round-trip before the next
+/// request can start. The interval a summary would cover changes only as new
+/// messages arrive, so the work can be done early and reused, provided the
+/// record says which messages it described.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryDigest {
+    /// Where the summarized interval started.
+    pub summarize_from: usize,
+    /// How many messages past the start the interval ran.
+    pub summarize_len: usize,
+    /// The generated summary.
+    pub summary: String,
+}
+
+impl SummaryDigest {
+    /// Build a digest for an interval.
+    #[must_use]
+    pub fn new(summarize_from: usize, summarize_len: usize, summary: impl Into<String>) -> Self {
+        Self {
+            summarize_from,
+            summarize_len,
+            summary: summary.into(),
+        }
+    }
+
+    /// Whether this digest still describes a prefix of the interval `history`
+    /// is about to summarize.
+    ///
+    /// The preserved head cannot move (it is the first user message), so a
+    /// digest stays valid as long as its end is still inside the interval. The
+    /// tail grows between the warning line and the compaction that follows —
+    /// the whole reason to compute early — and a digest that stopped inside
+    /// the old interval still summarizes exactly the messages it was built
+    /// from. What it must never do is summarize past its own end: messages it
+    /// never saw would be elided.
+    #[must_use]
+    pub const fn covers(&self, history: &[Message], split: &SummarySplit) -> bool {
+        let end = self.summarize_from.saturating_add(self.summarize_len);
+        split.summarize_from == self.summarize_from
+            && end <= split.summarize_to
+            && end <= history.len()
+    }
+
+    /// The split this digest summarizes.
+    ///
+    /// Compaction uses it in place of the recomputed one: the messages past
+    /// the digest's end are kept verbatim rather than elided, so a summary
+    /// made early never claims to cover more than it read.
+    #[must_use]
+    pub const fn split(&self) -> SummarySplit {
+        SummarySplit {
+            summarize_from: self.summarize_from,
+            summarize_to: self.summarize_from.saturating_add(self.summarize_len),
+        }
+    }
+}
+
 // ─── LLM Summary Compaction ─────────────────────────────────────────────────
 
 /// The interval of messages that an LLM summary compaction replaces.
@@ -2211,6 +2271,76 @@ mod tests {
             !matches!(messages[split.summarize_to].role, Role::Tool),
             "the kept tail begins with a tool result"
         );
+    }
+
+    /// A summary computed at the warning line is still usable at the
+    /// compaction line: the tail grows in between, and the digest's end stays
+    /// a valid boundary inside the new interval.
+    #[test]
+    fn a_digest_made_earlier_still_covers_a_grown_tail() {
+        let mut messages = vec![make_user_text("the task")];
+        for i in 0..10 {
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "output"));
+        }
+        let early = summary_split(&messages, 3, 8);
+        let digest = SummaryDigest::new(
+            early.summarize_from,
+            early.summarize_to - early.summarize_from,
+            "summary of the early interval",
+        );
+
+        // The turn continues: more exchanges arrive before compaction fires.
+        for i in 10..16 {
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "output"));
+        }
+        let late = summary_split(&messages, 3, 8);
+        assert!(late.summarize_to > early.summarize_to, "the tail moved");
+
+        assert!(
+            digest.covers(&messages, &late),
+            "an earlier digest still summarizes a prefix of the interval: \
+             early {early:?}, late {late:?}"
+        );
+        // What it summarizes is its own interval, so the messages between its
+        // end and the new one are kept verbatim rather than elided unseen.
+        assert_eq!(digest.split(), early);
+    }
+
+    /// A digest that would have to summarize past what it read is not usable.
+    #[test]
+    fn a_digest_does_not_cover_an_interval_that_shrank() {
+        let mut messages = vec![make_user_text("the task")];
+        for i in 0..10 {
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "output"));
+        }
+        let split = summary_split(&messages, 3, 8);
+        let digest = SummaryDigest::new(split.summarize_from, split.summarize_to, "x");
+
+        // A later split holds back a larger tail, whose start is now inside
+        // what the digest summarized.
+        let smaller = SummarySplit {
+            summarize_from: split.summarize_from,
+            summarize_to: split.summarize_to - 3,
+        };
+        assert!(!digest.covers(&messages, &smaller));
+    }
+
+    /// A new user message moves the anchor; a digest of the old head is not a
+    /// summary of the new one.
+    #[test]
+    fn a_digest_does_not_cover_a_moved_anchor() {
+        let messages = vec![
+            make_user_text("first intent"),
+            make_assistant_text("reply"),
+            make_user_text("second intent"),
+            make_assistant_text("reply"),
+        ];
+        let digest = SummaryDigest::new(0, 2, "x");
+        let split = SummarySplit {
+            summarize_from: 2,
+            summarize_to: 4,
+        };
+        assert!(!digest.covers(&messages, &split));
     }
 
     #[test]
