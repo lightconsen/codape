@@ -237,6 +237,34 @@ look permanently small. A compaction that replaces the measured messages also
 invalidates the anchor, because the measurement no longer describes what is
 there.
 
+### One ruler for the decision
+
+The thresholds are stated in provider tokens, so everything that *compares* a
+context to them is computed from the measurement: the level (`Ok` / `Warn` /
+`Compact` / `Blocked`), the triggered trigger's strategy, and the progress
+line a pass is judged against. The rule-based strategies (`Auto`, `Snip`) count
+`chars / 4` internally, and their targets are provider-token budgets. On
+JSON- and code-heavy tool traffic the provider's tokenizer reports 30–40 % more
+than that heuristic, so a budget handed over unchanged is one the history may
+already meet on its own ruler: the pass removes nothing and spends a recovery
+attempt on a no-op. A debug run of `gpt2-codegolf` crossed the line at 99 242
+measured tokens (72 389 by the heuristic), selected `Micro` because the
+heuristic still looked like `Ok`, and repeated passes whose 80 000-token
+`Snip` target the history already met.
+
+Every provider-token budget is therefore translated into heuristic units
+before a strategy sees it:
+
+```
+heuristic_budget = budget × heuristic / measured     (when measured > heuristic)
+heuristic_budget = budget                            (otherwise)
+```
+
+The line and the targets are re-derived on every pass, because the ratio is a
+property of the traffic, not of the model. A heuristic at or above the
+measurement is not evidence of a larger real context — the heuristic overcounts
+prose — so the budget is left as stated in that case.
+
 ## Background Summary
 
 Compaction's visible cost is latency: a turn that crosses the line cannot send
@@ -276,6 +304,15 @@ The preserved head is the first user message of the history — the task prompt.
 Preserving "the first user message in the request" instead captured the
 CLAUDE.md system-reminder wrapper and dropped the actual request.
 
+A `<context_summary>` message is preserved the same way the head is. It is the
+whole record of everything the compaction before it elided, so a later pass
+that drops it deletes that history a second time with nothing left to
+reconstruct it. `Reactive` and `Snip` therefore carry any summary that sits
+inside the span they remove across to the compacted side, next to the boundary
+marker. Without that, escalating from a summary to `Snip` — the ladder does
+exactly that when a summary removes too little — left a boundary marker saying
+history had been "summarized" and no summary describing it.
+
 ## Summary Split
 
 The LLM summary path keeps the head verbatim, summarizes the middle, and keeps
@@ -295,23 +332,41 @@ summarize.
 
 A compaction attempt counts as progress only when it reaches the `auto` line or
 removes at least a tenth of the context — not merely when the context shrank.
-Both judgements count tokens, and a pass that shrinks the list by less than a
-tenth while staying over the line is not a recovery. An earlier build reported
-success for a pass that removed 35 tokens of 20,000 and grew the message list,
-then spent every recovery attempt on passes that never approached the line.
+Both judgements are made on the provider-anchored count, with the line
+translated into the strategies' heuristic units (see [One ruler for the
+decision](#one-ruler-for-the-decision)). An earlier build reported success for
+a pass that removed 35 tokens of 20,000 and grew the message list, then spent
+every recovery attempt on passes that never approached the line; a later one
+judged a pass against the raw heuristic line and called a context that the
+provider still measured over it a recovery.
 
-- Progress resets the consecutive-failure counter. A threshold-triggered pass
-  that removes a meaningful share but leaves the context over the line spends
-  one recovery retry. A pass that brings the context back under the `auto` line
-  ends the recovery episode and restores the budget: the budget bounds the
-  passes spent returning under the line, not the number of times a session may
-  compact. A headless run is one engine turn for the whole task, and charging
-  every successful pass made such a run die after its third compaction with the
-  message below, with work still to do and thousands of tokens of room under
-  the window.
-- No progress increments the counter; at `max_consecutive_failures` the
-  circuit breaker opens and the turn ends with a diagnosable message.
+- Progress resets the consecutive-failure counter and the escalation ladder.
+  A threshold-triggered pass that removes a meaningful share but leaves the
+  context over the line spends one recovery retry. A pass that brings the
+  context back under the `auto` line ends the recovery episode and restores
+  the budget: the budget bounds the passes spent returning under the line, not
+  the number of times a session may compact. A headless run is one engine turn
+  for the whole task, and charging every successful pass made such a run die
+  after its third compaction with the message below, with work still to do and
+  thousands of tokens of room under the window.
+- No progress increments the counter and records the strategy that failed; at
+  `max_consecutive_failures` the circuit breaker opens.
+- The failed rung survives the turn boundary. A new turn continues from it
+  rather than restarting at the strategy the thresholds name, so three turns
+  cannot spend the whole breaker on the same ineffective pass.
+- A summary that leaves the context above the line and removes less than a
+  tenth of it falls through to the rule-based pass at the next rung instead of
+  ending the attempt.
+- When a threshold-triggered pass does not reach the line, the next attempt
+  escalates one rung down the strategy ladder (`Micro` → `Auto` → `Snip`)
+  instead of repeating the pass that just failed.
 - A cache-TTL pass is maintenance and is never charged to the recovery budget.
+
+An open breaker pauses auto-compaction: while the context is still below the
+`blocked` line the turn continues with the context as it is, because the
+provider will still accept the request. Only a full window is terminal, and a
+caller that asked for compaction for its own reason — a spent token budget, a
+provider overflow — reports that reason rather than compaction's.
 
 The check is repeated after compaction, and a turn whose context is still past
 the `blocked` line — on a window that is actually known — stops rather than
