@@ -44,6 +44,14 @@ A trial with `failure_mode: unset` and `accuracy: 0` is a **model or prompt
 result**. A trial with any other mode is a **plumbing result** and says nothing
 about the model until the plumbing is fixed.
 
+One shape the table does not cover is `unknown_agent_error` with
+`parser_results: null` and every timestamp null. That row never reached the
+test phase: `_run_trial` raised before it got there. On this host the cause has
+been a full disk — the harness writes `post-agent.txt` without catching
+`OSError`, so `[Errno 28] No space left on device` ends the trial and leaves a
+row that reads like a crash. Search the run log for `No space left on device`
+before blaming the agent.
+
 ## Environment on this machine
 
 - macOS on arm64; Docker runs `linux/arm64` task images.
@@ -108,7 +116,10 @@ the constraints above do not apply there:
 - The root filesystem is 50 GB. The docker build cache filled it during the
   first sweep (1.6 GB free, several trials died with `ENOSPC` while writing
   their pane files); `docker builder prune -af` recovered 13.4 GB. Every
-  batch after that was preceded by a free-space check.
+  batch after that was preceded by a free-space check. It filled again on
+  2026-11-04 from a trial's own writable layer — a 17 GB `/app/work` — which
+  no prune can reclaim while the container runs; long trials need a mid-run
+  `df`/`du` check as well.
 
 ## Run history
 
@@ -1637,6 +1648,75 @@ transcript showing that compaction ran twice and the run continued. It wrote a
 final message reports 56 of 57 reference prompts matching HF GPT-2
 byte-for-byte.
 
+### 2026-11-04 — `train-fasttext`, the model was ready and the disk was not
+
+A rerun of `train-fasttext` (run `fasttext-ship`) added the instruction that
+the earlier attempts lacked: save a model to `/app/model.bin` as soon as it
+meets the bounds, then keep improving. The agent did. The run still produced no
+score, for two reasons that are not model quality.
+
+| Time (UTC+8) | Event |
+|---|---|
+| 20:05 | the trial's own `df` reads 3.4 GB free (93 % used) |
+| 20:07 | `final_train.py` starts in the background: dim 100, bucket 2 M, wordNgrams 2, epoch 5, quantised (`cutoff=200000`, `dsub=8`), `out=/app/model.bin` |
+| 20:08 | a qualifying model lands: `model.bin` 4 637 279 B, `acc_test` 0.6235, quantised 0.624, val 0.6606 — inside the 150 MB and >0.62 bounds |
+| 20:09 | it copies the model to `model_quant_backup.bin`; a Python check of it crashes on `fasttext.predict` under NumPy 2.5.4 (`np.array(..., copy=False)`) |
+| 20:09–20:21 | it keeps searching: alternate splits score 0.6275 and 0.617; `dim=200` 0.618; `bucket=8M` 0.6164 — none beats the saved model |
+| 20:21 | it writes a/b train splits of 461 MB and 462 MB and launches `run_g11.sh` with `bucket=8_000_000` in the background |
+| 20:22:51 | the 3 600 s timer fires: `subtype: interrupted`, `num_turns: 110`, exit code 124 |
+| 20:22:51 | the harness writes `panes/post-agent.txt` and raises `OSError: [Errno 28] No space left on device` (`harness.py:750`) |
+| — | `results.json`: `failure_mode: unknown_agent_error`, `parser_results: null`, all timestamps null; the tests never ran |
+
+The recorded failure mode is wrong in a way worth remembering. The adapter maps
+`interrupted` to `AGENT_TIMEOUT`, and `_run_trial` deliberately continues to
+the tests for that mode. The pane write raised before the mode was recorded and
+the exception left the trial, so the row survived only as a null-filled
+`unknown_agent_error`. Had the write succeeded, the tests would have graded the
+4.6 MB model that was last written to `model.bin` — above the 0.62 floor by
+0.0035 on the local 10 k test split, so plausibly a pass but not a safe one.
+
+The disk was the agent's own. fastText writes an unquantised model of roughly
+`(vocab + bucket) × dim × 4` bytes, so `bucket=2M, dim=200` is about 1.6 GB and
+`bucket=8M, dim=100` about 3.2 GB. The trial's own `df` readings ran from
+3.4 GB to 5.4 GB free, and it spent that on duplicate corpora (482 MB,
+469 MB, then a 1.38 GB `p3` file, later deleted) and GB-scale candidates; by
+20:22 the pane could not be written.
+
+Two model-behaviour lessons come with it:
+
+- **The missing deliverable became a missing stop.** The twenty-second batch
+  failed because no `model.bin` was written; this run fixed that and then spent
+  the remaining 14 minutes on candidates that never beat it. It used 110 turns
+  and 47 `sleep` polls, and was still launching jobs when the timer fired; a
+  deadline-aware stop is what it lacked.
+- **The NumPy 2.5 self-check is a trap.** The task container has NumPy 2.5.4,
+  where `fasttext-wheel`'s `predict` raises `ValueError: Unable to avoid
+  copy`; the grading environment pins `numpy==1.24.0`. The agent distrusted its
+  CLI evaluation after its Python check crashed, and went back to training.
+
+#### The same disk ended the pdp11 rerun
+
+The `run-pdp11-code` rerun on the defect-14 fix (3 600 s) produced no result
+either. At 28 minutes its container's writable layer was **17 GB**, almost all
+under `/app/work`, and the root filesystem was at 0 bytes. Removing the
+container was the only way to recover the host; the launcher then died writing
+its own output with `OSError: [Errno 28]`, `results.json` is 0 bytes, and
+`post-agent.txt` is empty. The run cannot say whether the fix works and needs a
+rerun with a disk guard. The pre-fix pdp11 run remains the evidence for defect
+14.
+
+The 17 GB is a model artifact, not CodeRex: its last visible tool result shows
+a Python PDP-11 emulator executing 5 669 instructions and printing the wrong
+sequence, and `/app/work` was still being rewritten as the disk filled. Container
+writable layers are on the host's root filesystem, so a long trial needs a
+periodic `df`/`du` check as well as the preflight one.
+
+A second casualty of the same period was not a result at all:
+`playzork-budgetfix-600turns` started two minutes after the fasttext ENOSPC,
+ran its agent phase for 24 s, wrote no `coderex-stream.jsonl`, and its
+`post-agent.txt` is `can't find pane: agent`. It is recorded as invalid and
+says nothing about the budget fix.
+
 ### Scoreboard so far
 
 72 distinct tasks attempted (90 % of the 80 in the dataset), 68 resolved
@@ -1649,9 +1729,9 @@ still do not:
 | Task | Why it still fails |
 |---|---|
 | `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written |
-| `play-zork` | the model ended on prose ("Let me rewrite it with a robust heuristic…") without writing `/app/answer.txt` |
+| `play-zork` | the 2026-11-04 600-turn rerun was ended by defect 14 at 38 minutes (`132714` estimated tokens, budget spent); the campaign run ended on prose ("Let me rewrite it with a robust heuristic…") without writing `/app/answer.txt` |
 | `run-pdp11-code` | built `apout` and a PDP-11 emulator, but both reruns ended without `/app/out.txt` — the longer one at 1607 s of 1800 s, on prose ("Let me fetch the FP11 reference…"); the emulated output was off by 96 |
-| `train-fasttext` | 2400 s agent timeout; an earlier attempt produced a 0.6233 model inside the 150 MB and accuracy bounds but ran out of budget before copying it to `/app/model.bin` |
+| `train-fasttext` | the 2026-11-04 rerun wrote a 4.6 MB model at 0.6235, then kept searching until the 3 600 s timer; the harness crashed with ENOSPC while saving the pane and the tests never ran. An earlier attempt reached 0.6233 but never wrote `/app/model.bin` |
 
 The eight never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
@@ -1659,6 +1739,12 @@ The eight never run:
 dataset download, a multi-GB model, or a prebuilt third-party image;
 `fix-git`'s fixture is gone from GitHub, and
 `qemu-startup`'s image no longer builds (see the thirteenth batch).
+
+An attempt to run them on 2026-11-04 produced no trials: `eval-mteb`,
+`eval-mteb.hard`, `fix-git`, `oom` and `qemu-startup` all failed at
+`docker compose build` before a container existed, and the remaining three
+were skipped to keep disk headroom. The harness keeps no builder stderr, so
+these are recorded as build failures, not agent results.
 
 A single attempt is not a reliable pass. A later five-task batch re-ran three
 tasks that had passed earlier in the campaign, and all three failed for model
@@ -2075,6 +2161,13 @@ All fourteen were real, and all are fixed:
     back under the `auto` line, and the run continued each time. The fourth
     crossing found `max_recovery_retries` spent and ended the turn at the
     `blocked` line, with `/app/out.txt` never written.
+
+    A second headless run reproduced the same shape: `play-zork` with
+    `--max-turns 600` and a 3 600 s budget ended after 2 279 665 ms and 185
+    turns with "context window is full (132714 estimated tokens) and the
+    compaction retry budget is spent". Its transcript has two
+    `compact_boundary` frames and its exit code is 0 — the turn ended itself,
+    it was not killed.
 
     `recovery_count` lives on `TurnRuntime` and was incremented by every
     threshold-triggered pass that made progress — including a pass that
