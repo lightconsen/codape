@@ -49,3 +49,14 @@ Out of scope:
 Telemetry is opt-in. With the default settings nothing is sent; see
 [`docs/telemetry.md`](docs/telemetry.md) for what is collected when it is
 enabled and how to disable it.
+
+## Repository safeguards
+
+Pushing a credential to a public repository is the one mistake in this project
+that cannot be undone by a later commit: forks and caches keep the commit even
+after the secret is rotated. The repository therefore keeps secret scanning and
+push protection enabled, and Dependabot security updates on, so a key that
+reaches a branch is reported even if a maintainer's machine has no
+`pre-commit` hook installed. `.env` and the other local key files are
+gitignored as well; if you find one that slipped through, report it like any
+other credential disclosure rather than opening a pull request that removes it.
