@@ -87,11 +87,13 @@ live-provider and release-build jobs can stay conditional. `push` keeps the
 filter; after such a pull request merges, the commit does not need testing
 again.
 
-The rule does not block a push to `main`: it gates merges, and an
-organization administrator can still bypass it for a pull request. Direct
-pushes to `main` are therefore a maintainer action, and `push` runs report on
-them in the Actions tab rather than in a merge box. Work that lands that way
-should have passed the same checks on a topic branch first.
+The rule also applies to a push to `main`, so every change — including a
+maintainer's — goes through a pull request. That is the point: the checks are
+what `main` means to be built from, and a direct push would be a commit nobody
+had to wait for. An organization administrator still has one escape hatch, and
+only one: bypassing the checks when *merging* a pull request, which is recorded
+in the pull request and the audit log. A push to `main` with no pull request is
+refused outright.
 
 Every `cargo` invocation that resolves dependencies passes `--locked`, so CI
 builds the dependency graph committed in `Cargo.lock`. Without it a pull

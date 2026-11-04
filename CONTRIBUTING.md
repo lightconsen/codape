@@ -2,7 +2,10 @@
 
 Thanks for helping. This file covers the build, the test suites and review
 expectations. The project has a single integration branch, `main`; open a pull
-request against it from a topic branch.
+request against it from a topic branch. `main` accepts nothing else — the
+ruleset rejects a direct push, maintainers included — so a change is mergeable
+only once the checks listed in [`docs/verification.md`](docs/verification.md)
+have passed on the pull request.
 
 ## Prerequisites
 
