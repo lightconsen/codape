@@ -1204,6 +1204,26 @@ fn control_response_from_line(
     Some((request_id, response))
 }
 
+/// Wait for a SIGTERM. Never resolves where there is no SIGTERM to catch.
+#[cfg(unix)]
+async fn wait_for_sigterm(signal: &mut Option<tokio::signal::unix::Signal>) {
+    match signal.as_mut() {
+        Some(signal) => {
+            signal.recv().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Windows has no SIGTERM; the branch this backs is disabled there.
+///
+/// Taking `Option<()>` matches the placeholder the caller declares, and the
+/// body never resolves, so the select arm that calls this is inert.
+#[cfg(not(unix))]
+async fn wait_for_sigterm(_signal: &mut Option<()>) {
+    std::future::pending::<()>().await;
+}
+
 /// Read `control_response` lines from stdin for one turn.
 ///
 /// Unknown and malformed lines are ignored: stdin is shared with whatever
@@ -8020,8 +8040,11 @@ impl ReplLoop {
             use tokio::signal::unix::{SignalKind, signal};
             signal(SignalKind::terminate()).ok()
         };
+        // No SIGTERM to catch on other platforms. The placeholder keeps
+        // `closing_sink_owned` below compiling, and `wait_for_sigterm`'s
+        // other platform body never resolves, so the branch stays off.
         #[cfg(not(unix))]
-        let mut sigterm: Option<std::future::Pending<()>> = None;
+        let mut sigterm: Option<()> = None;
         let closing_sink_owned = headless_mode && protocol.is_some() && sigterm.is_some();
         let _headless_turn_guard = if closing_sink_owned {
             Some(HeadlessTurnGuard::enter())
@@ -8046,12 +8069,8 @@ impl ReplLoop {
             // External stop. This has to be a branch of the turn loop, not a
             // detached handler: only here is the protocol sink in hand, and
             // the closing frame is the whole point of catching the signal.
-            () = async {
-                match sigterm.as_mut() {
-                    Some(signal) => { signal.recv().await; }
-                    None => std::future::pending().await,
-                }
-            }, if closing_sink_owned => {
+            () = async { wait_for_sigterm(&mut sigterm).await; },
+            if closing_sink_owned => {
                 let message = "SIGTERM ended the run before the turn finished";
                 tracing::info!("Received SIGTERM mid-turn — writing an interrupted result");
                 write_interrupted_result(

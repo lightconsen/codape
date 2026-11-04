@@ -10,6 +10,12 @@
 //! is scoped to the current thread and does not race other tests in the same
 //! process. Spawned threads need their own capture; [`capture_logs_async`]
 //! covers the common case of a future polled on a current-thread runtime.
+//!
+//! One process-wide detail is not per-thread: `tracing` caches each callsite's
+//! interest the first time any thread reaches it, and does so with the
+//! registering thread's dispatcher when only one is live. A first touch from a
+//! thread without a capture would then cache "disabled" for everyone, so a
+//! permanent inert dispatcher is kept alive (see `pin_dispatcher`).
 
 use std::sync::{Arc, Mutex};
 
@@ -163,6 +169,51 @@ impl LogCapture {
     }
 }
 
+/// A subscriber that captures nothing and enables everything.
+///
+/// It exists only to be a second live dispatcher; see [`pin_dispatcher`].
+#[derive(Debug)]
+struct Pin;
+
+impl Subscriber for Pin {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, _event: &Event<'_>) {}
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Hold one inert dispatcher alive for the whole process.
+///
+/// `tracing` caches each callsite's [`Interest`] process-wide the first time
+/// any thread reaches it, and with exactly one live dispatcher it asks *that
+/// thread's* dispatcher rather than every live one. A test thread that has no
+/// capture would then register the callsite as disabled, and a capture
+/// installed afterwards would never see it — the event is lost even though
+/// `rebuild_interest_cache` runs when the capture starts, because the
+/// callsite is not registered yet at that point.
+///
+/// A second, permanent dispatcher moves tracing onto the path that consults
+/// every live dispatcher, so a first touch from any thread leaves the
+/// callsite enabled and the event reaches whichever capture is current on
+/// the logging thread.
+fn pin_dispatcher() {
+    static PIN: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    PIN.get_or_init(|| tracing::Dispatch::new(Pin));
+}
+
 /// Start capturing `tracing` events on the current thread.
 ///
 /// The default dispatcher is replaced for the lifetime of the returned guard,
@@ -170,6 +221,9 @@ impl LogCapture {
 /// in the same scope.
 #[must_use]
 pub fn capture_logs() -> LogCapture {
+    // Before the capture is installed, so the dispatcher count never passes
+    // through one.
+    pin_dispatcher();
     let events = Arc::new(Mutex::new(Vec::new()));
     let collector = Collector {
         events: Arc::clone(&events),
@@ -234,6 +288,62 @@ mod tests {
         tracing::info!("first");
         capture.clear();
         assert!(!capture.contains("first"));
+    }
+
+    #[test]
+    fn captures_do_not_lose_events_under_thread_contention() {
+        use std::sync::{Arc, Barrier};
+
+        for round in 0..20 {
+            let barrier = Arc::new(Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|worker| {
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let capture = capture_logs();
+                        probe_first_touch(worker);
+                        let found = capture.contains("thread contention probe");
+                        (worker, found)
+                    })
+                })
+                .collect();
+            for handle in handles {
+                let (worker, found) = handle.join().expect("worker");
+                assert!(found, "round {round} worker {worker} lost the event");
+            }
+        }
+    }
+
+    /// First touched here on purpose: a callsite's interest is cached the
+    /// first time any thread reaches it, and that thread may not be the one
+    /// running a capture.
+    #[inline(never)]
+    fn probe_first_touch(worker: usize) {
+        tracing::info!(worker, "thread contention probe");
+    }
+
+    /// Its own callsite, so the test above cannot have registered it first.
+    #[inline(never)]
+    fn probe_foreign_first_touch() {
+        tracing::info!("foreign first-touch probe");
+    }
+
+    #[test]
+    fn a_first_touch_from_another_thread_does_not_disable_a_live_capture() {
+        let capture = capture_logs();
+        // A thread with no capture of its own touches `probe_foreign_first_touch`
+        // for the first time in the process. Registering that callsite must
+        // still leave the capture on this thread able to see it.
+        std::thread::spawn(probe_foreign_first_touch)
+            .join()
+            .expect("the registering thread");
+        probe_foreign_first_touch();
+        assert!(
+            capture.contains("foreign first-touch probe"),
+            "the capture saw nothing: {:?}",
+            capture.messages()
+        );
     }
 
     #[test]
