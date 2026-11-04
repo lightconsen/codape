@@ -1624,19 +1624,31 @@ run while it was still fixing that, and the frame is the honest
 finished"`. The guard was not exercised by this run; a local mock provider is
 what verifies it end to end (see defect 12).
 
+A fifth run, at 7200 s, was the first to reach the compaction defect: it died
+after 41 turns and 934 s with the circuit breaker open while the provider had
+accepted every request (defect 13). A sixth run, on the escalation fix, got
+past that point and continued, but then stopped at 18.5 minutes with the
+context at the blocked line; a debug-instrumented run showed the trigger
+measuring 99 242 tokens while strategy selection counted 72 389 — two rulers
+for one decision. The seventh run, on the binary with both fixes, **resolved
+the task**: 116 turns and 2 597 s, with two `compact_boundary` frames in the
+transcript showing that compaction ran twice and the run continued. It wrote a
+4 979-byte `/app/gpt2.c` that builds with the user's exact command, and its
+final message reports 56 of 57 reference prompts matching HF GPT-2
+byte-for-byte.
+
 ### Scoreboard so far
 
-72 distinct tasks attempted (90 % of the 80 in the dataset), 67 resolved
-(93 % of those attempted), 5 unresolved. Scored by distinct task, taking the
+72 distinct tasks attempted (90 % of the 80 in the dataset), 68 resolved
+(94 % of those attempted), 4 unresolved. Scored by distinct task, taking the
 best result where a task ran more than once — several did, to re-check a fix
 and because the same task ran on more than one model. The 2026-11-04 campaign
-reran all 31 that had never passed, and 26 of them now pass. The five that
+reran all 31 that had never passed, and 27 of them now pass. The four that
 still do not:
 
 | Task | Why it still fails |
 |---|---|
 | `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written |
-| `gpt2-codegolf` | the 44-turn run mapped the checkpoint format and never created `/app/gpt2.c`; its closing turn carried no text and no tool call and was reported as success — fixed (defect 12), the task still fails. A rerun on the fixed binary produced an under-5000-byte `/app/gpt2.c` that compiles but segfaults (return code `-11`) on the test input, and the 1800 s timer ended it mid-fix with `subtype: interrupted` |
 | `play-zork` | the model ended on prose ("Let me rewrite it with a robust heuristic…") without writing `/app/answer.txt` |
 | `run-pdp11-code` | built `apout` and a PDP-11 emulator, but both reruns ended without `/app/out.txt` — the longer one at 1607 s of 1800 s, on prose ("Let me fetch the FP11 reference…"); the emulated output was off by 96 |
 | `train-fasttext` | 2400 s agent timeout; an earlier attempt produced a 0.6233 model inside the 150 MB and accuracy bounds but ran out of budget before copying it to `/app/model.bin` |
@@ -1971,6 +1983,82 @@ All twelve were real, and all are fixed:
     `interrupted` — so the guard is evidenced by the mock and the unit tests
     rather than by that run.
 
+13. **Compaction ended a run that was making progress.** Found by the first
+    two-hour `gpt2-codegolf` run on 2026-11-04. The run had just established,
+    with a numpy reference, that its checkpoint parsing and matrix layout were
+    right and was about to rewrite the C prototype — 41 turns and 934 s of
+    productive work — when it died with
+    `{"type":"result","subtype":"error_during_execution","is_error":true,
+    "error":"CompactRecovery: 3/3 consecutive compact failures — stopping
+    auto-retry. Use /compact manually or start a new session."}`. The provider
+    had accepted every request.
+
+    The context sat just over the `auto` line and far under `blocked`
+    (about 100 000 estimated tokens against 98 072 and 128 072 for a 131 072
+    window). Three separate design errors combined:
+
+    - The summary path accepted any parsed summary as the final result. It did
+      count as a failed pass in `finish_compaction`, but it never fell through
+      to the rule-based pass at the next rung, which is the pass that can
+      remove what the summary chooses to keep.
+    - `TurnRuntime::reset()` cleared `last_compact_strategy` at every turn
+      boundary. Even after a failed pass, the next turn restarted at the
+      strategy the thresholds name (`Auto`) instead of stepping down. Three
+      turns repeated the same ineffective pass.
+    - The breaker was mapped to a fatal error for the turn. It is compaction's
+      own stop signal, not the turn's reason; below the `blocked` line the
+      provider still accepts the request and the turn should continue.
+    - The numbers were measured on two different rulers. The trigger compared
+      the provider's own count, but strategy selection and the rule-based
+      strategies' targets counted `chars / 4`. On this tool-heavy history the
+      provider reported about 1.37× the heuristic, so the context looked like
+      it was still in the `Ok` band and the ladder chose `Micro`, and `Snip`'s
+      80 000-token target was already met before the pass ran. Every
+      rule-based pass removed nothing.
+
+    The escalation state now survives the turn boundary and is cleared only by
+    a pass that makes progress. A summary that is still above the line and
+    removed less than a tenth of the context falls through to the rule-based
+    ladder at the next rung (`Micro` → `Auto` → `Snip`). An open breaker pauses
+    auto-compaction and logs a warning while the context is below `blocked`;
+    only a full window is terminal, and callers that asked for compaction for
+    their own reason (a spent token budget, a provider overflow) report that
+    reason instead of compaction's.
+
+    Covered by `an_ineffective_pass_leaves_its_strategy_for_escalation` (which
+    asserts the strategy survives `turn.reset()`),
+    `a_progressing_pass_clears_the_escalation_ladder`, and
+    `an_open_breaker_does_not_end_a_turn_below_the_blocked_line`. Verified end
+    to end with a local mock provider whose four opening turns put 100 KB of
+    unremovable `tool_use` input into history and whose summarizer answers
+    HTTP 500: the old binary ends the run with the message above after three
+    turns, while the fixed binary logs `applying Auto strategy`, then
+    `applying Snip strategy`, and finishes the run with `"result":"done"`.
+
+    A rerun on that fix then failed differently, and exposed the ruler error.
+    The run passed the old failure point and continued, then stopped at 18.5
+    minutes with `context window is full (129371 estimated tokens) and
+    compaction is not recovering it` — while the provider had accepted every
+    request. A debug-instrumented rerun pinned the crossing exactly: measured
+    99 242 tokens against an `auto` line of 98 072, but the heuristic called
+    the same history 72 389, so the ladder selected `Micro`, and the rule
+    targets were provider-unit budgets the history already met on the
+    heuristic ruler.
+
+    The provider's count is now the single ruler for the decision: the level,
+    the strategy and the progress line all come from it, and each budget is
+    translated into heuristic units with `budget × heuristic / measured`
+    before a strategy sees it, so the pass trims to the same real size the
+    line names. Covered by `a_provider_measurement_scales_the_rule_targets`,
+    `a_scaled_snip_target_trims_a_history_the_unscaled_one_would_not`, and
+    `a_pass_between_the_measured_and_heuristic_lines_is_not_progress`.
+
+    The task itself then verified the fix: the seventh run, on the rebuilt
+    binary, resolved `gpt2-codegolf` in 2 597 s and 116 turns. Its transcript
+    contains two `compact_boundary` frames — compaction ran twice and the run
+    continued past both — and it finished with a 4 979-byte `/app/gpt2.c` that
+    passes the size, build, and sampling tests.
+
 ### Known, unfixed
 
 - **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
@@ -1984,7 +2072,10 @@ All twelve were real, and all are fixed:
   progress only when it reaches the `auto` line or removes a tenth of the
   context, an ineffective pass counts toward the circuit breaker, and the
   strategy escalates (`Micro` → `Auto` → `Snip`) on the next attempt. Covered by
-  `a_35_token_pass_is_not_reported_as_progress`.
+  `a_35_token_pass_is_not_reported_as_progress`. The escalation state and the
+  summary fall-through were themselves broken until defect 13, and the
+  selection, the targets and the progress line were computed on the heuristic
+  ruler rather than the provider's until the same defect.
 
 ## Local fixture patches
 
