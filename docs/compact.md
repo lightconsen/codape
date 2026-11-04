@@ -295,18 +295,23 @@ summarize.
 
 A compaction attempt counts as progress only when it reaches the `auto` line or
 removes at least a tenth of the context — not merely when the context shrank.
-An earlier build reported success for a pass that removed 35 tokens of 20,000
-and grew the message list, then spent every recovery attempt on passes that
-never approached the line.
+Both judgements count tokens, and a pass that shrinks the list by less than a
+tenth while staying over the line is not a recovery. An earlier build reported
+success for a pass that removed 35 tokens of 20,000 and grew the message list,
+then spent every recovery attempt on passes that never approached the line.
 
-- Progress resets the consecutive-failure counter, and a
-  threshold-triggered pass spends one recovery retry.
+- Progress resets the consecutive-failure counter. A threshold-triggered pass
+  that removes a meaningful share but leaves the context over the line spends
+  one recovery retry. A pass that brings the context back under the `auto` line
+  ends the recovery episode and restores the budget: the budget bounds the
+  passes spent returning under the line, not the number of times a session may
+  compact. A headless run is one engine turn for the whole task, and charging
+  every successful pass made such a run die after its third compaction with the
+  message below, with work still to do and thousands of tokens of room under
+  the window.
 - No progress increments the counter; at `max_consecutive_failures` the
   circuit breaker opens and the turn ends with a diagnosable message.
 - A cache-TTL pass is maintenance and is never charged to the recovery budget.
-- When a threshold-triggered pass does not reach the line, the next attempt
-  escalates one rung down the strategy ladder (`Micro` → `Auto` → `Snip`)
-  instead of repeating the pass that just failed.
 
 The check is repeated after compaction, and a turn whose context is still past
 the `blocked` line — on a window that is actually known — stops rather than
