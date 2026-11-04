@@ -18,10 +18,10 @@ request against it from a topic branch.
 ## Build and test
 
 ```bash
-cargo build --workspace
-cargo test --workspace          # full suite, roughly 4.3k tests
+cargo build --workspace --locked
+cargo test --workspace --locked # full suite, roughly 4.3k tests
 cargo fmt --all --check
-cargo clippy --workspace        # warnings are reported, not denied (see below)
+cargo clippy --workspace --locked # warnings are reported, not denied (see below)
 ```
 
 `scripts/build.sh` wraps the build and checks the toolchain and platform

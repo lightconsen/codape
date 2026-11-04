@@ -23,7 +23,7 @@ out="${1:-target/coverage}"
 mkdir -p "$out"
 
 if [[ "$summary_only" == false ]]; then
-    cargo llvm-cov --workspace --no-fail-fast --lcov --output-path "$out/lcov.info"
+    cargo llvm-cov --workspace --no-fail-fast --locked --lcov --output-path "$out/lcov.info"
 fi
 if [[ ! -f "$out/lcov.info" ]]; then
     echo "missing $out/lcov.info; run without --summary-only first" >&2

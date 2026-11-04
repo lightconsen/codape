@@ -41,6 +41,7 @@ this table is what they check):
 | `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p coderex-bridge --test ssh_spawn` — the SSH spawn path against a real server |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (the backlog is zero, so a warning fails) |
 | `test` | `cargo nextest run --workspace --no-fail-fast` on Linux; the macOS plist carrier and the live benchmark replay run in `test-macos`, the Windows runtime sandbox tests in `test-windows`, and the SSH spawn path in `ssh-integration` |
+| `doctests` | `cargo test --doc --workspace` — `nextest` does not run doctests, so a doc example that stops compiling is caught here rather than by a reader |
 | `coverage` | `scripts/coverage.sh`; fails below an 85% workspace floor, uploads `coverage-lcov`, and comments the total and delta on pull requests |
 | `doc` | `cargo doc` with `RUSTDOCFLAGS="-D warnings"` |
 | `audit` / `deny` | `cargo audit`, `cargo deny check licenses bans sources` |
@@ -50,6 +51,13 @@ this table is what they check):
 The toolchain is pinned in `rust-toolchain.toml` and named in the workflow
 files. Bump both together: a floating stable would let a new release's lints
 fail a pull request for reasons unrelated to the change.
+
+Every `cargo` invocation that resolves dependencies passes `--locked`, so CI
+builds the dependency graph committed in `Cargo.lock`. Without it a pull
+request that edits a manifest but not the lockfile would be tested against a
+freshly resolved graph that no one reviewed and that the repository does not
+contain. The exceptions are the steps that cannot lock: `cargo fmt` takes no
+`--locked`, and `cargo audit` and `cargo deny` read `Cargo.lock` directly.
 
 ## Advisories
 

@@ -4,10 +4,10 @@
 
 ## Tests
 
-- [ ] `cargo test --workspace`
+- [ ] `cargo test --workspace --locked`
 - [ ] `cargo fmt --all --check`
-- [ ] `cargo clippy --workspace` (no new warnings in the touched files)
-- [ ] `cargo check --workspace --all-features` (if an optional feature is touched)
+- [ ] `cargo clippy --workspace --locked` (no new warnings in the touched files)
+- [ ] `cargo check --workspace --all-features --locked` (if an optional feature is touched)
 
 ## Notes
 

@@ -66,7 +66,7 @@ run_mock() {
         set -- --test-threads=1
     fi
 
-    run_and_report "mock" cargo test -p coderex-cli --test code_agent_benchmark -- --nocapture "$@"
+    run_and_report "mock" cargo test --locked -p coderex-cli --test code_agent_benchmark -- --nocapture "$@"
 }
 
 run_live() {
@@ -75,7 +75,7 @@ run_live() {
     fi
 
     # The provider cases replay tests/cassettes/benchmark_live.
-    run_and_report "live" cargo test -p coderex-cli --test code_agent_benchmark live_hard_assert -- --nocapture "$@"
+    run_and_report "live" cargo test --locked -p coderex-cli --test code_agent_benchmark live_hard_assert -- --nocapture "$@"
 }
 
 case "$mode" in

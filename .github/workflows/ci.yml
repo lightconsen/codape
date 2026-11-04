@@ -92,12 +92,12 @@ jobs:
       # regression. `--all-targets` includes test and bench code; the toolchain
       # is pinned in rust-toolchain.toml so a new stable release cannot add a
       # lint that fails a build for reasons unrelated to the change.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The jobs build default features. `keyring`, `hot-reload` and
       # `wasm-runtime` are optional and are upgraded independently, so compile
       # one workspace with every feature enabled as well.
       - name: Check optional features compile
-        run: cargo check --workspace --all-features
+        run: cargo check --workspace --all-features --locked
 
   test:
     name: Test
@@ -114,7 +114,23 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # `--no-fail-fast` reports every failing test binary instead of stopping
       # at the first failure; one red run should name all of them.
-      - run: cargo nextest run --workspace --no-fail-fast
+      - run: cargo nextest run --workspace --no-fail-fast --locked
+
+  # `cargo nextest` does not run doctests, and a `cargo test` in another job
+  # would run them only incidentally. A doc example that stops compiling is a
+  # broken promise to every reader of the API docs, so it gets its own step.
+  doctests:
+    name: Doctests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: ./.github/actions/linux-deps
+      - run: cargo test --doc --workspace --locked
 
   # The plist managed-settings carrier is `#[cfg(target_os = "macos")]`, so no
   # Linux or Windows job ever compiles it. Without this job those tests never
@@ -129,16 +145,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
-      - run: cargo test -p coderex-config
+      - run: cargo test -p coderex-config --locked
       # The live benchmark cassettes replay sessions recorded on macOS; one of
       # them repairs its fixture with BSD `sed -i ''`, which GNU sed rejects.
       # The case is gated to macOS, so it runs here.
       - name: Live benchmark replay
-        run: cargo test -p coderex-cli --test code_agent_benchmark live_
+        run: cargo test -p coderex-cli --test code_agent_benchmark live_ --locked
       # macOS-only code (sandbox-exec, F_GETPATH, the plist carrier) is not
       # compiled on Linux, so the main clippy job never sees it.
       - name: Clippy (macOS)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # The release matrix builds a target that nothing else does: musl. Its libc
   # differs from glibc's in ways a gnu build cannot see (the rlimit resource
@@ -163,7 +179,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
       - name: Check the workspace for musl
-        run: cargo check --workspace --target x86_64-unknown-linux-musl
+        run: cargo check --workspace --target x86_64-unknown-linux-musl --locked
 
   # The SSH spawn path talks to a real sshd. Its unit tests cover the mapping
   # and the command list; only a live server covers the connection, the
@@ -222,7 +238,7 @@ jobs:
           exit 1
 
       - name: Spawn a session over SSH
-        run: cargo test -p coderex-bridge --test ssh_spawn -- --nocapture
+        run: cargo test -p coderex-bridge --test ssh_spawn --locked -- --nocapture
 
   # Compilation and linking for Windows are required, and are checked from
   # ubuntu-latest with the mingw-w64 toolchain below. This matters because the
@@ -245,10 +261,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mingw-w64
       - name: Check the workspace for Windows
-        run: cargo check --workspace --target x86_64-pc-windows-gnu
+        run: cargo check --workspace --target x86_64-pc-windows-gnu --locked
       - name: Link the Windows test binaries
         run: >
-          cargo test --no-run --lib --target x86_64-pc-windows-gnu
+          cargo test --no-run --lib --target x86_64-pc-windows-gnu --locked
           -p coderex-core -p coderex-tools -p coderex-hooks
           -p coderex-config -p coderex-cli
 
@@ -283,50 +299,50 @@ jobs:
       # Linux either. `--all-targets` is deliberately omitted: the CLI
       # integration tests are POSIX-shell fixtures and are not built here.
       - name: Clippy (Windows)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --locked -- -D warnings
       - name: Core sandbox tests (AppContainer)
         timeout-minutes: 20
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib sandbox -- --nocapture
+          cargo test --no-fail-fast -p coderex-core --lib sandbox --locked -- --nocapture
           --skip windows_sandbox_confines_a_suspended_child
           --skip spawn_in_container_confines_a_real_process
       - name: AppContainer confinement (suspended child)
         if: always()
         timeout-minutes: 10
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib
+          cargo test --no-fail-fast -p coderex-core --lib --locked
           sandbox::tests::windows_sandbox_confines_a_suspended_child
           -- --exact --nocapture
       - name: AppContainer confinement (STARTUPINFOEX)
         if: always()
         timeout-minutes: 10
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib
+          cargo test --no-fail-fast -p coderex-core --lib --locked
           sandbox_windows::tests::windows::spawn_in_container_confines_a_real_process
           -- --exact --nocapture
       - name: Process tree tests (Job Objects)
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-core --lib process_tree -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-core --lib process_tree --locked -- --nocapture
       - name: Tools shell sandbox tests
         if: always()
         timeout-minutes: 15
-        run: cargo test --no-fail-fast -p coderex-tools sandbox -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-tools sandbox --locked -- --nocapture
       # `fd_path` (GetFinalPathNameByHandleW) is the Windows half of the
       # verified-file story; macOS has F_GETPATH and a test, Windows had
       # neither until this step.
       - name: Verified file-access tests
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-tools --lib verified_fs -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-tools --lib verified_fs --locked -- --nocapture
       - name: Hooks sandbox tests
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-hooks sandbox -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-hooks sandbox --locked -- --nocapture
       - name: MCP sandbox tests
         if: always()
         timeout-minutes: 15
-        run: cargo test --no-fail-fast -p coderex-mcp --lib windows_ -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-mcp --lib windows_ --locked -- --nocapture
       # The whole crate, not just `archive`: the spawner, poller and
       # orchestrator tests are portable and used to run only on Unix, which
       # left the Windows spawn path with no runtime coverage. `ssh_spawn` is
@@ -335,19 +351,19 @@ jobs:
       - name: Bridge tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-bridge -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-bridge --locked -- --nocapture
       - name: WASM compiler sandbox tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-plugins --test wasm_compile_subprocess -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-plugins --test wasm_compile_subprocess --locked -- --nocapture
       - name: Config tests (Windows registry path)
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-config -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-config --locked -- --nocapture
       - name: CLI library tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-cli --lib -- --nocapture
+        run: cargo test --no-fail-fast -p coderex-cli --lib --locked -- --nocapture
 
   # Line coverage, uploaded as an artifact and reported on pull requests.
   #
@@ -460,10 +476,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - name: Build eval fixtures
-        run: cargo build -p coderex-cli --bin coderex --bin static-anthropic-server
+        run: cargo build -p coderex-cli --bin coderex --bin static-anthropic-server --locked
       - name: Run checked-in smoke flow
         run: |
-          cargo run -p coderex-evals --bin run-eval -- \
+          cargo run --locked -p coderex-evals --bin run-eval -- \
             --flow-dir evals/flows/smoke \
             --variant baseline \
             --approve-harness \
@@ -489,7 +505,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-mock.sh full
-      - run: cargo test -p coderex-cli --test e2e_stress -- --nocapture
+      - run: cargo test -p coderex-cli --test e2e_stress --locked -- --nocapture
 
   # Soak and fuzz: long-running checks that are pointless on every push but
   # catch the failures a unit test cannot — a session that leaks descriptors
@@ -612,7 +628,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       # The rustdoc backlog is empty; a warning is a regression.
-      - run: cargo doc --workspace --no-deps
+      - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -661,4 +677,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
-      - run: cargo build --workspace --release
+      - run: cargo build --workspace --release --locked

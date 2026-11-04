@@ -55,6 +55,7 @@ def build() -> None:
         [
             "cargo",
             "build",
+            "--locked",
             "--bin",
             "coderex",
             "--bin",
