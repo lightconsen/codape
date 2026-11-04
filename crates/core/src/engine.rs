@@ -470,9 +470,15 @@ impl TurnState {
                 next,
                 Self::StreamAssistant | Self::AwaitElicitation | Self::StopHooks
             ),
+            // A provider that rejected the prompt as too long sends the turn
+            // back through compaction and a fresh request — the same recovery
+            // move as crossing the token line.
             Self::StreamAssistant => matches!(
                 next,
-                Self::ExecuteTools | Self::EvaluateContinuation | Self::AwaitElicitation
+                Self::ExecuteTools
+                    | Self::EvaluateContinuation
+                    | Self::AwaitElicitation
+                    | Self::CompactRecovery
             ),
             // A permission decision is answered and the tools run.
             Self::AwaitPermission => matches!(next, Self::ExecuteTools | Self::ApplyToolResults),
@@ -697,6 +703,15 @@ pub struct TurnRuntime {
     pub state: TurnState,
     /// Messages for this turn.
     pub messages: Vec<Message>,
+    /// Where `messages` holds the conversation history.
+    ///
+    /// `messages` is the whole request — preamble, system prompt, history,
+    /// and per-turn injections. `(start, end)` marks the range that came from
+    /// `session.messages`; everything outside it is rebuilt every turn and
+    /// must survive compaction untouched. `None` means the list was not
+    /// assembled by `build_context` (a test, or a caller supplying its own),
+    /// and the whole list is treated as history.
+    pub history_range: Option<(usize, usize)>,
     /// Pending tool calls awaiting execution.
     pub pending_tool_calls: Vec<PendingToolCall>,
     /// Pending permission request.
@@ -726,6 +741,12 @@ pub struct TurnRuntime {
     /// `Reactive` compaction is for a response the model ran out of room for;
     /// that fact lives on the response, not in the context estimate.
     pub last_stop_reason: Option<String>,
+    /// The strategy of the last compaction in this turn, if any.
+    ///
+    /// Strategy selection reads it so a pass that did not bring the context
+    /// below the line escalates (the next attempt is more aggressive) rather
+    /// than repeating the pass that just failed.
+    pub last_compact_strategy: Option<crate::compact::CompactStrategy>,
     /// Optional observer called after every transition.
     pub transition_observer: Option<TransitionObserver>,
 }
@@ -737,6 +758,7 @@ impl TurnRuntime {
         Self {
             state: TurnState::Initialize,
             messages: Vec::new(),
+            history_range: None,
             pending_tool_calls: Vec::new(),
             pending_permission: None,
             pending_elevation: None,
@@ -748,7 +770,64 @@ impl TurnRuntime {
             agent_id: None,
             terminal_reason: None,
             last_stop_reason: None,
+            last_compact_strategy: None,
             transition_observer: None,
+        }
+    }
+
+    /// The slice of `messages` that is the conversation history.
+    ///
+    /// `messages` is a per-request list that also carries the parts of the
+    /// prompt that are rebuilt every turn: the CLAUDE.md preamble, the system
+    /// prompt, and the per-turn injections. Only the range `build_context`
+    /// populated from `session.messages` is history, and only history may be
+    /// compacted — replacing the whole list would drop the system prompt and
+    /// duplicate the preamble on the next turn.
+    #[must_use]
+    pub fn history(&self) -> &[Message] {
+        match self.history_range {
+            Some((start, end)) if end <= self.messages.len() => &self.messages[start..end],
+            _ => {
+                // Not built by `build_context` (tests, callers that assemble
+                // their own list): the whole list is the history.
+                &self.messages
+            }
+        }
+    }
+
+    /// Replace the conversation history, leaving the preamble and the
+    /// per-turn injections in place.
+    pub fn replace_history(&mut self, history: Vec<Message>) {
+        match self.history_range.take() {
+            Some((start, end)) if end <= self.messages.len() => {
+                let mut messages =
+                    Vec::with_capacity(start + history.len() + (self.messages.len() - end));
+                messages.extend(self.messages[..start].iter().cloned());
+                messages.extend(history.iter().cloned());
+                messages.extend(self.messages[end..].iter().cloned());
+                let new_end = start + history.len();
+                self.messages = messages;
+                self.history_range = Some((start, new_end));
+            }
+            _ => self.messages = history,
+        }
+    }
+
+    /// Record where `build_context` put the conversation history.
+    pub const fn set_history_range(&mut self, start: usize, end: usize) {
+        self.history_range = Some((start, end));
+    }
+
+    /// The context outside the history (preamble, system prompt, injections),
+    /// as it will be sent with the next request.
+    #[must_use]
+    pub fn context_prefix_tokens(&self) -> usize {
+        match self.history_range {
+            Some((start, end)) if end <= self.messages.len() => {
+                PromptCompiler::estimate_message_tokens(&self.messages[..start])
+                    + PromptCompiler::estimate_message_tokens(&self.messages[end..])
+            }
+            _ => 0,
         }
     }
 
@@ -763,11 +842,13 @@ impl TurnRuntime {
     pub fn reset(&mut self) {
         self.state = TurnState::Initialize;
         self.messages.clear();
+        self.history_range = None;
         self.pending_tool_calls.clear();
         self.pending_permission = None;
         self.pending_elevation = None;
         self.pending_elicitation = None;
         self.last_stop_reason = None;
+        self.last_compact_strategy = None;
         self.budget.reset_turn();
     }
 
@@ -820,6 +901,18 @@ pub enum TurnError {
         /// What to show a person.
         message: String,
     },
+    /// The request did not fit the model's context window. This is not fatal:
+    /// the provider has just said how large its window is, and compacting can
+    /// make the request fit, so the turn retries after compaction instead of
+    /// ending.
+    ContextOverflow {
+        /// What to show a person.
+        message: String,
+        /// The input size the provider measured, when it said so.
+        actual: Option<usize>,
+        /// The limit the request exceeded; zero when the provider gave none.
+        limit: usize,
+    },
     /// Anything else: a bad request, a refusal, a bug here.
     Fatal {
         /// What to show a person.
@@ -832,7 +925,9 @@ impl TurnError {
     #[must_use]
     pub fn message(&self) -> &str {
         match self {
-            Self::ApiUnavailable { message } | Self::Fatal { message } => message,
+            Self::ApiUnavailable { message }
+            | Self::ContextOverflow { message, .. }
+            | Self::Fatal { message } => message,
         }
     }
 
@@ -843,6 +938,9 @@ impl TurnError {
             Self::ApiUnavailable { message } => TerminalReason::ApiUnavailable {
                 message: message.clone(),
             },
+            Self::ContextOverflow { .. } => TerminalReason::ApiUnavailable {
+                message: self.message().to_string(),
+            },
             Self::Fatal { message } => TerminalReason::Error(message.clone()),
         }
     }
@@ -851,7 +949,9 @@ impl TurnError {
     #[must_use]
     pub fn into_message(self) -> String {
         match self {
-            Self::ApiUnavailable { message } | Self::Fatal { message } => message,
+            Self::ApiUnavailable { message }
+            | Self::ContextOverflow { message, .. }
+            | Self::Fatal { message } => message,
         }
     }
 }
@@ -1296,6 +1396,15 @@ impl Drop for CacheTtlTimer {
 /// end of the run.
 pub const MAX_PROVIDER_RESUMES: u32 = 8;
 
+/// How many times one request is retried after the provider says its input
+/// does not fit.
+///
+/// Each retry is preceded by a compaction, and a compaction may not remove
+/// anything — so the retries are bounded separately from the recovery budget,
+/// which only spends an attempt when the pass made progress. Two is enough:
+/// one pass learns the real window, the second compacts to it.
+const MAX_CONTEXT_OVERFLOW_RETRIES: u32 = 2;
+
 /// What the outer turn loop does after a turn returns a reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LoopStep {
@@ -1484,6 +1593,15 @@ pub struct QueryEngine {
     /// data, built-in table). The CLI installs one built from resolved
     /// settings and experiment flags.
     context_window_resolver: Option<ContextWindowResolver>,
+    /// The real context window, learned from a provider's overflow error.
+    ///
+    /// A provider enforces the window itself, and its rejection is the only
+    /// authoritative statement of what that window is. When one arrives the
+    /// engine records the limit here; from then on thresholds use it instead
+    /// of the table or the unknown-model guess. It outlives the turn: the
+    /// session already paid for the failed request, and the next turn should
+    /// not repeat the mistake.
+    learned_context_window: Option<usize>,
     /// Hook executor for firing lifecycle hooks.
     ///
     /// Shared rather than owned so a session can hand a clone to a background
@@ -1660,14 +1778,34 @@ fn push_assistant_content(out: &mut Vec<(String, serde_json::Value)>, content: s
 }
 
 impl QueryEngine {
+    /// Append one history message to both the session and this turn's request.
+    ///
+    /// Writing both lists is what keeps the next request and `close_turn`
+    /// agreeing. The write to `turn.messages` lands at the end of the history
+    /// range rather than at the end of the list: the per-turn injections that
+    /// follow the history (denied-tool summaries, a caller's extra system
+    /// prompt, the JSON-schema instruction) are rebuilt every turn and must
+    /// not be absorbed into the range compaction may replace.
+    fn push_history_message(&mut self, turn: &mut TurnRuntime, msg: Message) {
+        self.session.messages.push(msg.clone());
+        if let Some((start, end)) = turn.history_range
+            && start <= end
+            && end <= turn.messages.len()
+        {
+            turn.messages.insert(end, msg);
+            turn.history_range = Some((start, end + 1));
+        } else {
+            turn.messages.push(msg);
+        }
+    }
+
     fn persist_assistant_tool_calls(&mut self, turn: &mut TurnRuntime, tool_calls: &[ToolCall]) {
         for tool_call in tool_calls {
             let msg = Message {
                 role: crate::types::Role::Assistant,
                 content: crate::types::MessageContent::ToolCall(tool_call.clone()),
             };
-            turn.messages.push(msg.clone());
-            self.session.messages.push(msg);
+            self.push_history_message(turn, msg);
         }
     }
 
@@ -1822,6 +1960,7 @@ impl QueryEngine {
             prompt_compiler: PromptCompiler::new(config),
             compact_config: config,
             context_window_resolver: None,
+            learned_context_window: None,
             hooks: Arc::new(NoOpHookExecutor),
             session_watch_paths: Vec::new(),
             tools: Box::new(NoOpToolExecutor),
@@ -1942,6 +2081,22 @@ impl QueryEngine {
                     tracing::warn!("Notification hook errors: {:?}", result.errors);
                 }
                 TurnError::ApiUnavailable { message }
+            }
+            // The provider said the input does not fit. That is recoverable —
+            // compact and retry — and the message carries the real window.
+            error
+                if matches!(
+                    crate::api_client::classify_error(&error),
+                    crate::api_client::ErrorClass::ContextOverflow
+                ) =>
+            {
+                let message = error.to_string();
+                let overflow = crate::context_overflow::detect(&message);
+                TurnError::ContextOverflow {
+                    message,
+                    actual: overflow.and_then(|o| o.actual),
+                    limit: overflow.map_or(0, |o| o.limit),
+                }
             }
             // A transport failure that ran out of retries is the same
             // question — try later — and is classified by kind rather than
@@ -2108,7 +2263,22 @@ impl QueryEngine {
     }
 
     /// Compaction thresholds for this engine's model and override chain.
+    ///
+    /// A window learned from a provider's overflow error beats every other
+    /// source: it is the one value the provider itself stated. Anything else
+    /// is resolved through the override chain (env → settings → client data →
+    /// experiment → built-in table → unknown guess), and the source travels
+    /// with the value so the blocked line is only enforced on a real one.
     fn compact_thresholds(&self) -> compact::CompactThresholds {
+        if let Some(window) = self.learned_context_window {
+            return compact::CompactThresholds::resolve_detailed(
+                &self.compact_config,
+                crate::types::ResolvedContextWindow::new(
+                    window,
+                    crate::types::ContextWindowSource::Experiment,
+                ),
+            );
+        }
         self.context_window_resolver.as_ref().map_or_else(
             || compact::CompactThresholds::resolve(&self.model, &self.compact_config),
             |resolver| {
@@ -2119,6 +2289,37 @@ impl QueryEngine {
                 )
             },
         )
+    }
+
+    /// The context window this engine is currently working against.
+    #[must_use]
+    pub fn context_window(&self) -> crate::types::ResolvedContextWindow {
+        if let Some(window) = self.learned_context_window {
+            return crate::types::ResolvedContextWindow::new(
+                window,
+                crate::types::ContextWindowSource::Experiment,
+            );
+        }
+        self.context_window_resolver.as_ref().map_or_else(
+            || {
+                crate::types::ContextWindowResolver::from_env_and_client_data()
+                    .resolve_detailed(&self.model.0)
+            },
+            |resolver| resolver.resolve_detailed(&self.model.0),
+        )
+    }
+
+    /// Record a window the provider stated, so the rest of the session uses it.
+    pub fn learn_context_window(&mut self, window: usize) {
+        if window > 0 && self.learned_context_window != Some(window) {
+            tracing::info!(
+                model = %self.model.0,
+                previous = ?self.context_window(),
+                learned = window,
+                "provider reported the real context window"
+            );
+            self.learned_context_window = Some(window);
+        }
     }
 
     /// Refresh the session-memory document at compaction time and return the
@@ -2742,6 +2943,7 @@ impl QueryEngine {
                     let reason = error.terminal_reason();
                     let stop_reason = match &error {
                         TurnError::ApiUnavailable { .. } => "api_unavailable",
+                        TurnError::ContextOverflow { .. } => "context_overflow",
                         TurnError::Fatal { .. } => "error",
                     };
                     let _ = self
@@ -2757,7 +2959,9 @@ impl QueryEngine {
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     return match error {
-                        TurnError::ApiUnavailable { .. } => Ok(reason),
+                        TurnError::ApiUnavailable { .. } | TurnError::ContextOverflow { .. } => {
+                            Ok(reason)
+                        }
                         TurnError::Fatal { message } => Err(message),
                     };
                 }
@@ -2873,6 +3077,7 @@ impl QueryEngine {
                     let reason = error.terminal_reason();
                     let stop_reason = match &error {
                         TurnError::ApiUnavailable { .. } => "api_unavailable",
+                        TurnError::ContextOverflow { .. } => "context_overflow",
                         TurnError::Fatal { .. } => "error",
                     };
                     let _ = self
@@ -2888,7 +3093,9 @@ impl QueryEngine {
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     return match error {
-                        TurnError::ApiUnavailable { .. } => Ok(reason),
+                        TurnError::ApiUnavailable { .. } | TurnError::ContextOverflow { .. } => {
+                            Ok(reason)
+                        }
                         TurnError::Fatal { message } => Err(message),
                     };
                 }
@@ -3010,7 +3217,23 @@ impl QueryEngine {
 
         // Phase 4: StartRequest → StreamAssistant
         turn.transition_to(TurnState::StreamAssistant);
-        let api_response = self.send_request(turn, options).await?;
+        let mut overflow_retries = 0u32;
+        let api_response = loop {
+            match self.send_request(turn, options).await {
+                Ok(response) => break response,
+                Err(error @ TurnError::ContextOverflow { .. }) => {
+                    overflow_retries += 1;
+                    if overflow_retries > MAX_CONTEXT_OVERFLOW_RETRIES {
+                        return Err(error);
+                    }
+                    self.recover_from_context_overflow(turn, error, options, turn_number)
+                        .await?;
+                    turn.transition_to(TurnState::StartRequest);
+                    turn.transition_to(TurnState::StreamAssistant);
+                }
+                Err(error) => return Err(error),
+            }
+        };
         turn.last_stop_reason = Some(api_response.stop_reason.clone());
 
         // Record budget and cost
@@ -3034,8 +3257,7 @@ impl QueryEngine {
                 && let Some(user_text) = resp.other_text.or_else(|| resp.selected.first().cloned())
             {
                 let user_msg = Message::user(user_text);
-                turn.messages.push(user_msg.clone());
-                self.session.messages.push(user_msg);
+                self.push_history_message(turn, user_msg);
                 // Re-send request with clarified context
                 api_response = self.send_request(turn, options).await?;
                 turn.budget.record_tokens(&api_response.usage);
@@ -3167,8 +3389,7 @@ impl QueryEngine {
             // turn's loop fingerprint was built from the calls alone — and a
             // poll whose answer changes each time (`sleep 55; tail …` while a
             // download runs) looked identical to a stuck one and ended the run.
-            turn.messages.push(msg.clone());
-            self.session.messages.push(msg);
+            self.push_history_message(turn, msg);
         }
 
         // Phase 7: Evaluate continuation
@@ -3330,7 +3551,26 @@ impl QueryEngine {
         turn.transition_to(TurnState::StartRequest);
         turn.transition_to(TurnState::StreamAssistant);
 
-        // Streaming request
+        // Streaming request. A prompt too long for the provider is the one
+        // request failure with a thing to do about it: learn the real window,
+        // compact, and ask again.
+        let mut overflow_retries = 0u32;
+        let streamed = loop {
+            match self.send_request_streaming(turn, options).await {
+                Ok(response) => break response,
+                Err(error @ TurnError::ContextOverflow { .. }) => {
+                    overflow_retries += 1;
+                    if overflow_retries > MAX_CONTEXT_OVERFLOW_RETRIES {
+                        return Err(error);
+                    }
+                    self.recover_from_context_overflow(turn, error, options, turn_number)
+                        .await?;
+                    turn.transition_to(TurnState::StartRequest);
+                    turn.transition_to(TurnState::StreamAssistant);
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let StreamedResponse {
             mut content,
             mut tool_calls,
@@ -3339,7 +3579,7 @@ impl QueryEngine {
             mut usage,
             mut stop_reason,
             thinking,
-        } = self.send_request_streaming(turn, options).await?;
+        } = streamed;
         turn.last_stop_reason = Some(stop_reason.clone());
         // How the provider says the answer ended decides whether the loop
         // continues. A truncated response (`max_tokens`) and a finished one
@@ -3378,8 +3618,7 @@ impl QueryEngine {
                 && let Some(user_text) = resp.other_text.or_else(|| resp.selected.first().cloned())
             {
                 let user_msg = Message::user(user_text);
-                turn.messages.push(user_msg.clone());
-                self.session.messages.push(user_msg);
+                self.push_history_message(turn, user_msg);
                 // Re-send request with clarified context
                 let answered = self.send_request_streaming(turn, options).await?;
                 turn.budget.record_tokens(&answered.usage);
@@ -3405,8 +3644,7 @@ impl QueryEngine {
         self.persist_assistant_tool_calls(turn, &early_calls);
         for result in &early_results {
             let msg = Message::tool(result.clone());
-            turn.messages.push(msg.clone());
-            self.session.messages.push(msg);
+            self.push_history_message(turn, msg);
         }
         tracing::info!(
             "session.messages after early_results: {:?}",
@@ -3522,8 +3760,7 @@ impl QueryEngine {
             // turn's loop fingerprint was built from the calls alone — and a
             // poll whose answer changes each time (`sleep 55; tail …` while a
             // download runs) looked identical to a stuck one and ended the run.
-            turn.messages.push(msg.clone());
-            self.session.messages.push(msg);
+            self.push_history_message(turn, msg);
         }
 
         // Phase 7: Evaluate continuation
@@ -3702,8 +3939,7 @@ impl QueryEngine {
             role: crate::types::Role::Assistant,
             content: crate::types::MessageContent::Thinking(block),
         };
-        turn.messages.push(msg.clone());
-        self.session.messages.push(msg);
+        self.push_history_message(turn, msg);
     }
 
     fn push_visible_assistant_message(&mut self, turn: &mut TurnRuntime, content: String) {
@@ -3831,8 +4067,12 @@ impl QueryEngine {
             turn.messages.push(Message::system(team_context));
         }
 
-        // Add session conversation messages (after system context)
+        // Add session conversation messages (after system context). Note the
+        // range: this is the only part of the request that is history, and
+        // the only part compaction may replace.
+        let history_start = turn.messages.len();
         turn.messages.extend(self.session.messages.iter().cloned());
+        turn.set_history_range(history_start, turn.messages.len());
 
         // Inject denied tool call summaries from previous turns
         if !self.denied_tools.is_empty() {
@@ -3934,6 +4174,58 @@ impl QueryEngine {
         }
     }
 
+    /// React to a provider-reported context overflow.
+    ///
+    /// The provider's error is the one authoritative statement about how large
+    /// its window is, so the first thing done here is learning it — every
+    /// later request and every later compaction threshold uses the real value
+    /// instead of the table's guess. Then the turn compacts once and returns,
+    /// leaving the caller to retry the request.
+    ///
+    /// Returns the original error when no compaction happened, because
+    /// retrying an unchanged request fails the same way and only spends a
+    /// request.
+    async fn recover_from_context_overflow(
+        &mut self,
+        turn: &mut TurnRuntime,
+        error: TurnError,
+        options: &SubmitOptions,
+        turn_number: u32,
+    ) -> Result<(), TurnError> {
+        let TurnError::ContextOverflow { actual, limit, .. } = &error else {
+            return Err(error);
+        };
+        if *limit > 0 {
+            let learned = actual.map_or(*limit, |a| a.max(*limit));
+            self.learn_context_window(learned);
+        }
+        if turn.recovery_count >= self.compact_config.max_recovery_retries {
+            tracing::warn!(
+                recovery_count = turn.recovery_count,
+                "context overflow with the recovery budget spent — not compacting again"
+            );
+            return Err(error);
+        }
+
+        // The turn is past `StartRequest` when the request fails, and the
+        // recovery decision is only reachable from there.
+        turn.transition_to(TurnState::CompactRecovery);
+        let outcome = self
+            .run_compact_recovery(turn, options, turn_number, CompactTrigger::TokenThreshold)
+            .await;
+        if let Some(reason) = outcome.failure_message() {
+            return Err(TurnError::Fatal { message: reason });
+        }
+        if !matches!(outcome, CompactOutcome::Compacted { .. }) {
+            tracing::warn!(
+                outcome = ?outcome,
+                "context overflow: compaction made no progress — failing the turn"
+            );
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Run compact recovery when context is too large.
     ///
     /// Returns a named [`CompactOutcome`] for every path, including the ones
@@ -3945,7 +4237,7 @@ impl QueryEngine {
     /// emits a [`CompactionEvent`], so a caller can observe why compaction did
     /// or did not happen.
     async fn run_compact_recovery(
-        &self,
+        &mut self,
         turn: &mut TurnRuntime,
         options: &SubmitOptions,
         turn_number: u32,
@@ -3960,14 +4252,19 @@ impl QueryEngine {
 
     #[allow(clippy::unused_async)]
     async fn run_compact_recovery_inner(
-        &self,
+        &mut self,
         turn: &mut TurnRuntime,
         _options: &SubmitOptions,
         _turn_number: u32,
         trigger: CompactTrigger,
     ) -> CompactOutcome {
-        // Estimate current token count
-        let estimated_tokens = PromptCompiler::estimate_message_tokens(&turn.messages);
+        // Only the history is compactable: the preamble, the system prompt and
+        // the per-turn injections around it are rebuilt next turn and would
+        // both distort the estimate and be lost if the whole list were
+        // replaced.
+        let history = turn.history().to_vec();
+        let prefix_tokens = turn.context_prefix_tokens();
+        let estimated_tokens = PromptCompiler::estimate_message_tokens(&history) + prefix_tokens;
 
         // The strategy follows the trigger. A cold cache is a moment to tidy
         // up cheaply, not a reason to rewrite history: it takes the lightest
@@ -3997,6 +4294,21 @@ impl QueryEngine {
                     )
                 },
             ),
+        };
+
+        // Escalation: a pass that already ran and did not reach the line is
+        // repeated with a cheaper, more aggressive strategy. Two `Auto` passes
+        // in a row would spend the recovery budget on the same arithmetic that
+        // just failed; the rule strategies are monotone in what they remove,
+        // so stepping down the ladder is the move that can actually succeed.
+        let strategy = if trigger == CompactTrigger::TokenThreshold {
+            match turn.last_compact_strategy {
+                Some(CompactStrategy::Micro) => CompactStrategy::Auto,
+                Some(CompactStrategy::Auto) => CompactStrategy::Snip,
+                _ => strategy,
+            }
+        } else {
+            strategy
         };
 
         // Execute Stop hook with dead loop protection
@@ -4054,9 +4366,9 @@ impl QueryEngine {
         // proactive tidy-up is not worth one — and the lightest rule-based
         // pass is the whole point of compacting while the cache is cold.
         let tokens_before = estimated_tokens;
-        let split = compact::summary_split(&turn.messages, 3);
+        let split = compact::summary_split(&history, 3, self.compact_config.keep_recent_messages);
         let summary_input = compact::build_summary_input(
-            &turn.messages,
+            &history,
             &split,
             self.compact_config.summary_input_max_tokens,
         );
@@ -4078,7 +4390,7 @@ impl QueryEngine {
                         "CompactRecovery: summary failed — retrying with half input budget"
                     );
                     let halved = compact::build_summary_input(
-                        &turn.messages,
+                        &history,
                         &split,
                         self.compact_config.summary_input_max_tokens / 2,
                     );
@@ -4101,7 +4413,7 @@ impl QueryEngine {
                             Box::pin(self.refresh_session_memory(&summary_text, &summary_input))
                                 .await;
                         let mut result = compact::assemble_summary_result(
-                            &turn.messages,
+                            &history,
                             &split,
                             &summary_text,
                             tokens_before,
@@ -4110,11 +4422,10 @@ impl QueryEngine {
                         // Post-compact restore: breadcrumb the file paths whose
                         // contents were compacted away so the agent can re-read.
                         let restored_paths =
-                            compact::extract_recent_file_paths(&turn.messages, &split, 5);
+                            compact::extract_recent_file_paths(&history, &split, 5);
                         if let Some(restore_msg) = compact::file_restore_message(&restored_paths) {
                             result.messages.push(restore_msg);
                         }
-                        turn.compact_failures = 0;
                         return self
                             .finish_compaction(turn, result, trigger, SummaryOutcome::Summarized)
                             .await;
@@ -4145,12 +4456,13 @@ impl QueryEngine {
         // this model, not the configured fallback, which is sized for a window
         // that may not be this one.
         let thresholds = self.compact_thresholds();
+        let history = turn.history().to_vec();
         let result: CompactResult = match strategy {
-            CompactStrategy::Micro => compact::micro_compact(&turn.messages, self.micro_params()),
-            CompactStrategy::Auto => compact::auto_compact(&turn.messages, thresholds.auto),
-            CompactStrategy::Reactive => compact::reactive_compact(&turn.messages, 3),
+            CompactStrategy::Micro => compact::micro_compact(&history, self.micro_params()),
+            CompactStrategy::Auto => compact::auto_compact(&history, thresholds.auto),
+            CompactStrategy::Reactive => compact::reactive_compact(&history, 3),
             CompactStrategy::Snip => compact::snip_compact(
-                &turn.messages,
+                &history,
                 self.compact_config.snip_target_tokens.min(thresholds.auto),
             ),
         };
@@ -4163,27 +4475,47 @@ impl QueryEngine {
     /// event, transcript persistence, retry counters, and the PostCompact hook.
     ///
     /// The compaction-failure circuit breaker is driven here: an attempt that
-    /// fails to shrink the context counts as a failure and resets on progress,
+    /// fails to make real progress counts as a failure and resets on progress,
     /// so `run_compact_recovery` stops retrying once the context is
     /// irrecoverable.
     ///
-    /// Only a threshold-triggered compaction spends a recovery retry. A
-    /// cache-TTL pass is maintenance, and charging it to the recovery budget
-    /// would let tidying up starve a real recovery later.
+    /// Progress is "the context is back under the compaction line, or this
+    /// pass removed a meaningful share of it" — not merely "it got smaller".
+    /// A pass that removes 35 tokens of 20 000 is not success: it spends a
+    /// recovery attempt, resets the circuit breaker, and lets the next turn
+    /// grow past where it started. That is how a session used to burn its
+    /// whole retry budget on passes that never approached the line.
+    ///
+    /// Only a threshold-triggered compaction spends a recovery retry, and only
+    /// when it made progress. A cache-TTL pass is maintenance, and charging it
+    /// to the recovery budget would let tidying up starve a real recovery
+    /// later.
     async fn finish_compaction(
-        &self,
+        &mut self,
         turn: &mut TurnRuntime,
         mut result: CompactResult,
         trigger: CompactTrigger,
         summary: SummaryOutcome,
     ) -> CompactOutcome {
         // Recompute tokens removed from the actual post-compaction messages.
-        let tokens_after = PromptCompiler::estimate_message_tokens(&result.messages);
-        let tokens_before = PromptCompiler::estimate_message_tokens(&turn.messages);
+        // The estimate includes the context outside the history (system
+        // prompt, preamble) because the window is spent on the whole request.
+        let prefix_tokens = turn.context_prefix_tokens();
+        let history_tokens_before = PromptCompiler::estimate_message_tokens(turn.history());
+        let tokens_after =
+            PromptCompiler::estimate_message_tokens(&result.messages) + prefix_tokens;
+        let tokens_before = history_tokens_before + prefix_tokens;
         result.tokens_removed = tokens_before.saturating_sub(tokens_after);
 
-        // Circuit breaker accounting: no progress counts as a failure.
-        let made_progress = tokens_after < tokens_before;
+        let thresholds = self.compact_thresholds();
+        let below_line = tokens_after <= thresholds.auto;
+        let removed_a_meaningful_share =
+            result.tokens_removed > 0 && result.tokens_removed.saturating_mul(10) >= tokens_before;
+
+        // Circuit breaker accounting: a pass that neither reached the line nor
+        // removed a tenth of the context counts as a failure.
+        let made_progress =
+            (below_line || removed_a_meaningful_share) && tokens_after < tokens_before;
         if made_progress {
             turn.compact_failures = 0;
         } else {
@@ -4200,7 +4532,14 @@ impl QueryEngine {
         // Update turn messages with compacted messages
         let messages_remaining = result.messages.len();
         let strategy = result.strategy;
-        turn.messages = result.messages;
+        // Replace only the history. The preamble, system prompt and per-turn
+        // injections stay where they are, and the session — what the next turn
+        // rebuilds from — gets the compacted history too. Without that second
+        // write the next turn restores everything this pass removed, which is
+        // why an automatic compaction used to last exactly one request.
+        turn.replace_history(result.messages);
+        turn.last_compact_strategy = Some(strategy);
+        self.session.messages.clone_from(&turn.history().to_vec());
 
         // The detector's history describes turns that are no longer in the
         // context. Keeping it would let a repeat the model can no longer see
@@ -4222,8 +4561,11 @@ impl QueryEngine {
                 Err(e) => tracing::warn!("PreCompact: could not back up transcript: {e}"),
             }
 
-            // Write compacted messages to transcript
-            if let Err(e) = Self::write_transcript_replacement(&transcript_file, &turn.messages) {
+            // Write the compacted session — the same list the next turn builds
+            // from — so the file and the session cannot disagree.
+            if let Err(e) =
+                Self::write_transcript_replacement(&transcript_file, &self.session.messages)
+            {
                 tracing::warn!("Failed to update transcript after compact: {e}");
             }
 
@@ -4235,8 +4577,9 @@ impl QueryEngine {
             }
         }
 
-        // Increment recovery count (threshold-triggered compaction only).
-        if trigger == CompactTrigger::TokenThreshold {
+        // Spend a recovery retry only when the pass made progress, and only
+        // for threshold-triggered compaction — see the note on this function.
+        if trigger == CompactTrigger::TokenThreshold && made_progress {
             turn.recovery_count += 1;
         }
 
@@ -4424,27 +4767,37 @@ impl QueryEngine {
     /// Returns `Some(reason)` only when the context is still blocked after a
     /// compaction attempt; at the compact line the turn continues.
     async fn maybe_compact_on_threshold(
-        &self,
+        &mut self,
         turn: &mut TurnRuntime,
         options: &SubmitOptions,
         turn_number: u32,
     ) -> Option<TerminalReason> {
-        let estimated = PromptCompiler::estimate_message_tokens(&turn.messages);
+        let estimated = Self::turn_context_tokens(turn);
         let thresholds = self.compact_thresholds();
         let level = thresholds.level(estimated);
 
         match level {
             compact::ContextLevel::Ok => return None,
             compact::ContextLevel::Warn => {
-                tracing::warn!(
+                tracing::debug!(
                     estimated_tokens = estimated,
                     warn_at = thresholds.warn,
+                    window_source = %thresholds.window_source,
                     "context is approaching the compaction line"
                 );
                 return None;
             }
             compact::ContextLevel::Compact | compact::ContextLevel::Blocked => {}
         }
+
+        tracing::debug!(
+            estimated_tokens = estimated,
+            auto = thresholds.auto,
+            blocked = thresholds.blocked,
+            window_source = %thresholds.window_source,
+            level = ?level,
+            "context crossed the compaction line"
+        );
 
         if turn.recovery_count >= self.compact_config.max_recovery_retries {
             return if level == compact::ContextLevel::Blocked {
@@ -4473,16 +4826,31 @@ impl QueryEngine {
             return Some(TerminalReason::Error(reason));
         }
 
-        if level == compact::ContextLevel::Blocked {
-            let after = PromptCompiler::estimate_message_tokens(&turn.messages);
-            if thresholds.level(after) == compact::ContextLevel::Blocked {
-                return Some(TerminalReason::Error(format!(
-                    "context window is still full after compaction ({after} estimated tokens)"
-                )));
-            }
+        // Re-check at the compaction line too, not only at the blocked one: a
+        // pass that left the context above the line means the next turn starts
+        // from a worse place, and the retry budget is finite. Only the blocked
+        // line is fatal — above the compaction line the request can still be
+        // sent, so the turn continues and the next attempt escalates.
+        let after = Self::turn_context_tokens(turn);
+        if thresholds.level(after) == compact::ContextLevel::Blocked {
+            return Some(TerminalReason::Error(format!(
+                "context window is still full after compaction ({after} estimated tokens, \
+                 blocked line {} from a {} window)",
+                thresholds.blocked, thresholds.window_source,
+            )));
         }
 
         None
+    }
+
+    /// The estimated size of the request this turn would send.
+    ///
+    /// The whole request counts against the window — preamble, system prompt,
+    /// history and per-turn injections — not just the history. Measuring only
+    /// the compactable part made the numbers look comfortable while the
+    /// request was already at the limit.
+    fn turn_context_tokens(turn: &TurnRuntime) -> usize {
+        PromptCompiler::estimate_message_tokens(&turn.messages)
     }
 
     /// Compact proactively when the prompt cache has gone cold.
@@ -4503,7 +4871,7 @@ impl QueryEngine {
     /// caller's next move to `StartRequest` is the one the graph already
     /// allows from there.
     async fn maybe_compact_on_cache_ttl(
-        &self,
+        &mut self,
         turn: &mut TurnRuntime,
         options: &SubmitOptions,
         turn_number: u32,
@@ -4512,7 +4880,7 @@ impl QueryEngine {
             return None;
         }
 
-        let estimated_tokens = PromptCompiler::estimate_message_tokens(&turn.messages);
+        let estimated_tokens = Self::turn_context_tokens(turn);
         let thresholds = self.compact_thresholds();
         if matches!(
             thresholds.level(estimated_tokens),
@@ -4968,10 +5336,19 @@ impl QueryEngine {
                 && deferred_calls.is_empty()
                 && early_results.is_empty()
             {
-                return Err(TurnError::Fatal {
-                    message: stream_error
-                        .unwrap_or_else(|| "the provider returned no response".to_string()),
-                });
+                let message =
+                    stream_error.unwrap_or_else(|| "the provider returned no response".to_string());
+                // A stream that failed because the prompt does not fit is not
+                // a malformed request: the provider stated its limit, and the
+                // turn can retry after compacting.
+                if let Some(overflow) = crate::context_overflow::detect(&message) {
+                    return Err(TurnError::ContextOverflow {
+                        message,
+                        actual: overflow.actual,
+                        limit: overflow.limit,
+                    });
+                }
+                return Err(TurnError::Fatal { message });
             }
             return Ok(StreamedResponse {
                 content,
@@ -7088,6 +7465,9 @@ mod tests {
                     S::ExecuteTools,
                     S::EvaluateContinuation,
                     S::AwaitElicitation,
+                    // The provider refused the request as too large: the one
+                    // recovery not decided by this turn's own accounting.
+                    S::CompactRecovery,
                     S::Terminated,
                 ],
             ),
@@ -9322,14 +9702,16 @@ mod tests {
             PermissionEngine::new(checker),
             tx,
         );
-        // Ignore ambient context-window overrides so the 32K blocked line is
-        // fixed for the test.
+        // Ignore ambient context-window overrides, then state the window as a
+        // provider would. A guessed window never enforces the blocked line, so
+        // the test has to hand the engine a real one to exercise that path.
         engine.set_context_window_resolver(ContextWindowResolver::new(
             crate::types::ContextWindowOverrides::default(),
             crate::types::ContextWindowOverrides::default(),
             crate::types::ContextWindowOverrides::default(),
             crate::types::ContextWindowOverrides::default(),
         ));
+        engine.learn_context_window(32_000);
         engine.compact_config.max_recovery_retries = 0;
 
         let (hooks, recorded) = RecordingHooks::new();
@@ -9750,7 +10132,7 @@ mod tests {
     /// longer see must not count towards ending the run as a loop.
     #[tokio::test]
     async fn compaction_clears_the_loop_history() {
-        let (engine, _rx, _session) = make_test_engine();
+        let (mut engine, _rx, _session) = make_test_engine();
         engine.record_and_check_loop(
             &[PendingToolCall {
                 id: "call-1".into(),
@@ -9790,7 +10172,7 @@ mod tests {
     /// Why compaction did not happen is returned, not only logged.
     #[tokio::test]
     async fn compaction_says_why_it_did_not_happen() {
-        let (engine, _rx, _session) = make_test_engine();
+        let (mut engine, _rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("hello")];
         turn.compact_failures = engine.compact_config.max_consecutive_failures;
@@ -9935,13 +10317,363 @@ mod tests {
         );
     }
 
+    // ─── Compaction writes back ────────────────────────────────────────────
+
+    /// Compaction replaces the history, not the request. The system prompt
+    /// sits outside the history range — it is rebuilt every turn — and a
+    /// compaction that dropped it would send the next turn with no
+    /// instructions at all.
+    #[tokio::test]
+    async fn compaction_keeps_the_system_prompt() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![
+            Message::system("You are CodeRex. Follow the repository conventions."),
+            Message::user("the request"),
+        ];
+        turn.set_history_range(1, 2);
+        for i in 0..10 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(2_000)
+            )));
+        }
+        turn.set_history_range(1, turn.messages.len());
+
+        engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+
+        assert_eq!(
+            turn.messages[0].role,
+            crate::types::Role::System,
+            "the system prompt was compacted away: {:?}",
+            turn.messages.first()
+        );
+        assert!(
+            matches!(
+                &turn.messages[0].content,
+                crate::types::MessageContent::Text(text) if text.starts_with("You are CodeRex")
+            ),
+            "the first message is no longer the system prompt"
+        );
+    }
+
+    /// Compaction is only durable if the session — what the next turn builds
+    /// from — is updated too. Writing only to the turn made an automatic
+    /// compaction last exactly one request.
+    #[tokio::test]
+    async fn compaction_writes_back_to_the_session() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.session.messages = vec![Message::user("the request")];
+        for i in 0..20 {
+            engine.session.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(2_000)
+            )));
+        }
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = engine.session.messages.clone();
+        turn.set_history_range(0, turn.messages.len());
+        let before = engine.session.messages.len();
+
+        engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+
+        assert!(
+            engine.session.messages.len() < before,
+            "the session still holds the pre-compaction history: {} vs {}",
+            engine.session.messages.len(),
+            before
+        );
+        assert_eq!(
+            engine.session.messages.len(),
+            turn.messages.len(),
+            "the session and the compacted turn disagree"
+        );
+    }
+
+    /// The preserved anchor is the first user message — the task prompt — not
+    /// whatever the compiler put before it. CLAUDE.md arrives as a user
+    /// message too, and preserving that instead loses the request.
+    #[tokio::test]
+    async fn compaction_preserves_the_task_prompt_as_anchor() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        // Preamble injected by `build_context`, then the system prompt.
+        turn.messages = vec![
+            Message::user("<system-reminder>CLAUDE.md contents</system-reminder>"),
+            Message::system("You are CodeRex."),
+            Message::user("Fix the failing parser test"),
+        ];
+        turn.set_history_range(2, 3);
+        for i in 0..10 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(2_000)
+            )));
+        }
+        turn.set_history_range(2, turn.messages.len());
+
+        engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+
+        let history = turn.history();
+        assert!(
+            matches!(
+                &history[0].content,
+                crate::types::MessageContent::Text(text)
+                    if text == "Fix the failing parser test"
+            ),
+            "the task prompt was not preserved: {:?}",
+            history.first()
+        );
+    }
+
+    // ─── Progress judgement ────────────────────────────────────────────────
+
+    /// A pass that removes 35 tokens of 20 000 has not recovered anything: it
+    /// must not be reported as progress, must not reset the circuit breaker,
+    /// and must not spend a recovery retry.
+    #[tokio::test]
+    async fn a_35_token_pass_is_not_reported_as_progress() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("the request")];
+        for i in 0..4 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(10_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+        turn.compact_failures = 2;
+
+        // What the rules would do on their own: a small, ineffective trim.
+        let mut trimmed = turn.messages.clone();
+        trimmed.push(Message::assistant("x".repeat(140)));
+
+        let outcome = engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Micro,
+                    messages: trimmed,
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::NoProgress { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            turn.compact_failures, 3,
+            "an ineffective pass must count toward the breaker"
+        );
+        assert_eq!(
+            turn.recovery_count, 0,
+            "an ineffective pass must not spend a recovery retry"
+        );
+    }
+
+    /// A `Compact`-level pass that did not reach the line is checked again:
+    /// the turn must not proceed while still past it.
+    #[tokio::test]
+    async fn a_compact_level_pass_is_rechecked() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        // A stated window, so the blocked line is enforced.
+        engine.learn_context_window(32_000);
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        // Absurd for a 32K window, and unshrinkable: one message.
+        turn.messages = vec![Message::user("x".repeat(400_000))];
+
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+
+        let reason = reason.expect("a context still past the line after compaction must stop");
+        assert!(
+            matches!(reason, TerminalReason::Error(ref message) if message.contains("context")),
+            "the reason does not name the context: {reason:?}"
+        );
+    }
+
+    // ─── Provider-reported overflow ────────────────────────────────────────
+
+    /// An overflowing mock: the first request is refused with the provider's
+    /// real window, later ones succeed.
+    struct OverflowThenOk {
+        remaining_overflow: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl OverflowThenOk {
+        fn new(overflows: usize) -> Self {
+            Self {
+                remaining_overflow: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                    overflows,
+                )),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ApiClient for OverflowThenOk {
+        fn clone_box(&self) -> Box<dyn ApiClient> {
+            Box::new(Self {
+                remaining_overflow: std::sync::Arc::clone(&self.remaining_overflow),
+            })
+        }
+
+        async fn create_message(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> Result<ApiResponse, crate::api_client::ApiError> {
+            let left = self
+                .remaining_overflow
+                .try_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+            if left {
+                return Err(crate::api_client::ApiError::Response {
+                    status: 400,
+                    message: "prompt is too long: 213462 tokens > 200000 maximum".into(),
+                });
+            }
+            Ok(ApiResponse {
+                content: "done".into(),
+                tool_calls: Vec::new(),
+                usage: UsageSummary {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+                stop_reason: "end_turn".into(),
+                thinking: None,
+            })
+        }
+
+        async fn create_message_streaming(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> std::pin::Pin<
+            Box<dyn futures::Stream<Item = crate::api_client::StreamEvent> + Send + 'static>,
+        > {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _ = tx.send(crate::api_client::StreamEvent::StreamEnd);
+            Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_prompt_too_long_error_teaches_the_real_window() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+        let mut engine = QueryEngine::new(
+            Box::new(OverflowThenOk::new(1)),
+            ModelId::sonnet(),
+            SessionState::new(std::path::PathBuf::from("/tmp/test")),
+            PermissionEngine::new(checker),
+            tx,
+        );
+        engine.set_tool_executor(Box::new(StubOkToolExecutor));
+        engine.compact_config.max_recovery_retries = 3;
+        assert_eq!(engine.context_window().tokens, 200_000);
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("the request")];
+        for i in 0..10 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(1_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+
+        let turn_error = engine
+            .send_request(&turn, &SubmitOptions::default())
+            .await
+            .expect_err("the mock refuses the first request");
+        assert!(
+            matches!(turn_error, TurnError::ContextOverflow { limit, .. } if limit == 200_000),
+            "{turn_error:?}"
+        );
+
+        engine
+            .recover_from_context_overflow(&mut turn, turn_error, &SubmitOptions::default(), 1)
+            .await
+            .expect("compacting makes room for the retry");
+
+        // The provider measured 213 462; that is the window this session uses
+        // from now on, not the table's 200 000.
+        assert_eq!(engine.context_window().tokens, 213_462);
+        assert!(!engine.context_window().source.is_guess());
+    }
+
+    #[tokio::test]
+    async fn a_learned_window_survives_the_next_turn() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let before = engine.compact_thresholds();
+        engine.learn_context_window(64_000);
+        assert_eq!(
+            engine.context_window().tokens,
+            64_000,
+            "the learned window was not adopted"
+        );
+        let after = engine.compact_thresholds();
+        assert_ne!(
+            before, after,
+            "the learned window did not move the compaction lines"
+        );
+        assert_eq!(
+            after.blocked,
+            CompactConfig::default().resolve_blocked_threshold(64_000)
+        );
+    }
+
     // ─── Cache-TTL compaction ──────────────────────────────────────────────
 
     /// A cold cache is not by itself a reason to compact a small context:
     /// nothing has gone wrong, and the pass is skipped without a model call.
     #[tokio::test]
     async fn a_warm_cache_is_not_a_reason_to_compact() {
-        let (engine, _rx, _session) = make_test_engine();
+        let (mut engine, _rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("hello")];
 
@@ -9967,7 +10699,7 @@ mod tests {
     /// the TTL pass stands down rather than compacting twice for one reason.
     #[tokio::test]
     async fn the_cache_ttl_pass_stands_down_at_the_token_line() {
-        let (engine, _rx, _session) = make_test_engine();
+        let (mut engine, _rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
 
         // A context past the compaction line for this model.
@@ -10000,7 +10732,7 @@ mod tests {
     /// nobody's recovery budget — tidying up must not starve a real recovery.
     #[tokio::test]
     async fn a_cold_cache_below_the_token_line_compacts_without_spending_a_retry() {
-        let (engine, _rx, _session) = make_test_engine();
+        let (mut engine, _rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("hello")];
         turn.recovery_count = 0;
@@ -10156,7 +10888,7 @@ mod tests {
     /// can see that compaction ran and what it did.
     #[tokio::test]
     async fn a_compaction_outcome_reaches_the_event_stream() {
-        let (engine, mut rx, _session) = make_test_engine();
+        let (mut engine, mut rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("hello")];
 
@@ -10185,7 +10917,7 @@ mod tests {
     /// cannot tell "not needed" from "not reached".
     #[tokio::test]
     async fn a_compaction_pass_that_stands_down_is_reported() {
-        let (engine, mut rx, _session) = make_test_engine();
+        let (mut engine, mut rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
 
         let auto = compact::CompactThresholds::resolve(&engine.model, &engine.compact_config).auto;

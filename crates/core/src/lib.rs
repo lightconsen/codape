@@ -12,6 +12,7 @@ pub mod checkpoints;
 pub mod compact;
 pub mod compaction_backend;
 pub mod confirmation_bus;
+pub mod context_overflow;
 pub mod coordinator;
 pub mod cost;
 pub mod elicitation;

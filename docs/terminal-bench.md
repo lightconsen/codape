@@ -1479,11 +1479,11 @@ dataset download, a multi-GB model, or a prebuilt third-party image;
 | Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200), `train-fasttext` (a 0.6233 model inside the 150 MB limit, but the budget ran out before the last step copied it to `/app/model.bin`) |
 | Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
 | Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the eight found are fixed, two more are known and unfixed (see [Known, unfixed](#known-unfixed)) |
+| CodeRex defect | none outstanding — the eight found are fixed, plus the two compaction defects found afterwards (both now fixed); the only remainder is the 32 K default guess, which no longer blocks a request (see [Known, unfixed](#known-unfixed)) |
 
 ## CodeRex defects the benchmark exposed
 
-All seven were real, and all seven are fixed on `main`:
+All eight were real, and all eight are fixed on `main`:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -1678,16 +1678,60 @@ All seven were real, and all seven are fixed on `main`:
    listed a directory and answered reported `num_turns: 2`, where the old
    build reported 1 for every run regardless of length.
 
+9. **Compaction rewrote the prompt it was supposed to preserve, and "success"
+   meant 35 tokens.** Found after the benchmark runs, while reading the
+   "context window is full" stops in the batch logs. Five defects in one path:
+
+   - **The system prompt was compacted away.** `build_context` puts the
+     preamble at index 0 and the system prompt at index 1, outside
+     `session.messages`; a compaction replaced the whole message list, so the
+     next request went out with no instructions. Compaction now replaces only
+     the recorded history range (`TurnRuntime::history_range`).
+   - **The compacted history was never written back.** The session — what the
+     next turn rebuilds from — kept the full history, so an automatic
+     compaction lasted exactly one request and the context regrew on the next
+     turn.
+   - **The preserved "anchor" was the CLAUDE.md wrapper.** The summary split
+     preserved the first user message *in the request*, which is the
+     `<system-reminder>` preamble, not the task prompt.
+   - **A pass that removed 35 tokens counted as success.** `recovery_count`
+     incremented and `compact_failures` reset regardless, so the loop spent
+     its whole retry budget on passes that never approached the line. Progress
+     now means "reached `auto`, or removed a tenth"; an ineffective pass
+     counts toward the breaker and the strategy escalates a rung
+     (`Micro` → `Auto` → `Snip`).
+   - **The 32 K guess could refuse a request.** The `blocked` line was
+     enforced on a window nobody had stated. `CompactThresholds` now carries a
+     `ContextWindowSource`, and only a known window enforces it; a provider's
+     "prompt is too long" reply is parsed
+     (`coderex_core::context_overflow`) and teaches the session the real
+     window, after which it compacts and re-sends.
+
+   Covered by eleven new tests (`compaction_keeps_the_system_prompt`,
+   `compaction_writes_back_to_the_session`,
+   `compaction_preserves_the_task_prompt_as_anchor`,
+   `summary_split_works_with_a_single_user_message`,
+   `summary_split_does_not_orphan_a_tool_result`,
+   `a_35_token_pass_is_not_reported_as_progress`,
+   `a_compact_level_pass_is_rechecked`, `unknown_window_never_blocks`,
+   `window_source_is_reported`, `a_prompt_too_long_error_teaches_the_real_window`,
+   `a_learned_window_survives_the_next_turn`). The behaviour is documented in
+   [`docs/compact.md`](compact.md).
+
 ### Known, unfixed
 
 - **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
-  recognise, it compacts against a 32 K guess. The benchmark runs worked around
-  this with `CODEREX_CONTEXT_WINDOW=131072`; the guess itself is unchanged, so
-  an unknown model with a larger window still compacts far too early.
-- **Compaction can burn its retry budget on a no-op.** Observed at the 32 K
-  guess: a pass reported success while removing 35 tokens and *growing* the
-  message list (39 → 44 → 47) before the turn hard-stopped with
-  "context window is full".
+  recognise, it compacts against a 32 K guess. This is now only a *hint*: the
+  guess drives when compaction starts but can never refuse a request, and the
+  first provider "prompt too long" error teaches the session the real window
+  (see [Learning the window from the provider](compact.md#learning-the-window-from-the-provider)).
+  The benchmark runs still set `CODEREX_CONTEXT_WINDOW=131072` so they compact
+  on the right line from the start rather than after one rejected request.
+- **Compaction can burn its retry budget on a no-op.** Fixed: a pass counts as
+  progress only when it reaches the `auto` line or removes a tenth of the
+  context, an ineffective pass counts toward the circuit breaker, and the
+  strategy escalates (`Micro` → `Auto` → `Snip`) on the next attempt. Covered by
+  `a_35_token_pass_is_not_reported_as_progress`.
 
 ## Local fixture patches
 

@@ -1503,18 +1503,23 @@ impl SessionMemoryBackend for RecordingMemoryBackend {
     }
 }
 
-/// A session with enough turns for `summary_split(…, 3)` to yield a
-/// non-empty, ≥2-message summarize range.
+/// A session with enough turns for a non-empty, ≥2-message summarize range.
+///
+/// The split also holds back the last `keep_recent_messages` (8 by default),
+/// so the fixture needs more than that for a middle to survive.
 fn session_with_history() -> SessionState {
     let mut session = SessionState::new(std::path::PathBuf::from("/tmp/test"));
-    session.messages.push(Message::user("start"));
-    session.messages.push(Message::assistant("a1"));
-    session.messages.push(Message::user("u2"));
-    session.messages.push(Message::assistant("a2"));
-    session.messages.push(Message::user("u3"));
-    session.messages.push(Message::assistant("a3"));
-    session.messages.push(Message::user("u4"));
-    session.messages.push(Message::assistant("a4"));
+    for (user, assistant) in [
+        ("start", "a1"),
+        ("u2", "a2"),
+        ("u3", "a3"),
+        ("u4", "a4"),
+        ("u5", "a5"),
+        ("u6", "a6"),
+    ] {
+        session.messages.push(Message::user(user));
+        session.messages.push(Message::assistant(assistant));
+    }
     session
 }
 
@@ -1914,4 +1919,134 @@ async fn compaction_without_backend_uses_local_path_unchanged() {
         3,
         "default local path unchanged"
     );
+}
+
+// ─── Provider-reported context overflow, end to end ───────────────────────
+
+/// Refuses the first request the way a provider does when the input does not
+/// fit, then answers normally.
+struct OverflowOnceMock {
+    overflowed: std::sync::atomic::AtomicBool,
+}
+
+impl OverflowOnceMock {
+    const fn new() -> Self {
+        Self {
+            overflowed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl ApiClient for OverflowOnceMock {
+    fn clone_box(&self) -> Box<dyn ApiClient> {
+        Box::new(Self {
+            overflowed: std::sync::atomic::AtomicBool::new(self.overflowed.load(Ordering::SeqCst)),
+        })
+    }
+
+    async fn create_message(
+        &self,
+        _system: &str,
+        messages: &[serde_json::Value],
+        _model: &ModelId,
+        _max_tokens: u32,
+        _tools: &[ToolInfo],
+    ) -> Result<ApiResponse, ApiError> {
+        // Only the first request is refused; the post-compaction retry gets
+        // the answer.
+        let _ = messages;
+        if !self.overflowed.swap(true, Ordering::SeqCst) {
+            return Err(ApiError::Response {
+                status: 400,
+                message: "prompt is too long: 213462 tokens > 200000 maximum".into(),
+            });
+        }
+        Ok(text_response("recovered and continued"))
+    }
+
+    async fn create_message_streaming(
+        &self,
+        system: &str,
+        messages: &[serde_json::Value],
+        model: &ModelId,
+        max_tokens: u32,
+        tools: &[ToolInfo],
+    ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + 'static>> {
+        match self
+            .create_message(system, messages, model, max_tokens, tools)
+            .await
+        {
+            Ok(response) => Box::pin(futures::stream::iter(vec![
+                StreamEvent::TextDelta(response.content),
+                StreamEvent::StreamEnd,
+            ])),
+            Err(error) => Box::pin(futures::stream::iter(vec![StreamEvent::Error(error)])),
+        }
+    }
+}
+
+/// A provider rejection for a too-long prompt is not the end of the turn: the
+/// engine learns the real window, compacts, and asks again.
+#[tokio::test]
+async fn a_prompt_too_long_reply_is_compacted_and_retried() {
+    let tools = Box::new(EchoToolExecutor);
+    let (mut engine, _rx) = make_engine(Box::new(OverflowOnceMock::new()), tools);
+    let mut session = SessionState::new(std::path::PathBuf::from("/tmp/test"));
+    session.messages.push(Message::user("the task"));
+    for i in 0..12 {
+        session.messages.push(Message::assistant(format!(
+            "step {i}: {}",
+            "x".repeat(4_000)
+        )));
+    }
+    engine.set_session(session);
+
+    let options = SubmitOptions {
+        handle_elicitation: false,
+        ..Default::default()
+    };
+    let reason = engine
+        .submit("go".into(), options)
+        .await
+        .expect("the turn recovers instead of failing");
+
+    assert!(
+        matches!(reason, TerminalReason::Completed),
+        "the turn did not finish after recovery: {reason:?}"
+    );
+    // The window the provider stated is what the session now uses.
+    assert_eq!(engine.context_window().tokens, 213_462);
+}
+
+/// The streaming path has the same recovery: a stream that fails because the
+/// prompt does not fit compacts and re-asks rather than ending the turn.
+#[tokio::test]
+async fn a_streamed_prompt_too_long_reply_is_compacted_and_retried() {
+    let tools = Box::new(EchoToolExecutor);
+    let (mut engine, _rx) = make_engine(Box::new(OverflowOnceMock::new()), tools);
+    let mut session = SessionState::new(std::path::PathBuf::from("/tmp/test"));
+    session.messages.push(Message::user("the task"));
+    for i in 0..12 {
+        session.messages.push(Message::assistant(format!(
+            "step {i}: {}",
+            "x".repeat(4_000)
+        )));
+    }
+    engine.set_session(session);
+
+    let options = SubmitOptions {
+        handle_elicitation: false,
+        ..Default::default()
+    };
+    let reason = engine
+        .submit_streaming("go".into(), options)
+        .await
+        .expect("the streamed turn recovers instead of failing");
+
+    assert!(
+        matches!(reason, TerminalReason::Completed),
+        "the streamed turn did not finish after recovery: {reason:?}"
+    );
+    assert_eq!(engine.context_window().tokens, 213_462);
 }

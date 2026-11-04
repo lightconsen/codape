@@ -127,15 +127,46 @@ the conversation.
 | `gpt-3.5-turbo` | 16,000 |
 | `o1-mini` | 128,000 |
 | `o1`, `o3`, `o4-mini` | 200,000 |
-| `gemini-2.5-pro`, `gemini-2.5-flash` | 1,000,000 |
+| `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-3` | 1,000,000 |
 | `deepseek-chat`, `deepseek-reasoner`, `deepseek-r1` | 64,000 |
 | `llama-3.3`, `llama-3.1` | 128,000 |
-| `qwen2.5` | 128,000 |
+| `qwen3`, `qwen2.5` | 128,000 |
 | `mistral-large` | 128,000 |
+| `k3-256k` | 262,144 |
+| `k3` | 1,048,576 |
+| `kimi` | 262,144 |
+| `glm-5`, `glm-4.6` | 200,000 |
+| `glm-4` | 128,000 |
+| `minimax-m2`, `minimax` | 204,800 |
 
 Anything else gets `UNKNOWN_CONTEXT_WINDOW` (32,000). Claude is intentionally
 kept at 200,000 as a conservative floor across the family; raise a specific
 model through one of the override sources if it has a larger window.
+
+### Where the window came from
+
+The resolved value carries a `ContextWindowSource` (`Env`, `Settings`,
+`ClientData`, `Experiment`, `Table`, or `Unknown`). The source decides whether
+the `blocked` line is enforceable at all: a value someone supplied or
+documented is a limit, while `Unknown` is a guess. A guessed window still
+compacts early — that is cheap — but never refuses to send a request, because
+being wrong about it turns a working session into a failed one. Debug logs
+record the source alongside the lines.
+
+### Learning the window from the provider
+
+Every provider enforces the window on its side and says so in its error
+(`prompt is too long: 213462 tokens > 200000 maximum`,
+`input length and max_tokens exceed context limit: 195000 + 8192 > 200000`,
+`context_length_exceeded`, …). `coderex_core::context_overflow::detect` parses
+those messages, and the engine adopts the reported size for the rest of the
+session (`QueryEngine::context_window`, `learn_context_window`).
+
+An overflow is not a fatal error: the turn learns the real window, compacts,
+and re-sends once. The request is retried at most twice, and only after a
+compaction that actually removed something — retrying an unchanged request
+fails the same way. `ErrorClass::ContextOverflow` is never auto-retried by the
+transport; the recovery belongs to the turn.
 
 Matching is exact or family-prefix after normalization. Normalization
 lower-cases the name, drops a trailing `[1m]`, and strips provider/router
@@ -167,3 +198,57 @@ way.
 Example: an unknown gateway alias defaults to 32K (auto line 16K). Overriding
 it to 64K moves the auto line to 31K, so 20K tokens compact before the override
 and do not after it.
+
+## What Is Compacted
+
+`build_context` assembles each request from three parts: the preamble
+(CLAUDE.md, injected as a user message), the system prompt, and the session
+history. Only the history is compactable. The engine records where it sits in
+the request (`TurnRuntime::history_range`), and compaction replaces exactly
+that span, leaving the preamble, system prompt, and per-turn injections in
+place — they are rebuilt every turn, and rewriting the whole request would both
+distort the token estimate and delete the instructions the model runs under.
+
+Compaction also writes the compacted history back to the session. Writing only
+to the turn made an automatic compaction last exactly one request: the next
+turn rebuilt the full history from the session and undid it.
+
+The preserved head is the first user message of the history — the task prompt.
+Preserving "the first user message in the request" instead captured the
+CLAUDE.md system-reminder wrapper and dropped the actual request.
+
+## Summary Split
+
+The LLM summary path keeps the head verbatim, summarizes the middle, and keeps
+a recent tail. The tail has two floors and starts at the earlier one:
+
+- turn-counted: after `keep_recent_turns` (3) user messages;
+- message-counted: back up `keep_recent_messages` (8) messages, then move
+  forward to the nearest user message so a tool call is never split from its
+  result.
+
+The message floor is what makes the summary path reachable for an agentic
+session: those have one user message and hundreds of tool exchanges, so a
+turn-counted tail alone covers everything and there is never a range to
+summarize.
+
+## Progress and the Circuit Breaker
+
+A compaction attempt counts as progress only when it reaches the `auto` line or
+removes at least a tenth of the context — not merely when the context shrank.
+An earlier build reported success for a pass that removed 35 tokens of 20,000
+and grew the message list, then spent every recovery attempt on passes that
+never approached the line.
+
+- Progress resets the consecutive-failure counter, and a
+  threshold-triggered pass spends one recovery retry.
+- No progress increments the counter; at `max_consecutive_failures` the
+  circuit breaker opens and the turn ends with a diagnosable message.
+- A cache-TTL pass is maintenance and is never charged to the recovery budget.
+- When a threshold-triggered pass does not reach the line, the next attempt
+  escalates one rung down the strategy ladder (`Micro` → `Auto` → `Snip`)
+  instead of repeating the pass that just failed.
+
+The check is repeated after compaction, and a turn whose context is still past
+the `blocked` line — on a window that is actually known — stops rather than
+sending a request that cannot fit.

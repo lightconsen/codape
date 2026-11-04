@@ -157,6 +157,11 @@ pub enum ErrorClass {
     Auth,
     /// The request was refused by the provider's access policy.
     AccessPolicy,
+    /// The input does not fit the model's context window. Retrying the same
+    /// request fails the same way; the fix is to compact first. The provider's
+    /// message is the only authoritative statement of the real window, so the
+    /// engine reads the limit out of it.
+    ContextOverflow,
     /// The request itself was wrong (bad model, bad shape, other 4xx).
     InvalidRequest,
     /// Not classified.
@@ -176,6 +181,7 @@ impl std::fmt::Display for ErrorClass {
             Self::Server => "server",
             Self::Auth => "auth",
             Self::AccessPolicy => "access policy",
+            Self::ContextOverflow => "context overflow",
             Self::InvalidRequest => "invalid request",
             Self::Unknown => "unknown",
         };
@@ -205,6 +211,7 @@ impl ErrorClass {
             | Self::Server
             | Self::Auth
             | Self::AccessPolicy
+            | Self::ContextOverflow
             | Self::InvalidRequest => TransportError::Other,
         }
     }
@@ -316,17 +323,21 @@ fn io_error_kind(error: &(dyn std::error::Error + 'static)) -> Option<std::io::E
 
 /// Classify an [`ApiError`].
 #[must_use]
-pub const fn classify_error(error: &ApiError) -> ErrorClass {
+pub fn classify_error(error: &ApiError) -> ErrorClass {
     match error {
         // The class was settled when the error was built, from the facts the
         // HTTP client reported about itself.
         ApiError::Transport { class, .. } => *class,
         ApiError::Auth(_) => ErrorClass::Auth,
         ApiError::AccessPolicy(_) => ErrorClass::AccessPolicy,
-        ApiError::Response { status, .. } => match status {
+        ApiError::Response { status, message } => match status {
             401 | 403 => ErrorClass::Auth,
             429 => ErrorClass::RateLimit,
             500..=599 => ErrorClass::Server,
+            // A 4xx that says the input is too large is not a malformed
+            // request: the request is well-formed and will be accepted once
+            // the context is compacted.
+            _ if crate::context_overflow::detect(message).is_some() => ErrorClass::ContextOverflow,
             _ => ErrorClass::InvalidRequest,
         },
         ApiError::InvalidModel(_) => ErrorClass::InvalidRequest,
@@ -338,7 +349,7 @@ pub const fn classify_error(error: &ApiError) -> ErrorClass {
 
 /// The triage decision for a failure: its class, and whether to try again.
 #[must_use]
-pub const fn triage(error: &ApiError) -> ErrorTriage {
+pub fn triage(error: &ApiError) -> ErrorTriage {
     let class = classify_error(error);
     let action = match class {
         ErrorClass::Timeout
@@ -351,6 +362,7 @@ pub const fn triage(error: &ApiError) -> ErrorTriage {
         | ErrorClass::Decode
         | ErrorClass::Auth
         | ErrorClass::AccessPolicy
+        | ErrorClass::ContextOverflow
         | ErrorClass::InvalidRequest
         | ErrorClass::Unknown => RetryAction::Fail,
     };
@@ -2244,7 +2256,7 @@ fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEve
 /// This is the triage table's decision — there is one place that decides, so
 /// the retry rule and the backoff rule cannot drift apart.
 #[must_use]
-pub const fn is_retryable(error: &ApiError) -> bool {
+pub fn is_retryable(error: &ApiError) -> bool {
     triage(error).is_retry()
 }
 

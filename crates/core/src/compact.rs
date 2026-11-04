@@ -16,7 +16,10 @@
 //! - **Snip**: Truncate history at a boundary point, preserving essential context
 
 use crate::prompt::{CompactConfig, PromptCompiler};
-use crate::types::{ContextWindowResolver, Message, MessageContent, ModelId, Role, ToolResult};
+use crate::types::{
+    ContextWindowResolver, ContextWindowSource, Message, MessageContent, ModelId,
+    ResolvedContextWindow, Role, ToolResult,
+};
 
 // ─── Compact Strategy ───────────────────────────────────────────────────────
 
@@ -513,7 +516,12 @@ pub enum ContextLevel {
 /// Claude's arithmetic: the window is what the model can hold, some of it is
 /// held back for the reply and the system prompt, and compaction has to happen
 /// before the two collide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The resolved window travels with the lines: whether it is documented or
+/// guessed decides whether the `blocked` line may be enforced. A guessed
+/// window compacts early (cheap) but must never refuse a request (a working
+/// session turned into a failed one).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactThresholds {
     /// Compaction line: `window − min(output_reserve, 20 000) − 13 000`.
     pub auto: usize,
@@ -521,6 +529,8 @@ pub struct CompactThresholds {
     pub warn: usize,
     /// Blocked line: `window − 3 000`.
     pub blocked: usize,
+    /// Where the window came from.
+    pub window_source: ContextWindowSource,
 }
 
 impl CompactThresholds {
@@ -546,26 +556,48 @@ impl CompactThresholds {
         config: &CompactConfig,
         resolver: &ContextWindowResolver,
     ) -> Self {
-        Self::resolve_for_window(config, resolver.resolve(&model.0))
+        Self::resolve_detailed(config, resolver.resolve_detailed(&model.0))
     }
 
     /// Resolve the lines for a context window that has already been looked up.
     ///
     /// Useful when a caller has a provider-reported window or a resolved value
-    /// in hand and does not want a second lookup.
+    /// in hand and does not want a second lookup. The source defaults to
+    /// [`ContextWindowSource::Table`] — it is a known value as far as this
+    /// constructor can tell; use [`Self::resolve_detailed`] to say otherwise.
     #[must_use]
     pub const fn resolve_for_window(config: &CompactConfig, window: usize) -> Self {
+        Self::resolve_detailed(
+            config,
+            ResolvedContextWindow::new(window, ContextWindowSource::Table),
+        )
+    }
+
+    /// Resolve the lines for a window and the source that decided it.
+    #[must_use]
+    pub const fn resolve_detailed(config: &CompactConfig, window: ResolvedContextWindow) -> Self {
         Self {
-            auto: config.resolve_auto_threshold(window),
-            warn: config.resolve_warning_threshold(window),
-            blocked: config.resolve_blocked_threshold(window),
+            auto: config.resolve_auto_threshold(window.tokens),
+            warn: config.resolve_warning_threshold(window.tokens),
+            blocked: config.resolve_blocked_threshold(window.tokens),
+            window_source: window.source,
         }
+    }
+
+    /// Whether the hard limit may be enforced at all.
+    ///
+    /// A guessed window is only a hint: enforcing it turns "this session may
+    /// compact early" into "this session cannot run", and nothing here knows
+    /// enough to make that call.
+    #[must_use]
+    pub const fn enforces_blocked(&self) -> bool {
+        !self.window_source.is_guess()
     }
 
     /// Which line `estimated_tokens` has reached.
     #[must_use]
     pub const fn level(&self, estimated_tokens: usize) -> ContextLevel {
-        if estimated_tokens >= self.blocked {
+        if self.enforces_blocked() && estimated_tokens >= self.blocked {
             ContextLevel::Blocked
         } else if estimated_tokens >= self.auto {
             ContextLevel::Compact
@@ -694,12 +726,22 @@ pub struct SummarySplit {
 /// Invariants (enforced by tests below):
 /// - the first user message is always preserved verbatim,
 /// - the last `keep_recent_turns` * complete turns (user + response) are
-///   always preserved,
+///   preserved, or — when the conversation has fewer turns than that — at
+///   least the last `keep_recent_messages` messages are,
 /// - the range is empty when there is nothing worth summarizing.
+///
+/// The message-count floor is what makes the summary path reachable at all
+/// for an agentic session: those have one user message and hundreds of tool
+/// exchanges, so a turn-counted tail covers everything and there is never a
+/// range to summarize.
 #[must_use]
-pub fn summary_split(messages: &[Message], keep_recent_turns: usize) -> SummarySplit {
+pub fn summary_split(
+    messages: &[Message],
+    keep_recent_turns: usize,
+    keep_recent_messages: usize,
+) -> SummarySplit {
     let summarize_from = first_user_index(messages).map_or(0, |i| i + 1);
-    let summarize_to = tail_start(messages, keep_recent_turns);
+    let summarize_to = tail_start(messages, keep_recent_turns, keep_recent_messages);
     SummarySplit {
         summarize_from: summarize_from.min(summarize_to),
         summarize_to,
@@ -713,19 +755,51 @@ fn first_user_index(messages: &[Message]) -> Option<usize> {
 
 /// Index where the preserved recent tail starts.
 ///
-/// Walks backwards counting user messages as turn starts; the tail begins
-/// after `keep_recent_turns` user messages have been seen.
-fn tail_start(messages: &[Message], keep_recent_turns: usize) -> usize {
+/// Two floors, and the tail starts at the earlier satisfied one so neither
+/// invariant is lost:
+///
+/// - turn-counted: after `keep_recent_turns` user messages have been seen;
+/// - message-counted: back up from the end by `keep_recent_messages`
+///   messages, then move forward to the nearest user message so a tool call
+///   is never separated from its result.
+///
+/// Before the message floor existed, a session with a single user message
+/// returned 0 here — "preserve everything" — and the summary path never ran;
+/// the rule-based fallback then removed 35 tokens per attempt while the
+/// context kept growing.
+fn tail_start(
+    messages: &[Message],
+    keep_recent_turns: usize,
+    keep_recent_messages: usize,
+) -> usize {
     let mut turns_seen = 0usize;
+    let mut by_turns = None;
     for i in (0..messages.len()).rev() {
         if matches!(messages[i].role, Role::User) {
             turns_seen += 1;
             if turns_seen > keep_recent_turns {
-                return i + 1;
+                by_turns = Some(i + 1);
+                break;
             }
         }
     }
-    0
+
+    let by_messages = if keep_recent_messages >= messages.len() {
+        0
+    } else {
+        let floor = messages.len() - keep_recent_messages;
+        // Never split a tool call from its result: start at the nearest user
+        // message at or after the floor (a tool result alone is not a turn
+        // start). With no user message after the floor, keep the floor.
+        (floor..messages.len())
+            .find(|i| matches!(messages[*i].role, Role::User))
+            .unwrap_or(floor)
+    };
+
+    // The message floor always applies; the turn boundary applies only when
+    // the conversation actually has that many turns, and then takes the
+    // earlier of the two (i.e. the larger preserved tail).
+    by_turns.map_or(by_messages, |turns| turns.min(by_messages))
 }
 
 /// Render a message for the summarizer input.
@@ -1893,11 +1967,23 @@ mod tests {
         assert_eq!(thresholds.auto, 16_000);
         assert_eq!(thresholds.warn, 8_000);
         assert_eq!(thresholds.blocked, 29_000);
+        // A guessed window is a hint, not a limit: it may compact early but
+        // must never reach the level that refuses to send a request.
+        assert_eq!(thresholds.window_source, ContextWindowSource::Unknown);
+        assert!(!thresholds.enforces_blocked());
+        assert_eq!(
+            thresholds.level(110_000),
+            ContextLevel::Compact,
+            "a guessed window must never report Blocked"
+        );
 
-        // Past the end of that window: keep only what fits.
+        // Past the guessed window the pass is still the ordinary one; the
+        // truncating strategy belongs to a provider-stated window.
         let strategy =
             select_compact_strategy("end_turn", 110_000, &model, &CompactConfig::default());
-        assert!(matches!(strategy, CompactStrategy::Snip));
+        assert!(matches!(strategy, CompactStrategy::Auto));
+        let known = CompactThresholds::resolve_for_window(&CompactConfig::default(), 32_000);
+        assert_eq!(known.level(110_000), ContextLevel::Blocked);
 
         // Just over the compaction line for that window.
         let strategy =
@@ -1981,6 +2067,53 @@ mod tests {
         assert!(matches!(overridden_strategy, CompactStrategy::Micro));
     }
 
+    #[test]
+    fn unknown_window_never_blocks() {
+        // The 32K guess is 29K "blocked". Enforcing that would refuse to send
+        // a request the provider may well accept — a working session turned
+        // into a failed one on the strength of a guess.
+        let guessed = CompactThresholds::resolve_for_window(&CompactConfig::default(), 32_000);
+        assert_eq!(guessed.window_source, ContextWindowSource::Table);
+        assert_eq!(guessed.level(50_000), ContextLevel::Blocked);
+
+        let unknown = CompactThresholds::resolve(
+            &ModelId("nobody-has-heard-of-this".into()),
+            &CompactConfig::default(),
+        );
+        assert_eq!(unknown.window_source, ContextWindowSource::Unknown);
+        assert!(!unknown.enforces_blocked());
+        assert_eq!(unknown.level(50_000), ContextLevel::Compact);
+        assert_eq!(unknown.level(usize::MAX), ContextLevel::Compact);
+    }
+
+    #[test]
+    fn window_source_is_reported() {
+        let config = CompactConfig::default();
+        let model = ModelId("gateway-alias".into());
+
+        let unknown = CompactThresholds::resolve(&model, &config);
+        assert_eq!(unknown.window_source, ContextWindowSource::Unknown);
+
+        let from_table = CompactThresholds::resolve(&ModelId::sonnet(), &config);
+        assert_eq!(from_table.window_source, ContextWindowSource::Table);
+
+        let resolver = ContextWindowResolver::new(
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::from_env_vars([(
+                "CODEREX_CONTEXT_WINDOW_GATEWAY_ALIAS",
+                "64000",
+            )]),
+        );
+        let from_experiment = CompactThresholds::resolve_with(&model, &config, &resolver);
+        assert_eq!(
+            from_experiment.window_source,
+            ContextWindowSource::Experiment
+        );
+        assert_eq!(from_experiment.window_source.name(), "experiment");
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     //  LLM Summary Compaction
     // ═════════════════════════════════════════════════════════════════════
@@ -1998,7 +2131,7 @@ mod tests {
     #[test]
     fn summary_split_preserves_first_user_message_and_tail() {
         let messages = make_conversation(6);
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         // Head preserved: the first user message.
         assert_eq!(split.summarize_from, 1);
         // Layout: [0]=head user; turn i occupies assistant/tool/user at
@@ -2012,7 +2145,7 @@ mod tests {
     #[test]
     fn summary_split_empty_range_when_few_turns() {
         let messages = make_conversation(2);
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         // Nothing to summarize: tail covers everything after the head.
         assert!(split.summarize_from >= split.summarize_to);
     }
@@ -2020,9 +2153,64 @@ mod tests {
     #[test]
     fn summary_split_without_a_user_message_starts_at_zero() {
         let messages = vec![make_assistant_text("only a reply")];
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         assert_eq!(split.summarize_from, 0);
         assert_eq!(split.summarize_to, 0);
+    }
+
+    /// An agentic session has one user message and then a long run of tool
+    /// exchanges. Turn-counted alone, its tail covers everything after the
+    /// anchor and the summarize range is empty — the summary path never runs
+    /// and the rule fallback nibbles at the context forever.
+    #[test]
+    fn summary_split_works_with_a_single_user_message() {
+        let mut messages = vec![make_user_text("the one request for the whole run")];
+        for i in 0..12 {
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "output"));
+        }
+        let split = summary_split(&messages, 3, 8);
+
+        assert_eq!(split.summarize_from, 1, "the request stays the anchor");
+        assert_eq!(
+            split.summarize_to,
+            messages.len() - 8,
+            "eight messages are held back for the working set"
+        );
+        assert!(
+            split.summarize_from < split.summarize_to,
+            "there is a middle to summarize: {split:?}"
+        );
+    }
+
+    /// A tail may start at a tool result — it is a user-role message — but it
+    /// must never start *between* an assistant's tool call and that result, or
+    /// the kept tail contains a result whose call was summarized away.
+    #[test]
+    fn summary_split_does_not_orphan_a_tool_result() {
+        // The 8th message from the end lands on tool result 2; the nearest
+        // user message at or after it is turn 3's prompt at index 8.
+        let mut messages = vec![make_user_text("start")];
+        for i in 0..6 {
+            messages.push(make_user_text(&format!("turn {i}")));
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "result"));
+        }
+        let split = summary_split(&messages, 100, 7);
+
+        // Layout: [0]=start; turn i is [1+3i]=user, [2+3i]=call,
+        // [3+3i]=result. Message len − 7 = 12 lands on a tool result, so the
+        // tail has to move forward to the next user message, turn 4's at 13.
+        assert_eq!(split.summarize_to, 13, "{split:?}");
+        assert!(
+            matches!(messages[split.summarize_to].role, Role::User),
+            "the tail starts mid-exchange: {:?}",
+            messages[split.summarize_to].content
+        );
+        // The kept tail begins at a turn boundary, not at a result whose
+        // call was summarized away.
+        assert!(
+            !matches!(messages[split.summarize_to].role, Role::Tool),
+            "the kept tail begins with a tool result"
+        );
     }
 
     #[test]
@@ -2072,7 +2260,7 @@ mod tests {
     #[test]
     fn build_summary_input_drops_old_messages_from_the_front() {
         let messages = make_conversation(6);
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         let input = build_summary_input(&messages, &split, 1_000);
         let tiny = build_summary_input(&messages, &split, 10);
         assert!(!input.is_empty());
@@ -2151,7 +2339,7 @@ mod tests {
     #[test]
     fn assemble_summary_result_layout() {
         let messages = make_conversation(6);
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         let result = assemble_summary_result(&messages, &split, "summary text", 1000, 200);
         assert!(result.boundary_inserted);
         assert_eq!(result.strategy, CompactStrategy::Auto);
@@ -2174,7 +2362,7 @@ mod tests {
     #[test]
     fn build_summary_input_respects_token_budget() {
         let messages = make_conversation(8);
-        let split = summary_split(&messages, 3);
+        let split = summary_split(&messages, 3, 8);
         // Force a tiny budget: max_tokens in chars/4 units.
         let input = build_summary_input(&messages, &split, 200);
         let total_chars: usize = input.iter().map(String::len).sum();

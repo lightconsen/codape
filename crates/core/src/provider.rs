@@ -293,13 +293,18 @@ pub fn classify_api_error(provider: &str, err: &ApiError) -> ProviderError {
     let kind = match &err {
         ApiError::Auth(_) => ProviderErrorKind::Auth,
         ApiError::AccessPolicy(_) => ProviderErrorKind::AccessPolicy,
-        ApiError::Response { status, .. } => match status {
+        ApiError::Response { status, message } => match status {
             401 => ProviderErrorKind::Auth,
             403 if matches_access_policy_message(&err.to_string()) => {
                 ProviderErrorKind::AccessPolicy
             }
             429 => ProviderErrorKind::RateLimit,
             500 | 502 | 503 | 504 => ProviderErrorKind::Unavailable,
+            // Checked before the generic 4xx arm: a request that is too large
+            // is well-formed and succeeds once the context is compacted.
+            _ if crate::context_overflow::detect(message).is_some() => {
+                ProviderErrorKind::InvalidRequest
+            }
             400 | 403 | 404 => ProviderErrorKind::InvalidRequest,
             _ => ProviderErrorKind::Unknown,
         },

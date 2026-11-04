@@ -567,8 +567,16 @@ fn select_strategy_small_model_window() {
     let strategy = select_compact_strategy("end_turn", 17_000, &model, &cfg());
     assert_eq!(strategy, CompactStrategy::Auto);
 
-    // 110K is past the end of that window entirely.
+    // Past the guessed window the strategy is still the ordinary pass: a
+    // guessed window may compact early, never truncate on its own authority.
     let strategy = select_compact_strategy("end_turn", 110_000, &model, &cfg());
+    assert_eq!(strategy, CompactStrategy::Auto);
+
+    // A window the provider stated is a limit, and past it only what fits is
+    // kept.
+    let strategy = select_compact_strategy("end_turn", 110_000, &ModelId("ended".into()), &cfg());
+    assert_eq!(strategy, CompactStrategy::Auto);
+    let strategy = select_compact_strategy("end_turn", 198_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Snip);
 }
 

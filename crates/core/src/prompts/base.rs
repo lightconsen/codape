@@ -82,6 +82,15 @@ pub struct CompactConfig {
     pub summary_input_max_tokens: usize,
     /// Max tokens for the summary output.
     pub summary_output_max_tokens: u32,
+    /// How many messages the tail of a summary compaction always preserves.
+    ///
+    /// The turn-counted tail (`keep_recent_turns`) only works when a session
+    /// has several user messages. An agentic session has one user message and
+    /// hundreds of tool exchanges, so the turn count covers everything and
+    /// there is no interval left to summarize. This floor keeps the tail at
+    /// the most recent messages instead, which is what makes the summary path
+    /// reachable at all for that workload.
+    pub keep_recent_messages: usize,
     /// Only truncate tool results larger than this many tokens during
     /// micro compact (smaller results are left byte-identical so the
     /// prompt cache over them is preserved).
@@ -127,6 +136,7 @@ impl Default for CompactConfig {
             max_consecutive_failures: 3,
             summary_input_max_tokens: 20_000,
             summary_output_max_tokens: 4_096,
+            keep_recent_messages: 8,
             micro_min_result_tokens: 2_000,
             micro_head_tokens: 1_000,
             micro_tail_tokens: 500,

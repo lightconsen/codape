@@ -331,7 +331,12 @@ pub const CONTEXT_WINDOW_CLIENT_DATA_FILE: &str = "context_windows.json";
 /// some context, while one that is too large loses the conversation. Only
 /// documented families are listed; everything else falls through to
 /// [`UNKNOWN_CONTEXT_WINDOW`]. Order matters — more specific entries must come
-/// before their prefixes (`gpt-4o` before `gpt-4`).
+/// before their prefixes (`gpt-4o` before `gpt-4`, `k3-256k` before `k3`).
+///
+/// A table cannot keep up with new models, which is why an unknown window is
+/// reported as [`ContextWindowSource::Unknown`] rather than silently assumed:
+/// callers can see the guess, override it, and never enforce a hard limit on
+/// it. See [`ContextWindowResolver::resolve_detailed`].
 pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
     // Anthropic Claude: 200k across the family (conservative floor).
     ("claude", CLAUDE_CONTEXT_WINDOW),
@@ -348,6 +353,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
     // Google Gemini.
     ("gemini-2.5-pro", 1_000_000),
     ("gemini-2.5-flash", 1_000_000),
+    ("gemini-3", 1_000_000),
     // DeepSeek.
     ("deepseek-chat", 64_000),
     ("deepseek-reasoner", 64_000),
@@ -356,9 +362,22 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
     ("llama-3.3", 128_000),
     ("llama-3.1", 128_000),
     // Alibaba Qwen.
+    ("qwen3", 128_000),
     ("qwen2.5", 128_000),
     // Mistral.
     ("mistral-large", 128_000),
+    // Moonshot Kimi. The hosted `kimi-for-coding` / `k3` family is 1M; the
+    // `-256k` variant must come first because matching is prefix-based.
+    ("k3-256k", 262_144),
+    ("k3", 1_048_576),
+    ("kimi", 262_144),
+    // Zhipu GLM.
+    ("glm-5", 200_000),
+    ("glm-4.6", 200_000),
+    ("glm-4", 128_000),
+    // MiniMax.
+    ("minimax-m2", 204_800),
+    ("minimax", 204_800),
 ];
 
 /// Per-model context-window overrides with an optional fallback.
@@ -489,6 +508,80 @@ impl ContextWindowOverrides {
     }
 }
 
+/// Where a resolved context window came from.
+///
+/// The window is used for two different jobs: choosing when to compact (a
+/// guess that is too small merely compacts early) and refusing to send a
+/// request at all (a guess that is too small fails a session that would have
+/// worked). Those two must not be decided by the same anonymous number, so
+/// the source travels with the window and a guessed one is never treated as
+/// authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextWindowSource {
+    /// `CODEREX_CONTEXT_WINDOW` or a per-model environment variable.
+    Env,
+    /// The settings file's `context_window` block.
+    Settings,
+    /// The client-data file (`~/.coderex/context_windows.json`).
+    ClientData,
+    /// An experiment / feature-flag override.
+    Experiment,
+    /// The built-in [`MODEL_CONTEXT_WINDOWS`] table.
+    Table,
+    /// Nothing knew the model: [`UNKNOWN_CONTEXT_WINDOW`] is a guess.
+    Unknown,
+}
+
+impl ContextWindowSource {
+    /// Whether this window is a guess rather than a value someone supplied or
+    /// documented.
+    ///
+    /// A guessed window may trigger compaction early; it must not be used to
+    /// refuse a request, because being wrong about it turns a working session
+    /// into a failed one.
+    #[must_use]
+    pub const fn is_guess(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    /// The short wire/log name for this source.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Settings => "settings",
+            Self::ClientData => "client_data",
+            Self::Experiment => "experiment",
+            Self::Table => "table",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ContextWindowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A context window together with the source that decided it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedContextWindow {
+    /// The window in tokens.
+    pub tokens: usize,
+    /// Which input decided it.
+    pub source: ContextWindowSource,
+}
+
+impl ResolvedContextWindow {
+    /// A window from a known source.
+    #[must_use]
+    pub const fn new(tokens: usize, source: ContextWindowSource) -> Self {
+        Self { tokens, source }
+    }
+}
+
 /// Resolve context windows from an ordered chain of sources.
 ///
 /// Precedence (highest first):
@@ -562,17 +655,30 @@ impl ContextWindowResolver {
     /// Resolve the window for a model name.
     #[must_use]
     pub fn resolve(&self, model: &str) -> usize {
-        for source in [
-            &self.env,
-            &self.settings,
-            &self.client_data,
-            &self.experiment,
+        self.resolve_detailed(model).tokens
+    }
+
+    /// Resolve the window for a model name, keeping the source that decided it.
+    ///
+    /// Callers that only need a number use [`Self::resolve`]; callers that
+    /// decide whether to refuse a request need to know whether the number is
+    /// documented or guessed, and use this.
+    #[must_use]
+    pub fn resolve_detailed(&self, model: &str) -> ResolvedContextWindow {
+        for (source, kind) in [
+            (&self.env, ContextWindowSource::Env),
+            (&self.settings, ContextWindowSource::Settings),
+            (&self.client_data, ContextWindowSource::ClientData),
+            (&self.experiment, ContextWindowSource::Experiment),
         ] {
             if let Some(window) = source.resolve(model) {
-                return window;
+                return ResolvedContextWindow::new(window, kind);
             }
         }
-        table_context_window(model).unwrap_or(UNKNOWN_CONTEXT_WINDOW)
+        table_context_window(model).map_or(
+            ResolvedContextWindow::new(UNKNOWN_CONTEXT_WINDOW, ContextWindowSource::Unknown),
+            |window| ResolvedContextWindow::new(window, ContextWindowSource::Table),
+        )
     }
 }
 
