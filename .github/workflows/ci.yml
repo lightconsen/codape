@@ -8,13 +8,16 @@ on:
       - '**/*.md'
       - 'LICENSE'
       - 'NOTICE'
+  # Deliberately no `paths-ignore` here. The `main` ruleset requires these
+  # checks before a merge, and a required check that is never reported does not
+  # count as passing — it sits "Expected" forever. A workflow skipped by a path
+  # filter does not report anything, so a documentation-only pull request would
+  # be unmergeable. Running the matrix for a docs change costs a few minutes of
+  # free minutes; a branch that good changes cannot merge into costs more.
+  # `push` keeps the filter: after such a pull request merges, the same commit
+  # does not need to be tested again.
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - 'LICENSE'
-      - 'NOTICE'
   schedule:
     # Nightly: tests and checks only (the release build is gated below).
     - cron: "17 3 * * *"

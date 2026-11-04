@@ -52,6 +52,41 @@ The toolchain is pinned in `rust-toolchain.toml` and named in the workflow
 files. Bump both together: a floating stable would let a new release's lints
 fail a pull request for reasons unrelated to the change.
 
+## What must pass before a merge
+
+The `main` ruleset (`protect-main-2026`) requires these checks:
+
+| Required check | Job |
+|---|---|
+| `Format` | job `fmt` |
+| `Cassette metadata` | job `cassettes` |
+| `Clippy` | job `clippy` |
+| `Test` | job `test` |
+| `Doctests` | job `doctests` |
+| `Cross-check (musl)` | job `cross-check-musl` |
+| `Cross-check (Windows)` | job `cross-check-windows` |
+| `Test (Windows runtime)` | job `test-windows` |
+| `Test (macOS plist carrier)` | job `test-macos` |
+| `SSH spawn (real sshd)` | job `ssh-integration` |
+| `Coverage` | job `coverage` |
+| `Docs` | job `doc` |
+| `Security Audit` | job `audit` |
+| `License & Dependencies` | job `deny` |
+
+Names are matched on the job's `name:` field, not its key in the YAML, so
+renaming a job breaks the gate until the ruleset is updated — check both when
+renaming one. The checks are loose: the branch does not have to be up to date
+with `main`, so an unrelated merge does not force a full rebuild.
+
+`pull_request` has **no** `paths-ignore`. A required check that is never
+reported does not count as passing — it stays "Expected" — and a workflow
+skipped by a path filter reports nothing at all, so a documentation-only pull
+request would be unmergeable. A job that does run and is skipped by its own
+`if:` does report success and satisfies the gate, which is why the nightly,
+live-provider and release-build jobs can stay conditional. `push` keeps the
+filter; after such a pull request merges, the commit does not need testing
+again.
+
 Every `cargo` invocation that resolves dependencies passes `--locked`, so CI
 builds the dependency graph committed in `Cargo.lock`. Without it a pull
 request that edits a manifest but not the lockfile would be tested against a
