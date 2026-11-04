@@ -87,6 +87,29 @@ about the model until the plumbing is fixed.
 - `--coderex-binary` requires the path **on the host**; the adapter copies it
   into the container as `/tmp/coderex-local-binary`.
 
+### Linux x86_64 host (from 2026-11-04)
+
+The batches from the twenty-sixth on ran on a second machine, and several of
+the constraints above do not apply there:
+
+- Linux 6.8 on x86_64, 16 vCPU, 61 GB RAM; plain Docker Engine, not Docker
+  Desktop. Task images are `linux/amd64`.
+- No cross build and no proxy are needed. The native target works, and the
+  provider, `huggingface.co`, `github.com` and `dl-cdn.alpinelinux.org` are
+  reachable directly, so image builds use the unpatched network path.
+- The binary is `/tmp/coderex-0.1.3`, the published 0.1.3 release rebuilt as
+  `x86_64-unknown-linux-musl` (`static-pie linked`, stripped), run with
+  `--coderex-binary`.
+- The model endpoint is `https://opencode.ai/inference/go/anthropic` with
+  model `deepseek-v4.1-flash` and the header `x-opencode-session` supplied
+  through `CODEREX_CUSTOM_HEADERS`; `CODEREX_CONTEXT_WINDOW=131072`. The key
+  and base URL are read from `~/.claude/settings.json` at run time, never
+  written into the dataset or a command line.
+- The root filesystem is 50 GB. The docker build cache filled it during the
+  first sweep (1.6 GB free, several trials died with `ENOSPC` while writing
+  their pane files); `docker builder prune -af` recovered 13.4 GB. Every
+  batch after that was preceded by a free-space check.
+
 ## Run history
 
 ### 2026-11-01 — `configure-git-webserver`, 7 runs, 0 resolved
@@ -1442,27 +1465,181 @@ the image pre-install below is the actual fix there. But for any task that
 installs packages and also needs a blocked host, this is the correct shape of
 the flag.
 
+### 2026-11-04 — all thirty-one unresolved tasks, re-run on Linux
+
+The earlier batches ran on macOS through a proxy, several of them against KIMI.
+This campaign replaced the machine and the endpoint. The host is Linux 6.8 on
+x86_64 (16 vCPU, 61 GB RAM, Docker Engine, a 50 GB root filesystem), the
+network is direct, and the model is `deepseek-v4.1-flash` behind
+`https://opencode.ai/inference/go/anthropic`, with
+`CODEREX_CONTEXT_WINDOW=131072` and the header `x-opencode-session`. The agent
+binary is CodeRex 0.1.3 built for `x86_64-unknown-linux-musl` — static-pie and
+stripped, so it runs in every task container without a libc. None of these runs
+used `--task-proxy`: the hosts that were only reachable through one on the Mac
+resolve directly here, which also removes the 20× apt slowdown the proxy
+introduced.
+
+Every task the previous scoreboard listed as unresolved was run again against
+`0.1.1-analysis`. The first pass ran 24 of the 31 in four concurrent groups —
+three at a 600 s agent budget and one at 900 s — and resolved 11. The seven
+tasks that did not fit and the thirteen first-pass failures were then rerun
+with budgets matched to the failure (900 s to 2400 s), one to four at a time,
+after diagnosing each one.
+
+The 50 GB root filled twice as images and build caches accumulated. Two trials
+died with `OSError: [Errno 28] No space left on device` while the harness wrote
+`post-test.txt`; one of them, `hf-model-inference`, had already finished its
+agent phase. `docker builder prune -af` recovered 13.4 GB. The harness warns
+that `docker buildx` is unavailable, so it cannot prune build cache per trial
+and disk use has to be watched by hand during a sweep.
+
+#### What the failures turned out to be
+
+Twenty of the 26 tasks that now pass were failing on the fixture, not on the
+model. The most common shape is an instruction that omits exactly the fact the
+test checks:
+
+- `build-initramfs-qemu`: the expect script waits for `localhost login:`, but
+  the instruction never sets a hostname.
+- `configure-git-webserver`: the sample commands say `user@server`, `https`,
+  `index.html` and branch `webserver`; the test wants `git@localhost`, HTTP,
+  `hello.html` and `master`.
+- `decommissioning-service-with-sensitive-data`: the test requires the archive
+  to contain `opt/sensitive_service_data/...`; the instruction says only "the
+  entire directory".
+- `git-multibranch`: the test requires an initially empty repository on
+  `master` with no leftover test branches; the instruction never says so.
+- `jupyter-notebook-server`: the test reads
+  `~/.jupyter/jupyter_notebook_config.py` and looks for `c.NotebookApp.*`
+  settings; the instruction names no file and no keys.
+- `nginx-request-logging`: the test reads the site file for `listen 8080` and
+  `root /var/www/html`, but reads `nginx.conf` for `log_format` and
+  `limit_req_zone`; the instruction puts every directive in the site file, so
+  the second read finds nothing.
+- `polyglot-c-py`: the instruction says `main.c.py`, the test runs
+  `main.py.c`.
+- `raman-fitting` / `raman-fitting.easy`: the test expects `gamma` to be the
+  Lorentzian HWHM and the amplitude key to be `A`, and fits each peak in a
+  fixed window; the instruction only says "fit the peaks".
+- `reshard-c4-data`: the test requires a flat `c4_reshard/` holding the
+  original basenames after `revert.py`; the instruction bounds files per
+  folder and says "matches what was originally in `c4_sample`", which a nested
+  layout satisfies.
+- `sanitize-git-repo` / `.hard`: the test forbids editing the downloaded
+  `exp_data/` snapshots; the instruction only says "do not make unnecessary
+  changes". The hard variant additionally requires the pre-sanitization
+  history to remain resolvable by its original SHA.
+- `vim-terminal-task`: the test executes `text_processor.py`; the instruction
+  never asks for the executable bit.
+
+The rest are test defects rather than instruction gaps:
+
+- `cron-broken-network`: the test compared the served page against 90 % of
+  example.com's old body; example.com has since been redesigned, so a correct
+  cron job fails. It now asserts `Example Domain` is present.
+- `intrusion-detection`: the test grepped the source for the literal
+  `logs/auth.log`; the script uses a variable and works.
+- `conda-env-conflict-resolution`: the task claimed NumPy 1.22 is incompatible
+  with SciPy 1.9.0. scipy 1.9.0 declares `numpy>=1.21.6,<2.0`; conda solves
+  `numpy=1.22.0` with `scipy=1.9.0` and both import. The test demanded a
+  change that is not needed. It also grepped comments, so quoting a removed
+  pin in a comment failed it.
+- `hf-model-inference`: the test required `vocab.txt`; `save_pretrained` wrote
+  `tokenizer.json`, and the instruction never prescribes a serialization. The
+  API tests had already proved the directory loads.
+- `qemu-alpine-ssh`: `debian:bullseye-slim` now resolves a qemu package that
+  was deleted upstream; the image no longer builds. The test's ssh command
+  also concatenated `"StrictHostKeyChecking=no"` and `"-p 2222"` without a
+  space, so it ran `ssh ...no-p 2222`.
+- `build-linux-kernel-qemu`: `tests/test_outputs.py` joined an `apt-get`
+  string across lines, leaving `+"""libelf-dev` as unary plus on a string, so
+  pytest could not collect the test at all. Once it parses, the image ships no
+  `ramfs` though the instruction promises one, and the unguarded `gzip` then
+  booted the agent's archive.
+- `reshard-c4-data`: the test's size limit was `15 * 1024 * 1024 * 1024` — 15
+  GiB, not the 15 MB stated everywhere else.
+
+The pytorch case is the clearest, because the fixture was forcing the model to
+be *less* accurate. `TRUE_PRED_CLASSES` was generated from the reference
+solution, which feeds the PNG's `p/255` values straight into the network. The
+test generates its images with `transforms.ToTensor()`, and the obvious
+reading of "run the model" applies the model's mean/std normalization.
+Measured over the first 50 MNIST test images with a restricted unpickler that
+reads only the archive's tensors:
+
+| Preprocessing | Matches `TRUE_PRED_CLASSES` | Correct against true labels |
+|---|---|---|
+| `p/255` (reference) | 50 / 50 | 35 / 50 |
+| `(p/255 - 0.1307) / 0.3081` | 40 / 50 | **43 / 50** |
+
+The four indices the first Linux run failed on — 28, 32, 34, 44 — are exactly
+places where the true labels are 0, 3, 7, 3 (the agent's answers) while the
+expected list says 3, 8, 2, 8. The expected list encodes the reference's own
+15 mistakes. Naming `model.pth` and stating `p/255` with no normalization
+makes the task well-posed; the rerun passes all 6 tests.
+
+#### The other six were budget, plumbing, or the new network
+
+Six tasks passed on a rerun with no fixture change: `count-dataset-tokens`
+(huggingface.co is reachable directly now), `download-youtube` (SSIM 0.948
+against a 0.95 threshold the first time, a boundary result), `get-bitcoin-nodes`
+(the earlier failure used a live block explorer), `path-tracing-reverse`
+(passed at 602 s of a 900 s budget), `polyglot-rust-c` (283 s), and
+`tmux-advanced-workflow` (the earlier grade starved on `apt-get update`; the
+`parse_error` was in grading, not in the agent's work).
+
+#### Budgets
+
+Agent budgets were 600 s for the short groups, 900 s for data/download tasks,
+1200–1800 s for builds and services, and 2400 s for training. `--max-turns` was
+200 everywhere; test budgets were 120–900 s; the context window was 131072.
+
+The per-request *output* ceiling is separate: CodeRex's
+`DEFAULT_MAX_TOKENS = 32768`. The adapter has no `max_tokens` option, and the
+CLI has no flag — only an agent definition can set one (`set_max_tokens`), which
+these runs do not use. `gpt2-codegolf`'s first run is the case where this
+mattered: it ended after 202 s with `error_max_output_tokens`, one turn, zero
+tool calls, because reasoning consumed all 32 768 tokens before any text or
+tool use. Probing the provider directly with `max_tokens` 65 536 and 131 072
+returned HTTP 200 and `end_turn` for both, so 32 768 is CodeRex's default, not
+a gateway cap. At 900 s the second run wrote `/app/gpt2.c` at 5156 bytes
+against the 5000-byte limit and was then cut off by the agent timeout.
+
+A third run, at 1800 s, went the other way. It spent 44 turns and 46 tool calls
+mapping the checkpoint format — the transcripts are all probes of the `.ckpt`
+and scratch C files under `/app/w/` — and never created `/app/gpt2.c`. It
+stopped at 979 s with `{"subtype":"success","is_error":false,"result":""}`.
+That closing turn carried no text and no tool call; the transcript has no
+assistant text at all, and the last frame before the result is a tool result.
+The only response shape consistent with both facts is a thinking-only turn: a
+text delta or a tool call would have produced a frame. CodeRex reported it as a
+finished run, which is defect 12 below.
+
+A fourth run, with the empty-answer fix in place (1800 s), did not reproduce
+the empty turn. It made 89 turns and 90 tool calls and did produce
+`/app/gpt2.c` — under the 5000-byte limit, and it compiled — but the program
+segfaulted with `returncode -11` on the test input. The 1800 s timer ended the
+run while it was still fixing that, and the frame is the honest
+`subtype: interrupted` with `error: "SIGTERM ended the run before the turn
+finished"`. The guard was not exercised by this run; a local mock provider is
+what verifies it end to end (see defect 12).
+
 ### Scoreboard so far
 
-72 distinct tasks attempted (90 % of the 80 in the dataset), 41 resolved
-(57 % of those attempted). `qemu-alpine-ssh`, `pytorch-model-cli`,
-`run-pdp11-code`, `sanitize-git-repo.hard`, `play-zork`, `gpt2-codegolf`,
-`hf-model-inference`, `download-youtube`, `extract-moves-from-video`,
-`build-initramfs-qemu` and `get-bitcoin-nodes` count as attempted but not
-resolved. Scored by distinct task, taking the best result where a task ran
-more than once — several did, both to re-check a fix and because the same task
-ran on DeepSeek and then on KIMI. The thirty-one that have never resolved:
+72 distinct tasks attempted (90 % of the 80 in the dataset), 67 resolved
+(93 % of those attempted), 5 unresolved. Scored by distinct task, taking the
+best result where a task ran more than once — several did, to re-check a fix
+and because the same task ran on more than one model. The 2026-11-04 campaign
+reran all 31 that had never passed, and 26 of them now pass. The five that
+still do not:
 
-`build-initramfs-qemu`, `build-linux-kernel-qemu`, `conda-env-conflict-resolution`,
-`configure-git-webserver`, `cron-broken-network`, `count-dataset-tokens`,
-`decommissioning-service-with-sensitive-data`, `download-youtube`,
-`extract-moves-from-video`, `get-bitcoin-nodes`, `git-multibranch`,
-`gpt2-codegolf`, `hf-model-inference`, `intrusion-detection`,
-`jupyter-notebook-server`, `nginx-request-logging`, `path-tracing-reverse`,
-`play-zork`, `polyglot-c-py`, `polyglot-rust-c`, `pytorch-model-cli`,
-`qemu-alpine-ssh`, `raman-fitting`, `raman-fitting.easy`, `reshard-c4-data`,
-`run-pdp11-code`, `sanitize-git-repo.hard`, `sanitize-git-repo`,
-`tmux-advanced-workflow`, `train-fasttext`, `vim-terminal-task`.
+| Task | Why it still fails |
+|---|---|
+| `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written |
+| `gpt2-codegolf` | the 44-turn run mapped the checkpoint format and never created `/app/gpt2.c`; its closing turn carried no text and no tool call and was reported as success — fixed (defect 12), the task still fails. A rerun on the fixed binary produced an under-5000-byte `/app/gpt2.c` that compiles but segfaults (return code `-11`) on the test input, and the 1800 s timer ended it mid-fix with `subtype: interrupted` |
+| `play-zork` | the model ended on prose ("Let me rewrite it with a robust heuristic…") without writing `/app/answer.txt` |
+| `run-pdp11-code` | built `apout` and a PDP-11 emulator, but both reruns ended without `/app/out.txt` — the longer one at 1607 s of 1800 s, on prose ("Let me fetch the FP11 reference…"); the emulated output was off by 96 |
+| `train-fasttext` | 2400 s agent timeout; an earlier attempt produced a 0.6233 model inside the 150 MB and accuracy bounds but ran out of budget before copying it to `/app/model.bin` |
 
 The eight never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
@@ -1471,19 +1648,26 @@ dataset download, a multi-GB model, or a prebuilt third-party image;
 `fix-git`'s fixture is gone from GitHub, and
 `qemu-startup`'s image no longer builds (see the thirteenth batch).
 
-| Failure class | Tasks |
-|---|---|
-| Dataset: instruction contradicts or omits what the test checks | `polyglot-c-py`, `nginx-request-logging`, `vim-terminal-task`, `decommissioning-service-with-sensitive-data`, `raman-fitting.easy`, `jupyter-notebook-server`, `intrusion-detection` (test greps the source for `logs/auth.log`; the script uses a variable and works), `build-initramfs-qemu` (expects `localhost login:`; the boot prompt is `initramfs login:` because the instruction never asks for a hostname), `reshard-c4-data` (test demands a flat `c4_reshard/` holding the original basenames after `revert.py` runs; the instruction only bounds files-per-folder, so a nested layout is legal and fails no stated rule) |
-| Dataset: fixture is stale or no longer runs | `cron-broken-network` (example.com redesign), `fix-git` (repository deleted), `git-multibranch` (test assumes a repository state the instruction never specifies), `qemu-alpine-ssh` and `qemu-startup` (`debian:bullseye-slim` resolves `qemu 5.2+deb11u5`, deleted upstream — the image build 404s before the agent runs), `sanitize-git-repo.hard` (image build's `git clone` of `dclm` dies with `GnuTLS recv error`), `build-linux-kernel-qemu` (`tests/test_outputs.py` line 37-38 splits string concatenation so the `+` becomes unary plus and pytest cannot collect; once that parses, the image ships no `ramfs` though the instruction promises one, and the test's `gzip -9` then silently reuses the agent's archive — patched, see below) |
-| Dataset: dependency unreachable | `incompatible-python-fasttext` and `...base_with_hint` (huggingface.co — patched, see below; **both pass once they build**), `reshard-c4-data` (image build downloads `allenai/c4` from huggingface.co — patched, see below), `count-dataset-tokens` (container cannot reach huggingface.co at all, though the host can), `raman-fitting` / `raman-fitting.easy` (pip slower than the 60 s Bash timeout, so numpy never installed), `pytorch-model-cli` (test phase `apt-get` at 49 kB/s), `build-linux-kernel-qemu` (apt from `ports.ubuntu.com` at 30-60 kB/s: the 3000 s budget went to installing the kernel build dependencies), `hf-model-inference` / `download-youtube` / `extract-moves-from-video` (need huggingface.co, youtube.com or GitHub releases; reachable now with `--task-proxy`, but the full budget went to fetching a multi-GB `torch` wheel, the video, or a `deno` toolchain) |
-| Model behaviour | `configure-git-webserver` (key-only SSH, test wants a password), `sanitize-git-repo` (sanitized one file outside the allowed set), `tmux-advanced-workflow` (killed the harness's own tmux server), `path-tracing-reverse` (budget spent before writing the deliverable), `git-multibranch` (left the repository in a state its own test cannot pass), `polyglot-rust-c` (900 s on the technique, deliverable never written), `intrusion-detection` (also: no IP validation in the response script), `raman-fitting` (retried pip in the foreground ~150 s before backgrounding it), `conda-env-conflict-resolution` (correct yml, but spent the rest on a conda solve/download that never finished), `play-zork` (spent the full budget exploring the game and never wrote the deliverable), `gpt2-codegolf` (84 edits to one C file, landed at 5030 bytes against a 5000-byte limit when the budget ran out), `run-pdp11-code` (identified the PDP-11 `a.out` and built `apout` correctly, but its emulated output is off by 96 and it never wrote `/app/out.txt`), `download-youtube` (right video from an archive.org mirror, last 10 s misaligned by ~4 frames: SSIM 0.948 against a 0.95 threshold), `extract-moves-from-video` (spent the budget building a `deno` transcription toolchain and never wrote `solution.txt`), `hf-model-inference` (batch 15 saved the model without `tokenizer.json`), `get-bitcoin-nodes` (the genesis coinbase transaction 404s while a recent one returns 200), `train-fasttext` (a 0.6233 model inside the 150 MB limit, but the budget ran out before the last step copied it to `/app/model.bin`) |
-| Provider | `incompatible-python-fasttext` in `batch7b` (401, key invalid — the run itself passed) |
-| Harness/plumbing | `tmux-advanced-workflow` (grading script starved on `apt-get update`) |
-| CodeRex defect | none outstanding — the eight found are fixed, plus the five compaction defects found afterwards and the two estimation/summary defects that followed (all now fixed); the only remainder is the 32 K default guess, which no longer blocks a request (see [Known, unfixed](#known-unfixed)) |
+A single attempt is not a reliable pass. A later five-task batch re-ran three
+tasks that had passed earlier in the campaign, and all three failed for model
+reasons, not fixture reasons: `configure-git-webserver` hit its 600 s timeout,
+`nginx-request-logging` named its `log_format` `benchmark` although the
+instruction asks for `detailed`, and `raman-fitting.easy` converged to
+`gamma=18.2` / `offset=1018` against the expected `17.52` / `1239`.
+Best-of-runs keeps them resolved; the failure classes are model variance (time
+spent, instruction adherence, fit quality), not the fixture defects the
+campaign repaired.
+
+Earlier versions of this scoreboard listed the unresolved tasks by failure
+class: dataset defects (an instruction that contradicted or omitted what the
+test checked), stale fixtures, unreachable dependencies, model behaviour,
+provider errors and harness plumbing. The five tasks above are what remains of
+those classes. The fixture defects the campaign did repair — 25 files across 21
+tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## CodeRex defects the benchmark exposed
 
-All eight were real, and all eight are fixed on `main`:
+All twelve were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -1747,6 +1931,46 @@ All eight were real, and all eight are fixed on `main`:
     `a_disabled_prefetch_summarizes_only_at_compaction`, and the three
     `SummaryDigest` tests.
 
+12. **An empty answer was a completed turn.** Found by `gpt2-codegolf` in the
+    2026-11-04 campaign. The run made 46 tool calls over 44 turns and never
+    wrote the deliverable; the closing frame was
+    `{"type":"result","subtype":"success","is_error":false,...,"result":""}`.
+    The transcript holds no assistant text at all, and the last event before
+    the frame is a tool result, so the final response can only have carried a
+    thinking block — a text delta or a tool call would have produced a frame.
+
+    `push_thinking_message` stores that block as an assistant message, so the
+    turn's last message was not a tool result and `next_loop_step` broke a
+    `Completed` turn instead of re-requesting. `reason_for` maps every
+    non-`max_tokens` stop to `Completed`, and the only guard against an empty
+    response required `stream_failed`. A clean SSE end
+    (`StreamEvent::StreamEnd`) is not a failure, so it fell through with
+    `stop_reason` defaulted to `"end_turn"` and the REPL wrote
+    `subtype: success`.
+
+    The streaming path now treats "no text, no tool call, no early result" as
+    an anomaly: it retries once without streaming and fails the turn if the
+    retry is empty too. A `max_tokens` stop is exempt, because it is already
+    reported as a truncation. The result-frame match also gained the arm it
+    was missing: `TerminalReason::Error`, `TerminalReason::ApiUnavailable` and
+    `TerminalReason::BudgetExhausted` arrive as `Ok(_)` and used to fall
+    through to the success arm, so a failed compaction, an exhausted provider
+    retry or a spent token budget also looked like a finished task.
+
+    Covered by `an_empty_stream_retries_the_turn_non_streaming`,
+    `an_empty_stream_with_an_empty_retry_fails_the_turn`, and
+    `empty_streaming_response_fails_without_persisting_a_message`, which pins
+    that the failed turn still leaves no assistant message behind.
+
+    Verified end to end after rebuilding the static musl binary: a local mock
+    provider that answers an empty SSE stream and an empty non-streaming
+    response now yields `{"subtype":"error_during_execution","is_error":true,
+    "error":"the provider returned an empty response"}`, where the old build
+    wrote `success`. The fourth `gpt2-codegolf` run did not reproduce an empty
+    turn — it spent the whole 1800 s budget on a segfaulting program and ended
+    `interrupted` — so the guard is evidenced by the mock and the unit tests
+    rather than by that run.
+
 ### Known, unfixed
 
 - **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
@@ -1764,11 +1988,61 @@ All eight were real, and all eight are fixed on `main`:
 
 ## Local fixture patches
 
-The cached dataset at `~/.cache/terminal-bench/terminal-bench-core/0.1.1` is a
-copy, not the upstream source, and six of its tasks have been edited so they
-can run at all on this machine. Every edit is recorded here so a result can be
-traced back to the fixture it was measured against, and each edited file has a
-`.orig` sibling holding the pristine version.
+Two cached copies matter:
+
+- `~/.cache/terminal-bench/terminal-bench-core/0.1.1` — the pristine cache.
+- `~/.cache/terminal-bench/terminal-bench-core/0.1.1-analysis` — the copy every
+  run from the twenty-sixth batch on grades against. **25 files across 21
+  tasks** are edited there, and each edited file has a `.orig` sibling holding
+  the pristine version. Some of the edits repair a test that cannot pass
+  anything, some supply a fact the instruction omitted but the test requires,
+  and two unbreak images that no longer build.
+
+The table lists all 25. A task appearing here was measured against a patched
+fixture; the underlying defect and its evidence are in the batch sections that
+follow.
+
+| File (relative to `0.1.1-analysis/`) | Change | Defect it repairs |
+|---|---|---|
+| `build-initramfs-qemu/task.yaml` | asks for hostname `localhost` | the test's expect waits for `localhost login:`; the instruction never set a hostname, so the boot said `initramfs login:` and the expect timed out |
+| `build-linux-kernel-qemu/task.yaml` | says the harness builds the initramfs; adds the same toolchain note | the old text promised a shipped `ramfs/initramfs.cpio.gz` that was not in the image, pushing the agent to build one that the test then reused |
+| `build-linux-kernel-qemu/tests/test_outputs.py` | joins the split `apt-get install` string; `mkdir -p ramfs`; `rm -f initramfs.cpio.gz` | `+"""libelf-dev ...` is unary plus on a string, so pytest cannot collect; the unguarded `mkdir`/`gzip` made the test boot a stale archive |
+| `conda-env-conflict-resolution/task.yaml` | drops the "NumPy 1.22 is incompatible with SciPy" claim | the pair is compatible: scipy 1.9.0 declares `numpy>=1.21.6,<2.0`, and `conda create` solves it; the task was asking for a change that does not exist |
+| `conda-env-conflict-resolution/tests/test_outputs.py` | strips `#` comment lines before grepping pins; drops the numpy/scipy assertion | an agent that quotes the removed pin in a comment (`# removed cudatoolkit=11.2`) fails a test its working environment passes; and the numpy/scipy assertion enforced the false premise above |
+| `hf-model-inference/tests/test_outputs.py` | accepts `tokenizer.json` **or** `vocab.txt`, and `model.safetensors` **or** `pytorch_model.bin` | `save_pretrained` writes the fast tokenizer's `tokenizer.json` and not `vocab.txt`; the instruction never prescribes a serialization, and the API tests already prove the directory loads |
+| `pytorch-model-cli/task.yaml` | names `model.pth` (not `simple_mnist.pth`); states `p/255` with **no** normalization | the test's `TRUE_PRED_CLASSES` are the reference's `x/255` predictions, including 15 of its mistakes; an agent that normalized would be *more* accurate (43/50 vs 35/50) and still fail |
+| `configure-git-webserver/task.yaml` | fixes the example (`hello.html`, `master`, `http`, `localhost`) and states the layout | the instruction cloned `user@server`, added `index.html` after creating `hello.html`, pushed `webserver` on an empty repo, and curled `https`, while the test checks exactly one layout |
+| `cron-broken-network/tests/test_outputs.py` | asserts `Example Domain` instead of comparing to the captured page | example.com was redesigned, so the 90 %-line comparison fails for any correct agent |
+| `decommissioning-service-with-sensitive-data/task.yaml` | requires the archive to keep the `opt/sensitive_service_data/...` path | the test extracts the archive and looks for the full path; `tar -C /opt -czf ... sensitive_service_data` is a legal reading of the old text and fails |
+| `git-multibranch/task.yaml` | requires an empty repo, `HEAD` on `master`, no leftover branches | the test clones the repo and creates branches; a test branch left during verification collides |
+| `intrusion-detection/tests/test_outputs.py` | greps `auth.log` / `http.log` | the test demanded the literal `logs/auth.log`, so a script that builds the path from a variable failed while working |
+| `jupyter-notebook-server/task.yaml` | names the `c.NotebookApp` attributes and config path | the test imports the config and reads those attributes; nothing in the old instruction said so |
+| `nginx-request-logging/task.yaml` | requires `log_format detailed`, placed in `nginx.conf` with `limit_req_zone` | the test greps for a format *named* `detailed` and reads nginx.conf, neither of which the instruction asked for |
+| `polyglot-c-py/task.yaml` | file is `/app/main.py.c` | the instruction, and every command in it, said `main.c.py`; the test uses `main.py.c` |
+| `qemu-alpine-ssh/Dockerfile` | `bookworm-slim`; `netcat-openbsd` | `debian:bullseye-slim` pins a qemu package withdrawn upstream, and `netcat` is a virtual package with no default |
+| `qemu-alpine-ssh/tests/test_outputs.py` | space before `-p 2222` | the two literals concatenated to `...no-p 2222`, which ssh rejects as `unsupported option "no-p"` |
+| `qemu-startup/Dockerfile` | the same base/netcat fix | same build failure; the task had never run |
+| `raman-fitting/task.yaml` | exact Lorentzian, constant offset, fit windows, key `A`, stray quote removed | the test recomputes the fit and compares tightly; the old text left the model and windows to the agent, and `amplitude` could never match the tested key |
+| `raman-fitting.easy/task.yaml` | the same | same |
+| `reshard-c4-data/task.yaml` | flat `c4_reshard/`; `revert.py` restores the original basenames into `c4_reshard/` | the test requires that layout; the old text only bounded files per folder, so a nested layout was legal and failed |
+| `reshard-c4-data/tests/test_outputs.py` | `MAX_SIZE_PER_FILE` 15 GiB → 15 MiB | `15 * 1024 * 1024 * 1024` is 15 GiB, so the size check could never fail |
+| `sanitize-git-repo/task.yaml` | do not edit `exp_data/` snapshots | the test diffs forbidden files; a captured diff under `exp_data/` quotes the old token, tempting an agent to "sanitize" an archive the test wants untouched |
+| `sanitize-git-repo.hard/task.yaml` | the same, plus keep the original commits resolvable | the test resolves the pre-sanitization SHA after the rewrite; `filter-branch` garbage collection removes it |
+| `vim-terminal-task/task.yaml` | `chmod +x text_processor.py` | the test asserts `os.access(..., os.X_OK)` |
+
+The proxy build-arg patches described below were applied to the macOS copy of
+`0.1.1` in earlier batches and are **not** present in `0.1.1-analysis`: on the
+Linux host `huggingface.co` and GitHub are reachable directly, so those images
+build unpatched. Likewise, the kernel Dockerfile prebuild and the expect
+timeouts described below belong to that older copy; in `0.1.1-analysis` the
+kernel test builds its own initramfs and the expect script still has
+`set timeout -1`.
+
+### Patches to the earlier macOS copy (historical)
+
+These were applied to `0.1.1` before the cache was refreshed and the analysis
+copy was made. They are kept as the record of what those batches measured;
+they are not part of `0.1.1-analysis`.
 
 **`sanitize-git-repo` — proxy build args.** Its `setup.sh` clones from GitHub
 during the image build. The compose file passes `http_proxy` /

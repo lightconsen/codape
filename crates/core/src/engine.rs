@@ -5711,6 +5711,46 @@ impl QueryEngine {
                 }
                 return Err(TurnError::Fatal { message });
             }
+
+            // A clean stream can still carry no answer: a provider that ends
+            // after a thinking block, or a gateway that closes the body early,
+            // produces neither text nor a tool call. That used to fall through
+            // as `end_turn`, and because the thinking block is stored as an
+            // assistant message the turn loop saw "the last message is not a
+            // tool result" and broke with `Completed` — a headless run that
+            // wrote nothing exited 0 with an empty result (gpt2-codegolf in
+            // terminal-bench). An empty answer is not a completion: ask once
+            // more without streaming, then fail the turn.
+            //
+            // A truncated (`max_tokens`) empty answer is excluded: retrying
+            // would spend the same budget again, and the turn already reports
+            // the truncation.
+            let empty_answer = content.trim().is_empty()
+                && deferred_calls.is_empty()
+                && early_calls.is_empty()
+                && early_results.is_empty();
+            let truncated = matches!(stop_reason.as_deref(), Some("max_tokens" | "length"));
+            if empty_answer && !truncated {
+                tracing::warn!(
+                    "provider ended the turn with no content and no tool call; retrying non-streaming"
+                );
+                let retried = self.send_request(turn, options).await?;
+                if !retried.content.trim().is_empty() || !retried.tool_calls.is_empty() {
+                    return Ok(StreamedResponse {
+                        content: retried.content,
+                        tool_calls: retried.tool_calls,
+                        early_calls: Vec::new(),
+                        early_results: Vec::new(),
+                        usage: retried.usage,
+                        stop_reason: retried.stop_reason,
+                        thinking: retried.thinking,
+                    });
+                }
+                return Err(TurnError::Fatal {
+                    message: "the provider returned an empty response".to_string(),
+                });
+            }
+
             return Ok(StreamedResponse {
                 content,
                 tool_calls: deferred_calls,
@@ -8474,7 +8514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_streaming_response_is_not_persisted_as_assistant_message() {
+    async fn empty_streaming_response_fails_without_persisting_a_message() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
         let perm_engine = PermissionEngine::new(checker);
@@ -8488,14 +8528,23 @@ mod tests {
         );
         engine.set_tool_executor(Box::new(StubOkToolExecutor));
 
-        engine
+        // An empty answer is a failed turn (it is not a finished one), and it
+        // must not leave an assistant message behind: the next request starts
+        // from the user's text, not from an empty reply.
+        let first = engine
             .submit_streaming("first".into(), SubmitOptions::default())
-            .await
-            .unwrap();
-        engine
+            .await;
+        assert!(
+            first.is_err(),
+            "an empty answer must not succeed: {first:?}"
+        );
+        let second = engine
             .submit_streaming("second".into(), SubmitOptions::default())
-            .await
-            .unwrap();
+            .await;
+        assert!(
+            second.is_err(),
+            "an empty answer must not succeed: {second:?}"
+        );
 
         let roles = engine
             .session
@@ -11844,6 +11893,117 @@ mod tests {
             "the provider message should reach the caller: {}",
             error.message()
         );
+    }
+
+    /// A provider whose stream ends cleanly with nothing in it, plus the
+    /// non-streaming answer the retry should pick up.
+    struct EmptyStreamApi {
+        fallback: Option<&'static str>,
+        fallback_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApiClient for EmptyStreamApi {
+        fn clone_box(&self) -> Box<dyn ApiClient> {
+            Box::new(Self {
+                fallback: self.fallback,
+                fallback_calls: std::sync::Arc::clone(&self.fallback_calls),
+            })
+        }
+
+        async fn create_message(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> Result<ApiResponse, ApiError> {
+            self.fallback_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ApiResponse {
+                content: self.fallback.unwrap_or_default().into(),
+                tool_calls: Vec::new(),
+                usage: UsageSummary::default(),
+                stop_reason: "end_turn".into(),
+                thinking: None,
+            })
+        }
+
+        async fn create_message_streaming(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>> {
+            Box::pin(futures::stream::iter(vec![
+                StreamEvent::StopReason("end_turn".into()),
+                StreamEvent::StreamEnd,
+            ]))
+        }
+    }
+
+    fn empty_stream_api(
+        fallback: Option<&'static str>,
+    ) -> (
+        Box<dyn ApiClient>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Box::new(EmptyStreamApi {
+                fallback,
+                fallback_calls: std::sync::Arc::clone(&calls),
+            }),
+            calls,
+        )
+    }
+
+    /// A clean end with no text and no tool call is not a finished answer.
+    ///
+    /// It used to become `end_turn` with empty content, which the loop
+    /// reported as success — a headless run could stop early with nothing.
+    #[tokio::test]
+    async fn an_empty_stream_retries_the_turn_non_streaming() {
+        let (api, calls) = empty_stream_api(Some("the answer"));
+        let (mut engine, _rx) = test_engine_with_api(api);
+        let options = SubmitOptions::default();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        let response = engine
+            .send_request_streaming(&mut turn, &options)
+            .await
+            .expect("the retry produced an answer");
+        assert_eq!(response.content, "the answer");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the empty stream must be retried exactly once"
+        );
+    }
+
+    /// If the retry is empty too, the turn fails instead of reporting a
+    /// success with nothing in it.
+    #[tokio::test]
+    async fn an_empty_stream_with_an_empty_retry_fails_the_turn() {
+        let (api, calls) = empty_stream_api(None);
+        let (mut engine, _rx) = test_engine_with_api(api);
+        let options = SubmitOptions::default();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        let error = engine
+            .send_request_streaming(&mut turn, &options)
+            .await
+            .expect_err("an empty answer must not complete the turn");
+        assert!(matches!(error, TurnError::Fatal { .. }), "{error:?}");
+        assert!(
+            error.message().contains("empty response"),
+            "{}",
+            error.message()
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Returns a fixed summary on `create_message`, or an error when
