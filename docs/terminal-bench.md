@@ -1755,6 +1755,13 @@ not the test distribution. This also explains the earlier 0.6233/0.6235 local
 readings — they were measured on the same friendly split. The task needs
 held-out robustness, not a better training loop.
 
+That was the reading on 2026-11-05. The follow-up found a simpler cause: the
+training data and the hold-out had been lower-cased, and the private test had
+not. With a case-preserving hold-out and an early write of `/app/model.bin`,
+the task passes; see the 2026-11-06 section below. The 2.6-point gap was
+partly a format mismatch, not only a distribution shift; Claude's ablation
+puts the case effect at 0.76 points.
+
 **`play-zork` confirms defect 14 and nothing else.** The transcript contains
 five `compact_boundary` frames (frames 281, 328, 341, 383, 580) and the run
 kept issuing tool calls after each one; no "retry budget is spent" appears.
@@ -1921,7 +1928,9 @@ The Claude Code side of that comparison is `cc-vulhub-2` (resolved,
 `failure_mode: unset`). `cc-vulhub-1` is `unknown_agent_error` — its agent
 shell exited without running the command — and is not a result, and a Claude
 Code `train-fasttext` run from the same period (`cc-fasttext-1`) was stopped by
-the disk guard at 3 GB free (container exit 137), also not a result.
+the disk guard at 3 GB free (container exit 137), also not a result. Its
+rerun, `cc-cmp-fasttext-2`, did pass; it is recorded in the 2026-11-06
+section.
 
 The description row was a CodeRex bug, not a design choice.
 `ToolDescriptor` carries only a name, a tier and JSON schemas;
@@ -2096,44 +2105,143 @@ The same four tasks under Claude Code 2.1.318 on the same provider and fixture,
 run sequentially: `solana-data` resolved (5/5, 210 s), `extract-moves-from-video`
 failed again (`agent_timeout` after 1 020 s of a 600 s agent budget, neither
 parser passed), `play-zork` failed at its 3 600 s timeout with 600 turns
-allowed (both parsers), and `train-fasttext` produced no result — the container
-grew to 11.2 GB, the disk guard stopped it at 3 GB free, and the harness then
-could not find `tmux` in it, so that row is environmental rather than an agent
-result. Of the four, only `solana-data` was a gap the shell could close, and
-the fix closed it; the other two that ran failed for reasons this change does
-not touch.
+allowed (both parsers), and `train-fasttext` produced no result on its first
+attempt — the container grew to 11.2 GB, the disk guard stopped it at 3 GB
+free, and the harness then could not find `tmux` in it, so that row is
+environmental rather than an agent result. A rerun (`cc-cmp-fasttext-2`)
+passed both parsers with a 137.27 MB model; it is covered in the next section.
+Of the four, `solana-data` was the gap the shell could close, and the fix
+closed it; a prompt fix closed `train-fasttext`; the other two that ran failed
+for reasons this change does not touch.
+
+### 2026-11-06 — `train-fasttext`: the test's case, and shipping before the timer
+
+`train-fasttext` was never a capacity problem. The 2026-11-05 run
+(`dev-fasttext-1`) trained on 650 000 rows after `lower()` and newline
+stripping, measured 0.6274 on the 10 000-row split it was given, and scored
+**0.601275** on the private split. fastText's tokenizer is case-sensitive, so
+`The` and `the` are different features; a model trained on folded text sees a
+different feature distribution when the test preserves case. The agent's own
+hold-out did not catch it because the hold-out had been folded the same way:
+it measured the model against its own preprocessing, not against the test's.
+
+The private split is not a different sample. `reformat_data.py` draws 10 000
+rows (seed 123) from the 50 000-row Yelp test parquet in place, and
+`/tests/private_test.txt` is the remaining 40 000 rows, `__label__N text`,
+unmodified — 39 528 of the lines contain an upper-case letter. The reference
+solution writes the same lines with no normalization. Same distribution,
+different format, which is exactly what a self-check built from the provided
+data can miss.
+
+The fix is a prompt sentence in `HEADLESS_OPERATING_NOTE`
+(`crates/cli/src/orchestrator.rs`, appended only in non-interactive mode):
+
+> When the request names a hidden or private test, hold out part of the
+> original inputs and test them in the format that test will read; do not
+> apply a lossy normalization (lower-casing, truncation, re-encoding) that the
+> check does not.
+
+It fixed the preprocessing and exposed a second failure. In `dev-fasttext-2`
+the agent's `clean()` became `" ".join(s.split())` — case preserved — and its
+best candidate read `val=0.6659 test=0.6228` at 82.4 MB
+(`dim=50, bucket=200000, wordNgrams=2, minCount=5, epoch=3, lr=0.2`; its test
+split read 0.619–0.623 across the sweep). It spent the whole 1 800 s budget
+searching and never wrote `/app/model.bin`; both parsers failed with no model
+to load. A search that ends in scratch files scores zero.
+
+A second sentence went into the same note:
+
+> As soon as an artifact meets the stated constraints, write it to the
+> required path and keep improving it there; a search that leaves only
+> scratch files scores zero.
+
+With both sentences and a 3 600 s budget, `dev-fasttext-3` passed both
+parsers. `/app/model.bin` is 135 175 830 bytes (135.2 MB, 128.9 MiB), on disk
+when the timer fired at 3 599 994 ms; the harness graded it after the run
+ended as `agent_timeout`. The run made 94 turns and 100 tool calls (73 `Bash`,
+24 `Write`, 1 `Edit`, one `JobOutput`, one `JobKill`).
+
+| Run | Change | Agent time | Turns / calls | Artifact | Private result |
+|---|---|---|---|---|---|
+| `dev-fasttext-1` | — | 766 s, `success` | 27 | 123.9 MB, trained on lower-cased text | **0.601275** — accuracy failed, size passed |
+| `dev-fasttext-2` | format-matching note | 1 800 s, `interrupted` | 34 / 40 | none at `/app/model.bin`; best candidate 82.4 MB | both parsers failed (no model) |
+| `dev-fasttext-3` | + ship-early note | 3 600 s, `interrupted` | 94 / 100 | 135.2 MB | **passed** both parsers |
+| `cc-cmp-fasttext-2` | Claude Code 2.1.318, same provider/model | 4 020 s, `agent_timeout` | 42 main / 57 total | 137.27 MB | **passed** both parsers; local test raw 0.6243, lower-cased 0.6167 |
+
+Claude Code had already passed this task on the same fixture and provider on
+its second attempt; the first, `cc-cmp-fasttext-1`, grew the container to
+11.2 GB and was stopped by the disk guard at 3 GB free, so it is not a result.
+Its successful run kept case and measured the case effect directly on its own
+10 000-row split: `test_raw=0.6243` against `test_lower=0.6167` — 0.76 points
+for the same model. The main session returned `success` at 2 065 s while
+training was still in flight; background-task notifications resumed it, the
+137.27 MB model landed at 12:15 UTC, and the process was still alive when the
+timeout ended it at 4 020 s, which the harness records as `agent_timeout`.
+The private test passed; its margin is unknown, and the local margin was
+0.0043. Both passing runs are just-in-time.
+
+The honest limits:
+
+- **One run per configuration.** Every row is n=1, and `train-fasttext` has no
+  earlier passing run to compare against.
+- **Stacked changes.** The two sentences went in together with the 3 600 s
+  budget, so the pass cannot be apportioned between the format fix, the
+  ship-early instruction, and the extra time. `dev-fasttext-2` does isolate
+  one step: the format sentence alone fixed the preprocessing and did not
+  produce a deliverable.
+- **Extended budgets.** The task's own `max_agent_timeout_sec` is 600 s.
+  These runs lasted 1 800–3 600 s (CodeRex) and 4 020 s (Claude Code), so the
+  pass is real on this harness but is not a pass at the task's designed
+  budget.
+- **A pass is not a margin.** The test asserts `> 0.62` and reports nothing
+  else; the CodeRex model's private accuracy is not visible in
+  `results.json`. Claude's ablation shows the case fold is worth about 0.76
+  points, and correcting it plus shipping was enough to pass, but the
+  2.6-point swing from `dev-fasttext-1` is not attributable to case alone:
+  the training run, the data split and the hyperparameters all changed.
 
 ### Scoreboard so far
 
-74 distinct tasks attempted (93 % of the 80 in the dataset), 71 resolved
+75 distinct tasks attempted (94 % of the 80 in the dataset), 72 resolved
 (96 % of those attempted), 3 unresolved. Scored by distinct task, taking the
 best result where a task ran more than once — several did, to re-check a fix
 and because the same task ran on more than one model. The 2026-11-04 campaign
-reran all 31 that had never passed, and 27 of them now pass. Three of the six
+reran all 31 that had never passed, and 27 of them now pass. Four of the six
 that remained at the 2026-11-05 rerun have since passed: `security-vulhub-minio`
 on the prompt/tool-description fix (3/3), `run-pdp11-code` by writing
-`/app/out.txt` inside a 9 000 s budget, and `solana-data` once the shell's
-background jobs outlived the call (1 of 2 reruns, 5/5). The three that still
-do not:
+`/app/out.txt` inside a 9 000 s budget, `solana-data` once the shell's
+background jobs outlived the call (1 of 2 reruns, 5/5), and `train-fasttext`
+once the hold-out matched the test's format and the model was written before
+the timer (1 of 3 CodeRex attempts since 2026-11-05; Claude Code also passed
+it). The three that still do not:
 
 | Task | Why it still fails |
 |---|---|
 | `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written. The 2026-11-05 rerun reproduced it: 34 turns in 600 s spent installing `deno`, a PO-token provider and a plugin, while `yt-dlp` still returned the bot check and every piped/invidious mirror answered 403, 500 or 502 |
 | `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written |
-| `train-fasttext` | the 2026-11-05 rerun was clean — 27 turns, 766 s, `failure_mode: unset`, size passed at 123.9 MB — and `test_accuracy` failed on the private split with `0.601275 > 0.62`; the agent's own holdout read 0.6274, so it stopped on a number the test does not share |
+| `qemu-startup` | the 2026-11-06 retry produced the task's first trial — the analysis fixture builds — but the agent stopped after 7 turns and 452 s on a provider transport error (`error sending request for url (https://opencode.ai/...)`); the test's `expect` never got a telnet session (`spawn id exp5 not open`), so `/tmp/data.txt` was never written and `test_version` failed. Unresolved on the provider, not the fixture |
 
-The six never run:
-`eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
+The five never run: `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`,
 `super-benchmark-upet`. Most need a dataset download, a multi-GB model, or a
-prebuilt third-party image; `fix-git`'s fixture is gone from GitHub (the
-repository now answers 404), and `qemu-startup`'s image no longer builds (see
-the thirteenth batch).
+prebuilt third-party image, and `fix-git`'s fixture is gone from GitHub (the
+repository now answers 404). `qemu-startup` used to be on this list because
+the pristine image pins a qemu package withdrawn from bullseye; the analysis
+copy's Dockerfile patch (`bookworm-slim`, `netcat-openbsd`) fixes that, and it
+now has a trial (above).
 
 An attempt to run them on 2026-11-04 produced no trials: `eval-mteb`,
 `eval-mteb.hard`, `fix-git`, `oom` and `qemu-startup` all failed at
 `docker compose build` before a container existed, and the remaining three
 were skipped to keep disk headroom. The harness keeps no builder stderr, so
 these are recorded as build failures, not agent results.
+
+The 2026-11-06 retry ran all six on the analysis copy. `qemu-startup` built
+and produced the trial above. The other five again produced no trial:
+`eval-mteb` and `eval-mteb.hard` failed while building their client image,
+`fix-git` and `oom` failed at `docker compose build`, and
+`super-benchmark-upet`'s container exited before the harness could exec into
+it (`409 Conflict ... container ... is not running`). These remain fixture
+problems, not agent results.
 
 A single attempt is not a reliable pass. A later five-task batch re-ran three
 tasks that had passed earlier in the campaign, and all three failed for model
@@ -2148,7 +2256,7 @@ campaign repaired.
 Earlier versions of this scoreboard listed the unresolved tasks by failure
 class: dataset defects (an instruction that contradicted or omitted what the
 test checked), stale fixtures, unreachable dependencies, model behaviour,
-provider errors and harness plumbing. The four tasks above are what remains of
+provider errors and harness plumbing. The three tasks above are what remains of
 those classes. The fixture defects the campaign did repair — 26 files across 22
 tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
@@ -2672,7 +2780,7 @@ follow.
 | `run-pdp11-code/task.yaml` | requires the program's output in `/app/out.txt` | the instruction says only "tell me what the output of that program is"; the test's first assertion reads `/app/out.txt`, so a correct answer in the transcript still fails |
 | `qemu-alpine-ssh/Dockerfile` | `bookworm-slim`; `netcat-openbsd` | `debian:bullseye-slim` pins a qemu package withdrawn upstream, and `netcat` is a virtual package with no default |
 | `qemu-alpine-ssh/tests/test_outputs.py` | space before `-p 2222` | the two literals concatenated to `...no-p 2222`, which ssh rejects as `unsupported option "no-p"` |
-| `qemu-startup/Dockerfile` | the same base/netcat fix | same build failure; the task had never run |
+| `qemu-startup/Dockerfile` | the same base/netcat fix | same build failure; the task had never run before its first trial on 2026-11-06 |
 | `raman-fitting/task.yaml` | exact Lorentzian, constant offset, fit windows, key `A`, stray quote removed | the test recomputes the fit and compares tightly; the old text left the model and windows to the agent, and `amplitude` could never match the tested key |
 | `raman-fitting.easy/task.yaml` | the same | same |
 | `reshard-c4-data/task.yaml` | flat `c4_reshard/`; `revert.py` restores the original basenames into `c4_reshard/` | the test requires that layout; the old text only bounded files per folder, so a nested layout was legal and failed |
