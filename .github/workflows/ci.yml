@@ -45,6 +45,18 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# `Swatinem/rust-cache` is configured below with `save-if: github.ref ==
+# 'refs/heads/main'`, so only the default branch writes caches. Every pull
+# request has its own ref, and a cache written under `refs/pull/N/merge` is
+# restorable by that ref alone, so sixteen jobs per pull request each
+# accumulated a full copy nobody could reuse. They grew the repository past the
+# 10 GB Actions cache limit, and GitHub then evicted the largest entries to stay
+# under it -- including `v0-rust-coverage-*` at 1.5 GB. A pull request could
+# then only cold-build the workspace (603 crates instead of 21), and its
+# Coverage job ran long enough to be canceled. Reading is unaffected: a pull
+# request restores its base branch's caches, so this keeps the reuse and drops
+# the duplication.
+
 permissions:
   contents: read
 
@@ -87,6 +99,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
@@ -112,6 +126,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@nextest
@@ -131,6 +147,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: cargo test --doc --workspace --locked
@@ -145,6 +163,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
@@ -173,6 +193,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-unknown-linux-musl
@@ -195,6 +217,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
 
@@ -256,6 +280,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           targets: x86_64-pc-windows-gnu
@@ -295,6 +321,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
@@ -389,6 +417,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -465,6 +495,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-code-agent-benchmark.sh mock
@@ -476,6 +508,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - name: Build eval fixtures
@@ -505,6 +539,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-mock.sh full
@@ -526,6 +562,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -563,6 +601,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-live.sh "${{ inputs.live_provider }}" smoke
@@ -607,6 +647,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - name: Run the live-provider eval flow
@@ -628,6 +670,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       # The rustdoc backlog is empty; a warning is a regression.
@@ -642,6 +686,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
@@ -653,6 +699,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check licenses bans sources
@@ -677,6 +725,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: dtolnay/rust-toolchain@1.99.1
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
