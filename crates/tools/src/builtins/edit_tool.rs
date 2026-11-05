@@ -11,6 +11,15 @@ pub struct EditTool;
 
 #[async_trait]
 impl Tool for EditTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Replaces an exact string in a file. `old_string` must match the file byte for byte \
+             and must be unique unless `replace_all` is set, so include enough surrounding \
+             text to identify one site. Read the file first: editing text you have not seen is \
+             a guess.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Edit".into(),

@@ -200,6 +200,21 @@ impl BashTool {
 
 #[async_trait]
 impl Tool for BashTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Executes a shell command and returns its output. This is the way to inspect the \
+             machine and to run programs: list files, read what a service returns, check \
+             processes, ports, and environment variables.\n\n\
+             - Each call runs `sh -c` in a fresh shell: a `cd` or an exported variable does \
+             not carry to the next call, so use absolute paths or pass the whole sequence to \
+             one command.\n\
+             - The shell is non-interactive. Anything that waits for input blocks until the \
+             timeout.\n\
+             - `timeout` is in seconds (default 60, max 600). For a server or a long job, set \
+             `run_in_background` and read its output file instead of holding the call open.",
+        )
+    }
+
     /// The command is this tool's rule content, as it is in the reference
     /// (`Bash=command`). Declaring the field means a deny rule is judged
     /// against the command line the call is about to run — including a command

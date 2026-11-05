@@ -1717,29 +1717,304 @@ transcript showing that compaction ran twice and the run continued. It wrote a
 final message reports 56 of 57 reference prompts matching HF GPT-2
 byte-for-byte.
 
+### 2026-11-05 — reruns, and the first runs of two never-run fixtures
+
+The four tasks the 2026-11-04 campaign left unresolved were rerun on the binary
+built from `dev` with the defect-14 fix and the provider-ruler fix. Two
+never-run fixtures were also tried for the first time, `security-vulhub-minio`
+and `solana-data`; both now have a real trial, though neither resolves. The
+reruns got 3 600 s and 200 turns unless noted; `run-pdp11-code` ran against the
+analysis fixture whose instruction now asks for `/app/out.txt`.
+
+| Task | Result | Notes |
+|---|---|---|
+| `train-fasttext` | ❌ unresolved, clean | 27 turns, 766 s, `failure_mode: unset`; size passed, private accuracy **0.601275** against 0.62 |
+| `play-zork` | ❌ unresolved | `agent_timeout` at 3 600 s, 239 turns, 5 compactions, `/app/answer.txt` never written |
+| `run-pdp11-code` | ❌ unresolved | run 1: `error_max_output_tokens` at 39 turns; run 2: 133 turns / 3 600 s, no compaction, a PDP-11 emulator whose output was close but wrong; no `/app/out.txt` either time |
+| `extract-moves-from-video` | ❌ unresolved, environment | 600 s `agent_timeout`, 34 turns; `yt-dlp` got "Sign in to confirm you're not a bot" and every mirror answered 403/500/502 |
+| `security-vulhub-minio` | ❌ unresolved, model | 25 turns, 231 s, `failure_mode: unset`; it proved the access key and gave up on the secret without trying `POST /minio/bootstrap/v1/verify` |
+| `solana-data` | ❌ unresolved, timeout | 31 turns, 360 s, `agent_timeout`; the Flask server reached `/status: 200` during the run but was not listening when the tests started |
+
+**`train-fasttext` is now a straight model result.** The run had no disk or
+harness problem: 766 s of agent time, 27 turns, `subtype: success`, and both
+tests executed. `test_model_size` passed at 123.9 MB; `test_accuracy` failed on
+the private split:
+
+```
+E       assert 0.601275 > 0.62
+```
+
+The agent's own held-out 10 000-row split said 0.6274, which is why it stopped
+("Bounds met (0.6274 accuracy, 124MB)"). The winning configuration was
+`dim=10, bucket=2_500_000, wordNgrams=2, minCount=2, epoch=3, lr=0.5,
+loss=softmax` — capacity was deliberately small because larger settings
+overfitted (`epoch 25` scored 0.580). The 2.6-point gap between the provided
+holdout and the private split is the whole story: the model selected its
+hyperparameters against the only labelled data it was given, and that data is
+not the test distribution. This also explains the earlier 0.6233/0.6235 local
+readings — they were measured on the same friendly split. The task needs
+held-out robustness, not a better training loop.
+
+**`play-zork` confirms defect 14 and nothing else.** The transcript contains
+five `compact_boundary` frames (frames 281, 328, 341, 383, 580) and the run
+kept issuing tool calls after each one; no "retry budget is spent" appears.
+That is the behaviour the fix was for, and it is now exercised end to end on a
+real task. The trial still ended at 3 600 s with 239 turns:
+
+```
+{"type":"result","subtype":"interrupted","is_error":true,
+ "duration_ms":3599995,"num_turns":239,
+ "error":"SIGTERM ended the run before the turn finished"}
+```
+
+and both tests fail on `FileNotFoundError: /app/answer.txt`. The time went into
+a hand-built toolkit — 224 `Bash` calls, 18 `Write` calls, a `probe.py` that
+batched commands (95 runs), `save.sh`/`load.sh` save states (17 and 16), and a
+room map. The highest score it printed was 174/350 at move 415, and at the
+timer it was still at the Entrance to Hades. This is the model's long-horizon
+play, not a compaction defect: 3 600 s is not enough for this model to finish
+Zork.
+
+Two details matter for reading the missing file. The agent never mentions
+`/app/answer.txt` in any tool input, but that is a consequence, not the
+mistake: the test wants the ending text *and* the 350-point score, so the file
+can only be written after the game is finished. And the one shortcut it tried
+was unavailable — two `WebSearch` calls asked for a Zork walkthrough and both
+returned `No results found`, so it had to derive the solution instead of
+following one.
+
+**At double the budget `play-zork` finishes — and the test is wrong.** The
+rerun with 7 200 s and 1 200 turns (`dev-zork-2`) beat the game: 350 of 350
+points, rank Master Adventurer, 604 moves, in 442 turns and 5 912 s of agent
+time. It wrote the ending verbatim to `/app/answer.txt`, and
+`test_reached_end_of_game` passes. `test_maximum_score` is the only failure,
+and it is a string mismatch, not a missing result:
+
+```
+E  AssertionError: Expected 'Your score is 350 (total out of 350 points)' to be in answer.txt
+E  assert 'Your score is 350 (total out of 350 points)' in
+   '... Your score is 350 (total of 350 points), in 604 moves. ...'
+```
+
+The game never prints "out of". Every `score` reply in the transcript — forty-two
+distinct ones, from 0/350 in three moves to 350/350 in 597 — reads
+`Your score is N (total of 350 points)`, and so does the ending screen. The
+agent also decompiled the story's `V-SCORE` routine and read the format string
+itself: `<TELL " (total of 350 points), in ">`. The expected string comes from
+the task's own `solution.sh`, which writes both lines with `echo` instead of
+playing; the test file is byte-identical in `0.1.1` and `0.1.1-analysis`, so
+this is upstream. The task is tagged `shortcut-solution`, and this is exactly
+what that tag buys: the only way to pass is to recite the author's paraphrase,
+while following the instruction — "write the ending message ... exactly as it
+appears on the screen" — guarantees a failure even at a perfect score. CodeRex
+solved the stated goal; the fixture, not the model, is what failed. Until the
+assertion is corrected to the string the game emits, a `play-zork` pass is
+evidence about memorised test data, not about play.
+
+This also settles the budget question from the 3 600 s run. Zork at 350 is
+reachable in roughly 1 h 40 m by this model, with no compaction involved
+(442 turns against a 1 200-turn ceiling, the long session state carried in
+the conversation rather than the tool kit); the earlier run was not close
+because it spent an hour building probes and save states, not because the
+window was too small.
+
+**`run-pdp11-code` did not reach a test, for a new reason.** The fixture patch
+worked — the instruction asked for `/app/out.txt` and the agent knew it. It
+identified the file as a PDP-11 OMAGIC `a.out`, wrote a disassembler, and was
+looking for `apout` when the run ended:
+
+```
+{"type":"result","subtype":"error_max_output_tokens","is_error":true,
+ "duration_ms":1034280,"num_turns":39}
+```
+
+A turn hit the 32 768-token output ceiling with no text and no tool call — the
+same thinking-only shape as `gpt2-codegolf`'s first run, now at the ceiling
+that was supposed to leave room for reasoning. CodeRex treats `max_tokens` as
+a terminal reason by design (retrying would double the cost), so the whole
+session ends. The adapter offers no `max_tokens` knob and the CLI has no flag;
+the provider accepted 65 536 and 131 072 in a direct probe. Nothing in this
+trial is a test result: `/app/out.txt` was never created, and the recorded
+`unknown_agent_error` is the harness mapping the failed result frame.
+
+A second rerun reached the tests. It ran the full 3 600 s and 133 turns
+(`Bash` 129, `Write` 4, `WebSearch` 3), with **no compaction at all** — the
+trial never approached the context limit. It decoded `data.hex`, wrote
+`/app/work/cpu.py` (a PDP-11 emulator) and `dis2.py`/`annot.py`
+(disassemblers), and was still debugging the CPU when the timer fired:
+
+```
+17 8 -14 -7 -54 -77 -39 -20 -10 -55
+-28 -64 -32 -16 -8 -4 -2 -1 -1 -1
+```
+
+That is the right shape (20 values, the same descending tail) and the wrong
+numbers: the expected sequence starts `17 -60 -30 -15 -58 -29 -15 -8 -54 -27`
+and has one more `-1` at the end. `/app/out.txt` was never written, so both
+tests fail on `FileNotFoundError`; `failure_mode: agent_timeout` is honest.
+Compared with the 2026-11-04 run, which was off by a constant 96, this is a
+real second, independent attempt — the emulator is closer, but still not
+correct at the hour mark. This is a model result (emulator correctness), not
+a fixture or harness defect.
+
+**`security-vulhub-minio` is solvable, and the model missed the door.** The
+trial finished cleanly (25 turns, 231 s, `failure_mode: unset`) and failed the
+single assertion because `/app/result.txt` contained only half the pair:
+
+```
+AssertionError: Expected 'minioadmin-vulhub' to be in /app/result.txt
+```
+
+The agent's report is a careful piece of work: it found the three-node
+cluster, proved `minioadmin` is the access key by distinguishing
+`SignatureDoesNotMatch` from `InvalidAccessKeyId`, scanned all 65 535 ports on
+each node, checked for a mounted Docker socket, and then concluded the secret
+was unreachable "from this container". It never tried the documented
+vulnerability of the image it was pointed at. `vulhub/minio:2023-02-27…` is
+**CVE-2023-28432**, and the endpoint is right there:
+
+```
+POST /minio/bootstrap/v1/verify     (Content-Type: application/x-www-form-urlencoded)
+
+{"MinioEnv": {"MINIO_ROOT_USER": "minioadmin",
+              "MINIO_ROOT_PASSWORD": "minioadmin-vulhub", ...}}
+```
+
+I reproduced that by starting the fixture's three nodes and sending the
+request; the credentials the test wants come back verbatim. So the task is a
+knowledge/recall result, not a broken fixture: the agent did not search for the
+image's CVE and reasoned itself into a dead end instead. It is not a permanent
+result: after the request-level changes described in the next section, three
+reruns pass in 124 s, 155 s and 309 s.
+
+**`solana-data` was a timeout on a working server.** The agent built a Flask
+server in `/app/server.py` and verified it end to end — the transcript has
+`[PASS] /status -> 200` and `port 5000 OPEN`. At 360 s the timer fired while
+its last command was `kill_server.py; sleep 1; nohup python3 server.py …`,
+restarting the server; the SIGTERM took the process group with it, so when the
+tests ran ten seconds later nothing was listening and all five errored with
+"Solana service is not responding". Two things to keep separate: 360 s is a
+short budget for installing `solana` and writing the server, and a server
+started without `setsid` does not survive an `agent_timeout`. The model result
+is real but the recorded one is a timeout, not a wrong implementation.
+
+### 2026-11-05 — what the two agents send, and what CodeRex never told the model
+
+`security-vulhub-minio` failed four times in a row (0/4, including the first
+run above) while Claude Code 2.1.318 passed it on the same provider endpoint.
+The difference had to be below the fixture, so I put a local mock Anthropic
+endpoint in front of both agents and recorded the request bodies they send
+(`POST /v1/messages`, plus the `/count_tokens` probe). They share a model and a
+transport; the requests differed like this:
+
+| | CodeRex (before) | Claude Code 2.1.318 |
+|---|---|---|
+| System prompt | 887 characters, four sentences | ~6 200 characters: autonomy, a security-testing authorization paragraph, action bias |
+| Environment | — | a second, ~8 400-character environment description in the system role |
+| Tools advertised | 53 | 21 |
+| Tool `description` | the bare tool name — `Bash` was described as `Bash` | a paragraph or more each, saying what the tool does and when to reach for it |
+| `max_tokens` | 32 768 | 32 000 |
+| `thinking` | absent | `{"type": "adaptive"}` |
+| `output_config` | absent | `{"effort": "high"}` |
+
+The Claude Code side of that comparison is `cc-vulhub-2` (resolved,
+`failure_mode: unset`). `cc-vulhub-1` is `unknown_agent_error` — its agent
+shell exited without running the command — and is not a result, and a Claude
+Code `train-fasttext` run from the same period (`cc-fasttext-1`) was stopped by
+the disk guard at 3 GB free (container exit 137), also not a result.
+
+The description row was a CodeRex bug, not a design choice.
+`ToolDescriptor` carries only a name, a tier and JSON schemas;
+`RegistryToolDispatcher::list_tools()` looked for a `description` key inside the
+tool's input schema and then fell back to `d.name`. None of the builtins put one
+there, so all 53 tools went to the provider described as their own names. The
+model could see each argument schema but nothing said what the tool was for or
+when to use it — and nothing in the system prompt framed the agent's job as
+"keep going until the task is done" or gave the security-testing authorization
+paragraph Claude Code sends.
+
+Two controls before concluding the framing was the cause:
+
+- **The model knows the answer.** Asked with a minimal prompt about a host
+  running `vulhub/minio:2023-02-27`, it named CVE-2023-28432 and
+  `POST /minio/bootstrap/v1/verify` unprompted. The failure was not knowledge.
+- **Text appended to the prompt did nothing.** `dev-vulhub-3` appended only
+  Claude's security paragraph with `--append-system-prompt`, and `dev-vulhub-4`
+  appended its whole lean body. Neither run made a single
+  `bootstrap/v1/verify` request; both repeated the same local env/file probing
+  and the same wrong conclusion. Reading `build_headless_prompt` explained it:
+  in `-p` mode the append is folded into the *user* prompt as
+  `Additional system instructions: …`, and the system prompt stays the
+  887-character default. An operator cannot replace CodeRex's system prompt
+  from the command line in headless mode — worth recording on its own.
+
+Three changes followed:
+
+1. `DEFAULT_AGENT_SYSTEM` rewritten from 887 to ~1 900 characters: autonomy and
+   persistence ("check the result itself… adjust and try another approach
+   instead of stopping"), the scope including system work a coding task implies
+   (processes, services, ports, configuration), Claude's authorization
+   paragraph for security testing, and an action bias.
+2. `Tool::description()` added to the trait with a `None` default;
+   `list_tools()` now prefers it over the schema/name fallback. Thirteen
+   builtins implement it — `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`,
+   `ListDir`, `CurrentDir`, `WebSearch`, `WebFetch`, `TodoWrite`,
+   `NotebookEdit`, `Agent` — each with prose covering purpose and limits (for
+   `Bash`: a fresh non-interactive shell per call, the timeout, and
+   `run_in_background`). `None` keeps the old behaviour for the rest.
+   Covered by `builtin_tools_are_advertised_with_their_own_description`.
+3. Nothing was changed on the request parameters: no `thinking`, no
+   `output_config`, same `max_tokens`. That is still the largest remaining
+   difference from Claude Code and is unmeasured.
+
+Results on the dev binary (`target/x86_64-unknown-linux-musl/release/coderex`,
+built 14:55):
+
+| Run | Result | Turns | Wall | Model | Tool calls | Notes |
+|---|---|---|---|---|---|---|
+| `dev-vulhub-5` | ✅ resolved | 11 | 123.9 s | 87.2 s | 17 | names CVE-2023-28432 and the bootstrap endpoint |
+| `dev-vulhub-6` | ✅ resolved | 25 | 309.1 s | 274.5 s | 34 | final report names both credentials |
+| `dev-vulhub-7` | ✅ resolved | 14 | 155.0 s | 119.5 s | 18 | four `bootstrap/v1/verify` calls |
+| `dev-regress-create-bucket-1` | ✅ resolved | 15 | 214.6 s | 124.0 s | 18 | regression |
+| `dev-regress-hello-world-1` | ✅ resolved | 3 | 38.6 s | 10.3 s | 2 | regression |
+
+So 3/3 on a task that was 0/4, at 124–309 s, and the two regressions still
+pass. Two honest limits on what that shows. The prompt and the tool
+descriptions went in together, and these runs cannot say which did the work;
+the append control suggests text delivered in the user message did nothing,
+which points at the descriptions or the system role itself, but that is
+inference, not an ablation. And three passes on one fixture is a small sample —
+the campaign has seen single-pass tasks fail on rerun before, so the scoreboard
+counts it as resolved for this binary, not as a permanently settled task.
+
+For completeness, `run-pdp11-code` also produced its first pass the same day:
+`dev-pdp11-3` ran 4 489 s of a 9 000 s budget and both parser tests passed, on
+a binary that predates these prompt changes.
+
 ### Scoreboard so far
 
-72 distinct tasks attempted (90 % of the 80 in the dataset), 68 resolved
-(94 % of those attempted), 4 unresolved. Scored by distinct task, taking the
+74 distinct tasks attempted (93 % of the 80 in the dataset), 70 resolved
+(95 % of those attempted), 4 unresolved. Scored by distinct task, taking the
 best result where a task ran more than once — several did, to re-check a fix
 and because the same task ran on more than one model. The 2026-11-04 campaign
-reran all 31 that had never passed, and 27 of them now pass. The four that
-still do not:
+reran all 31 that had never passed, and 27 of them now pass. Two of the six
+that remained at the 2026-11-05 rerun have since passed: `security-vulhub-minio`
+on the prompt/tool-description fix (3/3), and `run-pdp11-code` by writing
+`/app/out.txt` inside a 9 000 s budget. The four that still do not:
 
 | Task | Why it still fails |
 |---|---|
-| `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written |
-| `gpt2-codegolf` | the 44-turn run mapped the checkpoint format and never created `/app/gpt2.c`; its closing turn carried no text and no tool call and was reported as success — fixed (defect 12), the task still fails. A rerun on the fixed binary produced an under-5000-byte `/app/gpt2.c` that compiles but segfaults (return code `-11`) on the test input, and the 1800 s timer ended it mid-fix with `subtype: interrupted` |
-| `play-zork` | the 2026-11-04 600-turn rerun was ended by defect 13 at 38 minutes (`132714` estimated tokens, budget spent); the campaign run ended on prose ("Let me rewrite it with a robust heuristic…") without writing `/app/answer.txt` |
-| `run-pdp11-code` | built `apout` and a PDP-11 emulator, but both reruns ended without `/app/out.txt` — the longer one at 1607 s of 1800 s, on prose ("Let me fetch the FP11 reference…"); the emulated output was off by 96 |
-| `train-fasttext` | the 2026-11-04 rerun wrote a 4.6 MB model at 0.6235, then kept searching until the 3 600 s timer; the harness crashed with ENOSPC while saving the pane and the tests never ran. An earlier attempt reached 0.6233 but never wrote `/app/model.bin` |
+| `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written. The 2026-11-05 rerun reproduced it: 34 turns in 600 s spent installing `deno`, a PO-token provider and a plugin, while `yt-dlp` still returned the bot check and every piped/invidious mirror answered 403, 500 or 502 |
+| `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written |
+| `train-fasttext` | the 2026-11-05 rerun was clean — 27 turns, 766 s, `failure_mode: unset`, size passed at 123.9 MB — and `test_accuracy` failed on the private split with `0.601275 > 0.62`; the agent's own holdout read 0.6274, so it stopped on a number the test does not share |
+| `solana-data` | first run: `agent_timeout` at 360 s. The Flask server was working (`[PASS] /status -> 200`) but was being restarted by the agent's last command when SIGTERM killed the process group, so the tests found nothing on port 5000 |
 
-The eight never run:
+The six never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
-`security-vulhub-minio`, `solana-data`, `super-benchmark-upet`. Most need a
-dataset download, a multi-GB model, or a prebuilt third-party image;
-`fix-git`'s fixture is gone from GitHub, and
-`qemu-startup`'s image no longer builds (see the thirteenth batch).
+`super-benchmark-upet`. Most need a dataset download, a multi-GB model, or a
+prebuilt third-party image; `fix-git`'s fixture is gone from GitHub (the
+repository now answers 404), and `qemu-startup`'s image no longer builds (see
+the thirteenth batch).
 
 An attempt to run them on 2026-11-04 produced no trials: `eval-mteb`,
 `eval-mteb.hard`, `fix-git`, `oom` and `qemu-startup` all failed at
@@ -1760,13 +2035,13 @@ campaign repaired.
 Earlier versions of this scoreboard listed the unresolved tasks by failure
 class: dataset defects (an instruction that contradicted or omitted what the
 test checked), stale fixtures, unreachable dependencies, model behaviour,
-provider errors and harness plumbing. The five tasks above are what remains of
-those classes. The fixture defects the campaign did repair — 25 files across 21
+provider errors and harness plumbing. The four tasks above are what remains of
+those classes. The fixture defects the campaign did repair — 26 files across 22
 tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## CodeRex defects the benchmark exposed
 
-All fourteen were real, and all are fixed:
+All fifteen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2185,8 +2460,53 @@ All fourteen were real, and all are fixed:
     `the_context_threshold_compacts_before_a_request` keeps its in-episode
     assertion, with the reason noted in the test.
 
+    The 2026-11-05 `play-zork` rerun closes the loop: five
+    `compact_boundary` frames, continued tool calls after every one, and no
+    "retry budget is spent" anywhere in 239 turns.
+
+15. **The model was told nothing about its tools, or about its job.** Found by
+    recording the requests CodeRex and Claude Code 2.1.318 send to the same
+    endpoint, 2026-11-05, after `security-vulhub-minio` failed four times
+    while Claude Code passed it.
+
+    Every tool went to the provider described as its own name. `ToolDescriptor`
+    has no description, and `RegistryToolDispatcher::list_tools()` fell back
+    through "a `description` key in the input schema" to `d.name`; no builtin
+    set that key, so the model received 53 tools whose `description` was
+    `Bash`, `Read`, `Grep`, … — argument schemas with no statement of what the
+    tool does or when to reach for it. The system prompt was 887 characters
+    and said nothing about autonomy, persistence, or the authorization a
+    security task needs; Claude Code sends about 6 200 characters covering all
+    three.
+
+    A control ruled out knowledge: asked with a minimal prompt about the same
+    image, the model named CVE-2023-28432 and `/minio/bootstrap/v1/verify`
+    unprompted. Two append experiments (`dev-vulhub-3`, `dev-vulhub-4`) then
+    showed that `--append-system-prompt` text changes nothing in `-p` mode —
+    `build_headless_prompt` folds it into the user message as
+    "Additional system instructions", leaving the system prompt at its default.
+    That operator limitation is still there.
+
+    Fixed by rewriting `DEFAULT_AGENT_SYSTEM` and adding
+    `Tool::description()` (default `None`, kept by the dispatcher's old
+    fallback) with prose for thirteen builtins. On the rebuilt binary,
+    `security-vulhub-minio` resolves 3/3 (11/25/14 turns, 124/309/155 s) where
+    it was 0/4, and `create-bucket` and `hello-world` still pass. Request
+    parameters were deliberately left alone, so `thinking`, `output_config`
+    and the environment message remain differences from Claude Code.
+
 ### Known, unfixed
 
+- **A turn that spends 32 768 output tokens on reasoning ends the run.**
+  `DEFAULT_MAX_TOKENS` is a per-request ceiling, and `max_tokens` is a
+  terminal reason by design: re-requesting the same prompt would spend the
+  budget again. A reasoning model on a hard step can consume all of it with no
+  text and no tool call, and the session then closes with
+  `error_max_output_tokens` having done nothing. Both `gpt2-codegolf` (first
+  run) and `run-pdp11-code` (2026-11-05) hit it. The provider accepted
+  `max_tokens` 65 536 and 131 072 in a direct probe, so the ceiling is
+  CodeRex's, not the gateway's — but only an agent definition can raise it
+  today, and a benchmark adapter has no way to pass one.
 - **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
   recognise, it compacts against a 32 K guess. This is now only a *hint*: the
   guess drives when compaction starts but can never refuse a request, and the
@@ -2209,13 +2529,13 @@ Two cached copies matter:
 
 - `~/.cache/terminal-bench/terminal-bench-core/0.1.1` — the pristine cache.
 - `~/.cache/terminal-bench/terminal-bench-core/0.1.1-analysis` — the copy every
-  run from the twenty-sixth batch on grades against. **25 files across 21
+  run from the twenty-sixth batch on grades against. **26 files across 22
   tasks** are edited there, and each edited file has a `.orig` sibling holding
   the pristine version. Some of the edits repair a test that cannot pass
   anything, some supply a fact the instruction omitted but the test requires,
   and two unbreak images that no longer build.
 
-The table lists all 25. A task appearing here was measured against a patched
+The table lists all 26. A task appearing here was measured against a patched
 fixture; the underlying defect and its evidence are in the batch sections that
 follow.
 
@@ -2236,6 +2556,7 @@ follow.
 | `jupyter-notebook-server/task.yaml` | names the `c.NotebookApp` attributes and config path | the test imports the config and reads those attributes; nothing in the old instruction said so |
 | `nginx-request-logging/task.yaml` | requires `log_format detailed`, placed in `nginx.conf` with `limit_req_zone` | the test greps for a format *named* `detailed` and reads nginx.conf, neither of which the instruction asked for |
 | `polyglot-c-py/task.yaml` | file is `/app/main.py.c` | the instruction, and every command in it, said `main.c.py`; the test uses `main.py.c` |
+| `run-pdp11-code/task.yaml` | requires the program's output in `/app/out.txt` | the instruction says only "tell me what the output of that program is"; the test's first assertion reads `/app/out.txt`, so a correct answer in the transcript still fails |
 | `qemu-alpine-ssh/Dockerfile` | `bookworm-slim`; `netcat-openbsd` | `debian:bullseye-slim` pins a qemu package withdrawn upstream, and `netcat` is a virtual package with no default |
 | `qemu-alpine-ssh/tests/test_outputs.py` | space before `-p 2222` | the two literals concatenated to `...no-p 2222`, which ssh rejects as `unsupported option "no-p"` |
 | `qemu-startup/Dockerfile` | the same base/netcat fix | same build failure; the task had never run |

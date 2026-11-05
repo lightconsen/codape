@@ -395,18 +395,30 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                 available.contains(&d.name)
             })
             .map(|d| {
-                let caps = self
-                    .registry
-                    .get_tool_arc(&d.name)
+                let tool = self.registry.get_tool_arc(&d.name);
+                let caps = tool
+                    .as_ref()
                     .map_or_else(ToolCapabilities::default, |tool| tool.capabilities());
+                // The tool's own description comes first: it is the only place
+                // that can say what the tool is for in prose. A schema-level
+                // `description` predates it and still works for tools that
+                // never override the trait method; the name is the last
+                // resort, and the reason `Bash` used to be advertised as
+                // "Bash".
+                let description = tool
+                    .as_ref()
+                    .and_then(|tool| tool.description())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        d.input_schema
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| d.name.clone());
                 coderex_core::tool_executor::ToolInfo {
                     name: d.name.clone(),
-                    description: d
-                        .input_schema
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&d.name)
-                        .to_string(),
+                    description,
                     input_schema: advertised_schema(d.input_schema, caps),
                 }
             })
@@ -1381,6 +1393,39 @@ mod tests {
             "the refusal should say so: {}",
             denied.result.output
         );
+    }
+
+    /// The model is told what a core tool is for. `list_tools` used to fall
+    /// back to the tool's name — `Bash` was advertised as `"Bash"` — so a
+    /// tool's own description has to win over that fallback.
+    #[test]
+    fn builtin_tools_are_advertised_with_their_own_description() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::builtins::BashTool::new()));
+        registry.register(Arc::new(crate::builtins::ReadTool));
+        let registry = Arc::new(registry);
+
+        let executor = Arc::new(InnerExecutor::new(ExecutionConfig::default()));
+        let dispatcher = RegistryToolDispatcher::new(
+            registry,
+            executor,
+            ExecutionContext::Normal,
+            PathBuf::from("/tmp"),
+        );
+
+        let tools = dispatcher.list_tools();
+        for name in ["Bash", "Read"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} should be advertised"));
+            assert_ne!(tool.description, name, "{name} needs a real description");
+            assert!(
+                tool.description.len() > 40,
+                "{name} description is too thin: {}",
+                tool.description
+            );
+        }
     }
 
     /// The control for the test above: a command the rule does not match runs.

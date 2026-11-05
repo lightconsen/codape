@@ -10,6 +10,10 @@ pub struct CurrentDirTool;
 
 #[async_trait]
 impl Tool for CurrentDirTool {
+    fn description(&self) -> Option<&'static str> {
+        Some("Reports the session's current working directory.")
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "CurrentDir".into(),

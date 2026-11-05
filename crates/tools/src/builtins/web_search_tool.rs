@@ -226,6 +226,14 @@ impl WebSearchTool {
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Searches the web and returns result titles and URLs. Use it for documentation, \
+             release notes, or a fact you cannot establish from the machine; quote or read the \
+             page with WebFetch before relying on it.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "WebSearch".into(),

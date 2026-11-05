@@ -317,6 +317,20 @@ pub trait Tool: Send + Sync {
     /// Returns the tool's descriptor with metadata and capabilities.
     fn descriptor(&self) -> ToolDescriptor;
 
+    /// What the model is told this tool is for, when the tool is advertised.
+    ///
+    /// [`ToolDescriptor`] carries no prose — only a name, a tier, and JSON
+    /// schemas — so without this a model sees `Bash` described as "Bash" and
+    /// has to infer from the schema alone what the tool does and when to reach
+    /// for it. A tool that wants to explain itself returns the text here.
+    ///
+    /// `None` keeps the old behaviour: the executor falls back to a
+    /// `description` at the top level of the input schema, and then to the
+    /// tool's name.
+    fn description(&self) -> Option<&'static str> {
+        None
+    }
+
     /// What this tool declares about its own output cap, rule content field,
     /// backgrounding, and rule exemptions.
     ///

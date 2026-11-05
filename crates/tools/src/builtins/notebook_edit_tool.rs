@@ -34,6 +34,10 @@ struct NotebookCell {
 
 #[async_trait]
 impl Tool for NotebookEditTool {
+    fn description(&self) -> Option<&'static str> {
+        Some("Replaces, inserts, or deletes a single cell in a Jupyter notebook (.ipynb file).")
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "NotebookEdit".into(),

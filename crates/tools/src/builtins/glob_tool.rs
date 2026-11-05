@@ -16,6 +16,14 @@ pub struct GlobTool;
 
 #[async_trait]
 impl Tool for GlobTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Finds files by glob pattern (for example `**/*.rs`) under `path` (default: the \
+             working directory) and returns the matching paths. Use it to learn the layout of \
+             a tree; use Grep to search inside files.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Glob".into(),

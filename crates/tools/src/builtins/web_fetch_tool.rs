@@ -101,6 +101,14 @@ impl WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Fetches an absolute http or https URL and returns the page as markdown, optionally \
+             answering a prompt against it. Use it to read a document or a service's response; \
+             use Bash with curl when you need headers, status codes, or a non-GET request.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "WebFetch".into(),

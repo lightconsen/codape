@@ -13,6 +13,14 @@ pub struct TodoWriteTool;
 
 #[async_trait]
 impl Tool for TodoWriteTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Records and updates the plan as a todo list. Use it to keep a multi-step task on \
+             track: mark the item you are working on `in_progress` and finish each one by \
+             `completed` before moving on.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "TodoWrite".into(),

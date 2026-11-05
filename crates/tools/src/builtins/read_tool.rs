@@ -28,6 +28,15 @@ pub struct ReadTool;
 
 #[async_trait]
 impl Tool for ReadTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Reads a file and returns its contents with line numbers. `file_path` must be \
+             absolute. Reads up to 2000 lines by default; use `offset` and `limit` to page \
+             through a larger file. Prefer this over shelling out to `cat`: it handles binary \
+             detection and paging for you.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Read".into(),

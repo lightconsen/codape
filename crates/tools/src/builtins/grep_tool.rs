@@ -16,6 +16,14 @@ pub struct GrepTool;
 
 #[async_trait]
 impl Tool for GrepTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Searches file contents with a regular expression and returns the matches, the \
+             matching file names, or counts. Narrow the search with `path` and `glob`; `-A`, \
+             `-B`, `-C`, and `head_limit` control how much context and volume come back.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Grep".into(),

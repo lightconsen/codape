@@ -11,6 +11,14 @@ pub struct WriteTool;
 
 #[async_trait]
 impl Tool for WriteTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Writes a file, creating it or replacing its contents entirely. Parent directories \
+             must already exist. Use Edit for a small change to an existing file; Write is for \
+             new files or a full rewrite.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Write".into(),

@@ -15,6 +15,13 @@ pub struct ListDirTool;
 
 #[async_trait]
 impl Tool for ListDirTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Lists the entries of a directory (default: the working directory). Use it before \
+             Glob when you do not yet know what the tree looks like.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "ListDir".into(),

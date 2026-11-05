@@ -92,6 +92,14 @@ impl AgentTool {
 
 #[async_trait]
 impl Tool for AgentTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Launches a sub-agent with its own context to handle a self-contained search or task, \
+             and returns its final report. Use it for broad exploration that would otherwise \
+             fill this conversation with file dumps.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Agent".into(),
