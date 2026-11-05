@@ -15,6 +15,7 @@ mod enter_plan_mode_tool;
 mod exit_plan_mode_tool;
 mod glob_tool;
 mod grep_tool;
+mod job_tools;
 mod list_dir_tool;
 mod lsp_tool;
 mod mcp_auth_tool;
@@ -63,6 +64,7 @@ pub use enter_plan_mode_tool::EnterPlanModeTool;
 pub use exit_plan_mode_tool::ExitPlanModeTool;
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
+pub use job_tools::{JobKillTool, JobListTool, JobOutputTool};
 pub use list_dir_tool::ListDirTool;
 pub use lsp_tool::LspTool;
 pub use mcp_auth_tool::{
@@ -267,6 +269,9 @@ pub fn register_builtin_tools(reg: &mut crate::registry::ToolRegistry) {
     reg.register(Arc::new(TaskUpdateTool));
     reg.register(Arc::new(TaskOutputTool));
     reg.register(Arc::new(TaskStopTool));
+    reg.register(Arc::new(JobListTool));
+    reg.register(Arc::new(JobOutputTool));
+    reg.register(Arc::new(JobKillTool));
     reg.register(Arc::new(EnterPlanModeTool));
     reg.register(Arc::new(ExitPlanModeTool));
     reg.register(Arc::new(CronCreateTool));
@@ -618,8 +623,8 @@ mod tests {
         );
     }
 
-    /// The registry carries 46 baseline tools and 6 feature-gated tools — the
-    /// 5 Chrome DevTools tools and `WebFetch` (52 in total). Nothing is
+    /// The registry carries 49 baseline tools and 6 feature-gated tools — the
+    /// 5 Chrome DevTools tools and `WebFetch` (55 in total). Nothing is
     /// registered that the model cannot use: the former feature-gated stubs
     /// are gone, and every descriptor is enabled.
     #[test]
@@ -628,13 +633,13 @@ mod tests {
         register_builtin_tools(&mut registry);
         let descriptors = registry.all_descriptors();
 
-        assert_eq!(descriptors.len(), 52, "unexpected registration count");
+        assert_eq!(descriptors.len(), 55, "unexpected registration count");
         assert_eq!(
             descriptors
                 .iter()
                 .filter(|d| matches!(d.tier, ToolTier::Baseline))
                 .count(),
-            46,
+            49,
             "unexpected baseline tool count"
         );
         assert_eq!(

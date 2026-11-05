@@ -6,10 +6,20 @@
 //! - **Linux**: seccomp BPF + rlimits applied via `pre_exec`.
 //! - **macOS**: command rewritten to run through `sandbox-exec`.
 //! - **Windows**: Job Object (requires synchronous spawn).
+//!
+//! Every command — foreground or background — is a job: it is spawned into a
+//! process group of its own, its output goes straight to a file under
+//! `.coderex/jobs/`, and its record is settled when it exits. That is what
+//! makes a server started with `run_in_background` outlive the call (and a
+//! harness timeout aimed at CodeRex), and what lets a foreground command that
+//! runs past its timeout be moved to the background instead of being orphaned.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::context::{ToolError, ToolOutput};
+use crate::job_control;
 use crate::tool::{
     Backgrounding, JOB_SESSION_ID_KEY, Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier,
 };
@@ -17,7 +27,7 @@ use async_trait::async_trait;
 use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
 use coderex_core::shell_security::BashAst;
 use coderex_core::task::now_ms;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 /// Build the shell command under the session's sandbox policy.
 ///
@@ -48,6 +58,40 @@ pub struct BashTool {
     allowed_commands: Option<Vec<String>>,
 }
 
+/// What a running job leaves for its caller.
+#[derive(Debug, Clone)]
+struct JobHandle {
+    id: String,
+    pid: Option<u32>,
+    store: JobStore,
+    output_path: PathBuf,
+}
+
+impl JobHandle {
+    /// The JSON handle the model gets back for a job it should come back to.
+    fn as_output(&self, note: &str) -> ToolOutput {
+        ToolOutput {
+            output: serde_json::json!({
+                "job_id": self.id,
+                "pid": self.pid,
+                "output_file": self.output_path,
+                "note": note,
+            })
+            .to_string(),
+            is_display: true,
+            images: Vec::new(),
+        }
+    }
+}
+
+/// How a job ended.
+#[derive(Debug, Clone)]
+struct JobOutcome {
+    state: JobState,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
 impl BashTool {
     /// Create a new Bash tool.
     pub fn new() -> Self {
@@ -59,119 +103,6 @@ impl BashTool {
     pub fn with_allowed_commands(mut self, commands: Vec<String>) -> Self {
         self.allowed_commands = Some(commands);
         self
-    }
-
-    /// Spawn a command detached from the tool call and return a handle.
-    ///
-    /// The child's pid and the job record are written before this returns, so
-    /// a later session can find the work even if this process dies. Completion
-    /// (or failure/timeout) is observed by a tokio task that settles the
-    /// record atomically; closing the process leaves it `Running`, which the
-    /// adopt path reports as interrupted.
-    fn spawn_background(
-        ctx: &ToolContext<'_>,
-        command: &str,
-        timeout_secs: u64,
-        mut cmd: Command,
-        sandbox_handle: Option<coderex_core::sandbox::SandboxHandle>,
-    ) -> Result<ToolOutput, ToolError> {
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            // A timed-out background command must not outlive its record.
-            .kill_on_drop(true);
-
-        let child = cmd.spawn().map_err(ToolError::Io)?;
-        crate::sandbox_shell::finish_spawn(sandbox_handle.as_ref(), &child)?;
-
-        let pid = child.id();
-        let started_at_ms = now_ms();
-        let store = JobStore::new(ctx.cwd);
-        let id = background_job_id(pid, started_at_ms);
-        let session_id = ctx
-            .extra
-            .get(JOB_SESSION_ID_KEY)
-            .and_then(|value| value.downcast_ref::<String>())
-            .map(String::as_str);
-
-        let mut record = JobRecord::new(
-            id.clone(),
-            JobKind::Shell,
-            job_description(command),
-            ctx.cwd,
-            session_id,
-            started_at_ms,
-        );
-        record.pid = pid;
-        if let Err(error) = store.write(&record) {
-            // Refusing to run a working command because its record could not
-            // be written would be a new failure mode; run it, but make the
-            // lost durability visible.
-            tracing::warn!(
-                job = %id,
-                path = %store.root().display(),
-                error = %error,
-                "could not write the background shell job record"
-            );
-        }
-
-        let output_path = store.root().join(format!("{id}.out"));
-        let store_for_task = store;
-        let id_for_task = id.clone();
-        let output_path_for_task = output_path.clone();
-        tokio::spawn(async move {
-            // The handle keeps the platform sandbox alive for the child's
-            // whole lifetime (a macOS profile, a Windows Job Object).
-            let _sandbox_keepalive = sandbox_handle;
-            let result =
-                tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-                    .await;
-
-            let (state, exit_code, error, bytes) = match result {
-                Ok(Ok(output)) => {
-                    let mut bytes = output.stdout;
-                    if !output.stderr.is_empty() {
-                        bytes.extend_from_slice(b"\n--- stderr ---\n");
-                        bytes.extend_from_slice(&output.stderr);
-                    }
-                    let code = output.status.code().unwrap_or(-1);
-                    let (state, error) = if output.status.success() {
-                        (JobState::Done, None)
-                    } else {
-                        (
-                            JobState::Failed,
-                            Some(format!("command exited with status {code}")),
-                        )
-                    };
-                    (state, Some(code), error, bytes)
-                }
-                Ok(Err(error)) => (JobState::Failed, None, Some(error.to_string()), Vec::new()),
-                Err(_) => (
-                    JobState::Failed,
-                    None,
-                    Some(format!("timed out after {timeout_secs}s")),
-                    Vec::new(),
-                ),
-            };
-
-            if let Some(parent) = output_path_for_task.parent() {
-                let _ = tokio::fs::create_dir_all(parent).await;
-            }
-            let _ = tokio::fs::write(&output_path_for_task, &bytes).await;
-            let _ = store_for_task.settle(&id_for_task, state, now_ms(), exit_code, error);
-        });
-
-        Ok(ToolOutput {
-            output: serde_json::json!({
-                "job_id": id,
-                "pid": pid,
-                "output_file": output_path,
-                "note": "command running in background",
-            })
-            .to_string(),
-            is_display: true,
-            images: Vec::new(),
-        })
     }
 
     /// Validate that `command` does not contain shell metacharacters
@@ -196,6 +127,212 @@ impl BashTool {
         }
         Ok(())
     }
+
+    /// Spawn a command as a job: its own process group, output straight to a
+    /// file, and a durable record written before this returns.
+    ///
+    /// The record is written after the spawn so it carries the pid; closing
+    /// the process leaves it `Running`, which the adopt path reports as
+    /// interrupted.
+    fn spawn_job(
+        ctx: &ToolContext<'_>,
+        command: &str,
+        cmd: &mut Command,
+        sandbox_handle: Option<coderex_core::sandbox::SandboxHandle>,
+    ) -> Result<
+        (
+            JobHandle,
+            Child,
+            Option<coderex_core::sandbox::SandboxHandle>,
+        ),
+        ToolError,
+    > {
+        let store = JobStore::new(ctx.cwd);
+        let started_at_ms = now_ms();
+        let id = next_job_id(started_at_ms);
+        let output_path = store.root().join(format!("{id}.out"));
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent).map_err(ToolError::Io)?;
+        }
+
+        // The child writes straight to the file, so the output is readable
+        // while the command runs — which is how a service is polled. Copying
+        // from a pipe at exit made the file appear only once the command had
+        // finished, i.e. never for a server.
+        let output = std::fs::File::create(&output_path).map_err(ToolError::Io)?;
+        let errors = output.try_clone().map_err(ToolError::Io)?;
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(output))
+            .stderr(std::process::Stdio::from(errors));
+
+        // A command that stayed in CodeRex's process group would be killed by
+        // any harness that times out the run (`timeout`, a benchmark runner)
+        // and signalled that group.
+        job_control::isolate(cmd);
+
+        let child = cmd.spawn().map_err(ToolError::Io)?;
+        let pid = child.id();
+        crate::sandbox_shell::finish_spawn(sandbox_handle.as_ref(), &child)?;
+
+        let session_id = ctx
+            .extra
+            .get(JOB_SESSION_ID_KEY)
+            .and_then(|value| value.downcast_ref::<String>())
+            .map(String::as_str);
+        let mut record = JobRecord::new(
+            id.clone(),
+            JobKind::Shell,
+            job_description(command),
+            ctx.cwd,
+            session_id,
+            started_at_ms,
+        );
+        record.pid = pid;
+        if let Err(error) = store.write(&record) {
+            // Refusing to run a working command because its record could not
+            // be written would be a new failure mode; run it, but make the
+            // lost durability visible.
+            tracing::warn!(
+                job = %id,
+                path = %store.root().display(),
+                error = %error,
+                "could not write the shell job record"
+            );
+        }
+
+        let handle = JobHandle {
+            id,
+            pid,
+            store,
+            output_path,
+        };
+        Ok((handle, child, sandbox_handle))
+    }
+}
+
+/// Wait for a job, optionally stopping its process group at a deadline, and
+/// settle its durable record.
+///
+/// `kill_after` is the only deadline this function enforces: a foreground
+/// call's own timeout is enforced by the caller, which keeps this task running
+/// (and the job alive) when that timeout fires.
+async fn supervise(mut child: Child, job: JobHandle, kill_after: Option<Duration>) -> JobOutcome {
+    let deadline_secs = kill_after.map(|limit| limit.as_secs());
+    let (status, timed_out) = if let Some(limit) = kill_after {
+        if let Ok(status) = tokio::time::timeout(limit, child.wait()).await {
+            (status, false)
+        } else {
+            if let Some(pid) = job.pid {
+                job_control::terminate_group(pid).await;
+            }
+            // Reap the direct child so the outcome carries its status.
+            (child.wait().await, true)
+        }
+    } else {
+        (child.wait().await, false)
+    };
+
+    let outcome = match status {
+        Ok(status) => {
+            let code = status.code().unwrap_or(-1);
+            let (state, error) = if timed_out {
+                (
+                    JobState::Failed,
+                    Some(format!("timed out after {}s", deadline_secs.unwrap_or(0))),
+                )
+            } else if status.success() {
+                (JobState::Done, None)
+            } else {
+                (
+                    JobState::Failed,
+                    Some(format!("command exited with status {code}")),
+                )
+            };
+            JobOutcome {
+                state,
+                exit_code: Some(code),
+                error,
+            }
+        }
+        Err(error) => JobOutcome {
+            state: JobState::Failed,
+            exit_code: None,
+            error: Some(error.to_string()),
+        },
+    };
+
+    let _ = job.store.settle(
+        &job.id,
+        outcome.state,
+        now_ms(),
+        outcome.exit_code,
+        outcome.error.clone(),
+    );
+    outcome
+}
+
+/// A file a foreground command writes its final `$PWD` into.
+///
+/// Shell state does not survive a call, but the working directory should: a
+/// `cd` in one call moves the next one. The command is run with a sentinel
+/// appended that records where it ended, and the exit status is preserved by
+/// capturing it before the sentinel and exiting with it.
+struct CwdTracker {
+    path: PathBuf,
+}
+
+impl CwdTracker {
+    fn new() -> Self {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!("coderex-cwd-{}-{n}", std::process::id())),
+        }
+    }
+
+    /// The command with the sentinel appended.
+    fn wrap(&self, command: &str) -> String {
+        let path = self.path.to_string_lossy().replace('\'', "'\\''");
+        format!(
+            "{command}\n\
+             __coderex_status=$?\n\
+             pwd -P > '{path}' 2>/dev/null\n\
+             exit $__coderex_status"
+        )
+    }
+
+    /// Move the session's shell directory when the command changed it.
+    ///
+    /// A command that exits without reaching the sentinel (`exit`, `exec`, or
+    /// `set -e` on a failure) leaves no file, and the directory stays where it
+    /// was.
+    fn apply(&self, ctx: &ToolContext<'_>) {
+        let Some(shared) = crate::tool::session_cwd_from(ctx) else {
+            return;
+        };
+        let Ok(contents) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let path = Path::new(contents.trim());
+        if path.is_absolute() && path.is_dir() {
+            *shared.write() = path.to_path_buf();
+        }
+    }
+}
+
+impl Drop for CwdTracker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The directory a command should start in: where the last call left the
+/// shell, when the session tracks it, else the session's own directory.
+fn start_cwd(ctx: &ToolContext<'_>) -> PathBuf {
+    crate::tool::session_cwd_from(ctx)
+        .map(|shared| shared.read().clone())
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(|| ctx.cwd.to_path_buf())
 }
 
 #[async_trait]
@@ -205,13 +342,20 @@ impl Tool for BashTool {
             "Executes a shell command and returns its output. This is the way to inspect the \
              machine and to run programs: list files, read what a service returns, check \
              processes, ports, and environment variables.\n\n\
-             - Each call runs `sh -c` in a fresh shell: a `cd` or an exported variable does \
-             not carry to the next call, so use absolute paths or pass the whole sequence to \
-             one command.\n\
+             - The shell starts in the directory the previous call left it in, so `cd` persists \
+             between calls. Exported variables and other shell state do not; pass a sequence to \
+             one command or use absolute paths.\n\
              - The shell is non-interactive. Anything that waits for input blocks until the \
              timeout.\n\
-             - `timeout` is in seconds (default 60, max 600). For a server or a long job, set \
-             `run_in_background` and read its output file instead of holding the call open.",
+             - `timeout` is in seconds (default 60, max 600). A foreground command still running \
+             at its timeout is not killed: it moves to the background and the call answers with \
+             a job handle instead of an error.\n\
+             - `run_in_background` returns at once with `job_id`, `pid` and an `output_file` that \
+             is written while the command runs. Use it for a server or a long job: start it \
+             once, read the output with JobOutput and stop it with JobKill. Do not start a second \
+             copy to check on it, and do not use `ps`/`pkill`, which many images do not have. A \
+             background command runs until it exits; it stops only at its own `timeout` (when you \
+             set one) or through JobKill.",
         )
     }
 
@@ -225,6 +369,9 @@ impl Tool for BashTool {
             // `run_in_background` is genuinely handled: the tool spawns the
             // child, returns a handle, and records the job before returning.
             backgrounding: Backgrounding::SelfManaged,
+            // The call's own `timeout` (up to 600 s) governs; the executor's
+            // 60 s default would cut it off early.
+            self_managed_timeout: true,
             ..crate::tool::ToolCapabilities::default()
         }
     }
@@ -238,16 +385,19 @@ impl Tool for BashTool {
                 "required": ["command"],
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout": { "type": "number", "description": "Timeout in seconds (default 60, max 600)" },
-                    "run_in_background": { "type": "boolean", "description": "Run command in background" }
+                    "timeout": { "type": "number", "description": "Seconds. Foreground: how long to wait before moving the command to the background (default 60, max 600). Background: stop the job after this many seconds (default: no limit)." },
+                    "run_in_background": { "type": "boolean", "description": "Start the command as a background job and return its job id and output file" }
                 }
             }),
             output_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "exit_code": { "type": "number" },
                     "stdout": { "type": "string" },
-                    "stderr": { "type": "string" }
+                    "exit_code": { "type": "number" },
+                    "job_id": { "type": "string" },
+                    "pid": { "type": "number" },
+                    "output_file": { "type": "string" },
+                    "note": { "type": "string" }
                 }
             }),
             requires_approval: false,
@@ -268,10 +418,13 @@ impl Tool for BashTool {
         let command = extract_string(&input.arguments, "command")?;
         let default_timeout = i64::try_from(DEFAULT_TIMEOUT_SECS).unwrap_or(i64::MAX);
         let max_timeout = i64::try_from(MAX_TIMEOUT_SECS).unwrap_or(i64::MAX);
-        let timeout_secs = extract_number(&input.arguments, "timeout")
-            .unwrap_or(default_timeout)
-            .clamp(1, max_timeout);
-        let timeout_secs = u64::try_from(timeout_secs).unwrap_or(0);
+        let requested_timeout = extract_number(&input.arguments, "timeout");
+        let timeout_secs = u64::try_from(
+            requested_timeout
+                .unwrap_or(default_timeout)
+                .clamp(1, max_timeout),
+        )
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
         let run_in_background = input
             .arguments
             .get("run_in_background")
@@ -289,41 +442,82 @@ impl Tool for BashTool {
             None
         };
 
-        let (mut cmd, sandbox_handle) = build_sandboxed_command(&ctx, &command)?;
+        // A foreground command carries a sentinel that reports where it left
+        // the shell; a background one has no later call to inherit it.
+        let mut tracker = None;
+        let script = if run_in_background {
+            command.clone()
+        } else {
+            let guard = CwdTracker::new();
+            let script = guard.wrap(&command);
+            tracker = Some(guard);
+            script
+        };
+
+        let start = start_cwd(&ctx);
+        let (mut cmd, sandbox_handle) = build_sandboxed_command(&ctx, &script)?;
+        if start != ctx.cwd {
+            cmd.current_dir(&start);
+        }
 
         // The shell is not a provider client, so it is given no way to read
         // this session's credentials out of the environment it inherits.
         for key in coderex_core::sandbox::credential_scrub_keys() {
             cmd.env_remove(key);
         }
-        crate::sandbox_shell::sanitize_shell_env(&mut cmd, ctx.cwd);
+        crate::sandbox_shell::sanitize_shell_env(&mut cmd, &start);
+
+        let (job, child, sandbox_handle) =
+            Self::spawn_job(&ctx, &command, &mut cmd, sandbox_handle)?;
 
         if run_in_background {
-            return Self::spawn_background(&ctx, &command, timeout_secs, cmd, sandbox_handle);
+            let kill_after = requested_timeout.map(|_| Duration::from_secs(timeout_secs));
+            let job_for_task = job.clone();
+            tokio::spawn(async move {
+                // The handle keeps the platform sandbox alive for the child's
+                // whole lifetime (a macOS profile, a Windows Job Object).
+                let _sandbox_keepalive = sandbox_handle;
+                let _ = supervise(child, job_for_task, kill_after).await;
+            });
+            return Ok(job.as_output("command running in background"));
         }
 
-        // Spawned rather than `output()`ed because Windows has to place the
-        // child in its Job Object *after* it exists. The handle stays alive
-        // until the child has finished, which is what keeps a macOS profile and
-        // a Job Object alive for its lifetime.
-        let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-            // `spawn()` inherits the parent's stdio; `output()` used to supply
-            // a null stdin and piped stdout/stderr, so ask for the same here.
-            cmd.stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            let child = cmd.spawn().map_err(ToolError::Io)?;
-            crate::sandbox_shell::finish_spawn(sandbox_handle.as_ref(), &child)?;
-            child.wait_with_output().await.map_err(ToolError::Io)
-        })
-        .await
-        .map_err(|_| ToolError::Timeout {
-            timeout: Duration::from_secs(timeout_secs),
-        })??;
+        // The supervisor is a task, not a future this call awaits directly, so
+        // that a timeout can hand the still-running job to the caller instead
+        // of dropping the wait with the process still alive.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let job_for_task = job.clone();
+        tokio::spawn(async move {
+            let _sandbox_keepalive = sandbox_handle;
+            let outcome = supervise(child, job_for_task, None).await;
+            let _ = tx.send(outcome);
+        });
 
-        let exit_code = result.status.code().unwrap_or(-1);
-        let mut stdout = String::from_utf8_lossy(&result.stdout).to_string();
-        let mut stderr = String::from_utf8_lossy(&result.stderr).to_string();
+        let outcome = match tokio::time::timeout(Duration::from_secs(timeout_secs), rx).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => {
+                return Err(ToolError::Execution {
+                    name: "Bash".into(),
+                    message: "the shell job ended without reporting its outcome".into(),
+                });
+            }
+            Err(_) => {
+                // Keep it: the job and its output file are still there, and the
+                // model can collect them with JobOutput.
+                return Ok(job.as_output(&format!(
+                    "command still running after {timeout_secs}s; it continues in the background. \
+                     Read it with JobOutput and stop it with JobKill"
+                )));
+            }
+        };
+
+        if let Some(tracker) = tracker {
+            tracker.apply(&ctx);
+        }
+
+        let bytes = std::fs::read(&job.output_path).unwrap_or_default();
+        let truncated = bytes.len() > MAX_OUTPUT_BYTES;
+        let captured = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)]);
 
         let mut output = String::new();
 
@@ -331,32 +525,17 @@ impl Tool for BashTool {
         if let Some(warning) = security_warning {
             output.push_str(&warning);
         }
-
-        // Truncate stdout if too large
-        if stdout.len() > MAX_OUTPUT_BYTES {
-            stdout.truncate(MAX_OUTPUT_BYTES);
-            stdout.push_str("\n\n... (truncated)");
+        output.push_str(&captured);
+        if truncated {
+            output.push_str("\n\n... (truncated)");
         }
 
-        // Truncate stderr if too large
-        if stderr.len() > MAX_OUTPUT_BYTES {
-            stderr.truncate(MAX_OUTPUT_BYTES);
-            stderr.push_str("\n\n... (truncated)");
+        let exit_code = outcome.exit_code.unwrap_or(-1);
+        if outcome.exit_code.is_none()
+            && let Some(error) = outcome.error
+        {
+            let _ = write!(output, "\n{error}");
         }
-
-        if !stdout.is_empty() {
-            output.push_str(&stdout);
-        }
-        if !stderr.is_empty() {
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
-            }
-            if !output.contains("--- stderr ---") {
-                output.push_str("--- stderr ---\n");
-            }
-            output.push_str(&stderr);
-        }
-
         let _ = write!(output, "\n\n[Exit code: {exit_code}]");
 
         Ok(ToolOutput {
@@ -381,13 +560,12 @@ fn extract_number(args: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// A job id that is safe as a file stem (no separators) and unique enough:
-/// the child pid plus the start time distinguishes two commands.
-fn background_job_id(pid: Option<u32>, started_at_ms: i64) -> String {
+/// the start time plus a process-local sequence distinguishes two commands.
+fn next_job_id(started_at_ms: i64) -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let started_at_ms = started_at_ms.max(0);
-    pid.map_or_else(
-        || format!("shell-{started_at_ms}"),
-        |pid| format!("shell-{pid}-{started_at_ms}"),
-    )
+    let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("shell-{started_at_ms}-{n}")
 }
 
 /// A bounded, human-readable description for a job record.
@@ -448,17 +626,39 @@ mod tests {
         assert!(output.output.contains("stderr_out"));
     }
 
+    /// A foreground command that outlives its timeout is not killed and not
+    /// orphaned: the call answers with a job handle and the command keeps
+    /// running until it finishes.
     #[tokio::test]
-    async fn timeout_aborts() {
+    async fn foreground_timeout_moves_the_command_to_the_background() {
+        let dir = tempfile::tempdir().unwrap();
         let input = ToolInput {
             call_id: "2".into(),
             name: "Bash".into(),
-            arguments: serde_json::json!({ "command": "sleep 10", "timeout": 1 }),
+            arguments: serde_json::json!({ "command": "sleep 1.5; echo late", "timeout": 1 }),
         };
-        let result = BashTool::new()
-            .execute(input, test_ctx(Path::new("/tmp")))
-            .await;
-        assert!(matches!(result, Err(ToolError::Timeout { .. })));
+        let output = BashTool::new()
+            .execute(input, test_ctx(dir.path()))
+            .await
+            .unwrap();
+
+        let handle: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        let id = handle["job_id"].as_str().unwrap().to_string();
+        assert!(
+            handle["note"].as_str().unwrap().contains("background"),
+            "the handle should say the command keeps running: {}",
+            output.output
+        );
+
+        let done = wait_for_terminal(&JobStore::new(dir.path()), &id).await;
+        assert_eq!(done.state, JobState::Done);
+        let captured =
+            std::fs::read_to_string(dir.path().join(".coderex/jobs").join(format!("{id}.out")))
+                .unwrap();
+        assert!(
+            captured.contains("late"),
+            "output written after promotion was lost: {captured}"
+        );
     }
 
     #[tokio::test]
@@ -482,6 +682,36 @@ mod tests {
             .await
             .unwrap();
         assert!(output.output.contains("Exit code: 42"));
+    }
+
+    /// `cd` moves the next call too, and the sentinel that tracks it does not
+    /// disturb the exit code.
+    #[tokio::test]
+    async fn cwd_persists_between_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(dir.path().to_path_buf()));
+
+        let first = BashTool::new()
+            .execute(
+                bash_input(&format!("cd '{}'", sub.display())),
+                ctx_with_session_cwd(dir.path(), &shared),
+            )
+            .await
+            .unwrap();
+        assert!(first.output.contains("Exit code: 0"), "{}", first.output);
+        assert_eq!(*shared.read(), sub);
+
+        let second = BashTool::new()
+            .execute(bash_input("pwd"), ctx_with_session_cwd(dir.path(), &shared))
+            .await
+            .unwrap();
+        assert!(
+            second.output.contains(sub.to_str().unwrap()),
+            "the second call did not start in the tracked directory: {}",
+            second.output
+        );
     }
 
     #[tokio::test]
@@ -741,6 +971,18 @@ mod tests {
         panic!("background job {id} never reached a terminal state");
     }
 
+    fn ctx_with_session_cwd<'a>(
+        cwd: &'a Path,
+        shared: &std::sync::Arc<parking_lot::RwLock<PathBuf>>,
+    ) -> ToolContext<'a> {
+        let mut extra = std::collections::HashMap::<String, crate::tool::SharedState>::new();
+        extra.insert(
+            crate::tool::SESSION_CWD_KEY.to_string(),
+            Box::new(std::sync::Arc::clone(shared)),
+        );
+        ToolContext::new(ExecutionContext::Normal, cwd).with_extra(extra)
+    }
+
     #[tokio::test]
     async fn background_job_is_recorded_running_then_done() {
         let dir = tempfile::tempdir().unwrap();
@@ -781,6 +1023,46 @@ mod tests {
         assert!(captured.contains("background-done"));
     }
 
+    /// The point of writing straight to the file: a service's output is there
+    /// to read while the service is still running.
+    #[tokio::test]
+    async fn background_output_is_readable_while_running() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `timeout`: a background job without one runs until it exits.
+        let input = ToolInput {
+            call_id: "bg".into(),
+            name: "Bash".into(),
+            arguments: serde_json::json!({
+                "command": "echo started; sleep 30",
+                "run_in_background": true,
+            }),
+        };
+        let output = BashTool::new()
+            .execute(input, test_ctx(dir.path()))
+            .await
+            .unwrap();
+        let handle: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        let id = handle["job_id"].as_str().unwrap().to_string();
+        let pid = u32::try_from(handle["pid"].as_u64().unwrap()).unwrap();
+        let path = dir.path().join(".coderex/jobs").join(format!("{id}.out"));
+
+        let mut seen = String::new();
+        for _ in 0..100 {
+            seen = std::fs::read_to_string(&path).unwrap_or_default();
+            if seen.contains("started") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            seen.contains("started"),
+            "the running job's output was not in its file: {seen:?}"
+        );
+
+        job_control::terminate_group(pid).await;
+        let _ = wait_for_terminal(&JobStore::new(dir.path()), &id).await;
+    }
+
     #[tokio::test]
     async fn background_failure_records_exit_code() {
         let dir = tempfile::tempdir().unwrap();
@@ -801,6 +1083,7 @@ mod tests {
         assert!(failed.ended_at_ms.is_some());
     }
 
+    /// A background job is only stopped by a timeout the caller asked for.
     #[tokio::test]
     async fn background_timeout_settles_failed_not_running() {
         let dir = tempfile::tempdir().unwrap();

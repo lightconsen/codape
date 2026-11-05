@@ -20,6 +20,29 @@ pub type SharedState = Box<dyn std::any::Any + Send + Sync>;
 /// whoever is adopting.
 pub const JOB_SESSION_ID_KEY: &str = "job_session_id";
 
+/// Key in `ToolContext.extra` holding the directory the session's shell is
+/// working in, as an `Arc<parking_lot::RwLock<PathBuf>>`.
+///
+/// The dispatcher's `cwd` moves only when the *session* moves (a worktree,
+/// say). A shell `cd` is smaller than that: it must persist between shell
+/// calls, but it must not silently redefine every other tool's paths. The Bash
+/// tool therefore keeps its own shared directory here.
+pub const SESSION_CWD_KEY: &str = "session_cwd";
+
+/// Borrow the session's shell working directory out of a tool context.
+///
+/// Absent in a bare test context, where the shell simply starts in
+/// [`ToolContext::cwd`] every time.
+#[must_use]
+pub fn session_cwd_from(
+    ctx: &ToolContext<'_>,
+) -> Option<Arc<parking_lot::RwLock<std::path::PathBuf>>> {
+    ctx.extra
+        .get(SESSION_CWD_KEY)
+        .and_then(|state| state.downcast_ref::<Arc<parking_lot::RwLock<std::path::PathBuf>>>())
+        .cloned()
+}
+
 /// Key in `ToolContext.extra` holding the session's hook executor as an
 /// `Arc<dyn HookExecutor>`.
 ///
@@ -245,6 +268,25 @@ pub struct ToolCapabilities {
     pub rule_content_field: Option<RuleContentField>,
     /// Whether this tool backgrounds work of its own accord.
     pub backgrounding: Backgrounding,
+    /// Whether the tool enforces its own deadline.
+    ///
+    /// The executor wraps every call in `ExecutionConfig::default_timeout`
+    /// (60 s). A shell tool accepts a per-call `timeout` of up to ten minutes,
+    /// so without this it would be cut off long before the deadline it
+    /// advertised — with a `ToolError::Timeout` the shell knows nothing about.
+    /// A tool that declares this is responsible for not hanging: both shell
+    /// tools cap the call themselves.
+    pub self_managed_timeout: bool,
+    /// Whether a successful result must not be served from the executor's
+    /// read-only result cache.
+    ///
+    /// The cache keys on `(tool name, arguments)` and lives for five minutes,
+    /// which is right for a tool that answers a question about a file and wrong
+    /// for one that reports on something still changing: a poll of a running
+    /// job with the same arguments must see the job's current output, not the
+    /// snapshot from the first poll. A read-only tool whose answer moves with
+    /// the clock declares this.
+    pub skip_result_cache: bool,
     /// Whether a whole-tool allow rule (one naming this tool with no path
     /// patterns) must not auto-approve it.
     ///

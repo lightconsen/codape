@@ -161,28 +161,39 @@ async fn run_tool_call(
     config: &ExecutionConfig,
     cache: Option<&ToolCache>,
 ) -> Result<ToolOutput, ToolError> {
-    // The cap is the tool's own declaration, read once: the executor no longer
-    // guesses a size for every tool alike.
-    let cap = output_cap(config, tool.capabilities());
+    // The tool's own declarations, read once: the executor no longer guesses a
+    // size or a deadline for every tool alike.
+    let capabilities = tool.capabilities();
+    let cap = output_cap(config, capabilities);
 
-    // Try cache for read-only tools
+    // Try cache for read-only tools. A tool whose answer moves on its own
+    // (a poll of a running job) opts out: the same arguments would otherwise
+    // keep returning the first look for the cache's whole lifetime.
     if desc.is_read_only
+        && !capabilities.skip_result_cache
         && let Some(cache) = cache
         && let Some(cached) = cache.get(&desc.name, &input.arguments).await
     {
         return Ok(truncate_output(cached, cap));
     }
 
-    let result = timeout(config.default_timeout, tool.execute(input.clone(), ctx))
-        .await
-        .map_err(|_| ToolError::Timeout {
-            timeout: config.default_timeout,
-        })?;
+    let result = if capabilities.self_managed_timeout {
+        // The shell tools read the call's own `timeout`; the executor's
+        // default would cut a ten-minute command off at sixty seconds.
+        tool.execute(input.clone(), ctx).await
+    } else {
+        timeout(config.default_timeout, tool.execute(input.clone(), ctx))
+            .await
+            .map_err(|_| ToolError::Timeout {
+                timeout: config.default_timeout,
+            })?
+    };
 
     let result = result.map(|output| truncate_output(output, cap));
 
     // Cache successful read-only results
     if desc.is_read_only
+        && !capabilities.skip_result_cache
         && let (Some(cache), Ok(output)) = (cache, &result)
     {
         cache
@@ -511,5 +522,183 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.output.chars().count(), 100 + "\n... [truncated]".len());
+    }
+
+    /// A tool that does not manage its own deadline is cut at the executor's.
+    struct SlowTool {
+        caps: ToolCapabilities,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SlowTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "slow".into(),
+                tier: crate::tool::ToolTier::Baseline,
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                requires_approval: false,
+                is_enabled: true,
+                is_read_only: false,
+                is_concurrency_safe: true,
+                interrupt_behavior: crate::tool::InterruptBehavior::RunToCompletion,
+            }
+        }
+
+        fn capabilities(&self) -> ToolCapabilities {
+            self.caps
+        }
+
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            _ctx: ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(ToolOutput {
+                output: "finished".into(),
+                is_display: false,
+                images: Vec::new(),
+            })
+        }
+    }
+
+    fn short_timeout_config() -> ExecutionConfig {
+        ExecutionConfig {
+            default_timeout: Duration::from_millis(50),
+            ..ExecutionConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_without_its_own_deadline_is_cut_at_the_executor_default() {
+        let executor = ToolExecutor::new(short_timeout_config());
+        let tool = SlowTool {
+            caps: ToolCapabilities::default(),
+            delay: Duration::from_millis(500),
+        };
+        assert!(matches!(
+            executor
+                .execute_single(&tool, test_input(""), test_ctx())
+                .await,
+            Err(ToolError::Timeout { .. })
+        ));
+    }
+
+    /// The shell tools enforce the call's own `timeout` (up to ten minutes), so
+    /// the executor's much smaller default must not cut them off first.
+    #[tokio::test]
+    async fn a_tool_with_its_own_deadline_is_not_cut_by_the_executor_default() {
+        let executor = ToolExecutor::new(short_timeout_config());
+        let tool = SlowTool {
+            caps: ToolCapabilities {
+                self_managed_timeout: true,
+                ..ToolCapabilities::default()
+            },
+            delay: Duration::from_millis(150),
+        };
+
+        let out = executor
+            .execute_single(&tool, test_input(""), test_ctx())
+            .await
+            .unwrap();
+        assert_eq!(out.output, "finished");
+    }
+
+    /// A read-only tool whose answer advances with every call — the shape of a
+    /// job poll.
+    struct PollTool {
+        caps: ToolCapabilities,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for PollTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "poll".into(),
+                tier: crate::tool::ToolTier::Baseline,
+                input_schema: serde_json::json!({}),
+                output_schema: serde_json::json!({}),
+                requires_approval: false,
+                is_enabled: true,
+                is_read_only: true,
+                is_concurrency_safe: true,
+                interrupt_behavior: crate::tool::InterruptBehavior::RunToCompletion,
+            }
+        }
+
+        fn capabilities(&self) -> ToolCapabilities {
+            self.caps
+        }
+
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            _ctx: ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(ToolOutput {
+                output: format!("poll {n}"),
+                is_display: false,
+                images: Vec::new(),
+            })
+        }
+    }
+
+    /// The cache is what makes a repeated read cheap, so a read-only tool is
+    /// cached by default.
+    #[tokio::test]
+    async fn a_read_only_tool_is_served_from_cache_on_a_repeat_call() {
+        let executor = ToolExecutor::new(ExecutionConfig::default());
+        let tool = PollTool {
+            caps: ToolCapabilities::default(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let first = executor
+            .execute_single(&tool, test_input(""), test_ctx())
+            .await
+            .unwrap();
+        let second = executor
+            .execute_single(&tool, test_input(""), test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (first.output.as_str(), second.output.as_str()),
+            ("poll 1", "poll 1")
+        );
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A tool that reports on something still moving opts out: polling with
+    /// unchanged arguments must reach the tool, not a five-minute-old answer.
+    #[tokio::test]
+    async fn a_tool_that_skips_the_cache_is_called_every_time() {
+        let executor = ToolExecutor::new(ExecutionConfig::default());
+        let tool = PollTool {
+            caps: ToolCapabilities {
+                skip_result_cache: true,
+                ..ToolCapabilities::default()
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let first = executor
+            .execute_single(&tool, test_input(""), test_ctx())
+            .await
+            .unwrap();
+        let second = executor
+            .execute_single(&tool, test_input(""), test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (first.output.as_str(), second.output.as_str()),
+            ("poll 1", "poll 2")
+        );
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
     }
 }

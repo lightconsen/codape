@@ -7,6 +7,7 @@ mod context;
 mod cron_scheduler;
 mod dispatcher;
 mod executor;
+mod job_control;
 mod rate_limiter;
 mod registry;
 mod sandbox_policy;
@@ -20,12 +21,12 @@ mod verified_fs;
 pub use builtins::{
     AgentTool, AskUserQuestionTool, BashTool, BriefTool, ChromeClient, ConfigTool, CronCreateTool,
     CronDeleteTool, CronListTool, CurrentDirTool, EchoTool, EditTool, EnterPlanModeTool,
-    ExitPlanModeTool, GlobTool, GrepTool, ListDirTool, LspTool, McpAuthTool, NoOpTool,
-    NotebookEditTool, PowerShellTool, ReadTool, RemoteTriggerTool, ReplTool, SearchBackendSpec,
-    SendMessageTool, SkillTool, SleepTool, StructuredOutputTool, SyntheticOutputTool,
-    TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool, TaskUpdateTool,
-    TodoWriteTool, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool, cache_discovery_at,
-    default_token_path, persist_token_at, persist_token_with_endpoints_at,
+    ExitPlanModeTool, GlobTool, GrepTool, JobKillTool, JobListTool, JobOutputTool, ListDirTool,
+    LspTool, McpAuthTool, NoOpTool, NotebookEditTool, PowerShellTool, ReadTool, RemoteTriggerTool,
+    ReplTool, SearchBackendSpec, SendMessageTool, SkillTool, SleepTool, StructuredOutputTool,
+    SyntheticOutputTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskOutputTool, TaskStopTool,
+    TaskUpdateTool, TodoWriteTool, ToolSearchTool, WebFetchTool, WebSearchTool, WriteTool,
+    cache_discovery_at, default_token_path, persist_token_at, persist_token_with_endpoints_at,
     platform_shell_is_powershell, platform_shell_tool, register_builtin_tools, register_shell_tool,
 };
 pub use coderex_core::permissions::ToolRuleExemptions;
@@ -39,8 +40,9 @@ pub use sandbox_policy::{default_sandbox_config, is_path_allowed};
 pub use task_store::{TASK_STORE_KEY, TaskRecord, TaskStatus, TaskStore};
 pub use todo_store::{TODO_STORE_KEY, TodoItem, TodoStatus, TodoStore};
 pub use tool::{
-    Backgrounding, ElicitRequest, InterruptBehavior, MaxResultSizeChars, RuleContentField, Tool,
-    ToolCapabilities, ToolContext, ToolDescriptor, ToolInput, ToolTier, fire_tool_hook,
+    Backgrounding, ElicitRequest, InterruptBehavior, MaxResultSizeChars, RuleContentField,
+    SESSION_CWD_KEY, Tool, ToolCapabilities, ToolContext, ToolDescriptor, ToolInput, ToolTier,
+    fire_tool_hook, session_cwd_from,
 };
 pub use tool_cache::{ToolCache, ToolCacheConfig};
 

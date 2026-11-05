@@ -17,8 +17,8 @@ use crate::sandbox_policy;
 use crate::task_store::{TASK_STORE_KEY, TaskStore};
 use crate::todo_store::{TODO_STORE_KEY, TodoStore};
 use crate::tool::{
-    Backgrounding, HOOK_EXECUTOR_KEY, JOB_SESSION_ID_KEY, RuleContentField, SharedState,
-    ToolCapabilities, ToolContext, ToolInput,
+    Backgrounding, HOOK_EXECUTOR_KEY, JOB_SESSION_ID_KEY, RuleContentField, SESSION_CWD_KEY,
+    SharedState, ToolCapabilities, ToolContext, ToolInput,
 };
 use coderex_config::FeatureFlags;
 use coderex_core::hook_executor::HookExecutor;
@@ -47,6 +47,10 @@ pub struct RegistryToolDispatcher {
     /// copied so a dispatcher clone (the agent manager holds one) sees the same
     /// move.
     cwd: Arc<parking_lot::RwLock<PathBuf>>,
+    /// Where the session's *shell* is working, shared between Bash calls so a
+    /// `cd` persists. Separate from [`Self::cwd`] on purpose: a shell `cd` must
+    /// not silently redefine the paths every other tool resolves.
+    session_cwd: Arc<parking_lot::RwLock<PathBuf>>,
     sandbox_enabled: bool,
     /// This session's resolved feature flags, which decide whether a gated
     /// tool is offered at all. Empty until a session says otherwise: a tool
@@ -175,6 +179,9 @@ impl RegistryToolDispatcher {
     /// the `CwdChanged` hook with the old and new directories.
     pub fn set_cwd(&self, cwd: PathBuf) {
         let previous = std::mem::replace(&mut *self.cwd.write(), cwd.clone());
+        // The shell moves with the session: a `cd` is a smaller move than a
+        // worktree, and the new checkout is the new starting point.
+        (*self.session_cwd.write()).clone_from(&cwd);
         if previous == cwd {
             return;
         }
@@ -231,6 +238,7 @@ impl RegistryToolDispatcher {
             registry,
             executor,
             context,
+            session_cwd: Arc::new(parking_lot::RwLock::new(cwd.clone())),
             cwd: Arc::new(parking_lot::RwLock::new(cwd)),
             sandbox_enabled,
             feature_flags: Arc::new(parking_lot::RwLock::new(FeatureFlags::default())),
@@ -621,6 +629,13 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                 );
             }
         }
+
+        // The shell's own working directory, shared across calls so a `cd`
+        // persists between them.
+        extra.insert(
+            SESSION_CWD_KEY.to_string(),
+            Box::new(Arc::clone(&self.session_cwd)) as SharedState,
+        );
 
         // Inject the owning session id for durable job records.
         if let Some(ref session_id) = self.session_id {

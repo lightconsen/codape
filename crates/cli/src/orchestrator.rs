@@ -3078,7 +3078,12 @@ impl StartupOrchestrator {
          instructions give exact commands, paths, ports, credentials or verification steps, treat \
          them as requirements: follow them literally and do not substitute a different design. \
          Before finishing, run the exact verification commands from the request and confirm they \
-         succeed; if they fail, fix the setup instead of explaining why a different design is better.";
+         succeed; if they fail, fix the setup instead of explaining why a different design is better. \
+         Long-running services: start each one once with Bash `run_in_background` and keep its job \
+         id. Check it with JobOutput and stop it with JobKill; do not start a second copy or restart \
+         it because a check was slow, and do not reach for `ps`/`pkill`, which many images do not \
+         have. The time budget is limited: when the request's own acceptance checks pass, stop and \
+         report the result instead of adding documentation, extra tests, or unrelated polish.";
 
     /// Assemble the non-interactive prompt.
     ///

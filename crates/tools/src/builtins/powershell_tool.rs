@@ -54,6 +54,8 @@ impl Tool for PowerShellTool {
         crate::tool::ToolCapabilities {
             // Permission rules match the command, exactly as for Bash.
             rule_content_field: Some(crate::tool::RuleContentField::Scalar("command")),
+            // As in Bash, the call's own `timeout` governs the call.
+            self_managed_timeout: true,
             ..crate::tool::ToolCapabilities::default()
         }
     }

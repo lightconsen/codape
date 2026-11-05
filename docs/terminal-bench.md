@@ -1991,23 +1991,136 @@ For completeness, `run-pdp11-code` also produced its first pass the same day:
 `dev-pdp11-3` ran 4 489 s of a 9 000 s budget and both parser tests passed, on
 a binary that predates these prompt changes.
 
+### 2026-11-05 — the shell that outlives its call, and `solana-data`
+
+The previous section's `solana-data` row ends with a symptom that is really a
+diagnosis: the Flask server was answering (`[PASS] /status -> 200`) when the
+agent's own last command restarted it, and the 360 s SIGTERM that ended the run
+took the process group the server lived in. Claude Code on the same provider
+and the same 360 s window (`cc-cmp-solana-1`) resolved all five parser tests in
+210 s. Same model, same endpoint, same fixture — the difference was the shell.
+
+Three defects met in that one task:
+
+- **The command shared CodeRex's process group.** `sh -c` was spawned with no
+  `setpgid`, so a signal aimed at the agent's group hit every service it had
+  started. A foreground timeout or a harness deadline therefore killed the work
+  as well as the waiter. (Verified separately: the harness TERMs the group; a
+  `nohup` child dies with it, a `setsid` child does not.)
+- **Foreground and background were both lossy.** A foreground command that ran
+  past its timeout was detached from the call: the call returned a bare
+  `ToolError::Timeout`, the process kept running with no record and no handle,
+  and its output was gone. A background command buffered its output through
+  `wait_with_output` and wrote the record only on exit — so there was nothing
+  to poll while a server was starting — and was killed at the default 60 s
+  (`kill_on_drop` under a `timeout`) whether the caller asked for that or not.
+- **The job records were write-only.** `JobStore` recorded every command, but no
+  tool read the store. The only way to find, inspect or stop a job was `ps`,
+  `/proc` and `pkill`, which several benchmark images do not have; a "restart
+  the server" step became a `/proc` scan that could — and in one run did — kill
+  its own shell.
+
+Two more sat directly underneath. The shell tool advertised a `timeout` of up
+to 600 s, but `ToolExecutor` wrapped *every* call in its 60 s default and
+returned a `ToolError::Timeout` the tool never saw, so the advertised ceiling
+was unreachable. And the executor caches read-only results for five minutes
+keyed on the arguments; the poll tools this work adds are read-only and take
+the same arguments on every poll, so without an opt-out a `JobOutput` call
+would keep answering with the first snapshot for the whole five minutes.
+
+**The changes.** Every shell command is now a job:
+
+- `crates/tools/src/job_control.rs` — `isolate()` calls `Cmd::process_group(0)`
+  so the shell gets its own group (on Windows there is no group to join, and
+  termination goes through `taskkill /T`), `group_exists()` probes the group,
+  `terminate_group()` sends SIGTERM, waits one second, then SIGKILL.
+- `BashTool` spawns into that group with stdout and stderr pointed straight at
+  `.coderex/jobs/<id>.out`, writes the record with the pid, and supervises the
+  child in a task. `run_in_background` returns `{job_id, pid, output_file,
+  note}` at once and the file is readable while the command runs. A background
+  command runs until it exits; only an explicit `timeout` or `JobKill` stops it.
+  A foreground command that outlives its timeout is *promoted*: the call
+  returns the same handle with a note instead of an error, and the job keeps
+  running.
+- `JobList`, `JobOutput`, `JobKill` (`crates/tools/src/builtins/job_tools.rs`,
+  baseline tier) read and settle the same durable store. `JobOutput` returns
+  the record's state plus the last `tail_lines` lines, appended live; `JobKill`
+  terminates the group and settles the record. Both declare the new
+  `ToolCapabilities::skip_result_cache` and bypass the result cache.
+- The shell's working directory is now shared across calls through
+  `ToolContext.extra["session_cwd"]`, so `cd` persists. It is deliberately a
+  separate value from the dispatcher's `cwd`: a shell `cd` must not redefine
+  every other tool's paths.
+- `ToolCapabilities::self_managed_timeout` tells the executor that the shell
+  enforces its own deadline; `run_tool_call` skips its default `timeout` for a
+  tool that declares it.
+- `HEADLESS_OPERATING_NOTE` and the `Bash` description now say to start a
+  service once with `run_in_background`, keep its id, read it with `JobOutput`,
+  stop it with `JobKill`, not to restart it because a check was slow, and not to
+  reach for `ps`/`pkill`. The same note repeats the time-budget discipline:
+  stop when the request's own acceptance checks pass.
+
+Tool tests: 347 unit tests and 40 integration tests pass; clippy is clean for
+`coderex-tools`. The new tests cover the process group and its tree, promotion
+on a foreground timeout, output readable while a job runs, `cd` persistence,
+the job tools, the executor's two timeout paths, and the cache opt-out.
+
+**Results** (dev binary, `target/x86_64-unknown-linux-musl/release/coderex`,
+built 15:49):
+
+| Run | Result | Wall | Notes |
+|---|---|---|---|
+| `dev-verify-solana-2` | ✅ resolved, 5/5 | 359.2 s (agent 334 s) | used `JobList` and `JobKill`; the window is thin |
+| `dev-verify-solana-1` | 4/5 | 309.4 s | `test_status_endpoint`: `'mainnet-beta' == 'devnet'`; the agent chose mainnet-beta |
+| `dev-verify-hello-1` | ✅ resolved | 37.7 s | regression |
+| `dev-verify-bucket-2` | ✅ resolved | 203.8 s | regression |
+| `dev-verify-bucket-1` | no trial | 32.5 s | the container was stopped by the disk guard at 5 GB free before the agent ran; rerun as `-2` |
+| `dev-verify-vulhub-1` | ✅ resolved | 323.9 s | regression; 39 foreground `Bash` calls, no jobs |
+
+So the task that failed at the deadline now passes inside the same 360 s, and
+the three regressions pass. The honest limits are worth stating:
+
+- **One of two.** The first rerun reached all five endpoints but reported
+  `network: "mainnet-beta"`, and the test asserts `devnet`; the instruction
+  lists all three as valid and does not say which to use, so this is a model
+  choice, not a tooling defect. The earlier failing run (`dev-solana-1`) had
+  chosen devnet and was killed by the group signal. The task is resolved on
+  this binary by best-of-runs, and the choice is the remaining variance.
+- **Thin margin.** The passing run used 334 s of the 360 s agent budget. The
+  fix removes the failure mode that made the budget unusable, but it does not
+  create slack; a slower model or a slower validator would still run out.
+- **No ablation.** These changes went in together with the `Job*` tools and the
+  prompt note, and the runs cannot apportion the result between them.
+
+The same four tasks under Claude Code 2.1.318 on the same provider and fixture,
+run sequentially: `solana-data` resolved (5/5, 210 s), `extract-moves-from-video`
+failed again (`agent_timeout` after 1 020 s of a 600 s agent budget, neither
+parser passed), `play-zork` failed at its 3 600 s timeout with 600 turns
+allowed (both parsers), and `train-fasttext` produced no result — the container
+grew to 11.2 GB, the disk guard stopped it at 3 GB free, and the harness then
+could not find `tmux` in it, so that row is environmental rather than an agent
+result. Of the four, only `solana-data` was a gap the shell could close, and
+the fix closed it; the other two that ran failed for reasons this change does
+not touch.
+
 ### Scoreboard so far
 
-74 distinct tasks attempted (93 % of the 80 in the dataset), 70 resolved
-(95 % of those attempted), 4 unresolved. Scored by distinct task, taking the
+74 distinct tasks attempted (93 % of the 80 in the dataset), 71 resolved
+(96 % of those attempted), 3 unresolved. Scored by distinct task, taking the
 best result where a task ran more than once — several did, to re-check a fix
 and because the same task ran on more than one model. The 2026-11-04 campaign
-reran all 31 that had never passed, and 27 of them now pass. Two of the six
+reran all 31 that had never passed, and 27 of them now pass. Three of the six
 that remained at the 2026-11-05 rerun have since passed: `security-vulhub-minio`
-on the prompt/tool-description fix (3/3), and `run-pdp11-code` by writing
-`/app/out.txt` inside a 9 000 s budget. The four that still do not:
+on the prompt/tool-description fix (3/3), `run-pdp11-code` by writing
+`/app/out.txt` inside a 9 000 s budget, and `solana-data` once the shell's
+background jobs outlived the call (1 of 2 reruns, 5/5). The three that still
+do not:
 
 | Task | Why it still fails |
 |---|---|
 | `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written. The 2026-11-05 rerun reproduced it: 34 turns in 600 s spent installing `deno`, a PO-token provider and a plugin, while `yt-dlp` still returned the bot check and every piped/invidious mirror answered 403, 500 or 502 |
 | `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written |
 | `train-fasttext` | the 2026-11-05 rerun was clean — 27 turns, 766 s, `failure_mode: unset`, size passed at 123.9 MB — and `test_accuracy` failed on the private split with `0.601275 > 0.62`; the agent's own holdout read 0.6274, so it stopped on a number the test does not share |
-| `solana-data` | first run: `agent_timeout` at 360 s. The Flask server was working (`[PASS] /status -> 200`) but was being restarted by the agent's last command when SIGTERM killed the process group, so the tests found nothing on port 5000 |
 
 The six never run:
 `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`, `qemu-startup`,
