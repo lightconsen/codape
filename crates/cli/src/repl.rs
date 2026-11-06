@@ -3482,8 +3482,8 @@ impl ReplLoop {
         for path in &self.require_artifacts {
             match std::fs::metadata(path) {
                 Ok(meta) if meta.is_dir() => {
-                    let empty = std::fs::read_dir(path)
-                        .is_ok_and(|mut entries| entries.next().is_none());
+                    let empty =
+                        std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
                     if empty {
                         missing.push(format!("{} (directory is empty)", path.display()));
                     }

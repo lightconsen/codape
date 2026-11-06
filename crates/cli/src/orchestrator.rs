@@ -797,7 +797,9 @@ impl StartupOrchestrator {
         self.ctx.json_schema.clone_from(&args.json_schema);
         self.ctx.max_turns = args.max_turns;
         self.ctx.time_budget = args.time_budget;
-        self.ctx.require_artifacts.clone_from(&args.require_artifact);
+        self.ctx
+            .require_artifacts
+            .clone_from(&args.require_artifact);
         self.ctx.replay_user_messages = args.replay_user_messages;
         self.ctx.include_partial_messages = args.include_partial_messages;
         self.ctx.effort.clone_from(&args.effort);
