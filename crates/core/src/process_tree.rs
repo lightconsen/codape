@@ -861,7 +861,9 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{JobLimits, ProcessTree, signs_a_target};
+    #[cfg(unix)]
+    use super::signs_a_target;
+    use super::{JobLimits, ProcessTree};
 
     /// A long-lived child that also has a child of its own, so a tree kill is
     /// distinguishable from a direct-child kill.
