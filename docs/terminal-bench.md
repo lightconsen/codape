@@ -2200,6 +2200,75 @@ The honest limits:
   2.6-point swing from `dev-fasttext-1` is not attributable to case alone:
   the training run, the data split and the hyperparameters all changed.
 
+### 2026-11-06 — `extract-moves-from-video`: the deliverable, then the content
+
+Nine runs. The first seven all ended with no `/app/solution.txt`; the eighth
+wrote one, and the test's existence parser passed for the first time.
+
+| Run | Budget | Change | Outcome |
+|---|---|---|---|
+| `dev-extract-1` | 600 s | baseline | `agent_timeout`; no file |
+| `dev-extract-2` | 600 s | egress-fallback note | `agent_timeout`; Tor came up at 407 s, no video yet |
+| `dev-extract-3` | 360 s | same, task's own budget | `agent_timeout`; no file |
+| `dev-extract-4` | 600 s | same | video downloaded, frames extracted and OCR'd in `/tmp`; no file |
+| `dev-extract-5` | 360 s | same | Tor at 263 s; no file |
+| `dev-extract-6` | 1 200 s | media/ship-early note | video at ~570 s, 1 901 frames analysed, `ocr_all.py` written; no file at the timer |
+| `dev-extract-7` | 600 s | same | `agent_timeout`; no file |
+| `dev-extract-8` | 900 s | artifact contract + budget clock | **file written**, 343 lines / 1 867 B; similarity **52.22 %** |
+| `dev-extract-9` | 360 s | same, task's own budget | file written (530 B, 7 lines); similarity **16.84 %** |
+| `dev-extract-10` | 1 500 s | + frame-dedup note | file written (3 410 B, a status report); similarity **15.28 %** |
+
+The seven empty runs were not one failure repeated. Run 5 proved the network
+route existed and cost 260 s to find; run 6 proved time alone was not the
+constraint, because 1 200 s was enough to download the video, extract 1 901
+frames and build an OCR loop, and still not enough for the run to decide it
+was time to write the deliverable. The model kept improving scratch files and
+never crossed the line the request drew at `/app/solution.txt`.
+
+Run 8 is the same model and the same route with two mechanisms in place. It
+found Tor, downloaded the 720p video, OCR'd frames, and wrote
+`/app/solution.txt`; at the 90 % mark it stopped refining and confirmed the
+file, and the process exited on its own after 820 s (41 turns, 56 tool calls,
+exit code 0) — `success`, not `agent_timeout`. Content similarity is
+**52.22 %**, below the test's 90 %. The file has 343 lines against the
+reference's 276, and its terminal captures repeat lines that stayed on screen
+across frames and carry OCR noise (`elose lid`, `1lid`, `ceage`), so the
+distance is a transcription-quality problem, not a delivery problem. That
+distinction is new: every earlier run scored zero for the same reason no
+matter how good the OCR was.
+
+Run 9 is the task's own 360 s budget, and it shows the other edge of the
+contract. The run never got a frame: it probed the YouTube players, an
+invidious list, the Wayback Machine and a deno-backed `yt-dlp`, and by 290 s
+it had nothing. The first turn ended there; the artifact continuation then
+produced a file, but it was the model's honest note that no transcription
+existed — "it is not the list of moves … I chose this over fabricating Zork
+commands that would satisfy the shape of the request" — rather than invented
+commands. The existence parser passed (530 B, 7 lines) and similarity was
+16.84 %. A completion contract cannot manufacture the work; it can only make
+its absence visible and force a decision. A non-empty placeholder therefore
+satisfies the check, and quality remains the test's business.
+
+A note on the mechanics: the 360 s run stopped at 292 s, the 900 s run at
+820 s, and both before the harness killed them, so neither is an
+`agent_timeout`. Run 8 stopped ten seconds after its 90 % time check was due,
+which is consistent with the clock ending the search; the injected message
+itself is not in the stream-json output, and the session transcript is not
+persisted under `--no-session-persistence`, so that attribution is inference
+from the timing rather than a recorded message.
+
+Run 10 added a note that a line on screen across consecutive frames is one
+line, not several, and gave the run 1 500 s. It never reached the OCR stage:
+this time the Tor circuit also answered "Sign in to confirm you're not a
+bot", the invidious instances returned 403/500/502/`Endpoint disabled`, and no
+video was obtained. After 1 093 s the model wrote an honest status report to
+`/app/solution.txt` — 3 410 bytes, zero command lines — rather than inventing
+Zork moves, and the existence parser passed with 15.28 % similarity. So the
+dedup note is untested; the binding constraint in this sample is the network
+route, which varied between runs on the same image and provider. The task's
+own 360 s budget leaves no room for that lottery: run 9 spent its whole
+window probing and never saw a frame.
+
 ### Scoreboard so far
 
 75 distinct tasks attempted (94 % of the 80 in the dataset), 72 resolved
@@ -2217,7 +2286,7 @@ it). The three that still do not:
 
 | Task | Why it still fails |
 |---|---|
-| `extract-moves-from-video` | YouTube answers a bot check: `yt-dlp` tried 308 proxies and every one returned `LOGIN_REQUIRED` ("Sign in to confirm you're not a bot"), so `solution.txt` was never written. The 2026-11-05 rerun reproduced it: 34 turns in 600 s spent installing `deno`, a PO-token provider and a plugin, while `yt-dlp` still returned the bot check and every piped/invidious mirror answered 403, 500 or 502 |
+| `extract-moves-from-video` | YouTube answers a bot check, and the route past it is intermittent: `yt-dlp` tried 308 proxies on 2026-11-05 and every one returned `LOGIN_REQUIRED`. On 2026-11-06, `dev-extract-8` (900 s) got through a local Tor SOCKS port, downloaded the video, OCR'd it and wrote `/app/solution.txt`; existence passed and similarity was 52.22 % against 90 % (343 lines vs the reference's 276, with duplicated on-screen lines and OCR noise). `dev-extract-10` (1 500 s) had its Tor circuit refused and produced only an honest status report. Ten runs, none resolved; the remaining gap is transcription quality plus a network lottery that alone can exceed the task's 360 s budget |
 | `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written |
 | `qemu-startup` | the 2026-11-06 retry produced the task's first trial — the analysis fixture builds — but the agent stopped after 7 turns and 452 s on a provider transport error (`error sending request for url (https://opencode.ai/...)`); the test's `expect` never got a telnet session (`spawn id exp5 not open`), so `/tmp/data.txt` was never written and `test_version` failed. Unresolved on the provider, not the fixture |
 
@@ -2262,7 +2331,7 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## CodeRex defects the benchmark exposed
 
-All fifteen were real, and all are fixed:
+All sixteen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2715,6 +2784,66 @@ All fifteen were real, and all are fixed:
     it was 0/4, and `create-bucket` and `hello-world` still pass. Request
     parameters were deliberately left alone, so `thinking`, `output_config`
     and the environment message remain differences from Claude Code.
+
+16. **A headless run could stop without its deliverable, and did not know how
+    much time was left.** Found by `extract-moves-from-video` and
+    `train-fasttext`, 2026-11-05/06. The fasttext run was rescued by a prompt
+    sentence and a longer budget; the extract runs could not be.
+    `dev-extract-4` built frames and OCR text in scratch files but never wrote
+    `/app/solution.txt`, and `dev-extract-6` spent 1 200 s and still had no
+    file when the timer fired. Two things were missing: the loop never checked
+    whether the thing the request asked for existed, and nothing in the
+    model's context said how much of the harness budget had already gone.
+
+    **The completion contract.** `--require-artifact PATH` (repeatable;
+    `CODEREX_REQUIRE_ARTIFACTS` takes a colon-separated list) names the
+    deliverable. In headless mode the instruction is also read for output
+    paths (`crates/cli/src/artifacts.rs`): a path counts when an output verb
+    (`create`, `write`, `save`, `produce`, …) introduces it and no input verb
+    (`read`, `from`, `input`, …) explains it, system prefixes are ignored, and
+    paths that already existed when the run began are inputs and are dropped.
+    The reading is deliberately conservative — a miss costs nothing because
+    the caller can name the path, while a false positive sends a finished run
+    back to work. When a turn ends and a required path is missing — absent,
+    empty, or an empty directory — the headless loop sends one more turn
+    naming what is missing, up to three times. The reminder says to write the
+    best version from what the run already has, not to start over: the point
+    is to ship, not to retry.
+
+    **The wall clock.** `--time-budget SECS` (`CODEREX_TIME_BUDGET`) starts
+    when the headless turn starts, not at process start — setup the model
+    cannot influence should not count against it. The engine injects a time
+    check at 25 %, 50 %, 75 % and 90 % of the budget: seconds used, seconds
+    left, and what to do with them. A turn that crosses two milestones at once
+    reports only the later one, because the earlier advice is already stale.
+    The clock is advisory; it never ends a turn.
+
+    Verified end to end against the local endpoint. A prompt that asked for no
+    tools, with an empty `--require-artifact`, produced a 42-byte file on the
+    second turn and a `result` frame confirming it. `--time-budget 24` around
+    three `sleep 6` calls put the 50 % and 90 % messages into the transcript
+    with the expected used/remaining numbers. Unit tests cover the parser (the
+    extract task's real instruction included) and the milestone selection.
+
+    On `extract-moves-from-video` at 900 s (`dev-extract-8`), the run
+    downloaded the video through Tor and wrote `/app/solution.txt`; the
+    existence parser passed for the first time in seven attempts, and content
+    similarity was 52.22 % against the 90 % threshold. The remaining gap is
+    transcription quality, not delivery: the run's last calls were still
+    refining a file that already existed.
+
+    **The generic stall detector was considered and not built.** A scan of the
+    33 stream transcripts this repository kept — including `play-zork`'s 444
+    calls and every extract attempt — finds a longest streak of three
+    consecutive failing `Bash` calls; the existing `LoopDetector` (exact
+    repeat and alternation) fired zero times in the whole corpus. The stalls
+    that cost these runs were not a detectable command pattern: the models
+    kept varying their commands and kept making progress on scratch work, and
+    what they lacked was the knowledge that a decision was due. A threshold
+    low enough to fire would have fired on successful runs too. Neither
+    Claude Code 2.1.318 nor Codex ships a generic one. The clock and the
+    completion contract target the observable failure directly; a second,
+    fuzzier signal has no evidence behind it yet.
 
 ### Known, unfixed
 

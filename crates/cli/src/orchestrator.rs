@@ -325,6 +325,11 @@ pub struct SessionContext {
     pub json_schema: Option<String>,
     /// Maximum number of turns.
     pub max_turns: Option<u32>,
+    /// Wall-clock budget for the run, in seconds.
+    pub time_budget: Option<u64>,
+    /// Paths the request requires as output; a headless turn that ends
+    /// without them is continued.
+    pub require_artifacts: Vec<std::path::PathBuf>,
     /// Replay user messages.
     pub replay_user_messages: bool,
     /// Include partial messages.
@@ -720,6 +725,8 @@ impl StartupOrchestrator {
                 input_format: "text".into(),
                 json_schema: None,
                 max_turns: None,
+                time_budget: None,
+                require_artifacts: Vec::new(),
                 replay_user_messages: false,
                 include_partial_messages: false,
                 effort: None,
@@ -789,6 +796,8 @@ impl StartupOrchestrator {
         self.ctx.input_format.clone_from(&args.input_format);
         self.ctx.json_schema.clone_from(&args.json_schema);
         self.ctx.max_turns = args.max_turns;
+        self.ctx.time_budget = args.time_budget;
+        self.ctx.require_artifacts.clone_from(&args.require_artifact);
         self.ctx.replay_user_messages = args.replay_user_messages;
         self.ctx.include_partial_messages = args.include_partial_messages;
         self.ctx.effort.clone_from(&args.effort);
@@ -2718,6 +2727,7 @@ impl StartupOrchestrator {
         }
         repl.with_hook_layers(hook_layers);
         repl.with_max_turns(self.ctx.max_turns);
+        repl.with_time_budget(self.ctx.time_budget);
         repl.with_fallback_model(self.ctx.fallback_model.clone());
         repl.with_telemetry_handle(self.ctx.telemetry_handle.clone());
         // `/vim` and `/statusline-setup` persist these; apply them at startup.
@@ -3053,6 +3063,20 @@ impl StartupOrchestrator {
         let streaming_protocol = self.ctx.output_format == "stream-json";
         let mut repl = self.prepare_repl(cwd, model.clone(), streaming_protocol, false);
 
+        // What this run owes. The caller may name the paths, and the request
+        // usually names them too: the headless loop checks both, because a run
+        // that stops without its deliverable scores zero however good the work
+        // inside was. A path that already existed when the run began is an
+        // input the request mentions, not something this run has to produce.
+        let mut required = self.ctx.require_artifacts.clone();
+        for path in crate::artifacts::required_from_instruction(&user_prompt) {
+            if !required.contains(&path) {
+                required.push(path);
+            }
+        }
+        required.retain(|path| std::fs::metadata(path).is_err());
+        repl.with_required_artifacts(required);
+
         // The engine owns the one-retry fallback for both interactive and
         // headless sessions, so the headless path must not retry again: doing
         // so would send the same failure to the same fallback a second time.
@@ -3082,13 +3106,30 @@ impl StartupOrchestrator {
          When the request names a hidden or private test, hold out part of the original inputs and \
          test them in the format that test will read; do not apply a lossy normalization \
          (lower-casing, truncation, re-encoding) that the check does not. \
+         When a network request is refused by a bot check, login wall or 4xx from a host that is \
+         otherwise reachable, change the path before changing the client: try a local anonymizing \
+         proxy (a Tor SOCKS port, if present) or another source, and do not spend the budget \
+         iterating over large public-proxy lists or curated mirror lists, which are mostly dead or \
+         refusing. When the proxy or the fetch tool is not installed, install it together with every \
+         other tool the job needs in one backgrounded command before probing alternatives, and \
+         prefer a standalone release binary over a tool that needs a runtime you do not have. \
+         Time-box installing a heavy toolchain (JavaScript runtime, token provider, build \
+         dependencies), and start long downloads with Bash `run_in_background` while preparing the \
+         rest of the pipeline. \
          Long-running services: start each one once with Bash `run_in_background` and keep its job \
          id. Check it with JobOutput and stop it with JobKill; do not start a second copy or restart \
          it because a check was slow, and do not reach for `ps`/`pkill`, which many images do not \
          have. As soon as an artifact meets the stated constraints, write it to the required path \
-         and keep improving it there; a search that leaves only scratch files scores zero. \
-         The time budget is limited: when the request's own acceptance checks pass, stop and \
-         report the result instead of adding documentation, extra tests, or unrelated polish.";
+         and keep improving it there; a search that leaves only scratch files scores zero. When the \
+         deliverable is text recovered from media, write the raw extraction to the required path as \
+         soon as some of it exists and refine it there, and sample the media rather than processing \
+         every frame. A line that appears in several consecutive frames was on screen the whole \
+         time and is one line, not several: deduplicate by normalized text, because OCR gives \
+         near-identical repeats slightly different characters. \
+         The time budget is limited: if one route keeps failing and the deliverable still does not \
+         exist, switch to the most promising untried route; when the request's own acceptance \
+         checks pass, stop and report the result instead of adding documentation, extra tests, or \
+         unrelated polish.";
 
     /// Assemble the non-interactive prompt.
     ///
@@ -4964,6 +5005,8 @@ mod tests {
             disable_slash_commands: false,
             max_budget_usd: None,
             max_turns: None,
+            time_budget: None,
+            require_artifact: Vec::new(),
             api_key: None,
             no_telemetry: false,
             mcp_config: None,

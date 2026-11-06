@@ -77,6 +77,8 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--no-session-persistence` | | Disable session transcript saving (clears memory stores) |
 | `--disable-slash-commands` | | Disable slash commands in the REPL: clears `CommandRegistry`, skips the REPL's built-in command branches in both interactive and headless paths, and stops macro expansion |
 | `--max-budget-usd USD` | | Maximum budget for this session |
+| `--time-budget SECS` | | Wall-clock budget for the run (`CODEREX_TIME_BUDGET`). In headless mode the model is told how much of it remains at 25, 50, 75 and 90 percent, with what to do with the remaining time. The clock never ends a turn; it only informs it |
+| `--require-artifact PATH` | | A path the request requires as output (`CODEREX_REQUIRE_ARTIFACTS`, colon-separated). When a headless turn ends without it — absent, empty, or an empty directory — the model is sent back for it, up to three times. Paths the instruction itself names with an output verb are added automatically, and paths that existed before the run are treated as inputs |
 | `--api-key KEY` | | API key (overrides environment and config) |
 | `--no-telemetry` | | Disable telemetry for this session |
 | `--mcp-config PATH` | | MCP config file path |

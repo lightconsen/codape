@@ -634,6 +634,88 @@ pub struct ResolvedElicitation {
     pub response: Option<String>,
 }
 
+// ─── Time budget ────────────────────────────────────────────────────────────
+
+/// The run's wall-clock budget and the milestones already announced.
+#[derive(Debug, Clone, Copy)]
+struct TimeBudgetClock {
+    /// When the budget started counting.
+    started: std::time::Instant,
+    /// How long the run may take.
+    budget: Duration,
+    /// Milestones already told to the model, in order: 25 %, 50 %, 75 %, 90 %.
+    announced: [bool; 4],
+}
+
+impl TimeBudgetClock {
+    /// Fractions of the budget the model is told about, in order.
+    const MILESTONES: [f64; 4] = [0.25, 0.5, 0.75, 0.9];
+
+    /// Fraction of the budget already spent, as a number of at least zero.
+    fn fraction(&self) -> f64 {
+        let budget = self.budget.as_secs_f64();
+        if budget <= 0.0 {
+            return 1.0;
+        }
+        (self.started.elapsed().as_secs_f64() / budget).clamp(0.0, 1.0)
+    }
+
+    /// The highest milestone crossed since the last call, if any.
+    ///
+    /// A slow tool call can cross two milestones at once; only the later one
+    /// is reported, because the earlier one's advice is already stale.
+    fn next_milestone(&mut self) -> Option<u32> {
+        let fraction = self.fraction();
+        let mut due = None;
+        for (index, milestone) in Self::MILESTONES.iter().enumerate() {
+            if fraction >= *milestone && !self.announced[index] {
+                self.announced[index] = true;
+                due = Some(*milestone);
+            }
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        due.map(|milestone| (milestone * 100.0) as u32)
+    }
+}
+
+#[cfg(test)]
+mod time_budget_tests {
+    use super::TimeBudgetClock;
+    use std::time::{Duration, Instant};
+
+    fn clock_at(elapsed_secs: u64) -> TimeBudgetClock {
+        TimeBudgetClock {
+            started: Instant::now()
+                .checked_sub(Duration::from_secs(elapsed_secs))
+                .expect("instant arithmetic"),
+            budget: Duration::from_secs(100),
+            announced: [false; 4],
+        }
+    }
+
+    #[test]
+    fn each_milestone_is_reported_once() {
+        let mut clock = clock_at(30);
+        assert_eq!(clock.next_milestone(), Some(25));
+        assert_eq!(clock.next_milestone(), None);
+        assert!((clock.fraction() - 0.3).abs() < 0.05);
+    }
+
+    #[test]
+    fn crossing_two_milestones_reports_only_the_later_one() {
+        let mut clock = clock_at(60);
+        assert_eq!(clock.next_milestone(), Some(50));
+        assert_eq!(clock.next_milestone(), None);
+    }
+
+    #[test]
+    fn the_last_stretch_is_announced() {
+        let mut clock = clock_at(95);
+        assert_eq!(clock.next_milestone(), Some(90));
+        assert_eq!(clock.next_milestone(), None);
+    }
+}
+
 // ─── SubmitOptions ──────────────────────────────────────────────────────────
 
 /// Options for submitting a turn to the QueryEngine.
@@ -1807,6 +1889,12 @@ pub struct QueryEngine {
     /// run the compaction path; the detector itself is only touched once per
     /// turn and once per compaction.
     loop_detector: std::sync::Mutex<Option<LoopDetector>>,
+    /// Wall-clock budget the model is reminded of, when the caller set one.
+    ///
+    /// The engine is not what enforces a deadline — the caller's `timeout`
+    /// is — but a model that never hears the clock cannot budget. The
+    /// reminder is injected between turns, at fixed fractions of the budget.
+    time_budget: Option<TimeBudgetClock>,
     /// Last successful response content and usage (for graceful degradation).
     last_successful_response: Option<(String, UsageSummary)>,
     /// Optional team context for multi-agent collaboration.
@@ -2166,6 +2254,7 @@ impl QueryEngine {
             last_usage: None,
             usage_anchor: None,
             loop_detector: std::sync::Mutex::new(Some(LoopDetector::new())),
+            time_budget: None,
             last_successful_response: None,
             team_context: None,
             streaming_tool_execution: false,
@@ -2403,6 +2492,43 @@ impl QueryEngine {
             .loop_detector
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = detector;
+    }
+
+    /// Start a wall-clock budget the model is told about between turns.
+    ///
+    /// The engine does not enforce the deadline — the caller's `timeout` does.
+    /// This only makes the clock visible to the model, because a run that
+    /// cannot see how much time is left cannot decide when to stop exploring
+    /// and write the deliverable.
+    pub const fn set_time_budget(&mut self, started: std::time::Instant, budget: Duration) {
+        self.time_budget = Some(TimeBudgetClock {
+            started,
+            budget,
+            announced: [false; 4],
+        });
+    }
+
+    /// The next budget milestone to tell the model about, if one is due.
+    ///
+    /// Milestones fire once each and are reported on the turn boundary after
+    /// they pass, so a long tool call does not delay or repeat them.
+    fn take_time_budget_reminder(&mut self) -> Option<String> {
+        let clock = self.time_budget.as_mut()?;
+        let percent = clock.next_milestone()?;
+        let budget = clock.budget.as_secs();
+        let used = clock.started.elapsed().as_secs().min(budget);
+        let left = budget.saturating_sub(used);
+        let urgency = if percent >= 90 {
+            "The budget is nearly spent: stop exploring and make sure the deliverable is on disk"
+        } else if percent >= 50 {
+            "If the deliverable is not on disk yet, write the best version you have before continuing"
+        } else {
+            "Keep the remaining work inside the budget"
+        };
+        Some(format!(
+            "Time check ({percent} % of the budget used): {used} s of {budget} s have passed, \
+             about {left} s remain. {urgency}."
+        ))
     }
 
     /// Set the transcript base path for persisting compact boundaries.
@@ -3095,6 +3221,13 @@ impl QueryEngine {
             self.cost_tracker.start_turn();
             turn.reset();
 
+            // The model has no clock of its own: hand it the budget at the
+            // milestones. The message is part of the next request, so the
+            // model reads it before deciding what this turn should be.
+            if let Some(reminder) = self.take_time_budget_reminder() {
+                self.session.messages.push(Message::user(reminder));
+            }
+
             // Execute the turn
             match self.execute_turn(&mut turn, &options, turn_number).await {
                 Ok(reason) => {
@@ -3226,6 +3359,13 @@ impl QueryEngine {
 
             self.cost_tracker.start_turn();
             turn.reset();
+
+            // The model has no clock of its own: hand it the budget at the
+            // milestones. The message is part of the next request, so the
+            // model reads it before deciding what this turn should be.
+            if let Some(reminder) = self.take_time_budget_reminder() {
+                self.session.messages.push(Message::user(reminder));
+            }
 
             // Execute the turn using streaming
             match self

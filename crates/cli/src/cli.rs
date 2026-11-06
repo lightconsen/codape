@@ -118,6 +118,22 @@ pub struct Cli {
     #[arg(long, value_name = "TURNS")]
     pub max_turns: Option<u32>,
 
+    /// Time budget in seconds for the run. The model is told how much of it
+    /// remains at 25, 50, 75 and 90 percent of the budget.
+    #[arg(long, value_name = "SECS", env = "CODEREX_TIME_BUDGET")]
+    pub time_budget: Option<u64>,
+
+    /// A path the request requires as its output. When a headless turn ends
+    /// without it, the model is sent back to produce it. Repeatable; the
+    /// environment variable takes a colon-separated list.
+    #[arg(
+        long,
+        value_name = "PATH",
+        env = "CODEREX_REQUIRE_ARTIFACTS",
+        value_delimiter = ':'
+    )]
+    pub require_artifact: Vec<std::path::PathBuf>,
+
     /// API key (overrides environment and config).
     #[arg(long, value_name = "KEY")]
     pub api_key: Option<String>,

@@ -1,6 +1,7 @@
 //! CodeRex CLI library — REPL loop, orchestrator, and CLI utilities.
 
 pub mod agent_selection;
+pub mod artifacts;
 pub mod bridge_launcher;
 pub mod cli;
 pub mod daemon;

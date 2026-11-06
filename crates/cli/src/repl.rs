@@ -2324,6 +2324,11 @@ pub struct ReplLoop {
     max_budget_usd: Option<f64>,
     /// Maximum number of turns (--max-turns).
     max_turns: Option<u32>,
+    /// Wall-clock budget for the run (--time-budget), and when it started.
+    time_budget: Option<(std::time::Instant, std::time::Duration)>,
+    /// Paths the request requires as output (--require-artifact). A headless
+    /// turn that ends without them is continued.
+    require_artifacts: Vec<std::path::PathBuf>,
     /// Replay user messages from previous session (--replay-user-messages).
     replay_user_messages: bool,
     /// Include partial messages in context (--include-partial-messages).
@@ -2655,6 +2660,8 @@ impl ReplLoop {
             json_schema: None,
             max_budget_usd: None,
             max_turns: None,
+            time_budget: None,
+            require_artifacts: Vec::new(),
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
@@ -3060,6 +3067,8 @@ impl ReplLoop {
             json_schema: None,
             max_budget_usd: None,
             max_turns: None,
+            time_budget: None,
+            require_artifacts: Vec::new(),
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
@@ -3441,6 +3450,52 @@ impl ReplLoop {
 
     pub const fn with_max_turns(&mut self, turns: Option<u32>) {
         self.max_turns = turns;
+    }
+
+    /// Start the wall-clock budget the model is reminded of (`--time-budget`).
+    ///
+    /// The clock starts here rather than at process start: everything before
+    /// this is setup that the model cannot influence, and a reminder that
+    /// claims more time was already spent than the agent ever saw would push
+    /// it to wrap up for the wrong reason.
+    pub fn with_time_budget(&mut self, seconds: Option<u64>) {
+        self.time_budget = seconds.map(|seconds| {
+            (
+                std::time::Instant::now(),
+                std::time::Duration::from_secs(seconds),
+            )
+        });
+    }
+
+    /// Set the paths a headless run must produce (`--require-artifact`).
+    pub fn with_required_artifacts(&mut self, paths: Vec<std::path::PathBuf>) {
+        self.require_artifacts = paths;
+    }
+
+    /// A turn-end reminder for the artifacts the run owes and has not written.
+    ///
+    /// Returns one line per missing path. A directory that exists but is empty
+    /// counts as missing: the deliverable is the file inside it, and stopping
+    /// at the directory is the same non-delivery with more steps.
+    fn missing_required_artifacts(&self) -> Vec<String> {
+        let mut missing = Vec::new();
+        for path in &self.require_artifacts {
+            match std::fs::metadata(path) {
+                Ok(meta) if meta.is_dir() => {
+                    let empty = std::fs::read_dir(path)
+                        .is_ok_and(|mut entries| entries.next().is_none());
+                    if empty {
+                        missing.push(format!("{} (directory is empty)", path.display()));
+                    }
+                }
+                Ok(meta) if meta.len() == 0 => {
+                    missing.push(format!("{} (file is empty)", path.display()));
+                }
+                Ok(_) => {}
+                Err(_) => missing.push(format!("{} (does not exist)", path.display())),
+            }
+        }
+        missing
     }
 
     /// Configure the one-retry fallback model (`--fallback-model`).
@@ -6530,6 +6585,7 @@ impl ReplLoop {
             }
         }
         let mut result = self.run_headless_turn(prompt).await;
+        result = self.continue_until_artifacts(result, prompt).await;
 
         // Mod submissions become ordinary turns after the person's turn. The
         // same loop guard as the interactive path applies: submit what was
@@ -6636,6 +6692,54 @@ impl ReplLoop {
             )
             .unwrap_or(i64::MAX),
         );
+    }
+
+    /// Send a finished headless run back to work when its deliverable is
+    /// missing.
+    ///
+    /// A headless run has nobody to look at the result. The model can spend
+    /// the whole budget building the right pipeline and stop one step short of
+    /// writing the file — a search that leaves only scratch files scores the
+    /// same as no work at all. The check is only as good as the paths it was
+    /// given (`--require-artifact`, or the paths the request names), and the
+    /// continuation is capped: a model that will not produce the artifact in
+    /// three tries will not produce it in ten.
+    async fn continue_until_artifacts(
+        &mut self,
+        mut result: Result<String>,
+        prompt: &str,
+    ) -> Result<String> {
+        /// How many times a finished run is sent back for a missing artifact.
+        const MAX_ARTIFACT_CONTINUATIONS: usize = 3;
+
+        if prompt.starts_with('/') {
+            return result;
+        }
+        let mut continuations = 0;
+        loop {
+            let Ok(_) = &result else {
+                return result;
+            };
+            let missing = self.missing_required_artifacts();
+            if missing.is_empty() || continuations >= MAX_ARTIFACT_CONTINUATIONS {
+                return result;
+            }
+            continuations += 1;
+            let reminder = format!(
+                "The turn ended, but the request's deliverable is still missing: {}. Produce it \
+                 now from what you already have: write the best version that meets the stated \
+                 format to that path, then confirm it exists and is not empty. Do not start a new \
+                 search or change approach.",
+                missing.join("; ")
+            );
+            tracing::info!(
+                missing = ?missing,
+                attempt = continuations,
+                "headless turn ended without the required artifact"
+            );
+            eprintln!("{reminder}");
+            result = self.run_headless_turn(&reminder).await;
+        }
     }
 
     async fn run_headless_turn(&mut self, prompt: &str) -> Result<String> {
@@ -7293,6 +7397,11 @@ impl ReplLoop {
         }
         if let Some(turns) = self.max_turns {
             options.max_turns = turns;
+        }
+        if let Some((started, budget)) = self.time_budget
+            && let Some(ref mut engine) = self.engine
+        {
+            engine.set_time_budget(started, budget);
         }
         options.include_partial_messages = self.include_partial_messages;
         // In the interactive REPL, assistant clarification questions should stay in the
