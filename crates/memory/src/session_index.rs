@@ -181,7 +181,7 @@ impl SessionIndex {
         let mut stmt = self
             .conn
             .prepare("SELECT * FROM sessions ORDER BY last_active_at DESC LIMIT ?1")?;
-        let rows = stmt.query_map([limit], row_to_meta)?;
+        let rows = stmt.query_map([sql_integer(limit)], row_to_meta)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -229,7 +229,7 @@ impl SessionIndex {
              ORDER BY s.last_active_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![search_term, limit], row_to_meta)?;
+        let rows = stmt.query_map(params![search_term, sql_integer(limit)], row_to_meta)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -386,6 +386,15 @@ impl SessionIndex {
         results.truncate(limit);
         Ok(results)
     }
+}
+
+/// A `LIMIT` value as the integer type SQLite binds.
+///
+/// rusqlite implements `ToSql` for the signed integer types but not for
+/// `usize`, so a row count has to be converted. Saturating at `i64::MAX` keeps
+/// the meaning ("no limit in practice") instead of failing the query.
+fn sql_integer(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Combine the metadata and optional content into one FTS document.
