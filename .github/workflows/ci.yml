@@ -416,9 +416,17 @@ jobs:
       COVERAGE_MIN: '85'
     steps:
       - uses: actions/checkout@v7
+      # `cache-on-failure` matters here more than in any other job: `Measure`
+      # is one long `cargo llvm-cov` that builds the whole workspace for the
+      # instrumented profile and then runs every test. When it fails or is
+      # cancelled, the default `cache-on-failure: false` skips the save, so the
+      # next run starts cold again — a cold build takes far longer, which makes
+      # another failure more likely, which skips the save again. Saving the
+      # partial `target/llvm-cov-target` on failure is what breaks that loop.
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: 'true'
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@cargo-llvm-cov

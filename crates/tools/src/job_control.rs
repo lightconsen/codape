@@ -37,6 +37,40 @@ pub fn isolate(cmd: &mut tokio::process::Command) {
     let _ = cmd;
 }
 
+/// Whether `pid` can name a process group at all.
+///
+/// `kill(-pid, …)` names the group led by `pid`, so a pid that cannot lead a
+/// group must never reach it:
+///
+/// * `0` — `kill(-0, …)` is `kill(0, …)`, which signals **the caller's own
+///   group**. `kill(0, 0)` therefore always succeeds, so a recorded pid of `0`
+///   (a corrupt or hand-written job record) would look like a live group and
+///   [`terminate_group`] would then SIGTERM and SIGKILL whoever called it.
+///   Under `cargo test` the test binaries share the runner's group, so that
+///   ends the whole CI job — observed as "The runner has received a shutdown
+///   signal" while the `coderex_cli` lib tests were starting. `cargo nextest`
+///   puts each binary in its own group, which is why only the coverage job was
+///   affected.
+/// * `1` — signalling pid 1 means "every process the caller may signal".
+/// * A pid whose group is the caller's own. Pid reuse can make a recorded pid
+///   name a group this process belongs to, and "stop that job" must never mean
+///   "stop the caller".
+/// * Everything that is not a pid on this platform.
+#[cfg(unix)]
+#[allow(unsafe_code)] // `getpgrp` is the only way to read the caller's group.
+fn leader_pid(pid: u32) -> Option<libc::pid_t> {
+    let raw = libc::pid_t::try_from(pid).ok()?;
+    if raw <= 1 {
+        return None;
+    }
+    // SAFETY: `getpgrp` only reads process state.
+    let own_group = unsafe { libc::getpgrp() };
+    if own_group == raw {
+        return None;
+    }
+    Some(raw)
+}
+
 /// Whether the process group led by `pid` still has a live member.
 ///
 /// `kill(-pid, 0)` is the portable probe: it sends no signal and reports
@@ -46,11 +80,13 @@ pub fn isolate(cmd: &mut tokio::process::Command) {
 #[cfg(unix)]
 #[allow(unsafe_code)]
 pub fn group_exists(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
+    let Some(raw) = leader_pid(pid) else {
         return false;
     };
     // SAFETY: `kill` does not touch memory; signal 0 only performs the
-    // existence and permission checks. The negated pid names the group.
+    // existence and permission checks. The negated pid names the group, and
+    // `leader_pid` has already excluded the values for which it would name
+    // the caller's own group instead.
     unsafe {
         libc::kill(-raw, 0) == 0
             || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
@@ -63,10 +99,13 @@ pub fn group_exists(_pid: u32) -> bool {
 }
 
 /// Send `signal` to every process in the group led by `pid`.
+///
+/// The same guard as [`group_exists`] applies: a pid that cannot lead a group
+/// must not be negated into the caller's own.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn signal_group(pid: u32, signal: i32) {
-    let Ok(raw) = i32::try_from(pid) else {
+    let Some(raw) = leader_pid(pid) else {
         return;
     };
     // SAFETY: `kill` does not touch memory; the negated pid names the group
@@ -160,5 +199,23 @@ mod tests {
             return;
         }
         terminate_group(pid).await;
+    }
+
+    /// A group id that is not a group must never reach `kill(-pid, …)`.
+    ///
+    /// `kill(-0, …)` is `kill(0, …)`: it signals the caller's own process
+    /// group, and `kill(0, 0)` always succeeds. A recorded pid of `0` would
+    /// therefore look like a live group, and stopping that job would SIGTERM
+    /// and SIGKILL the process that asked — under `cargo test` that is the
+    /// whole test binary and, in CI, the job. This asserts the probe refuses
+    /// the value rather than testing the signal, because the signal cannot be
+    /// tested without killing the test runner.
+    #[test]
+    fn a_pid_that_cannot_lead_a_group_is_not_a_group() {
+        assert!(!group_exists(0), "0 is the caller's own group, not a job");
+        assert!(!group_exists(1), "1 is init, not a job");
+        assert_eq!(leader_pid(0), None);
+        assert_eq!(leader_pid(1), None);
+        assert_eq!(leader_pid(2), Some(2));
     }
 }
