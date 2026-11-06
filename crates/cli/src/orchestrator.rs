@@ -3110,7 +3110,9 @@ impl StartupOrchestrator {
          otherwise reachable, change the path before changing the client: try a local anonymizing \
          proxy (a Tor SOCKS port, if present) or another source, and do not spend the budget \
          iterating over large public-proxy lists or curated mirror lists, which are mostly dead or \
-         refusing. When the proxy or the fetch tool is not installed, install it together with every \
+         refusing. After one or two client variants hit the same bot check, stop probing clients \
+         and take the proxy route: the check is on the address, not on the client. When the proxy \
+         or the fetch tool is not installed, install it together with every \
          other tool the job needs in one backgrounded command before probing alternatives, and \
          prefer a standalone release binary over a tool that needs a runtime you do not have. \
          Time-box installing a heavy toolchain (JavaScript runtime, token provider, build \
@@ -3123,9 +3125,19 @@ impl StartupOrchestrator {
          and keep improving it there; a search that leaves only scratch files scores zero. When the \
          deliverable is text recovered from media, write the raw extraction to the required path as \
          soon as some of it exists and refine it there, and sample the media rather than processing \
-         every frame. A line that appears in several consecutive frames was on screen the whole \
-         time and is one line, not several: deduplicate by normalized text, because OCR gives \
-         near-identical repeats slightly different characters. \
+         every frame. Crop to the region that changes and OCR the crop: a full frame costs several \
+         times as much and reads no better. When the frames show a scrolling log, do not stitch \
+         overlapping screens by fuzzy matching, because repeated short lines make the alignment \
+         ambiguous and silently drop or reorder entries; track the element that changes per step, \
+         such as the prompt or input line, and rebuild the sequence from its transitions. Replay \
+         the candidate sequence against every frame: each frame's visible text should be a \
+         contiguous window of the result, and a frame that is not is evidence of a dropped or \
+         reordered entry, so fix the sequence instead of cleaning up the artifact. Deduplicate \
+         frames, not events: a line that appears in consecutive frames is one screen line, but a \
+         command entered twice is two separate moves. Transcribed text is judged on coverage and \
+         order at least as much as on per-character accuracy, so never ship a prefix, a merged \
+         approximation or a reordered list; if part of it cannot be recovered, write what is \
+         certain and name the gaps instead of inventing entries. \
          The time budget is limited: if one route keeps failing and the deliverable still does not \
          exist, switch to the most promising untried route; when the request's own acceptance \
          checks pass, stop and report the result instead of adding documentation, extra tests, or \
