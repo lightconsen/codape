@@ -99,7 +99,9 @@ ed25519-dalek = "2"
 
 # Text processing
 nucleo-matcher = "0.3"
-comrak = "0.37"
+# The library API only: the default features pull in the whole CLI
+# (clap, xdg, fmt2io), and fmt2io is MITNFA, which `cargo deny` refuses.
+comrak = { version = "0.59", default-features = false }
 # `yaml-load`/`plist-load` are intentionally off: they pull the unmaintained
 # `yaml-rust`, and the code only uses the compiled default syntax/theme sets.
 syntect = { version = "5", default-features = false, features = [

@@ -2,7 +2,7 @@
 //!
 //! Wraps `comrak` for Markdown → HTML and Markdown → text conversion.
 
-use comrak::{Arena, ComrakOptions, format_commonmark, format_html, parse_document};
+use comrak::{Arena, Options, format_commonmark, format_html, parse_document};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -75,10 +75,10 @@ pub fn markdown_to_html(input: &str, config: &MarkdownConfig) -> Result<String, 
 
     let root = parse_document(&arena, input, &options);
 
-    let mut html = Vec::new();
+    let mut html = String::new();
     format_html(root, &options, &mut html).map_err(|e| MarkdownError::Render(e.to_string()))?;
 
-    String::from_utf8(html).map_err(|e| MarkdownError::Render(e.to_string()))
+    Ok(html)
 }
 
 /// Convert Markdown back to CommonMark (roundtrip).
@@ -91,11 +91,11 @@ pub fn markdown_to_commonmark(
 
     let root = parse_document(&arena, input, &options);
 
-    let mut output = Vec::new();
+    let mut output = String::new();
     format_commonmark(root, &options, &mut output)
         .map_err(|e| MarkdownError::Render(e.to_string()))?;
 
-    String::from_utf8(output).map_err(|e| MarkdownError::Render(e.to_string()))
+    Ok(output)
 }
 
 /// Extract frontmatter from Markdown content (if present).
@@ -179,8 +179,8 @@ pub fn strip_markdown(input: &str) -> String {
     result.trim().to_string()
 }
 
-fn build_options(config: &MarkdownConfig) -> ComrakOptions<'_> {
-    let mut options = ComrakOptions::default();
+fn build_options(config: &MarkdownConfig) -> Options<'static> {
+    let mut options = Options::default();
     options.extension.strikethrough = config.strikethrough;
     options.extension.table = config.tables;
     options.extension.tasklist = config.tasklists;
