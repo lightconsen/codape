@@ -863,8 +863,18 @@ async fn terminate_child(
 
 /// `kill -TERM` the process, or the process group it leads when `group` is
 /// set. Returns whether the signal was delivered.
+///
+/// A pid of 0 is refused before it reaches `kill`: `kill -TERM 0` and
+/// `kill -TERM -0` both signal **the caller's own process group**, so under
+/// `cargo test` — where every test binary shares the runner's group — that
+/// request would end the job. A session child always has a real pid, so 0 here
+/// can only come from a spawn that failed strangely, not from a session to
+/// stop.
 #[cfg(unix)]
 async fn signal(pid: u32, group: bool) -> bool {
+    if pid <= 1 {
+        return false;
+    }
     let target = if group {
         format!("-{pid}")
     } else {
