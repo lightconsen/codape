@@ -430,6 +430,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@cargo-llvm-cov
+      # `scripts/coverage.sh` measures with `cargo llvm-cov nextest` when
+      # nextest is present, so each test binary runs in its own process group
+      # — the same isolation the `Test` job gets. Without this the run falls
+      # back to `cargo test`, where every binary shares the runner's group.
+      - uses: taiki-e/install-action@nextest
       - name: Measure
         run: scripts/coverage.sh
       - name: Compare with the baseline

@@ -75,8 +75,10 @@ MPL-2.0 question are in [`docs/verification.md`](docs/verification.md).
 
 `scripts/coverage.sh` runs the workspace suite under `cargo llvm-cov` and writes
 `target/coverage/lcov.info` plus a per-crate line-coverage table
-(`target/coverage/summary.md`). Test files under `crates/*/tests`, benches and
-examples are excluded from the denominator. The advisory targets are 80% lines
+(`target/coverage/summary.md`). When `cargo-nextest` is installed the tests run
+through `cargo llvm-cov nextest`, so each test binary gets its own process group
+instead of sharing one with the whole run. Test files under `crates/*/tests`,
+benches and examples are excluded from the denominator. The advisory targets are 80% lines
 for `core`, `cli` and `tools`, and 65% for the other crates; the script reports
 them but does not fail the build. See [`docs/coverage.md`](docs/coverage.md) for
 the current baseline and the lowest-coverage modules.

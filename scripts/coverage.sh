@@ -23,7 +23,23 @@ out="${1:-target/coverage}"
 mkdir -p "$out"
 
 if [[ "$summary_only" == false ]]; then
-    cargo llvm-cov --workspace --no-fail-fast --locked --lcov --output-path "$out/lcov.info"
+    # `nextest` runs every test binary in a **process group of its own**;
+    # `cargo test` runs them all inside one process group shared with the
+    # caller. That difference matters: a test that puts a child in its own
+    # process group and signals it, or that replaces `PATH` for the whole
+    # process, can reach the runner under `cargo test` but reaches nobody
+    # outside its own binary under `nextest`. The `Test` job already uses
+    # nextest for the same reason, and coverage should measure the same suite
+    # under the same isolation rather than a subtly different one.
+    if cargo nextest --version >/dev/null 2>&1; then
+        cargo llvm-cov nextest --workspace --no-fail-fast --locked \
+            --lcov --output-path "$out/lcov.info"
+    else
+        echo "cargo-nextest is not installed; falling back to 'cargo test'," >&2
+        echo "which shares one process group between every test binary." >&2
+        echo "Install it (cargo install cargo-nextest --locked) for isolation." >&2
+        cargo llvm-cov --workspace --no-fail-fast --locked --lcov --output-path "$out/lcov.info"
+    fi
 fi
 if [[ ! -f "$out/lcov.info" ]]; then
     echo "missing $out/lcov.info; run without --summary-only first" >&2

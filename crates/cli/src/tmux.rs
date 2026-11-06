@@ -323,9 +323,26 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&tmux, perms).unwrap();
 
+        // The mock goes **in front of** PATH, never in place of it.
+        //
+        // `ENV_LOCK` is cooperative: it only orders the tests that take it,
+        // and the ones that merely resolve a program through PATH (`sh`, `kill`
+        // and the `sleep` that a `sh -c` then looks up) do not. Replacing PATH
+        // with the mock directory therefore broke them for as long as this test
+        // held the lock: `sh -c "sleep 60"` started, failed to find `sleep`,
+        // and exited before the test that spawned it could look at it. That is
+        // the interference bisection pinned on this test, so the substitution
+        // has to leave the real directories reachable.
         let previous = std::env::var_os("PATH");
+        let mock_first = match previous.as_deref() {
+            Some(rest) => std::env::join_paths(
+                std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(rest)),
+            )
+            .unwrap(),
+            None => dir.path().as_os_str().to_os_string(),
+        };
         // SAFETY: `ENV_LOCK` is held for this test.
-        unsafe { std::env::set_var("PATH", dir.path()) };
+        unsafe { std::env::set_var("PATH", &mock_first) };
 
         let plan = RelaunchPlan::new(
             tmux.clone(),

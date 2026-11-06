@@ -6,9 +6,8 @@ Code coverage is measured with [`cargo-llvm-cov`]. Run:
 scripts/coverage.sh
 ```
 
-The script runs `cargo llvm-cov --workspace --no-fail-fast --lcov` and writes
-three artifacts under `target/coverage/` (or the directory passed as the last
-argument):
+The script runs `cargo llvm-cov` over the workspace and writes three artifacts
+under `target/coverage/` (or the directory passed as the last argument):
 
 - `lcov.info` — raw line coverage.
 - `coverage.tsv` — per-crate hit/total lines.
@@ -16,6 +15,15 @@ argument):
 
 `scripts/coverage.sh --summary-only` regenerates the tables from an existing
 `lcov.info` without rerunning the suite.
+
+The tests run through `cargo llvm-cov nextest` when `cargo-nextest` is
+installed, and fall back to `cargo test` otherwise. This is not cosmetic:
+nextest gives every test binary a process group of its own, while `cargo test`
+runs all of them inside one group shared with the caller. A test that signals a
+child's process group, or that replaces `PATH` for the whole process, is
+confined to its own binary under nextest; under `cargo test` it can reach the
+rest of the run. CI installs nextest for this job so coverage measures the same
+suite, under the same isolation, as the `Test` job.
 
 Test-only code under `crates/*/tests/`, `benches/` and `examples/` is excluded
 from the denominator. Unit-test code inside `src/` is still instrumented (and

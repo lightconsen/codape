@@ -691,7 +691,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
-        let shared = std::sync::Arc::new(parking_lot::RwLock::new(dir.path().to_path_buf()));
+        // The tracker records `pwd -P`, the *physical* path. On macOS `/var` is
+        // a symlink to `/private/var`, so the tempdir this test built and the
+        // path the shell reports are two spellings of one directory. Compare
+        // against the canonical one, which is what the shell will report.
+        let sub = std::fs::canonicalize(&sub).unwrap();
+        let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        ));
 
         let first = BashTool::new()
             .execute(
