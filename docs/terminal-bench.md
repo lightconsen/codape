@@ -2269,6 +2269,53 @@ route, which varied between runs on the same image and provider. The task's
 own 360 s budget leaves no room for that lottery: run 9 spent its whole
 window probing and never saw a frame.
 
+### 2026-11-06 — CodeRex and Claude Code, same task and provider
+
+Two Claude Code 2.1.318 runs on the same image, provider and model, and the two
+CodeRex runs with the new mechanisms:
+
+| Run | Budget | Tool calls | Tor installed at | First proxied fetch | Deliverable | Test | Stop |
+|---|---|---|---|---|---|---|---|
+| `dev-extract-8` | 900 s | 56 (47 Bash) | call 20 of 56 | call 30 | `solution.txt`, 343 lines | existence passed, 52.22 % | self-exit, 820 s |
+| `dev-extract-10` | 1 500 s | 51 (49 Bash) | call 14 of 51 | call 18 | `solution.txt`, a 3 410 B status report | existence passed, 15.28 % | self-exit, 1 093 s |
+| `cc-cmp-extract-1` | 720 s | 69 (67 Bash) | call 54 of 69 | call 57 | video + 950 frames OCR'd; no file | both parsers failed | killed during OCR |
+| `cc-cmp-extract-2` | 900 s | 52 (51 Bash) | call 34 of 52 | call 35 | none (no video) | both parsers failed | killed while testing public proxies |
+
+Both agents found the same route — a local Tor SOCKS port — and both paid for
+it. The difference is where in the run it happened. CodeRex reached the Tor
+install at 25–36 % of its calls because the headless note says that a bot
+check from a reachable host is a reason to change the path, not the client,
+and to try a local anonymizing proxy before spending the budget on proxy
+lists. Claude Code, with no such instruction, spent its first 30–50 calls on
+player clients, a deno runtime, a PO-token provider, WARP and public-proxy
+lists; it installed Tor at 65–78 % of its calls.
+
+What that cost shows up differently in the two Claude runs.
+`cc-cmp-extract-1` still got through: it downloaded the video, extracted 950
+frames at 5 fps and had tesseract running on them when the window closed —
+the same place CodeRex's `dev-extract-6` reached at 1 200 s — with no
+`/app/solution.txt`. `cc-cmp-extract-2` never got the video: its Tor install
+at call 34 was followed by a proxied attempt that failed, then by a sweep of
+8 910 public proxies; the last calls launched a proxied `yt-dlp` with
+`timeout 900` and the run ended inside it. Nothing in Claude Code's context
+says how much of the window is gone, so it could not know that the call was
+longer than the time it had.
+
+CodeRex's two runs both stopped themselves with a file on disk — 820 s of
+900, 1 093 s of 1 500 — and the 900 s run stopped ten seconds after its 90 %
+time check was due. The mechanism matters even when the work is not done: a
+clock is what turns "still working when the window closes" into "ship what
+you have", and the artifact contract is what turns a turn that ended empty
+into one more decision about the file. Neither can help a run the harness
+kills mid-tool; that is the clock's job, not the contract's.
+
+The comparison does not show CodeRex solving the task: 52.22 % is still below
+90 %, and run 10's route failed outright where run 8's succeeded, on the same
+binary. n=1 per arm and a bot check that varies by exit IP mean the similarity
+numbers cannot be attributed to the agents; the call-position and
+deadline-behavior differences are visible in every run of each agent, and
+those are what the two mechanisms change.
+
 ### Scoreboard so far
 
 75 distinct tasks attempted (94 % of the 80 in the dataset), 72 resolved
