@@ -141,7 +141,7 @@ impl TelemetryStore {
              LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map([limit], |row| {
+        let rows = stmt.query_map([sql_integer(limit)], |row| {
             Ok(PendingEvent {
                 id: row.get(0)?,
                 event_type: row.get(1)?,
@@ -235,7 +235,7 @@ impl TelemetryStore {
              LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map([limit], |row| {
+        let rows = stmt.query_map([sql_integer(limit)], |row| {
             Ok(PendingCrash {
                 id: row.get(0)?,
                 panic_info: row.get(1)?,
@@ -350,6 +350,15 @@ impl TelemetryStore {
         }
         Ok(deleted)
     }
+}
+
+/// A `LIMIT` value as the integer type SQLite binds.
+///
+/// rusqlite implements `ToSql` for the signed integer types but not for
+/// `usize`, so a row count has to be converted. Saturating at `i64::MAX` keeps
+/// the meaning ("no limit in practice") instead of failing the query.
+fn sql_integer(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// Add the structured-crash columns to a database created by an older build.
