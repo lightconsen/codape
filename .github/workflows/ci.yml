@@ -602,6 +602,8 @@ jobs:
           echo "Test=${{ needs.test.result }} Coverage=${{ needs.coverage.result }}"
 
           cut_off=false
+          failed=false
+          unreadable=false
           for job in Test Coverage; do
             case "$job" in
               Test)     result='${{ needs.test.result }}' ;;
@@ -609,10 +611,16 @@ jobs:
             esac
             [[ "$result" == "failure" ]] || continue
 
+            # `|| …=""` on both lookups is load-bearing. The default shell here
+            # is `bash -e` and pipefail is on, so an unanswered `gh` call would
+            # otherwise abort the step — and a red step means this job concludes
+            # `failure`, which `rerun-failed-jobs` would then re-run alongside
+            # the jobs it was asked to retry.
             id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-              --jq ".jobs[]|select(.name==\"$job\")|.id" | head -1)
+              --jq ".jobs[]|select(.name==\"$job\")|.id" | head -1) || id=""
             if [[ -z "$id" ]]; then
-              echo "$job: job id not found; not retrying" >&2
+              echo "$job: job id not found" >&2
+              unreadable=true
               continue
             fi
 
@@ -625,15 +633,28 @@ jobs:
               --jq '[.steps[] | (.conclusion // .status)] as $c
                     | if ($c | index("failure")) then "failed"
                       elif ($c | any(. == "cancelled" or . == "in_progress")) then "cut-off"
-                      else "inconclusive" end')
+                      else "inconclusive" end') || verdict=""
             echo "$job: ${verdict:-unreadable}"
-            if [[ "$verdict" == "cut-off" ]]; then
-              cut_off=true
-            fi
+            case "$verdict" in
+              cut-off) cut_off=true ;;
+              failed)  failed=true ;;
+              *)       unreadable=true ;;
+            esac
           done
 
+          # A real failure anywhere wins over a cut-off elsewhere. Retrying a run
+          # that also contains a genuine red would give that red a second roll of
+          # the dice, which is exactly what this job must not do.
+          if [[ "$failed" == "true" ]]; then
+            echo "::warning::At least one Test/Coverage step genuinely failed; not re-run. See the job log."
+            exit 0
+          fi
           if [[ "$cut_off" != "true" ]]; then
-            echo "::warning::Test/Coverage failed with a failed step, not a cancelled one; this is a real failure and is not re-run."
+            if [[ "$unreadable" == "true" ]]; then
+              echo "::warning::Could not read Test/Coverage step conclusions; not retrying. Check the jobs by hand."
+            else
+              echo "::warning::Test/Coverage failed with a failed step, not a cancelled one; this is a real failure and is not re-run."
+            fi
             exit 0
           fi
           echo "Retrying run ${{ github.run_id }} (attempt ${{ github.run_attempt }})"
