@@ -1,0 +1,144 @@
+name: Retry cancelled tests
+
+# `Test` and `Coverage` are occasionally ended by the hosted runner rather than
+# by a test: the job receives a shutdown signal and nextest reports
+# "Cancelling due to signal" a few hundredths of a second into a `nextest`
+# call. It happens on `main` as well, and the same commit has both passed and
+# failed, so it is not a regression in the change under test. See issue #25.
+#
+# A retry loop inside the job cannot help: the signal reaches the shell as
+# well, so the loop dies with the step (verified — a wrapper takes SIGTERM and
+# exits 143 without reaching its second iteration). The retry has to be a new
+# attempt of the whole run, which is what `rerun-failed-jobs` creates.
+#
+# That call cannot come from inside `CI`. It answers
+#
+#   403 "This workflow is already running"
+#
+# for any run that has not finished, and a job in `CI` is by definition running
+# while `CI` is. Nor can such a job read the failed job's log: the log endpoints
+# 404 until the run completes. `workflow_run` is the way out — it fires only
+# once the watched run has finished, so both the log and the retry are
+# available.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retry:
+    name: Re-run cut-off tests
+    # A run triggered by a schedule is left alone, and there is nothing to
+    # re-run on a green run.
+    if: >-
+      github.event.workflow_run.event != 'schedule'
+      && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      REPO: ${{ github.repository }}
+    steps:
+      # This step must not exit non-zero on any path it takes deliberately. A
+      # red step here cannot re-run itself (this is a separate workflow, so
+      # `rerun-failed-jobs` on `CI` cannot reach it), but it would bury the
+      # reason under a failure badge. Every path prints and stops instead.
+      - name: Retry only if a test job was cut off
+        run: |
+          set -uo pipefail
+
+          # A second attempt that lands on the same infrastructure is not worth a
+          # third. The retry below shares the original's attempt counter, so an
+          # attempt of 2 or more means we already tried.
+          attempt=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .run_attempt) || attempt=""
+          if [[ -z "$attempt" ]]; then
+            echo "::warning::Could not read run $RUN_ID; not retrying."
+            exit 0
+          fi
+          echo "run $RUN_ID attempt $attempt"
+          if (( attempt >= 2 )); then
+            echo "::warning::Attempt $attempt was cut off too. Not retrying; see issue #25."
+            exit 0
+          fi
+
+          cut_off=false
+          failed=false
+          unreadable=false
+
+          while read -r id name; do
+            [[ -n "$id" ]] || continue
+
+            log="/tmp/$name.log"
+            if ! gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>/dev/null || [[ ! -s "$log" ]]; then
+              echo "$name: log unavailable" >&2
+              unreadable=true
+              continue
+            fi
+
+            # Strip the timestamp and the ANSI colours so the markers match
+            # whatever the terminal settings were.
+            esc=$(printf '\033')
+            sed -e 's/^[0-9T:.Z-]* //' -e "s/${esc}\[[0-9;]*m//g" "$log" > "$log.clean"
+
+            # The runner's own message is the decisive marker: only a shutdown
+            # produces it. nextest's "tests were not run due to signal" follows
+            # from the same event and is kept as a second witness.
+            shutdown=false
+            nextest_signal=false
+            grep -q 'runner has received a shutdown signal' "$log.clean" && shutdown=true
+            grep -q 'tests were not run due to signal' "$log.clean" && nextest_signal=true
+
+            # A test that actually failed prints a `FAIL [ ... ]` line. A cut-off
+            # run does not: its killed tests are reported as `SIGTERM`, and they
+            # are counted in the summary's `failed` total, so the summary line
+            # must NOT be used as the marker — a cut-off log says
+            # "422 passed, 2 failed" too.
+            real_fail=false
+            grep -qE '^ *FAIL +\[' "$log.clean" && real_fail=true
+
+            # The step conclusion separates the two cases on its own: the runner
+            # marks a step it killed `cancelled`, and leaves it `in_progress`
+            # when the log never made it out at all (the 50-minute hangs). A step
+            # that genuinely failed is `failure`.
+            verdict=$(gh api "repos/$REPO/actions/jobs/$id" \
+              --jq '[.steps[] | (.conclusion // .status)] as $c
+                    | if ($c | index("failure")) then "failed"
+                      elif ($c | any(. == "cancelled" or . == "in_progress")) then "cut-off"
+                      else "inconclusive" end') || verdict=""
+
+            echo "$name: verdict=${verdict:-unreadable} shutdown=$shutdown nextest_signal=$nextest_signal real_fail=$real_fail"
+
+            if [[ "$real_fail" == "true" || "$verdict" == "failed" ]]; then
+              failed=true
+            elif [[ "$verdict" == "cut-off" && ( "$shutdown" == "true" || "$nextest_signal" == "true" ) ]]; then
+              cut_off=true
+            else
+              unreadable=true
+            fi
+          done < <(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name=="Test" or .name=="Coverage")
+                  | select(.conclusion=="failure") | "\(.id) \(.name)"' 2>/dev/null)
+
+          # A real failure anywhere wins over a cut-off elsewhere. Retrying a run
+          # that also contains a genuine red would give that red a second chance.
+          if [[ "$failed" == "true" ]]; then
+            echo "::warning::A Test/Coverage step genuinely failed; not re-run. See the job log."
+            exit 0
+          fi
+          if [[ "$cut_off" != "true" ]]; then
+            if [[ "$unreadable" == "true" ]]; then
+              echo "::warning::Could not classify a failed Test/Coverage job; not retrying."
+            else
+              echo "No failed Test/Coverage job to re-run."
+            fi
+            exit 0
+          fi
+
+          echo "Re-running failed jobs of run $RUN_ID"
+          gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
