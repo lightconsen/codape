@@ -123,6 +123,15 @@ jobs:
     env:
       # Linking the whole workspace at once exhausts the runner's memory.
       CARGO_BUILD_JOBS: '2'
+      # TEMPORARY DIAGNOSTIC. Every run since 3346b7f has been killed by the
+      # runner 1.2-1.55s after "Starting 4685 tests across 125 binaries", at
+      # indices 421-424, with `The runner has received a shutdown signal`.
+      # Lowering the number of simultaneously running tests moves that instant
+      # if the trigger is the burst of test binaries starting at once, and
+      # leaves it in place if it is anything else. 2 instead of 1 so the run
+      # still fits the 120-minute job budget. Restore the default (unset) once
+      # the question is answered.
+      NEXTEST_TEST_THREADS: '2'
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
@@ -133,7 +142,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       # `--no-fail-fast` reports every failing test binary instead of stopping
       # at the first failure; one red run should name all of them.
-      - run: cargo nextest run --workspace --no-fail-fast --locked
+      - run: cargo nextest run --workspace --no-fail-fast --locked --test-threads "$NEXTEST_TEST_THREADS"
 
   # `cargo nextest` does not run doctests, and a `cargo test` in another job
   # would run them only incidentally. A doc example that stops compiling is a
