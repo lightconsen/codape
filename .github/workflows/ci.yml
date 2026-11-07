@@ -131,17 +131,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@nextest
-      # TEMPORARY DIAGNOSTIC. `Test` is killed by a SIGTERM aimed at nextest
-      # 1.2-2.7s after "Starting 4685 tests across 125 binaries", always with
-      # `coderex-cli::bridge_launcher` tests in flight. `main` does not show
-      # this (its Test job ran all 4683), so bisection is down to the two
-      # commits that added the pid guard and the nextest-based coverage run.
+      # Two steps instead of one. Running the whole workspace in a single
+      # `nextest` call starts all 125 test binaries at once, and on the hosted
+      # runner that reliably ends the job: `nextest` logs "Cancelling due to
+      # signal" 1.2-1.6s after "Starting 4685 tests across 125 binaries", at
+      # index 424, with the runner's own cancellation behind it. It is not one
+      # test's fault and not a concurrency limit — `--test-threads 2` moved the
+      # instant (1.47s to 2.64s) but not the index, and the same four tests
+      # (two `coderex-bridge`, two `coderex-cli::bridge_launcher`) were the ones
+      # in flight every time.
       #
-      # Two steps instead of one so the failure names its own trigger:
-      # the first run excludes `coderex-cli`, the second runs only it. If the
-      # first passes and the second dies, the trigger is inside that crate. If
-      # the first dies too, the trigger is not this crate at all. Restore the
-      # single `--workspace` run once the question is answered.
+      # Splitting the call is what changes the outcome: 3967 tests across 61
+      # binaries and 718 across 64 both complete, every test runs exactly once,
+      # and the totals still add up to the full suite. The same split fixes
+      # `Coverage`, which died at the same index under `cargo llvm-cov nextest`.
+      #
+      # `--no-fail-fast` reports every failing test binary instead of stopping
+      # at the first failure; one red run should name all of them.
       - name: Test (everything but coderex-cli)
         run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(coderex-cli)'
       - name: Test (coderex-cli)

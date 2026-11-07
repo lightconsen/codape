@@ -23,17 +23,24 @@ out="${1:-target/coverage}"
 mkdir -p "$out"
 
 if [[ "$summary_only" == false ]]; then
-    # `nextest` runs every test binary in a **process group of its own**;
-    # `cargo test` runs them all inside one process group shared with the
-    # caller. That difference matters: a test that puts a child in its own
-    # process group and signals it, or that replaces `PATH` for the whole
-    # process, can reach the runner under `cargo test` but reaches nobody
-    # outside its own binary under `nextest`. The `Test` job already uses
-    # nextest for the same reason, and coverage should measure the same suite
-    # under the same isolation rather than a subtly different one.
+    # Two calls, for the same reason the `Test` job uses two: one `nextest` call
+    # over the whole workspace starts all 125 test binaries at once, and on the
+    # hosted runner that ends the job — `nextest` reports "Cancelling due to
+    # signal" 1.2-1.6s after "Starting 4685 tests across 125 binaries", always
+    # at index 424, and the runner's own cancellation is what arrived first.
+    # Lowering `--test-threads` moves the instant but not the index, so this is
+    # not a concurrency limit; splitting the call is what completes. Both halves
+    # run the whole suite exactly once (3967 + 718 = 4685).
+    #
+    # `llvm-cov` merges every profile under the target directory when the report
+    # is generated, so each call runs with `--no-report` and the report is
+    # produced once at the end. Generating it per call would export only that
+    # call's profiles and the second would overwrite the first.
     if cargo nextest --version >/dev/null 2>&1; then
-        cargo llvm-cov nextest --workspace --no-fail-fast --locked \
-            --lcov --output-path "$out/lcov.info"
+        cargo llvm-cov nextest --workspace --no-fail-fast --locked --no-report \
+            -E 'not package(coderex-cli)'
+        cargo llvm-cov nextest -p coderex-cli --no-fail-fast --locked --no-report
+        cargo llvm-cov report --lcov --output-path "$out/lcov.info"
     else
         echo "cargo-nextest is not installed; falling back to 'cargo test'," >&2
         echo "which shares one process group between every test binary." >&2
