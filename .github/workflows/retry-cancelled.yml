@@ -94,6 +94,20 @@ jobs:
             grep -q 'runner has received a shutdown signal' "$log.clean" && shutdown=true
             grep -q 'tests were not run due to signal' "$log.clean" && nextest_signal=true
 
+            # A third shape: the runner is killed mid-`cargo build`, before any
+            # test starts. Run 42388431081 attempt 2 is exactly that — the log
+            # stops mid-token at "Compiling coder", 64 KB against a normal
+            # 800 KB, with no ending and no shutdown message, because the process
+            # writing the log went away with everything else. Nothing in the text
+            # says "cut off" and the step still concludes `failure`, so without
+            # this check a size-truncated log would read as a genuine failure.
+            truncated=false
+            if [[ "$(wc -c < "$log")" -lt 200000 ]] \
+               && ! grep -q 'Cleaning up orphan processes' "$log.clean" \
+               && ! grep -qE 'Complete job' "$log.clean"; then
+              truncated=true
+            fi
+
             # A test that actually failed prints a `FAIL [ ... ]` line. A cut-off
             # run does not: its killed tests are reported as `SIGTERM`, and they
             # are counted in the summary's `failed` total, so the summary line
@@ -114,11 +128,11 @@ jobs:
                       elif ($c | any(. == "cancelled" or . == "in_progress")) then "cut-off"
                       else "inconclusive" end') || verdict=""
 
-            echo "$name: verdict=${verdict:-unreadable} shutdown=$shutdown nextest_signal=$nextest_signal real_fail=$real_fail"
+            echo "$name: verdict=${verdict:-unreadable} shutdown=$shutdown nextest_signal=$nextest_signal real_fail=$real_fail truncated=$truncated"
 
             if [[ "$real_fail" == "true" ]]; then
               failed=true
-            elif [[ "$shutdown" == "true" || "$nextest_signal" == "true" ]]; then
+            elif [[ "$shutdown" == "true" || "$nextest_signal" == "true" || "$truncated" == "true" ]]; then
               cut_off=true
             elif [[ "$verdict" == "failed" ]]; then
               failed=true
