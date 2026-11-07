@@ -148,6 +148,17 @@ jobs:
       #
       # `--no-fail-fast` reports every failing test binary instead of stopping
       # at the first failure; one red run should name all of them.
+      #
+      # This split does NOT make the SIGTERM class of failure go away. The
+      # earlier fingerprint (index 424 of one 125-binary call) is gone, but the
+      # same shape now lands on this second call: the runner receives a shutdown
+      # signal and nextest reports "Cancelling due to signal" 0.05-0.07s after
+      # "Starting 718 tests across 64 binaries", always at index 13-16, always
+      # the same four `bridge_launcher` tests. It happens on `main` too, and the
+      # same commit has both passed and failed, so it is not a test's fault.
+      # See issue #25. `rerun-cancelled` below re-runs the job when this
+      # happens; do not treat a cut-off `Test`/`Coverage` as a regression
+      # signal.
       - name: Test (everything but coderex-cli)
         run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(coderex-cli)'
       - name: Test (coderex-cli)
@@ -518,6 +529,101 @@ jobs:
             } else {
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
+
+  # `Test` and `Coverage` are occasionally ended by the hosted runner rather
+  # than by a test: the job receives a shutdown signal and nextest reports
+  # "Cancelling due to signal" a few hundredths of a second into a `nextest`
+  # call. It happens on `main` as well, and the same commit has both passed and
+  # failed, so it is not a regression in the change under test. See issue #25.
+  #
+  # A retry loop inside the job cannot help: the signal reaches the shell as
+  # well, so the loop dies with the step (verified — a wrapper takes SIGTERM and
+  # exits 143 without reaching its second iteration). The retry has to be a new
+  # attempt of the whole job, which is what `rerun-failed-jobs` creates. It
+  # re-runs only the failed jobs, and the `Test`/`Coverage` check runs are
+  # replaced by the new attempt, so the required checks end up reporting the
+  # retry's result.
+  #
+  # The job *conclusion* is `failure`, not `cancelled` — nextest exits non-zero
+  # after the signal, so the step fails and the job reports the usual red. The
+  # distinguishing marker is in the log, and it is unambiguous:
+  #
+  #   "warning: N/M tests were not run due to signal"
+  #
+  # appears only when nextest was cut off, and in that case the log contains no
+  # `FAIL [` line at all (the four tests are reported as `SIGTERM`, not `FAIL`).
+  # A genuine red run has `FAIL [` lines and no "not run due to signal" line.
+  # The step below refuses to retry unless the first is present and the second
+  # is absent, so a real failure stays red.
+  rerun-cancelled:
+    name: Re-run cancelled tests
+    needs: [test, coverage]
+    # `always()` so it still runs when the jobs it needs failed. A pass needs
+    # nothing re-run, and a docs-only push skips the test jobs entirely.
+    #
+    # A pull request from a fork gets a read-only token, so it could not ask for
+    # the retry anyway; those runs stay red and are re-run by hand.
+    if: >-
+      always()
+      && github.event_name != 'schedule'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+      && (needs.test.result == 'failure' || needs.coverage.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      # Neither step below may exit non-zero. `rerun-failed-jobs` re-runs every
+      # job whose conclusion is `failure`, so a red job here would re-run itself
+      # on the retry it just asked for, and would sit red on a run whose tests
+      # are fine. `Test`/`Coverage` already carry the verdict the branch
+      # protection reads; this job only decides whether to ask for another try.
+
+      # A second cut-off is not retried automatically: a retry that lands on the
+      # same infrastructure twice is not worth a third attempt.
+      - name: Stop after the first attempt
+        if: github.run_attempt >= 2
+        run: |
+          echo "::warning::Test/Coverage were cut off again on attempt ${{ github.run_attempt }}. Not re-running; see issue #25."
+      - name: Re-run only if the tests were cut off, not if they failed
+        if: github.run_attempt == 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo "Test=${{ needs.test.result }} Coverage=${{ needs.coverage.result }}"
+
+          cut_off=false
+          for job in Test Coverage; do
+            if [[ "$job" == "Test" && "${{ needs.test.result }}" != "failure" ]]; then continue; fi
+            if [[ "$job" == "Coverage" && "${{ needs.coverage.result }}" != "failure" ]]; then continue; fi
+            id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+              --jq ".jobs[]|select(.name==\"$job\")|.id" 2>/dev/null | head -1)
+            log="/tmp/$job.log"
+            if [[ -z "$id" ]] || ! gh api "repos/${{ github.repository }}/actions/jobs/$id/logs" > "$log" 2>/dev/null; then
+              echo "$job: no log to inspect; not retrying" >&2
+              continue
+            fi
+            # ANSI colours would break the markers; strip them first.
+            sed -i 's/\x1b\[[0-9;]*m//g' "$log"
+            signalled=false; failed_test=false
+            grep -q 'tests were not run due to signal' "$log" && signalled=true
+            grep -qE '\bFAIL \[' "$log" && failed_test=true
+            echo "$job: signalled=$signalled failing_test=$failed_test"
+            if [[ "$signalled" == "true" && "$failed_test" == "false" ]]; then
+              cut_off=true
+            fi
+          done
+
+          if [[ "$cut_off" != "true" ]]; then
+            echo "::warning::Test/Coverage failed without the issue #25 signal marker; this is a real failure and is not re-run."
+            exit 0
+          fi
+          echo "Retrying run ${{ github.run_id }} (attempt ${{ github.run_attempt }})"
+          gh api -X POST \
+            "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/rerun-failed-jobs"
 
   code-agent-benchmark:
     name: Code Agent Benchmark
