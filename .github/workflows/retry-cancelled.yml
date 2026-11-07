@@ -46,6 +46,12 @@ jobs:
     # The check lives in the step rather than in `if:` because the payload's
     # `pull_requests` array is empty for some events, and indexing it in an
     # expression would make the whole job silently skip.
+    # Only `failure`. A run that ends `cancelled` is a different thing: in
+    # 42391025553 attempt 2 every test step was `skipped` and the log carried no
+    # signal marker at all, because the run was stopped before the tests began
+    # (a superseding push, or a manual rerun hitting the concurrency rule).
+    # Re-running that would be busywork; the branch's next push starts a fresh
+    # run anyway.
     if: >-
       github.event.workflow_run.event != 'schedule'
       && github.event.workflow_run.conclusion == 'failure'
