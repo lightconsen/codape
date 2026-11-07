@@ -35,6 +35,17 @@ jobs:
     name: Re-run cut-off tests
     # A run triggered by a schedule is left alone, and there is nothing to
     # re-run on a green run.
+    #
+    # `workflow_run` starts this with the *default branch's* workflow file and a
+    # repository-scoped token, regardless of which branch the triggering run
+    # came from. That is why the fork check below is not optional: without it a
+    # run proposed from a fork would get this repository's write token to ask
+    # GitHub to re-execute its own code, which is the classic `workflow_run`
+    # privilege escalation. Same-origin pull requests and pushes are fine.
+    #
+    # The check lives in the step rather than in `if:` because the payload's
+    # `pull_requests` array is empty for some events, and indexing it in an
+    # expression would make the whole job silently skip.
     if: >-
       github.event.workflow_run.event != 'schedule'
       && github.event.workflow_run.conclusion == 'failure'
@@ -52,6 +63,22 @@ jobs:
       - name: Retry only if a test job was cut off
         run: |
           set -uo pipefail
+
+          # Refuse to spend this repository's write token on a fork's code. The
+          # payload's `pull_requests` array is empty for some events, so the
+          # branch name is read from the run itself as a fallback.
+          if [[ "${{ github.event.workflow_run.event }}" == "pull_request" ]]; then
+            head_repo=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+              --jq '.head_repository.full_name // ""') || head_repo=""
+            if [[ -z "$head_repo" ]]; then
+              echo "::warning::Could not read the source repository of run $RUN_ID; not retrying."
+              exit 0
+            fi
+            if [[ "$head_repo" != "$REPO" ]]; then
+              echo "::warning::Run $RUN_ID came from $head_repo; a fork's run is not re-run automatically."
+              exit 0
+            fi
+          fi
 
           # A second attempt that lands on the same infrastructure is not worth a
           # third. The retry below shares the original's attempt counter, so an
