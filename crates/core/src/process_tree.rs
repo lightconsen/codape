@@ -234,6 +234,29 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
     after_comm.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// Whether `pid` names a process this code may signal on its own behalf.
+///
+/// Every kill in this module is aimed at *something we started or adopted*, so
+/// a pid that names us, our group, or init is a corrupt record, not a target.
+/// The particular trap is `0`: `kill(0, sig)` and `kill(-0, sig)` both signal
+/// **the caller's own process group**, and `kill(0, 0)` always succeeds, so a
+/// recorded `0` looks alive and then stops whoever asked.
+///
+/// That is not hypothetical: under `cargo test` every test binary shares the
+/// runner's process group, so a stray group kill takes the whole job down.
+/// `cargo nextest` gives each binary its own group, which confines the damage
+/// to the binary that asked.
+#[cfg(unix)]
+#[allow(unsafe_code)] // `getpgrp` is the only way to read the caller's group.
+fn signs_a_target(pid: libc::pid_t) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    // SAFETY: `getpgrp` only reads process state.
+    let own_group = unsafe { libc::getpgrp() };
+    own_group != pid
+}
+
 /// `SIGKILL` the recorded process, but only if the pid still names it.
 ///
 /// The start-time check is what makes a later signal safe: a reused pid is a
@@ -246,6 +269,9 @@ pub fn kill_tracked_process(process: TrackedProcess) -> bool {
     let Ok(pid) = libc::pid_t::try_from(process.pid) else {
         return false;
     };
+    if !signs_a_target(pid) {
+        return false;
+    }
     // SAFETY: `kill` takes plain integers, and the pid was just verified to
     // still name the process this record describes.
     unsafe { libc::kill(pid, libc::SIGKILL) == 0 }
@@ -254,6 +280,7 @@ pub fn kill_tracked_process(process: TrackedProcess) -> bool {
 #[cfg(unix)]
 mod imp {
     use super::JobLimits;
+    use super::signs_a_target;
     use std::io;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
@@ -323,6 +350,11 @@ mod imp {
                     let Ok(pid) = libc::pid_t::try_from(pid) else {
                         return false;
                     };
+                    // A group id of 0 is not a group we created; `kill(-0, …)`
+                    // names the caller's own group. See `signs_a_target`.
+                    if !signs_a_target(pid) {
+                        return false;
+                    }
                     // macOS has no process group that survives a `setsid()`, so
                     // a daemonised descendant is not in the group the kill below
                     // names. Walk the libproc parent/child chain first, while
@@ -338,6 +370,11 @@ mod imp {
                     let Ok(pid) = libc::pid_t::try_from(pid) else {
                         return false;
                     };
+                    // `kill(0, …)` signals the caller's own group, exactly as
+                    // `kill(-0, …)` would. See `signs_a_target`.
+                    if !signs_a_target(pid) {
+                        return false;
+                    }
                     // SAFETY: signalling a pid we recorded; failure is
                     // reported, not ignored.
                     unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
@@ -378,6 +415,11 @@ mod imp {
     #[cfg(target_os = "macos")]
     fn kill_descendants(root: libc::pid_t) {
         for pid in descendants_of(root) {
+            // The walk excludes `root`, but not this process: nothing guarantees
+            // a caller's own pid never appears under a root it adopted.
+            if !super::signs_a_target(pid) {
+                continue;
+            }
             // SAFETY: signalling a pid read from libproc. A failure means the
             // process exited between the read and the kill, which is fine.
             unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -819,6 +861,8 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::signs_a_target;
     use super::{JobLimits, ProcessTree};
 
     /// A long-lived child that also has a child of its own, so a tree kill is
@@ -840,6 +884,31 @@ mod tests {
         {
             std::process::Command::new("true")
         }
+    }
+
+    /// A pid that cannot be a target must never reach `kill`.
+    ///
+    /// `kill(0, sig)` and `kill(-0, sig)` both signal the caller's own process
+    /// group, and `kill(0, 0)` always succeeds — so a recorded 0 looks like a
+    /// live process and stopping it stops whoever asked. Under `cargo test`
+    /// every binary shares the runner's group, so that request would end the
+    /// whole job. The signal itself cannot be exercised in a test without
+    /// killing the test runner, so this asserts the guard refuses the value.
+    #[cfg(unix)]
+    #[test]
+    fn a_pid_that_cannot_be_a_target_is_never_signalled() {
+        // SAFETY: `getpgrp` only reads process state.
+        let own_group = unsafe { libc::getpgrp() };
+        assert!(!signs_a_target(0), "0 is the caller's own group");
+        assert!(!signs_a_target(1), "1 is init");
+        assert!(
+            !signs_a_target(own_group),
+            "the caller's own group is not a target"
+        );
+        assert!(signs_a_target(2), "an unrelated pid is a target");
+
+        let tree = ProcessTree::from_pid(0).unwrap();
+        assert!(!tree.terminate(), "pid 0 must not reach kill(0, SIGTERM)");
     }
 
     #[cfg(unix)]

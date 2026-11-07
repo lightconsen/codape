@@ -483,6 +483,9 @@ mod tests {
         assert!(error.to_string().contains("JobList"), "{error}");
     }
 
+    /// Process groups are a Unix idea; Windows `JobKill` uses `taskkill /T`,
+    /// which has no `process_group` to set up here.
+    #[cfg(unix)]
     #[tokio::test]
     async fn kill_stops_the_group_and_settles_the_record() {
         use std::os::unix::process::CommandExt as _;

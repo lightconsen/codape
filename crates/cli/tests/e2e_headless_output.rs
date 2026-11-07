@@ -128,6 +128,10 @@ fn stdout_is_the_answer_without_a_title_banner() {
 
 /// A transcript directory that cannot be written must not end the session:
 /// the answer still arrives, and the failure is not a panic.
+///
+/// The read-only directory is made with Unix mode bits; Windows has no
+/// equivalent that this test can set from the outside.
+#[cfg(unix)]
 #[test]
 fn a_read_only_transcript_directory_does_not_fail_the_turn() {
     use std::os::unix::fs::PermissionsExt;

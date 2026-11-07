@@ -367,6 +367,9 @@ def rekey_from_missing(args: argparse.Namespace) -> int:
             traces.append((path, trace))
         if not traces:
             continue
+        traces = drop_stream_fallbacks(traces)
+        if not traces:
+            continue
         print(f"rekeying {suite} from {len(traces)} traced request(s)")
         cassettes = []
         for path in sorted(directory.glob("*.json")):
@@ -383,6 +386,10 @@ def rekey_from_missing(args: argparse.Namespace) -> int:
                 for path, document, request in cassettes
                 if path not in used
                 and conversation_identity(request) == conversation_identity(trace)
+                # A recording of an event stream cannot answer a request that
+                # asked for a JSON body, or the other way round: the client
+                # would receive a body it cannot parse.
+                and answers_a_stream(document) == is_streaming(trace)
             ]
             if not matches:
                 print(
@@ -435,6 +442,57 @@ def conversation_identity(request: dict) -> str:
         sort_keys=True,
         ensure_ascii=False,
     )
+
+
+def is_streaming(request: dict) -> bool:
+    """Whether the request asks for an event stream.
+
+    Absent and `false` are the same thing: the non-streaming path in
+    `api_client` does not write the field at all.
+    """
+    return request.get("stream") is True
+
+
+def answers_a_stream(cassette: dict) -> bool:
+    """Whether the recording holds an event stream rather than a JSON body."""
+    responses = cassette.get("responses") or []
+    for response in responses:
+        content_type = response.get("content_type") if isinstance(response, dict) else None
+        if isinstance(content_type, str) and "event-stream" in content_type:
+            return True
+    return False
+
+
+def drop_stream_fallbacks(traces: list[tuple[Path, dict]]) -> list[tuple[Path, dict]]:
+    """Remove the non-streaming retry that a missed stream produces.
+
+    `engine::send_request_streaming` retries the same turn without streaming
+    when the stream yields nothing usable — and a replayed request that misses
+    yields exactly that. The retry carries the same messages and system prompt
+    as the request that missed, so the two traces look like one conversation
+    asking for two recordings; the recording set only ever holds the streaming
+    one, because the fallback never happened when the cassettes were recorded.
+    Rekeying both would make each pass rename the same recording to the other
+    key, which is why the earlier runs reported 50, 49, 48 and never reached
+    zero.
+    """
+    streaming = {
+        conversation_identity(trace)
+        for _, trace in traces
+        if is_streaming(trace)
+    }
+    kept = []
+    for path, trace in traces:
+        if not is_streaming(trace) and conversation_identity(trace) in streaming:
+            print(
+                f"note: {path.name} is the non-streaming retry of a request that "
+                f"already has a trace; dropping it",
+                file=sys.stderr,
+            )
+            path.unlink()
+            continue
+        kept.append((path, trace))
+    return kept
 
 
 def rekey(args: argparse.Namespace) -> int:

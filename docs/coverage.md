@@ -6,9 +6,8 @@ Code coverage is measured with [`cargo-llvm-cov`]. Run:
 scripts/coverage.sh
 ```
 
-The script runs `cargo llvm-cov --workspace --no-fail-fast --lcov` and writes
-three artifacts under `target/coverage/` (or the directory passed as the last
-argument):
+The script runs `cargo llvm-cov` over the workspace and writes three artifacts
+under `target/coverage/` (or the directory passed as the last argument):
 
 - `lcov.info` — raw line coverage.
 - `coverage.tsv` — per-crate hit/total lines.
@@ -16,6 +15,15 @@ argument):
 
 `scripts/coverage.sh --summary-only` regenerates the tables from an existing
 `lcov.info` without rerunning the suite.
+
+The tests run through `cargo llvm-cov nextest` when `cargo-nextest` is
+installed, and fall back to `cargo test` otherwise. This is not cosmetic:
+nextest gives every test binary a process group of its own, while `cargo test`
+runs all of them inside one group shared with the caller. A test that signals a
+child's process group, or that replaces `PATH` for the whole process, is
+confined to its own binary under nextest; under `cargo test` it can reach the
+rest of the run. CI installs nextest for this job so coverage measures the same
+suite, under the same isolation, as the `Test` job.
 
 Test-only code under `crates/*/tests/`, `benches/` and `examples/` is excluded
 from the denominator. Unit-test code inside `src/` is still instrumented (and
@@ -40,42 +48,42 @@ CI runs the same script on every push and pull request (job `Coverage`):
 Update the baseline below whenever the figure moves, so the delta on the next
 pull request is meaningful.
 
-## Baseline — 2026-10-27
+## Baseline — 2026-11-07
 
-Workspace total: **110,490 / 127,015 lines = 87.0%**.
+Workspace total: **120,008 / 137,361 lines = 87.4%**.
 
 | crate | lines hit | lines | coverage |
 |---|---:|---:|---:|
-| agents | 2354 | 2605 | 90.4% |
-| artifacts | 3115 | 3426 | 90.9% |
-| bridge | 4811 | 5149 | 93.4% |
-| cli | 15225 | 20978 | 72.6% |
-| commands | 3969 | 4494 | 88.3% |
-| config | 2680 | 2924 | 91.7% |
-| core | 23009 | 25725 | 89.4% |
-| events | 980 | 1061 | 92.4% |
-| hooks | 3696 | 3945 | 93.7% |
-| insights | 793 | 824 | 96.2% |
-| mcp | 7921 | 9040 | 87.6% |
-| memory | 3863 | 4092 | 94.4% |
+| agents | 2352 | 2600 | 90.5% |
+| artifacts | 3116 | 3426 | 91.0% |
+| bridge | 5098 | 5514 | 92.5% |
+| cli | 17086 | 23068 | 74.1% |
+| commands | 3992 | 4473 | 89.2% |
+| config | 2602 | 2816 | 92.4% |
+| core | 25891 | 28858 | 89.7% |
+| events | 980 | 1060 | 92.5% |
+| hooks | 3800 | 4124 | 92.1% |
+| insights | 794 | 825 | 96.2% |
+| mcp | 8179 | 9277 | 88.2% |
+| memory | 4133 | 4391 | 94.1% |
 | mods | 3147 | 3465 | 90.8% |
-| other (evals and root sources) | 1209 | 1498 | 80.7% |
-| plugins | 7611 | 8867 | 85.8% |
-| server | 1559 | 1831 | 85.1% |
-| telemetry | 4079 | 4314 | 94.6% |
-| test-utils | 263 | 528 | 49.8% |
-| tools | 11383 | 12799 | 88.9% |
-| ui | 6774 | 7258 | 93.3% |
-| workflow | 2049 | 2192 | 93.5% |
+| other (evals and root sources) | 1212 | 1500 | 80.8% |
+| plugins | 8765 | 10090 | 86.9% |
+| server | 2168 | 2538 | 85.4% |
+| telemetry | 4094 | 4322 | 94.7% |
+| test-utils | 431 | 713 | 60.4% |
+| tools | 13232 | 14755 | 89.7% |
+| ui | 6887 | 7355 | 93.6% |
+| workflow | 2049 | 2191 | 93.5% |
 
 Below target at baseline:
 
-- **`cli` 72.6%.** Two test-support binaries counted in the crate
+- **`cli` 74.1%.** Two test-support binaries counted in the crate
   (`mock_anthropic_server.rs`, `static_anthropic_server.rs`) have no coverage of
-  their own; excluding them raises the crate to 78.1%. The remaining gap is
-  concentrated in `repl.rs` (72.2%), `orchestrator.rs` (76.9%),
-  `interactive_e2e.rs` (68.6%) and `tmux.rs` (74.2%).
-- **`test-utils` 49.8%.** Test infrastructure rather than product code; it is
+  their own; excluding them raises the crate further. The remaining gap is
+  concentrated in `repl.rs`, `orchestrator.rs`, `interactive_e2e.rs` and
+  `tmux.rs`.
+- **`test-utils` 60.4%.** Test infrastructure rather than product code; it is
   exercised indirectly by the suites that use it, which line coverage of its
   own tests does not measure.
 
