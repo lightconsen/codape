@@ -544,17 +544,23 @@ jobs:
   # replaced by the new attempt, so the required checks end up reporting the
   # retry's result.
   #
-  # The job *conclusion* is `failure`, not `cancelled` — nextest exits non-zero
-  # after the signal, so the step fails and the job reports the usual red. The
-  # distinguishing marker is in the log, and it is unambiguous:
+  # The *job* conclusion is `failure`, not `cancelled` — nextest exits non-zero
+  # after the signal, so the job reports the usual red. But the *step* conclusion
+  # is still `cancelled`: the runner marks the step it killed explicitly before
+  # the job-level failure swallows the distinction. That is the marker this job
+  # reads, and it is the only one available — the log cannot be used.
   #
-  #   "warning: N/M tests were not run due to signal"
+  # Downloading the failed job's log does not work from here. This job is in the
+  # same run, so the run is still `in_progress` while it executes, and the
+  # per-job log endpoint answers 404 until the run completes. (The first version
+  # of this job tried exactly that and every run reported "no log to inspect".)
+  # Reading the log afterwards is too late to start a retry.
   #
-  # appears only when nextest was cut off, and in that case the log contains no
-  # `FAIL [` line at all (the four tests are reported as `SIGTERM`, not `FAIL`).
-  # A genuine red run has `FAIL [` lines and no "not run due to signal" line.
-  # The step below refuses to retry unless the first is present and the second
-  # is absent, so a real failure stays red.
+  # So the rule is: a `Test`/`Coverage` job whose conclusion is `failure` while
+  # the step that runs the tests is `cancelled` (or still `in_progress`, which is
+  # what the 50-minute hangs leave behind) was cut off by the runner, not failed
+  # by a test. A genuine red run leaves that step `failure` with `FAIL [` lines
+  # in its log. Retry only the first; a real failure stays red.
   rerun-cancelled:
     name: Re-run cancelled tests
     needs: [test, coverage]
@@ -597,28 +603,37 @@ jobs:
 
           cut_off=false
           for job in Test Coverage; do
-            if [[ "$job" == "Test" && "${{ needs.test.result }}" != "failure" ]]; then continue; fi
-            if [[ "$job" == "Coverage" && "${{ needs.coverage.result }}" != "failure" ]]; then continue; fi
+            case "$job" in
+              Test)     result='${{ needs.test.result }}' ;;
+              Coverage) result='${{ needs.coverage.result }}' ;;
+            esac
+            [[ "$result" == "failure" ]] || continue
+
             id=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
-              --jq ".jobs[]|select(.name==\"$job\")|.id" 2>/dev/null | head -1)
-            log="/tmp/$job.log"
-            if [[ -z "$id" ]] || ! gh api "repos/${{ github.repository }}/actions/jobs/$id/logs" > "$log" 2>/dev/null; then
-              echo "$job: no log to inspect; not retrying" >&2
+              --jq ".jobs[]|select(.name==\"$job\")|.id" | head -1)
+            if [[ -z "$id" ]]; then
+              echo "$job: job id not found; not retrying" >&2
               continue
             fi
-            # ANSI colours would break the markers; strip them first.
-            sed -i 's/\x1b\[[0-9;]*m//g' "$log"
-            signalled=false; failed_test=false
-            grep -q 'tests were not run due to signal' "$log" && signalled=true
-            grep -qE '\bFAIL \[' "$log" && failed_test=true
-            echo "$job: signalled=$signalled failing_test=$failed_test"
-            if [[ "$signalled" == "true" && "$failed_test" == "false" ]]; then
+
+            # A runner shutdown marks the step it killed `cancelled`, or leaves it
+            # `in_progress` when the log never made it out at all (the 50-minute
+            # hangs). A test that actually fails marks its step `failure`. Read
+            # the step conclusions — the job log is not downloadable from inside
+            # the same run.
+            verdict=$(gh api "repos/${{ github.repository }}/actions/jobs/$id" \
+              --jq '[.steps[] | (.conclusion // .status)] as $c
+                    | if ($c | index("failure")) then "failed"
+                      elif ($c | any(. == "cancelled" or . == "in_progress")) then "cut-off"
+                      else "inconclusive" end')
+            echo "$job: ${verdict:-unreadable}"
+            if [[ "$verdict" == "cut-off" ]]; then
               cut_off=true
             fi
           done
 
           if [[ "$cut_off" != "true" ]]; then
-            echo "::warning::Test/Coverage failed without the issue #25 signal marker; this is a real failure and is not re-run."
+            echo "::warning::Test/Coverage failed with a failed step, not a cancelled one; this is a real failure and is not re-run."
             exit 0
           fi
           echo "Retrying run ${{ github.run_id }} (attempt ${{ github.run_attempt }})"
