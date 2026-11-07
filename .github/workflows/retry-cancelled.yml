@@ -102,10 +102,12 @@ jobs:
             real_fail=false
             grep -qE '^ *FAIL +\[' "$log.clean" && real_fail=true
 
-            # The step conclusion separates the two cases on its own: the runner
-            # marks a step it killed `cancelled`, and leaves it `in_progress`
-            # when the log never made it out at all (the 50-minute hangs). A step
-            # that genuinely failed is `failure`.
+            # The step conclusion is a poor signal on its own. A step that the
+            # runner killed reports `failure` when its script exits non-zero on
+            # the signal (Coverage exits 143 this way) and `cancelled` when it
+            # does not (Test). Only the log can tell the two apart, so the log
+            # markers decide and the conclusion is used only when the log is
+            # silent about both.
             verdict=$(gh api "repos/$REPO/actions/jobs/$id" \
               --jq '[.steps[] | (.conclusion // .status)] as $c
                     | if ($c | index("failure")) then "failed"
@@ -114,9 +116,13 @@ jobs:
 
             echo "$name: verdict=${verdict:-unreadable} shutdown=$shutdown nextest_signal=$nextest_signal real_fail=$real_fail"
 
-            if [[ "$real_fail" == "true" || "$verdict" == "failed" ]]; then
+            if [[ "$real_fail" == "true" ]]; then
               failed=true
-            elif [[ "$verdict" == "cut-off" && ( "$shutdown" == "true" || "$nextest_signal" == "true" ) ]]; then
+            elif [[ "$shutdown" == "true" || "$nextest_signal" == "true" ]]; then
+              cut_off=true
+            elif [[ "$verdict" == "failed" ]]; then
+              failed=true
+            elif [[ "$verdict" == "cut-off" ]]; then
               cut_off=true
             else
               unreadable=true
