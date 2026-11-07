@@ -30,6 +30,13 @@ pub const TERM_GRACE: Duration = Duration::from_secs(1);
 ///
 /// The child becomes the leader, so its pid is also the group id that
 /// [`terminate_group`] signals. No-op on platforms without process groups.
+// Windows has no process groups to set, so the stub neither mutates its
+// argument nor does anything `const` cannot express — both lints only fire on
+// that build. The signature has to stay the same on every platform.
+#[cfg_attr(
+    not(unix),
+    allow(clippy::missing_const_for_fn, clippy::needless_pass_by_ref_mut)
+)]
 pub fn isolate(cmd: &mut tokio::process::Command) {
     #[cfg(unix)]
     cmd.process_group(0);
@@ -93,7 +100,10 @@ pub fn group_exists(pid: u32) -> bool {
     }
 }
 
+// Windows kills the tree with `taskkill /T`, so there is no group to probe.
+// The body is a constant, which clippy would prefer spelled `const fn`.
 #[cfg(not(unix))]
+#[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 pub fn group_exists(_pid: u32) -> bool {
     true
 }
