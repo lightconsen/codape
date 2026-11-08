@@ -104,28 +104,58 @@ jobs:
           failed=false
           unreadable=false
 
+          list=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name=="Test" or .name=="Coverage")
+                  | select(.conclusion=="failure") | "\(.id) \(.name)"') || {
+            echo "::warning::Could not list the jobs of run $RUN_ID; not retrying."
+            exit 0
+          }
+          if [[ -z "$list" ]]; then
+            # Only reachable if the run failed without either job failing, so
+            # there is nothing here for this workflow to do. A failed listing
+            # is caught above: it must not look like this, because then a
+            # transient API error would read as "nothing to retry".
+            echo "No failed Test/Coverage job to re-run."
+            exit 0
+          fi
+
+          # Fetch every log before classifying any of them, because the blob is
+          # not readable in the second the run finishes. Run 42438743045
+          # answered 404 to this workflow about ten seconds after it reported
+          # `completed`, and served the same log fine four minutes later. So
+          # poll, and keep the error instead of sending it to /dev/null: an
+          # earlier version hid that 404 and it took two CI runs to work out
+          # whether the cause was latency or permissions.
+          #
+          # One backoff shared by the whole set, not one per job: when both
+          # `Test` and `Coverage` are cut off, a per-job wait would take twice
+          # as long as the blob actually needs.
+          declare -A ready=()
+          for delay in 0 30 60 75 90; do
+            sleep "$delay"
+            pending=false
+            while read -r id name; do
+              [[ -n "$id" && -z "${ready[$id]:-}" ]] || continue
+              log="/tmp/$name.log"
+              if gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>"/tmp/$name.err" \
+                 && [[ -s "$log" ]]; then
+                ready[$id]=1
+              else
+                pending=true
+                echo "$name: log not available yet: $(head -1 "/tmp/$name.err" 2>/dev/null)"
+              fi
+            done <<< "$list"
+            [[ "$pending" == "true" ]] || break
+          done
+
           while read -r id name; do
             [[ -n "$id" ]] || continue
-
-            log="/tmp/$name.log"
-            # The run just completed, and its log blob is not always readable
-            # yet: run 42437872050 answered 404 from inside this workflow and
-            # served the same log fine a minute later. Four attempts over about
-            # 45 seconds, because a single try turns a race into "could not
-            # classify" and the retry silently never happens.
-            got_log=false
-            for delay in 0 5 15 25; do
-              sleep "$delay"
-              if gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>/dev/null && [[ -s "$log" ]]; then
-                got_log=true
-                break
-              fi
-            done
-            if [[ "$got_log" != "true" ]]; then
-              echo "$name: log unavailable after 4 attempts" >&2
+            if [[ -z "${ready[$id]:-}" ]]; then
+              echo "$name: log still unavailable after 5 attempts (~4 min)"
               unreadable=true
               continue
             fi
+            log="/tmp/$name.log"
 
             # Strip the timestamp and the ANSI colours so the markers match
             # whatever the terminal settings were.
@@ -187,9 +217,7 @@ jobs:
             else
               unreadable=true
             fi
-          done < <(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-            --jq '.jobs[] | select(.name=="Test" or .name=="Coverage")
-                  | select(.conclusion=="failure") | "\(.id) \(.name)"' 2>/dev/null)
+          done <<< "$list"
 
           # A real failure anywhere wins over a cut-off elsewhere. Retrying a run
           # that also contains a genuine red would give that red a second chance.
