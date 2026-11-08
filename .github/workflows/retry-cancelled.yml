@@ -1,0 +1,257 @@
+name: Retry cancelled tests
+
+# `Test` and `Coverage` are occasionally ended by the hosted runner rather than
+# by a test: the job receives a shutdown signal and nextest reports
+# "Cancelling due to signal" a few hundredths of a second into a `nextest`
+# call. It happens on `main` as well, and the same commit has both passed and
+# failed, so it is not a regression in the change under test. See issue #25.
+#
+# A retry loop inside the job cannot help: the signal reaches the shell as
+# well, so the loop dies with the step (verified — a wrapper takes SIGTERM and
+# exits 143 without reaching its second iteration). The retry has to be a new
+# attempt of the whole run, which is what `rerun-failed-jobs` creates.
+#
+# That call cannot come from inside `CI`. It answers
+#
+#   403 "This workflow is already running"
+#
+# for any run that has not finished, and a job in `CI` is by definition running
+# while `CI` is. Nor can such a job read the failed job's log: the log endpoints
+# 404 until the run completes. `workflow_run` is the way out — it fires only
+# once the watched run has finished, so both the log and the retry are
+# available.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  retry:
+    name: Re-run cut-off tests
+    # A run triggered by a schedule is left alone, and there is nothing to
+    # re-run on a green run.
+    #
+    # `workflow_run` starts this with the *default branch's* workflow file and a
+    # repository-scoped token, regardless of which branch the triggering run
+    # came from. That is why the fork check below is not optional: without it a
+    # run proposed from a fork would get this repository's write token to ask
+    # GitHub to re-execute its own code, which is the classic `workflow_run`
+    # privilege escalation. Same-origin pull requests and pushes are fine.
+    #
+    # The check lives in the step rather than in `if:` because the payload's
+    # `pull_requests` array is empty for some events, and indexing it in an
+    # expression would make the whole job silently skip.
+    # Only `failure`. A run that ends `cancelled` is a different thing: in
+    # 42391025553 attempt 2 every test step was `skipped` and the log carried no
+    # signal marker at all, because the run was stopped before the tests began
+    # (a superseding push, or a manual rerun hitting the concurrency rule).
+    # Re-running that would be busywork; the branch's next push starts a fresh
+    # run anyway.
+    if: >-
+      github.event.workflow_run.event != 'schedule'
+      && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      REPO: ${{ github.repository }}
+    steps:
+      # This step must not exit non-zero on any path it takes deliberately. A
+      # red step here cannot re-run itself (this is a separate workflow, so
+      # `rerun-failed-jobs` on `CI` cannot reach it), but it would bury the
+      # reason under a failure badge. Every path prints and stops instead.
+      - name: Retry only if a test job was cut off
+        run: |
+          set -uo pipefail
+
+          # Refuse to spend this repository's write token on a fork's code. The
+          # payload's `pull_requests` array is empty for some events, so the
+          # branch name is read from the run itself as a fallback.
+          if [[ "${{ github.event.workflow_run.event }}" == "pull_request" ]]; then
+            head_repo=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+              --jq '.head_repository.full_name // ""') || head_repo=""
+            if [[ -z "$head_repo" ]]; then
+              echo "::warning::Could not read the source repository of run $RUN_ID; not retrying."
+              exit 0
+            fi
+            if [[ "$head_repo" != "$REPO" ]]; then
+              echo "::warning::Run $RUN_ID came from $head_repo; a fork's run is not re-run automatically."
+              exit 0
+            fi
+          fi
+
+          # A second attempt that lands on the same infrastructure is not worth a
+          # third. The retry below shares the original's attempt counter, so an
+          # attempt of 2 or more means we already tried.
+          attempt=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .run_attempt) || attempt=""
+          if [[ -z "$attempt" ]]; then
+            echo "::warning::Could not read run $RUN_ID; not retrying."
+            exit 0
+          fi
+          echo "run $RUN_ID attempt $attempt"
+          if (( attempt >= 2 )); then
+            echo "::warning::Attempt $attempt was cut off too. Not retrying; see issue #25."
+            exit 0
+          fi
+
+          cut_off=false
+          failed=false
+          unreadable=false
+
+          list=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+            --jq '.jobs[] | select(.name=="Test" or .name=="Coverage")
+                  | select(.conclusion=="failure") | "\(.id) \(.name)"') || {
+            echo "::warning::Could not list the jobs of run $RUN_ID; not retrying."
+            exit 0
+          }
+          if [[ -z "$list" ]]; then
+            # Only reachable if the run failed without either job failing, so
+            # there is nothing here for this workflow to do. A failed listing
+            # is caught above: it must not look like this, because then a
+            # transient API error would read as "nothing to retry".
+            echo "No failed Test/Coverage job to re-run."
+            exit 0
+          fi
+
+          # Fetch every log before classifying any of them.
+          #
+          # `gh` refuses to print a job log that contains ANSI colour codes
+          # unless it is told to:
+          #
+          #   the response contains terminal escape sequences; pass
+          #   --allow-escape-sequences to output it anyway
+          #
+          # and CI logs do contain them, so the fetch failed every time. Three
+          # earlier versions read that failure as "the blob is not readable
+          # yet" and added backoff — four minutes of waiting for an error that
+          # never changes. It was not latency, and not permissions.
+          #
+          # The flag is not on every gh (2.90 rejects `--allow-escape-sequences`
+          # as an unknown flag), so probe once instead of assuming: on a gh that
+          # lacks it the log comes through without the flag, and on one that has
+          # it the flag is required. Getting this wrong either way is silent.
+          escape_flag=()
+          if gh api --allow-escape-sequences --method GET \
+               "repos/$REPO/actions/runs/$RUN_ID" > /dev/null 2>&1; then
+            escape_flag=(--allow-escape-sequences)
+          fi
+          echo "gh escape-sequence flag: ${escape_flag[*]:-unsupported}"
+
+          # "Which logs are in hand" is tracked with a marker file per job
+          # rather than an associative array: `declare -A` needs bash 4, and
+          # running this locally on macOS bash 3.2 fails on it, which makes the
+          # step untestable off the runner for no gain.
+          rm -f /tmp/*.ready
+          for delay in 0 15 30; do
+            sleep "$delay"
+            pending=false
+            while read -r id name; do
+              [[ -n "$id" ]] || continue
+              [[ -f "/tmp/$name.ready" ]] && continue
+              log="/tmp/$name.log"
+              if gh api ${escape_flag[@]+"${escape_flag[@]}"} \
+                   "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>"/tmp/$name.err" \
+                 && [[ -s "$log" ]]; then
+                : > "/tmp/$name.ready"
+              else
+                pending=true
+                echo "$name: log not available yet: $(head -1 "/tmp/$name.err" 2>/dev/null)"
+              fi
+            done <<< "$list"
+            [[ "$pending" == "true" ]] || break
+          done
+
+          while read -r id name; do
+            [[ -n "$id" ]] || continue
+            if [[ ! -f "/tmp/$name.ready" ]]; then
+              echo "$name: log still unavailable after 3 attempts"
+              unreadable=true
+              continue
+            fi
+            log="/tmp/$name.log"
+
+            # Strip the timestamp and the ANSI colours so the markers match
+            # whatever the terminal settings were.
+            esc=$(printf '\033')
+            sed -e 's/^[0-9T:.Z-]* //' -e "s/${esc}\[[0-9;]*m//g" "$log" > "$log.clean"
+
+            # The runner's own message is the decisive marker: only a shutdown
+            # produces it. nextest's "tests were not run due to signal" follows
+            # from the same event and is kept as a second witness.
+            shutdown=false
+            nextest_signal=false
+            grep -q 'runner has received a shutdown signal' "$log.clean" && shutdown=true
+            grep -q 'tests were not run due to signal' "$log.clean" && nextest_signal=true
+
+            # A third shape: the runner is killed mid-`cargo build`, before any
+            # test starts. Run 42388431081 attempt 2 is exactly that — the log
+            # stops mid-token at "Compiling coder", 64 KB against a normal
+            # 800 KB, with no ending and no shutdown message, because the process
+            # writing the log went away with everything else. Nothing in the text
+            # says "cut off" and the step still concludes `failure`, so without
+            # this check a size-truncated log would read as a genuine failure.
+            truncated=false
+            if [[ "$(wc -c < "$log")" -lt 200000 ]] \
+               && ! grep -q 'Cleaning up orphan processes' "$log.clean" \
+               && ! grep -qE 'Complete job' "$log.clean"; then
+              truncated=true
+            fi
+
+            # A test that actually failed prints a `FAIL [ ... ]` line. A cut-off
+            # run does not: its killed tests are reported as `SIGTERM`, and they
+            # are counted in the summary's `failed` total, so the summary line
+            # must NOT be used as the marker — a cut-off log says
+            # "422 passed, 2 failed" too.
+            real_fail=false
+            grep -qE '^ *FAIL +\[' "$log.clean" && real_fail=true
+
+            # The step conclusion is a poor signal on its own. A step that the
+            # runner killed reports `failure` when its script exits non-zero on
+            # the signal (Coverage exits 143 this way) and `cancelled` when it
+            # does not (Test). Only the log can tell the two apart, so the log
+            # markers decide and the conclusion is used only when the log is
+            # silent about both.
+            verdict=$(gh api "repos/$REPO/actions/jobs/$id" \
+              --jq '[.steps[] | (.conclusion // .status)] as $c
+                    | if ($c | index("failure")) then "failed"
+                      elif ($c | any(. == "cancelled" or . == "in_progress")) then "cut-off"
+                      else "inconclusive" end') || verdict=""
+
+            echo "$name: verdict=${verdict:-unreadable} shutdown=$shutdown nextest_signal=$nextest_signal real_fail=$real_fail truncated=$truncated"
+
+            if [[ "$real_fail" == "true" ]]; then
+              failed=true
+            elif [[ "$shutdown" == "true" || "$nextest_signal" == "true" || "$truncated" == "true" ]]; then
+              cut_off=true
+            elif [[ "$verdict" == "failed" ]]; then
+              failed=true
+            elif [[ "$verdict" == "cut-off" ]]; then
+              cut_off=true
+            else
+              unreadable=true
+            fi
+          done <<< "$list"
+
+          # A real failure anywhere wins over a cut-off elsewhere. Retrying a run
+          # that also contains a genuine red would give that red a second chance.
+          if [[ "$failed" == "true" ]]; then
+            echo "::warning::A Test/Coverage step genuinely failed; not re-run. See the job log."
+            exit 0
+          fi
+          if [[ "$cut_off" != "true" ]]; then
+            if [[ "$unreadable" == "true" ]]; then
+              echo "::warning::Could not classify a failed Test/Coverage job; not retrying."
+            else
+              echo "No failed Test/Coverage job to re-run."
+            fi
+            exit 0
+          fi
+
+          echo "Re-running failed jobs of run $RUN_ID"
+          gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
