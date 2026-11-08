@@ -889,10 +889,7 @@ async fn signal(pid: u32, group: bool) -> bool {
         #[allow(unsafe_code)]
         let own_group = unsafe { libc::getpgrp() };
         if u32::try_from(own_group).is_ok_and(|own| own == pid) {
-            tracing::warn!(
-                pid,
-                "refusing to signal the caller's own process group"
-            );
+            tracing::warn!(pid, "refusing to signal the caller's own process group");
             return false;
         }
     }
@@ -3191,7 +3188,11 @@ printf 'ECHO:%s\n' "$line""#;
         // this records the request; if the guard works, nothing is recorded
         // and the assertion below is what catches a regression. Running the
         // real `kill -TERM -<our group>` would end this test run.
-        std::fs::write(&kill, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+        std::fs::write(
+            &kill,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3238,7 +3239,11 @@ printf 'ECHO:%s\n' "$line""#;
         let fake = tmp.path().join("bin");
         std::fs::create_dir_all(&fake).unwrap();
         let kill = fake.join("kill");
-        std::fs::write(&kill, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+        std::fs::write(
+            &kill,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3260,7 +3265,9 @@ printf 'ECHO:%s\n' "$line""#;
 
         let recorded = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(
-            recorded.lines().any(|line| line == format!("-TERM {own_group}")),
+            recorded
+                .lines()
+                .any(|line| line == format!("-TERM {own_group}")),
             "a pid request must reach kill as a plain pid, got: {recorded:?}"
         );
     }
