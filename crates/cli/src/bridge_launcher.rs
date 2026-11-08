@@ -3118,14 +3118,16 @@ printf 'ECHO:%s\n' "$line""#;
         let kill = fake.join("kill");
         std::fs::write(
             &kill,
-            // Records the request, then runs the real `kill`: other tests in
-            // this process resolve `kill` from PATH too (`process_is_alive`),
-            // and a stand-in that swallowed the call would make them see a
-            // live process that is gone.
-            format!(
-                "#!/bin/sh\necho \"$@\" >> {}\nexec /bin/kill \"$@\"\n",
-                log.display()
-            ),
+            // Records the request and does *not* run the real `kill`. This
+            // test only asserts the request; delivering it is what
+            // `shutdown_terminates_the_child_gracefully` covers. Exec-ing
+            // `/bin/kill -TERM -<pid>` sends a real signal to a real group
+            // from inside the test binary, and when that pid is stale and has
+            // been reused, the group it names is the one this process is in:
+            // nextest sees the binary abort with SIGTERM and reports the whole
+            // run as cancelled. That is issue #25's shape, reproduced from
+            // inside the suite.
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
         )
         .unwrap();
         {
