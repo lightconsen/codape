@@ -617,7 +617,23 @@ jobs:
         run: scripts/race-soak.sh 5000
       - name: Symlink/rename churn (four processes)
         run: scripts/race-soak-multi.sh 4 5000 2
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `uses: taiki-e/install-action@cargo-fuzz` never installed anything.
+      # `cargo-fuzz` is a repository *branch*, not a published tag, and the
+      # action's `tool` input defaults to a placeholder (`# default:
+      # #publish:tool`) that only the release process rewrites into a tool
+      # name. On the branch it is still the placeholder, so `INPUT_TOOL` was
+      # empty: the step warned "no tool specified" and exited 0 in 13 ms, and
+      # `scripts/fuzz.sh` then failed with "cargo-fuzz is not installed".
+      #
+      # Reaching for `tool: cargo-fuzz` on `@v2` is not a fix either. The
+      # action only falls back to `cargo-binstall` for a tool it does not
+      # know, and `cargo-fuzz` publishes prebuilt tarballs with no binstall
+      # metadata in its manifest to point at them, so the fallback has nothing
+      # to resolve. `cargo install` is what the tool's own error message
+      # suggests, and the nightly toolchain this job already installs is the
+      # one `scripts/fuzz.sh` compiles the targets with.
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
       - name: Fuzz the parsers
         run: scripts/fuzz.sh 120
       - name: Upload soak and fuzz reports
