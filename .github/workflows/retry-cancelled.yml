@@ -108,8 +108,21 @@ jobs:
             [[ -n "$id" ]] || continue
 
             log="/tmp/$name.log"
-            if ! gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>/dev/null || [[ ! -s "$log" ]]; then
-              echo "$name: log unavailable" >&2
+            # The run just completed, and its log blob is not always readable
+            # yet: run 42437872050 answered 404 from inside this workflow and
+            # served the same log fine a minute later. Four attempts over about
+            # 45 seconds, because a single try turns a race into "could not
+            # classify" and the retry silently never happens.
+            got_log=false
+            for delay in 0 5 15 25; do
+              sleep "$delay"
+              if gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>/dev/null && [[ -s "$log" ]]; then
+                got_log=true
+                break
+              fi
+            done
+            if [[ "$got_log" != "true" ]]; then
+              echo "$name: log unavailable after 4 attempts" >&2
               unreadable=true
               continue
             fi
