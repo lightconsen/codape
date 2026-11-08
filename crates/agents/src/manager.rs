@@ -664,6 +664,10 @@ pub struct AgentManager {
     /// Durable records for background agents this manager has already
     /// written. Kept so `Drop` can settle work the process is abandoning.
     background_jobs: Vec<(JobStore, String)>,
+    /// Identifies this manager among any others in the same process. Task ids
+    /// restart at `task_0` for every manager, so this is what keeps two
+    /// sessions' agents from landing on the same output path.
+    artifact_namespace: u64,
 }
 
 impl std::fmt::Debug for AgentManager {
@@ -695,7 +699,16 @@ impl AgentManager {
             hooks: None,
             test_mode: false,
             background_jobs: Vec::new(),
+            artifact_namespace: Self::next_artifact_namespace(),
         }
+    }
+
+    /// Hand out a distinct namespace per manager. Combined with the pid at the
+    /// call site, this makes the temp artifact directory unique to one manager
+    /// in one process.
+    fn next_artifact_namespace() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Create a new AgentManager with its own internal task manager.
@@ -982,10 +995,21 @@ impl AgentManager {
         // unless the caller explicitly chose a working directory override.
         // When isolation created a worktree (itself a checkout) the artifacts
         // go to the temp directory so they do not pollute that checkout.
+        //
+        // Task ids restart at `task_0` for every manager, and managers restart
+        // at nothing in every process, so the temp directory carries both the
+        // pid and this manager's own namespace: two sessions running at once
+        // would otherwise both write `agent-task_0-output.txt` and one would
+        // read the other's output and fork metadata — and in tests every
+        // spawning test collided this way. A caller-supplied `cwd` already
+        // isolates itself and is left alone, which keeps the artifact next to
+        // the work.
         let output_file = match (&worktree_path, &options.cwd) {
             (None, Some(dir)) => dir.join(format!("agent-{task_id}-output.txt")),
             _ => std::env::temp_dir()
                 .join("coderex-agents")
+                .join(std::process::id().to_string())
+                .join(self.artifact_namespace.to_string())
                 .join(format!("agent-{task_id}-output.txt")),
         };
 
@@ -2650,6 +2674,56 @@ mod tests {
         let ctx = instance.context.as_ref().unwrap();
         assert_eq!(ctx.parent_session_id, "sess_1");
         assert_eq!(ctx.allowed_tools, vec!["Read", "Bash"]);
+    }
+
+    /// Two managers number their tasks independently, so both hand out
+    /// `task_0`. Their output files must still land in different places: a
+    /// shared path let one agent read another's output and fork metadata, and
+    /// this is exactly what made `child_request_carries_the_parent_prefix`
+    /// fail once in a while when the whole test binary ran in parallel.
+    #[tokio::test]
+    async fn agents_with_the_same_task_id_do_not_share_an_output_file() {
+        let mut first = make_manager();
+        let mut second = make_manager();
+
+        let a = first
+            .spawn_agent(
+                AgentType::GeneralPurpose,
+                "first",
+                SpawnOptions::default(),
+                "sess_a",
+                "/tmp/does-not-matter",
+                0,
+            )
+            .await
+            .unwrap()
+            .output_file
+            .clone()
+            .expect("output file");
+        let b = second
+            .spawn_agent(
+                AgentType::GeneralPurpose,
+                "second",
+                SpawnOptions::default(),
+                "sess_b",
+                "/tmp/does-not-matter",
+                0,
+            )
+            .await
+            .unwrap()
+            .output_file
+            .clone()
+            .expect("output file");
+
+        assert_eq!(
+            a.file_name(),
+            b.file_name(),
+            "both managers should still number from task_0; the file name is not what separates them"
+        );
+        assert_ne!(
+            a, b,
+            "two agents with the same task id must not share one output path"
+        );
     }
 
     #[tokio::test]
