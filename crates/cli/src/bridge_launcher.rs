@@ -870,10 +870,31 @@ async fn terminate_child(
 /// request would end the job. A session child always has a real pid, so 0 here
 /// can only come from a spawn that failed strangely, not from a session to
 /// stop.
+///
+/// A group request for the caller's own group is refused for the same reason.
+/// `-<pid>` names a *group*, not a process, so if the recorded pid happens to
+/// equal the id of the group this process is in, the call signals everything
+/// in it. That is not a hypothetical: `cargo nextest` gives each test binary
+/// its own group, so the binary is the group leader and its pgid is its own
+/// pid; killing that group takes down every test running in the binary at
+/// once and nextest reports them all as `SIGTERM`. [`super::process_tree`]'s
+/// `signs_a_target` already carries this guard; this fn did not.
 #[cfg(unix)]
 async fn signal(pid: u32, group: bool) -> bool {
     if pid <= 1 {
         return false;
+    }
+    if group {
+        // SAFETY: `getpgrp` only reads process state.
+        #[allow(unsafe_code)]
+        let own_group = unsafe { libc::getpgrp() };
+        if u32::try_from(own_group).is_ok_and(|own| own == pid) {
+            tracing::warn!(
+                pid,
+                "refusing to signal the caller's own process group"
+            );
+            return false;
+        }
     }
     let target = if group {
         format!("-{pid}")
@@ -3139,6 +3160,108 @@ printf 'ECHO:%s\n' "$line""#;
         assert!(
             recorded.lines().any(|line| line == format!("-TERM -{pid}")),
             "expected the group to be signalled, kill was asked for: {recorded:?}"
+        );
+    }
+
+    /// A group request that names the caller's own group is refused before
+    /// `kill` runs.
+    ///
+    /// `kill -TERM -<pid>` signals a group, not a process. If the recorded pid
+    /// is the id of the group this process is in, the call takes down the
+    /// caller along with everything else in that group. Under `cargo nextest`
+    /// each test binary leads its own group, so its pgid *is* its pid, and a
+    /// stray group kill ends the binary and every test running inside it —
+    /// nextest reports them all as `SIGTERM`, which is the shape issue #25
+    /// keeps producing. The guard is the whole point of this test, so it
+    /// asserts that no `kill` ran at all rather than that one ran and failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(unsafe_code)] // PATH mutation and `getpgrp` are unsafe in edition 2024; ENV_LOCK guards the mutation.
+    #[allow(clippy::await_holding_lock)] // ENV_LOCK serialises PATH mutation; held across the await on purpose.
+    async fn a_group_request_for_our_own_group_is_refused() {
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("kill.log");
+        let fake = tmp.path().join("bin");
+        std::fs::create_dir_all(&fake).unwrap();
+        let kill = fake.join("kill");
+        // Deliberately does *not* exec the real kill. If the guard is missing,
+        // this records the request; if the guard works, nothing is recorded
+        // and the assertion below is what catches a regression. Running the
+        // real `kill -TERM -<our group>` would end this test run.
+        std::fs::write(&kill, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // SAFETY: `getpgrp` only reads process state.
+        let own_group = u32::try_from(unsafe { libc::getpgrp() }).unwrap();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: ENV_LOCK above keeps every other environment-touching test
+        // out for the duration.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{original_path}", fake.display()));
+        }
+        let delivered = signal(own_group, true).await;
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+
+        assert!(
+            !delivered,
+            "a group request for the caller's own group must report no delivery"
+        );
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            recorded.is_empty(),
+            "kill must not run for the caller's own group, it was asked for: {recorded:?}"
+        );
+    }
+
+    /// The same pid as a *process* is still signalled; the guard rejects only
+    /// group requests, which is what keeps it from turning a legitimate stop
+    /// into a silent no-op.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(unsafe_code)] // PATH mutation and `getpgrp` are unsafe in edition 2024; ENV_LOCK guards the mutation.
+    #[allow(clippy::await_holding_lock)] // ENV_LOCK serialises PATH mutation; held across the await on purpose.
+    async fn a_process_request_for_our_own_pid_is_not_refused() {
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("kill.log");
+        let fake = tmp.path().join("bin");
+        std::fs::create_dir_all(&fake).unwrap();
+        let kill = fake.join("kill");
+        std::fs::write(&kill, format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // SAFETY: `getpgrp` only reads process state.
+        let own_group = u32::try_from(unsafe { libc::getpgrp() }).unwrap();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        // SAFETY: ENV_LOCK above keeps every other environment-touching test
+        // out for the duration.
+        unsafe {
+            std::env::set_var("PATH", format!("{}:{original_path}", fake.display()));
+        }
+        let _ = signal(own_group, false).await;
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            recorded.lines().any(|line| line == format!("-TERM {own_group}")),
+            "a pid request must reach kill as a plain pid, got: {recorded:?}"
         );
     }
 
