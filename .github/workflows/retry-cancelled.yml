@@ -119,31 +119,44 @@ jobs:
             exit 0
           fi
 
-          # Fetch every log before classifying any of them, because the blob is
-          # not readable in the second the run finishes. Run 42438743045
-          # answered 404 to this workflow about ten seconds after it reported
-          # `completed`, and served the same log fine four minutes later. So
-          # poll, and keep the error instead of sending it to /dev/null: an
-          # earlier version hid that 404 and it took two CI runs to work out
-          # whether the cause was latency or permissions.
+          # Fetch every log before classifying any of them.
           #
-          # One backoff shared by the whole set, not one per job: when both
-          # `Test` and `Coverage` are cut off, a per-job wait would take twice
-          # as long as the blob actually needs.
+          # `gh` refuses to print a job log that contains ANSI colour codes
+          # unless it is told to:
           #
+          #   the response contains terminal escape sequences; pass
+          #   --allow-escape-sequences to output it anyway
+          #
+          # and CI logs do contain them, so the fetch failed every time. Three
+          # earlier versions read that failure as "the blob is not readable
+          # yet" and added backoff — four minutes of waiting for an error that
+          # never changes. It was not latency, and not permissions.
+          #
+          # The flag is not on every gh (2.90 rejects `--allow-escape-sequences`
+          # as an unknown flag), so probe once instead of assuming: on a gh that
+          # lacks it the log comes through without the flag, and on one that has
+          # it the flag is required. Getting this wrong either way is silent.
+          escape_flag=()
+          if gh api --allow-escape-sequences --method GET \
+               "repos/$REPO/actions/runs/$RUN_ID" > /dev/null 2>&1; then
+            escape_flag=(--allow-escape-sequences)
+          fi
+          echo "gh escape-sequence flag: ${escape_flag[*]:-unsupported}"
+
           # "Which logs are in hand" is tracked with a marker file per job
           # rather than an associative array: `declare -A` needs bash 4, and
           # running this locally on macOS bash 3.2 fails on it, which makes the
           # step untestable off the runner for no gain.
           rm -f /tmp/*.ready
-          for delay in 0 30 60 75 90; do
+          for delay in 0 15 30; do
             sleep "$delay"
             pending=false
             while read -r id name; do
               [[ -n "$id" ]] || continue
               [[ -f "/tmp/$name.ready" ]] && continue
               log="/tmp/$name.log"
-              if gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>"/tmp/$name.err" \
+              if gh api ${escape_flag[@]+"${escape_flag[@]}"} \
+                   "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>"/tmp/$name.err" \
                  && [[ -s "$log" ]]; then
                 : > "/tmp/$name.ready"
               else
@@ -157,7 +170,7 @@ jobs:
           while read -r id name; do
             [[ -n "$id" ]] || continue
             if [[ ! -f "/tmp/$name.ready" ]]; then
-              echo "$name: log still unavailable after 5 attempts (~4 min)"
+              echo "$name: log still unavailable after 3 attempts"
               unreadable=true
               continue
             fi
