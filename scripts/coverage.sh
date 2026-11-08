@@ -32,6 +32,12 @@ if [[ "$summary_only" == false ]]; then
     # not a concurrency limit; splitting the call is what completes. Both halves
     # run the whole suite exactly once (3967 + 718 = 4685).
     #
+    # The split does not remove that class of failure, it only moves where it
+    # lands: the second call can be cancelled the same way (runner shutdown
+    # signal, 0.05-0.07s after "Starting 718 tests", index 13-16). That is a
+    # hosted-runner problem on `main` too, tracked in issue #25, not a result of
+    # these tests — do not read a cancelled run here as a coverage regression.
+    #
     # `llvm-cov` merges every profile under the target directory when the report
     # is generated, so each call runs with `--no-report` and the report is
     # produced once at the end. Generating it per call would export only that

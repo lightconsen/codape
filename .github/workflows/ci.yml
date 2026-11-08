@@ -148,6 +148,17 @@ jobs:
       #
       # `--no-fail-fast` reports every failing test binary instead of stopping
       # at the first failure; one red run should name all of them.
+      #
+      # This split does NOT make the SIGTERM class of failure go away. The
+      # earlier fingerprint (index 424 of one 125-binary call) is gone, but the
+      # same shape now lands on this second call: the runner receives a shutdown
+      # signal and nextest reports "Cancelling due to signal" 0.05-0.07s after
+      # "Starting 718 tests across 64 binaries", always at index 13-16, always
+      # the same four `bridge_launcher` tests. It happens on `main` too, and the
+      # same commit has both passed and failed, so it is not a test's fault.
+      # See issue #25. `rerun-cancelled` below re-runs the job when this
+      # happens; do not treat a cut-off `Test`/`Coverage` as a regression
+      # signal.
       - name: Test (everything but coderex-cli)
         run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(coderex-cli)'
       - name: Test (coderex-cli)
