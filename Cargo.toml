@@ -117,7 +117,7 @@ base64 = "0.22"
 
 # Cryptography & hashing
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 aes-gcm = "0.10"
 hkdf = "0.12"
 hex = "0.4"
