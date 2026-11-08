@@ -249,6 +249,28 @@ jobs:
             echo "=== strace: signal sends from traced processes ==="
             grep -E '(kill|tgkill|tkill)\(' /tmp/strace.log 2>/dev/null | head -40 \
               || echo "(none)"
+            # A signal that reaches the step shell, nextest and the runner at
+            # the same instant did not come from a descendant: `cargo nextest`
+            # gives every test binary its own process group, so the worst a
+            # test can do is end its own binary. That leaves something above
+            # the step, and the one thing that both explains the blast radius
+            # and would fire exactly when 64 test binaries start at once is
+            # memory pressure. These files are the record of it, and unlike
+            # strace they are written by the kernel, so they survive the
+            # processes that read them.
+            echo "=== memory ==="
+            free -m 2>/dev/null || true
+            for f in /sys/fs/cgroup/memory.current \
+                     /sys/fs/cgroup/memory.peak \
+                     /sys/fs/cgroup/memory.max \
+                     /sys/fs/cgroup/memory.events \
+                     /sys/fs/cgroup/memory.events.local \
+                     /sys/fs/cgroup/memory.swap.current; do
+              [ -r "$f" ] && echo "$f: $(cat "$f" 2>/dev/null | tr '\n' ' ')"
+            done
+            echo "=== kernel log: oom / kill ==="
+            sudo dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -20 \
+              || echo "(no oom entries, or dmesg not readable)"
           }
           trap dump EXIT
           # A job-level cancellation runs EXIT but not `Post Run` steps, so the
