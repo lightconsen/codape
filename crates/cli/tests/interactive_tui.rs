@@ -1829,6 +1829,43 @@ fn assert_screen_order(screen: &str, needles: &[&str]) {
     }
 }
 
+/// Poll until `needles` appear on screen in that order.
+///
+/// Waiting on a word the edit *adds* is not enough when the word was already
+/// on screen before the edit: `dd` and `p` move a line rather than introduce
+/// one, so `wait_for_text("one")` returned the pre-edit screen and the order
+/// assertion ran before the redraw. Under load — 16 concurrent PTY sessions
+/// reproduces it every time — the redraw lands after that check. The ordering
+/// is the thing the motion is supposed to produce, so wait for it directly.
+fn wait_for_screen_order(session: &PtySession, needles: &[&str], timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let screen = session.screen_text();
+        if screen_has_order(&screen, needles) {
+            return screen;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {:?} in order\n--- screen ---\n{}\n--- raw ---\n{}",
+            needles,
+            screen,
+            session.raw_text()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn screen_has_order(screen: &str, needles: &[&str]) -> bool {
+    let mut position = 0;
+    for needle in needles {
+        let Some(found) = screen[position..].find(needle) else {
+            return false;
+        };
+        position += found + needle.len();
+    }
+    true
+}
+
 /// `o` and `O` create lines on either side of the cursor; the buffer renders
 /// them in order and Enter submits the whole multi-line prompt.
 #[test]
@@ -1885,10 +1922,10 @@ fn vim_dd_and_p_move_a_line() {
     thread::sleep(Duration::from_millis(150));
     session.send_text("p");
 
-    // "one" disappears with `dd` and only comes back with `p`; waiting for it
-    // (rather than for "three", which is already on screen) proves the paste
-    // was rendered.
-    let screen = session.wait_for_text("one", SCREEN_TIMEOUT);
+    // "one" disappears with `dd` and only comes back with `p`, but it was on
+    // screen before the edit too, so its presence proves nothing on its own.
+    // The order is what `dd` + `p` produces; wait for that.
+    let screen = wait_for_screen_order(&session, &["two", "one", "three"], SCREEN_TIMEOUT);
     drop(session);
     assert_screen_order(&screen, &["two", "one", "three"]);
 }
