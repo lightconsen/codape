@@ -188,11 +188,7 @@ jobs:
       # `retry-cancelled.yml` re-runs the job when it happens; do not read a
       # cut-off `Test`/`Coverage` as a regression signal.
       - name: Test (coderex-cli)
-        # Issue #25 forensic run: this call is cut off 57-187 ms after it starts
-        # testing, every time, while the 3968-test call above never is. Run the
-        # tests one at a time to separate "the cut is about concurrency" from
-        # "the cut is about this command starting at all".
-        run: cargo nextest run -p coderex-cli --no-fail-fast --locked --test-threads 1
+        run: cargo nextest run -p coderex-cli --no-fail-fast --locked
 
   # `cargo nextest` does not run doctests, and a `cargo test` in another job
   # would run them only incidentally. A doc example that stops compiling is a
