@@ -161,159 +161,34 @@ jobs:
       # signal.
       - name: Test (everything but coderex-cli)
         run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(coderex-cli)'
-      # DIAGNOSTIC PROBE — temporary, remove once issue #25 is answered.
+      # Issue #25: this call is cancelled 50-70 ms after it starts, always, and
+      # the probe that ran here on 2026-11-08 established who does it.
       #
-      # Shape of the failure, measured rather than guessed:
+      # The step shell wrapped this call, recorded its own pid/pgid/sid, and
+      # trapped SIGTERM. It was hit every time, alongside nextest and the
+      # runner agent -- the signal lands on the whole step, not on one process.
+      # `cargo nextest` gives each test binary its own process group, so no
+      # descendant can reach the shell that spawned nextest; the
+      # `bridge_launcher` tests that signal process groups are not involved,
+      # and there is no `killall`/`pkill`/negative-group `kill` in the
+      # repository. It is not memory: 14 GB of 16 GB was free with swap
+      # untouched and no oom entry in `dmesg` when it happened.
       #
-      #   * Cancellation lands 52-66 ms after "Starting 718 tests across 64
-      #     binaries", always at indices 13-16, always the same four
-      #     `bridge_launcher` tests. Test and Coverage both do it, on
-      #     different machines, about two minutes apart within one run.
-      #   * The offset from *job start* is not merely noisy, it is unrelated:
-      #     262 s, 840 s, 286 s for the three most recent runs. So this is not
-      #     a runner quota, a job timeout, or anything scheduled from outside.
-      #     The trigger is anchored to this nextest invocation.
-      #   * A run-level cancel is ruled out by Test and Coverage dying ~2 min
-      #     apart, each 62 ms after its *own* second call.
-      #   * nextest prints "Cancelling due to signal" before its own SIGTERM
-      #     result lines, and two of the four caught tests have no child
-      #     process and no signal code at all — the tests are receivers.
-      #   * The runner logs "received a shutdown signal" 3-11 ms *after*
-      #     nextest reports the cancellation, i.e. both processes were hit
-      #     essentially at once.
+      # The timing is anchored to this call, not to the job: 262 s, 840 s and
+      # 286 s from job start across three runs, but 52-66 ms from
+      # "Starting N tests" every time, on different VMs. The first call above
+      # (`--workspace`, 3968 tests, 25 s) has never once been cut off. The
+      # index is not special either -- adding two tests moved it from 13-16 to
+      # 14-17, so it is "whichever tests are in flight at t+62 ms".
       #
-      # That last point is the fork in the road and the only thing this probe
-      # has to settle: did the step shell receive SIGTERM too?
-      #
-      #   * Shell got it, alongside nextest and the runner -> the signal went
-      #     to a group, session, or cgroup above all of them. The sender is
-      #     outside this step (runner/platform side), and no code change here
-      #     can prevent it.
-      #   * Shell did not, only nextest and the runner did -> the sender is a
-      #     descendant of the step, and the `bridge_launcher` tests that create
-      #     process groups are back on the table as the source.
-      #
-      # Process groups and sessions do not change during a run, so this does
-      # not need to catch the exact millisecond; it samples continuously and
-      # records the step shell's own pid/pgid/sid first, as the reference
-      # point every sample is compared against.
-      #
-      # Earlier drafts of this probe were defeated by two details, both fixed
-      # here: a background subshell writing to a pipe is block-buffered, so the
-      # last ~4 KB vanished exactly when SIGTERM landed (every sample now goes
-      # to a file with `>>`, which is durable immediately), and a probe step
-      # guarded by `if: always()` never runs at all, because a job-level
-      # cancellation skips `Post Run` steps too.
-      #
-      # If this comes back inconclusive, the next instrument is
-      # `strace -f -e trace=signal` around the nextest call, which reports the
-      # sender pid in `si_pid` directly. It is held in reserve because it slows
-      # the run and may stop a timing-sensitive failure from reproducing.
-      #
-      # The exit status is passed through unchanged, so the step still fails
-      # exactly as before.
+      # `strace -e trace=signal` could not name the sender: strace sits inside
+      # the same blast radius and died before it could flush, which is itself
+      # the signature of a group-, session- or cgroup-wide signal. The sender
+      # is outside this repository, so no change here can prevent it.
+      # `retry-cancelled.yml` re-runs the job when it happens; do not read a
+      # cut-off `Test`/`Coverage` as a regression signal.
       - name: Test (coderex-cli)
-        run: |
-          set +e
-
-          log=/tmp/probe.log
-          : > "$log"
-          # The TERM handler both dumps and exits, and `exit` runs the EXIT
-          # trap as well, so without this guard the whole dump prints twice
-          # and the second copy buries the first under 120 lines of process
-          # table.
-          dumped=0
-
-          dump() {
-            # Command substitution runs in a subshell, and a subshell inherits
-            # the EXIT trap with its own copy of `dumped` still at 0. Without
-            # this, every `$(...)` in the script fires its own dump -- three
-            # copies of the whole report, two of them from subshells that
-            # never saw the signal. `$$` is the main shell's pid in both, so
-            # `$BASHPID` is what distinguishes them.
-            [ "$$" = "$BASHPID" ] || return 0
-            [ "$dumped" = 0 ] || return 0
-            dumped=1
-            echo "=== process tree at step start ==="
-            cat /tmp/tree.txt 2>/dev/null | head -60
-            echo "=== what the step shell recorded ==="
-            cat "$log" 2>/dev/null
-            # Delivery lines look like
-            #   `1234 12:00:00.123 --- SIGTERM {si_signo=SIGTERM, ...} ---`
-            # and carry `si_pid`, the sender. Matching the bare word SIGTERM
-            # also catches `rt_sigaction(SIGTERM, ...)`, which most programs
-            # call during setup and which says nothing about delivery.
-            echo "=== strace: signals delivered (si_pid names the sender) ==="
-            grep -E -- '--- SI[A-Z]+ \{si_signo=' /tmp/strace.log 2>/dev/null | head -40 \
-              || echo "(no signal delivered to a traced process)"
-            echo "=== strace: signal sends from traced processes ==="
-            grep -E '(kill|tgkill|tkill)\(' /tmp/strace.log 2>/dev/null | head -40 \
-              || echo "(none)"
-            # A signal that reaches the step shell, nextest and the runner at
-            # the same instant did not come from a descendant: `cargo nextest`
-            # gives every test binary its own process group, so the worst a
-            # test can do is end its own binary. That leaves something above
-            # the step, and the one thing that both explains the blast radius
-            # and would fire exactly when 64 test binaries start at once is
-            # memory pressure. These files are the record of it, and unlike
-            # strace they are written by the kernel, so they survive the
-            # processes that read them.
-            echo "=== memory ==="
-            free -m 2>/dev/null || true
-            for f in /sys/fs/cgroup/memory.current \
-                     /sys/fs/cgroup/memory.peak \
-                     /sys/fs/cgroup/memory.max \
-                     /sys/fs/cgroup/memory.events \
-                     /sys/fs/cgroup/memory.events.local \
-                     /sys/fs/cgroup/memory.swap.current; do
-              [ -r "$f" ] && echo "$f: $(cat "$f" 2>/dev/null | tr '\n' ' ')"
-            done
-            echo "=== kernel log: oom / kill ==="
-            sudo dmesg 2>/dev/null | grep -iE 'oom|killed process|out of memory' | tail -20 \
-              || echo "(no oom entries, or dmesg not readable)"
-          }
-          trap dump EXIT
-          # A job-level cancellation runs EXIT but not `Post Run` steps, so the
-          # dump has to happen on the way out rather than in a later step. The
-          # marker line is the whole point: if the shell itself was hit, the
-          # signal was aimed at a group containing it. SIGHUP is trapped too
-          # because the runner sends HUP on some cancellation paths; an
-          # untrapped HUP kills the shell before it can write anything.
-          trap 'echo "!!! step shell received SIGTERM" >> "$log"; dump; exit 143' TERM
-          trap 'echo "!!! step shell received SIGHUP" >> "$log"; dump; exit 129' HUP
-
-          echo "step shell pid=$$ ppid=$PPID pgid=$(ps -o pgid= -p $$ | tr -d ' ') sid=$(ps -o sid= -p $$ | tr -d ' ')" | tee "$log"
-          ps -eo pid,ppid,pgid,sid,comm,args --sort=pid > /tmp/tree.txt 2>/dev/null
-
-          # `strace -f -e trace=signal` prints `si_pid` for every signal a
-          # traced process receives, which names the sender instead of leaving
-          # it to be inferred from process groups. It is preinstalled on the
-          # hosted image; the install is only a fallback and is allowed to
-          # fail, because a missing ptrace must not turn into a missing test
-          # run.
-          command -v strace >/dev/null 2>&1 \
-            || sudo apt-get install -y -qq --no-install-recommends strace >/dev/null 2>&1
-
-          if command -v strace >/dev/null 2>&1; then
-            echo "running under strace"
-            strace -f -tt -s 0 -e trace=signal -o /tmp/strace.log -- \
-              cargo nextest run -p coderex-cli --no-fail-fast --locked
-            status=$?
-            if [ "$status" = 1 ] && [ ! -s /tmp/strace.log ]; then
-              # strace itself failed (ptrace refused, or a bad option): rerun
-              # untraced so the job still reports whatever nextest says.
-              echo "strace produced nothing; rerunning untraced"
-              cargo nextest run -p coderex-cli --no-fail-fast --locked
-              status=$?
-            fi
-          else
-            echo "strace unavailable; running untraced"
-            cargo nextest run -p coderex-cli --no-fail-fast --locked
-            status=$?
-          fi
-
-          echo "nextest exited with $status" | tee -a "$log"
-          exit "$status"
+        run: cargo nextest run -p coderex-cli --no-fail-fast --locked
 
   # `cargo nextest` does not run doctests, and a `cargo test` in another job
   # would run them only incidentally. A doc example that stops compiling is a
