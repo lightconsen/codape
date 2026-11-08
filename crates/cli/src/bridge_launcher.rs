@@ -315,7 +315,7 @@ impl SessionRunner for ProcessSessionRunner {
         // Spawn inside a process tree and register it with the bridge, so the
         // cleanup that runs when the session ends terminates the child (and
         // anything it started) instead of an empty map.
-        let (child, _tree) = spawn_registered_child(
+        let (child, tree) = spawn_registered_child(
             &mut command,
             context.session_id,
             context.process_registry.as_ref(),
@@ -336,9 +336,12 @@ impl SessionRunner for ProcessSessionRunner {
             decisions,
             stop,
             self.grace,
-            // `spawn_registered_child` put the child in its own process group
-            // (`ProcessTree::prepare`), so a stop can reach its children too.
-            true,
+            // Only a child that went through `ProcessTree::prepare` leads its
+            // own group, and that only happens when a registry was supplied.
+            // Without one the child stays in *our* group, so `kill -TERM -pid`
+            // would name a group that either does not exist or belongs to
+            // somebody else. Ask the spawn result instead of assuming.
+            tree.is_some(),
         )
         .await
     }
