@@ -130,16 +130,22 @@ jobs:
           # One backoff shared by the whole set, not one per job: when both
           # `Test` and `Coverage` are cut off, a per-job wait would take twice
           # as long as the blob actually needs.
-          declare -A ready=()
+          #
+          # "Which logs are in hand" is tracked with a marker file per job
+          # rather than an associative array: `declare -A` needs bash 4, and
+          # running this locally on macOS bash 3.2 fails on it, which makes the
+          # step untestable off the runner for no gain.
+          rm -f /tmp/*.ready
           for delay in 0 30 60 75 90; do
             sleep "$delay"
             pending=false
             while read -r id name; do
-              [[ -n "$id" && -z "${ready[$id]:-}" ]] || continue
+              [[ -n "$id" ]] || continue
+              [[ -f "/tmp/$name.ready" ]] && continue
               log="/tmp/$name.log"
               if gh api "repos/$REPO/actions/jobs/$id/logs" > "$log" 2>"/tmp/$name.err" \
                  && [[ -s "$log" ]]; then
-                ready[$id]=1
+                : > "/tmp/$name.ready"
               else
                 pending=true
                 echo "$name: log not available yet: $(head -1 "/tmp/$name.err" 2>/dev/null)"
@@ -150,7 +156,7 @@ jobs:
 
           while read -r id name; do
             [[ -n "$id" ]] || continue
-            if [[ -z "${ready[$id]:-}" ]]; then
+            if [[ ! -f "/tmp/$name.ready" ]]; then
               echo "$name: log still unavailable after 5 attempts (~4 min)"
               unreadable=true
               continue
