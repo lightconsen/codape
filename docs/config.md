@@ -109,6 +109,17 @@ so a session can override a globally exported Claude configuration:
 | Base URL | `CODAPE_BASE_URL` | `ANTHROPIC_BASE_URL` |
 | Model | `CODAPE_MODEL` | `ANTHROPIC_MODEL`, `OPENAI_MODEL` |
 | Request timeout | `CODAPE_REQUEST_TIMEOUT_SECS` (seconds) | `API_TIMEOUT_MS` (milliseconds, rounded up) |
+| Output ceiling | `CODAPE_MAX_TOKENS` | — |
+
+`CODAPE_MAX_TOKENS` sets the per-request output ceiling (`max_tokens`). Unset,
+blank, zero or non-numeric leaves the engine default (32 768). A value is
+clamped to half the model's context window, because a request carries
+`input + max_tokens` and one that cannot fit is rejected before compaction has
+anything to compact. Raising it beyond the compaction reserve also means a
+request sent at the compaction line can be rejected once, learned from, and
+retried after compacting — which is why this is opt-in. A named agent
+definition's `max_tokens` wins over it. See
+[`docs/compact.md`](compact.md).
 
 `settings.json` may also carry a Claude-compatible `env` object; it is applied
 to the process at startup, before providers, the model resolver and feature
