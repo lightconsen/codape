@@ -317,13 +317,13 @@ async fn handle(
     if mode == Mode::Replay {
         let message = format!(
             "llm-cassette: no recording for {method} {path} (key {key}). \
-             Run the suites with CODEREX_CASSETTE_MODE=record against a real endpoint first."
+             Run the suites with CODAPE_CASSETTE_MODE=record against a real endpoint first."
         );
         eprintln!("{message}");
         // Leave the unmatched request behind for inspection when tracing is
         // explicitly enabled. A normal replay run must not litter the tree
         // with `_missing_*.json`; optional follow-up requests are common.
-        if std::env::var_os("CODEREX_CASSETTE_TRACE").is_some() {
+        if std::env::var_os("CODAPE_CASSETTE_TRACE").is_some() {
             let missing = dir.join(format!("_missing_{key}.json"));
             let _ = std::fs::write(
                 missing,
@@ -538,7 +538,7 @@ fn strip_system_context(system: &serde_json::Value) -> serde_json::Value {
 /// backfill --digest`, in which case a mismatch is expected rather than a
 /// reason to refuse the recording.
 fn digest_backfill_enabled() -> bool {
-    std::env::var("CODEREX_CASSETTE_DIGEST_BACKFILL").is_ok_and(|value| {
+    std::env::var("CODAPE_CASSETTE_DIGEST_BACKFILL").is_ok_and(|value| {
         !matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "0" | "false" | "no"
@@ -670,13 +670,13 @@ async fn read_request(
 /// would fail and the recorded follow-up turns would no longer make sense. The
 /// test harness sends the child's working directory in `X-Cassette-Cwd`; every
 /// recorded temp directory in the answer is rewritten to it.
-/// Append a line to the file named by `CODEREX_CASSETTE_TRACE`, when set.
+/// Append a line to the file named by `CODAPE_CASSETTE_TRACE`, when set.
 ///
 /// The test harness captures the server's stderr, so this is the way to see
 /// what a suite actually asked for while debugging a replay mismatch.
 fn trace(line: &str) {
     use std::io::Write as _;
-    let Ok(path) = std::env::var("CODEREX_CASSETTE_TRACE") else {
+    let Ok(path) = std::env::var("CODAPE_CASSETTE_TRACE") else {
         return;
     };
     if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -1165,8 +1165,8 @@ mod tests {
     /// prompt must not look like a prompt change.
     #[test]
     fn the_system_digest_is_stable_across_temp_directories() {
-        let one = serde_json::json!("You are CodeRex in /tmp/.tmpAAA/workspace");
-        let two = serde_json::json!("You are CodeRex in /tmp/.tmpBBB/workspace");
+        let one = serde_json::json!("You are Codape in /tmp/.tmpAAA/workspace");
+        let two = serde_json::json!("You are Codape in /tmp/.tmpBBB/workspace");
         assert_eq!(system_digest(Some(&one)), system_digest(Some(&two)));
     }
 
@@ -1177,17 +1177,17 @@ mod tests {
     fn the_system_digest_ignores_the_working_tree_state() {
         let clean = serde_json::json!([{
             "type": "text",
-            "text": "You are CodeRex.\n\n## System Context\n\nCurrent branch: `main`\n\nGit status:\n```\n\n```\n"
+            "text": "You are Codape.\n\n## System Context\n\nCurrent branch: `main`\n\nGit status:\n```\n\n```\n"
         }]);
         let dirty = serde_json::json!([{
             "type": "text",
-            "text": "You are CodeRex.\n\n## System Context\n\nCurrent branch: `feature`\n\nGit status:\n```\nM src/lib.rs\n?? .coderex/\n```\n"
+            "text": "You are Codape.\n\n## System Context\n\nCurrent branch: `feature`\n\nGit status:\n```\nM src/lib.rs\n?? .codape/\n```\n"
         }]);
         assert_eq!(system_digest(Some(&clean)), system_digest(Some(&dirty)));
 
         let changed_instructions = serde_json::json!([{
             "type": "text",
-            "text": "You are CodeRex. Answer in French.\n\n## System Context\n\nCurrent branch: `main`\n"
+            "text": "You are Codape. Answer in French.\n\n## System Context\n\nCurrent branch: `main`\n"
         }]);
         assert_ne!(
             system_digest(Some(&clean)),
@@ -1209,8 +1209,8 @@ mod tests {
 
     #[test]
     fn a_changed_system_prompt_changes_the_digest() {
-        let one = serde_json::json!("You are CodeRex.");
-        let two = serde_json::json!("You are CodeRex. Always answer in French.");
+        let one = serde_json::json!("You are Codape.");
+        let two = serde_json::json!("You are Codape. Always answer in French.");
         assert_ne!(system_digest(Some(&one)), system_digest(Some(&two)));
     }
 

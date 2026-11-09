@@ -6,17 +6,17 @@ use crate::mcp_elicitation::SessionElicitationHandler;
 use crate::session_resume;
 use anyhow::{Context, Result, bail};
 #[cfg(feature = "enterprise")]
-use coderex_config::config_home;
-use coderex_config::{ConfigService, RuntimeOverrides, Settings};
+use codape_config::config_home;
+use codape_config::{ConfigService, RuntimeOverrides, Settings};
 #[cfg(feature = "enterprise")]
-use coderex_config::{
+use codape_config::{
     LoadingBarrier, RemoteManagedSettings, RemoteManagedSettingsClient, RemoteSettingsManager,
 };
-use coderex_core::api_client::{ApiClient, EffortClient, ReasoningEffort};
-use coderex_core::provider_config::ProviderConfig;
-use coderex_core::providers::cloud::{CloudEndpoint, ProviderKind};
-use coderex_core::query_profiles::ModelProfile;
-use coderex_core::types::ModelId;
+use codape_core::api_client::{ApiClient, EffortClient, ReasoningEffort};
+use codape_core::provider_config::ProviderConfig;
+use codape_core::providers::cloud::{CloudEndpoint, ProviderKind};
+use codape_core::query_profiles::ModelProfile;
+use codape_core::types::ModelId;
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,7 +37,7 @@ pub struct TelemetryUploaderGuard {
 
 impl TelemetryUploaderGuard {
     /// Spawn an uploader onto the current tokio runtime.
-    fn spawn(uploader: coderex_telemetry::TelemetryUploader) -> Self {
+    fn spawn(uploader: codape_telemetry::TelemetryUploader) -> Self {
         Self {
             handle: tokio::spawn(async move {
                 uploader.run().await;
@@ -70,14 +70,14 @@ impl Drop for TelemetryUploaderGuard {
 /// could not be uploaded in time.
 #[derive(Debug)]
 pub struct TelemetrySessionGuard {
-    handle: coderex_telemetry::TelemetryHandle,
+    handle: codape_telemetry::TelemetryHandle,
     session_id: String,
     started: Instant,
 }
 
 impl TelemetrySessionGuard {
     /// Record a session-start event with a fresh session id.
-    fn start(handle: coderex_telemetry::TelemetryHandle) -> Self {
+    fn start(handle: codape_telemetry::TelemetryHandle) -> Self {
         let session_id = uuid::Uuid::new_v4().to_string();
         handle.session_start(session_id.clone());
         Self {
@@ -103,7 +103,7 @@ const PLUGIN_CHANNEL_EVENT_LOG: usize = 64;
 ///
 /// A channel binds a plugin to a configured MCP server. The MCP manager routes
 /// every notification that server emits into
-/// [`PluginManager::route_channel_notification`](coderex_plugins::plugins::PluginManager::route_channel_notification),
+/// [`PluginManager::route_channel_notification`](codape_plugins::plugins::PluginManager::route_channel_notification),
 /// which fans it out to the sinks subscribed to the channel. This is the
 /// production sink: it records each delivery (bounded, oldest first out) and
 /// reports it through `tracing`, so a notification a channel's server emits is
@@ -113,12 +113,12 @@ const PLUGIN_CHANNEL_EVENT_LOG: usize = 64;
 #[derive(Debug)]
 struct PluginChannelSink {
     log: Arc<
-        std::sync::Mutex<std::collections::VecDeque<coderex_plugins::plugins::PluginChannelEvent>>,
+        std::sync::Mutex<std::collections::VecDeque<codape_plugins::plugins::PluginChannelEvent>>,
     >,
 }
 
-impl coderex_plugins::plugins::ChannelSink for PluginChannelSink {
-    fn deliver(&self, event: coderex_plugins::plugins::PluginChannelEvent) {
+impl codape_plugins::plugins::ChannelSink for PluginChannelSink {
+    fn deliver(&self, event: codape_plugins::plugins::PluginChannelEvent) {
         tracing::info!(
             channel = %event.channel,
             plugin = %event.plugin,
@@ -143,22 +143,22 @@ impl coderex_plugins::plugins::ChannelSink for PluginChannelSink {
 struct PluginChannelSubscriptions {
     /// The bounded log every channel writes to.
     log: Arc<
-        std::sync::Mutex<std::collections::VecDeque<coderex_plugins::plugins::PluginChannelEvent>>,
+        std::sync::Mutex<std::collections::VecDeque<codape_plugins::plugins::PluginChannelEvent>>,
     >,
     /// The webhook sink per channel that declared a delivery URL.
     webhooks: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::WebhookChannelSink>,
+        Arc<codape_plugins::channel_delivery::WebhookChannelSink>,
     )>,
     /// The tool sink per channel that declared a server and tool.
     tools: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
+        Arc<codape_plugins::channel_delivery::McpToolChannelSink>,
     )>,
     /// The command sink per channel that declared a command.
     commands: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::CommandChannelSink>,
+        Arc<codape_plugins::channel_delivery::CommandChannelSink>,
     )>,
 }
 
@@ -168,21 +168,21 @@ struct PluginChannelSubscriptions {
 /// this thin bridge: it resolves the tool's public name, calls it, and turns an
 /// `isError` result into the `Err` the sink counts.
 ///
-/// [`ToolCaller`]: coderex_plugins::channel_delivery::ToolCaller
+/// [`ToolCaller`]: codape_plugins::channel_delivery::ToolCaller
 #[derive(Debug)]
 struct McpChannelToolCaller {
-    manager: Arc<coderex_mcp::manager::McpManager>,
+    manager: Arc<codape_mcp::manager::McpManager>,
 }
 
 #[async_trait::async_trait]
-impl coderex_plugins::channel_delivery::ToolCaller for McpChannelToolCaller {
+impl codape_plugins::channel_delivery::ToolCaller for McpChannelToolCaller {
     async fn call_tool(
         &self,
         server: &str,
         tool: &str,
         input: serde_json::Value,
     ) -> Result<(), String> {
-        let name = coderex_mcp::proxy::qualified_tool_name(server, tool);
+        let name = codape_mcp::proxy::qualified_tool_name(server, tool);
         let proxy = self
             .manager
             .get_tool_proxy(&name)
@@ -222,7 +222,7 @@ pub struct SessionContext {
     pub mcp_ready: bool,
     /// Live MCP servers and their discovered tools, kept for the session so
     /// the tools can be registered into the tool registry.
-    pub mcp_manager: Option<Arc<coderex_mcp::manager::McpManager>>,
+    pub mcp_manager: Option<Arc<codape_mcp::manager::McpManager>>,
     /// Answers questions MCP servers ask of the user, kept for the session.
     pub mcp_elicitation: Option<Arc<SessionElicitationHandler>>,
     /// True for `--print`, a piped prompt, or any session without a terminal.
@@ -231,7 +231,7 @@ pub struct SessionContext {
     /// installed handler declines instead of reaching for stdin.
     pub non_interactive: bool,
     /// MCP-discovered skills registered during InitMcp.
-    pub mcp_skills: Vec<coderex_plugins::skills::SkillMetadata>,
+    pub mcp_skills: Vec<codape_plugins::skills::SkillMetadata>,
     /// Memory subsystem initialized.
     pub memory_ready: bool,
     /// Remote services initialized.
@@ -239,7 +239,7 @@ pub struct SessionContext {
     /// Working directory for the session.
     pub cwd: String,
     /// Plugin manager (initialized during InitPlugins).
-    pub plugin_manager: Option<Arc<coderex_plugins::plugins::PluginManager>>,
+    pub plugin_manager: Option<Arc<codape_plugins::plugins::PluginManager>>,
     /// Host `userConfig` values from the `plugins` settings key.
     pub plugin_settings: Option<serde_json::Value>,
     /// Where plugin `.d.ts` declarations were exported, when any were.
@@ -250,28 +250,28 @@ pub struct SessionContext {
     /// Bounded, oldest first out. Kept so a session can inspect what its
     /// channels actually delivered rather than only knowing a sink exists.
     pub plugin_channel_events: Arc<
-        std::sync::Mutex<std::collections::VecDeque<coderex_plugins::plugins::PluginChannelEvent>>,
+        std::sync::Mutex<std::collections::VecDeque<codape_plugins::plugins::PluginChannelEvent>>,
     >,
     /// Webhook sinks for channels that declared a `deliver.url`, with the
     /// counters each one keeps.
     pub plugin_channel_webhooks: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::WebhookChannelSink>,
+        Arc<codape_plugins::channel_delivery::WebhookChannelSink>,
     )>,
     /// Tool sinks for channels that declared `deliver.server` + `deliver.tool`.
     pub plugin_channel_tools: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::McpToolChannelSink>,
+        Arc<codape_plugins::channel_delivery::McpToolChannelSink>,
     )>,
     /// Command sinks for channels that declared `deliver.command`.
     pub plugin_channel_commands: Vec<(
         String,
-        Arc<coderex_plugins::channel_delivery::CommandChannelSink>,
+        Arc<codape_plugins::channel_delivery::CommandChannelSink>,
     )>,
     /// Marketplaces configured in settings.
-    pub marketplaces: Vec<coderex_config::MarketplaceSetting>,
+    pub marketplaces: Vec<codape_config::MarketplaceSetting>,
     /// Telemetry handle (initialized during LoadSettings).
-    pub telemetry_handle: Option<coderex_telemetry::TelemetryHandle>,
+    pub telemetry_handle: Option<codape_telemetry::TelemetryHandle>,
     /// Background uploader task, stopped when the session context is dropped.
     pub telemetry_uploader: Option<TelemetryUploaderGuard>,
     /// Session lifecycle guard (start/end events), dropped with the context.
@@ -421,17 +421,17 @@ fn schema_is_present(schema: &serde_json::Value) -> bool {
 /// The key is the trust anchor for plugin signatures, so it comes from the
 /// process environment — a source a repository cannot write — rather than from
 /// anything a plugin package carries.
-fn plugin_manager_with_signing_key() -> coderex_plugins::plugins::PluginManager {
-    let mut manager = coderex_plugins::plugins::PluginManager::new();
+fn plugin_manager_with_signing_key() -> codape_plugins::plugins::PluginManager {
+    let mut manager = codape_plugins::plugins::PluginManager::new();
     if manager.set_public_key_from_env() {
         tracing::info!(
             "plugin signature verification enabled from {}",
-            coderex_plugins::plugins::PLUGIN_PUBLIC_KEY_ENV
+            codape_plugins::plugins::PLUGIN_PUBLIC_KEY_ENV
         );
     } else {
         tracing::debug!(
             "no {} set — plugin signatures are not checked and installs are marked unverified",
-            coderex_plugins::plugins::PLUGIN_PUBLIC_KEY_ENV
+            codape_plugins::plugins::PLUGIN_PUBLIC_KEY_ENV
         );
     }
     manager
@@ -593,23 +593,23 @@ fn settings_with_every_key() -> Settings {
         permission_mode: Some(String::new()),
         max_budget_usd: Some(0.0),
         telemetry_enabled: Some(false),
-        telemetry: Some(coderex_config::settings::TelemetrySubConfig::default()),
+        telemetry: Some(codape_config::settings::TelemetrySubConfig::default()),
         hooks: Some(serde_json::Value::Null),
         mcp_servers: Some(serde_json::Value::Null),
         api_key: Some(String::new()),
-        provider: Some(coderex_config::ProviderSettings {
+        provider: Some(codape_config::ProviderSettings {
             base_url: Some(String::new()),
             request_timeout_secs: Some(1),
         }),
         env: Some(std::collections::BTreeMap::from([(
-            "CODEREX_MODEL".to_string(),
+            "CODAPE_MODEL".to_string(),
             "m".to_string(),
         )])),
-        context_window: Some(coderex_config::settings::ContextWindowSettings::default()),
+        context_window: Some(codape_config::settings::ContextWindowSettings::default()),
         vim_mode: Some(false),
-        statusline: Some(coderex_config::settings::StatuslineSettings::default()),
+        statusline: Some(codape_config::settings::StatuslineSettings::default()),
         prompt_caching: Some(false),
-        permissions: Some(coderex_config::PermissionsSettings::default()),
+        permissions: Some(codape_config::PermissionsSettings::default()),
         ..Settings::default()
     }
 }
@@ -643,18 +643,18 @@ fn mergeable_settings_keys() -> std::collections::HashSet<String> {
 ///
 /// The MCP crate does not depend on the plugin crate, so the two meet here:
 /// installed on the MCP manager through
-/// [`McpManager::set_notification_router`](coderex_mcp::manager::McpManager::set_notification_router),
+/// [`McpManager::set_notification_router`](codape_mcp::manager::McpManager::set_notification_router),
 /// this hands every notification a configured server emits to
-/// [`PluginManager::route_channel_notification`](coderex_plugins::plugins::PluginManager::route_channel_notification),
+/// [`PluginManager::route_channel_notification`](codape_plugins::plugins::PluginManager::route_channel_notification),
 /// which delivers it to the sinks subscribed to a channel bound to that
 /// server. Without it an MCP notification stops at the MCP manager and the
 /// channel layer never sees it.
 #[derive(Debug)]
 struct PluginChannelRouter {
-    manager: Arc<coderex_plugins::plugins::PluginManager>,
+    manager: Arc<codape_plugins::plugins::PluginManager>,
 }
 
-impl coderex_mcp::manager::ServerNotificationRouter for PluginChannelRouter {
+impl codape_mcp::manager::ServerNotificationRouter for PluginChannelRouter {
     fn route(&self, server: &str, method: &str, params: Option<&serde_json::Value>) {
         let delivered = self
             .manager
@@ -944,14 +944,14 @@ impl StartupOrchestrator {
             });
         }
 
-        tracing::info!("CodeRex ready");
+        tracing::info!("Codape ready");
 
-        // Determine model: CODEREX_MODEL / ANTHROPIC_MODEL / OPENAI_MODEL env
+        // Determine model: CODAPE_MODEL / ANTHROPIC_MODEL / OPENAI_MODEL env
         // → --model/settings → default. `fast_mode` only changes the default:
         // an explicitly configured model (`--model`, the model variables, or a
         // settings `model` value) always wins, so the flag is what you get
         // when nothing else chose one.
-        let explicit_model = std::env::var("CODEREX_MODEL")
+        let explicit_model = std::env::var("CODAPE_MODEL")
             .or_else(|_| std::env::var("ANTHROPIC_MODEL"))
             .or_else(|_| std::env::var("OPENAI_MODEL"))
             .ok()
@@ -963,7 +963,7 @@ impl StartupOrchestrator {
         // so it has to be folded in for `--betas +fast_mode` to mean anything.
         // A malformed list is the REPL's own `--betas` handling's problem; here
         // a failure just leaves the environment-provided flags in place.
-        let mut flags = coderex_config::flags::FeatureFlags::from_env();
+        let mut flags = codape_config::flags::FeatureFlags::from_env();
         if !args.betas.is_empty() {
             let _ = flags.apply_comma_list(&args.betas.join(","));
         }
@@ -1111,7 +1111,7 @@ impl StartupOrchestrator {
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_load_settings(&mut self, args: &Cli) -> Result<()> {
-        let config_dir = coderex_config::config_home();
+        let config_dir = codape_config::config_home();
 
         // Use custom settings path if --settings is provided
         let user_path = args
@@ -1125,7 +1125,7 @@ impl StartupOrchestrator {
         // The managed-settings file carrier (enterprise). Defaults to
         // <config_dir>/managed_settings.json; deployments can point it at an
         // admin-controlled location via the env var.
-        let managed_path = std::env::var("CODEREX_MANAGED_SETTINGS_PATH").map_or_else(
+        let managed_path = std::env::var("CODAPE_MANAGED_SETTINGS_PATH").map_or_else(
             |_| config_dir.join("managed_settings.json"),
             std::path::PathBuf::from,
         );
@@ -1139,11 +1139,11 @@ impl StartupOrchestrator {
             .with_platform_managed_settings();
         // Explicit environment overrides for the platform carriers exist for
         // deployments and tests that need a non-default location.
-        let config_service = match std::env::var("CODEREX_MANAGED_SETTINGS_PLIST_PATH") {
+        let config_service = match std::env::var("CODAPE_MANAGED_SETTINGS_PLIST_PATH") {
             Ok(path) => config_service.with_managed_settings_plist(path.into()),
             Err(_) => config_service,
         };
-        let config_service = match std::env::var("CODEREX_MANAGED_SETTINGS_REGISTRY_KEY") {
+        let config_service = match std::env::var("CODAPE_MANAGED_SETTINGS_REGISTRY_KEY") {
             Ok(key) => config_service.with_managed_settings_registry_key(key),
             Err(_) => config_service,
         };
@@ -1163,7 +1163,7 @@ impl StartupOrchestrator {
             settings.telemetry_enabled = Some(choice);
             // Persist the decision on its own. Writing the resolved
             // settings back would copy everything that went into resolving
-            // them — including whatever a project's `.coderex/settings.json`
+            // them — including whatever a project's `.codape/settings.json`
             // contributed, which the repository controls — into the
             // person's permanent settings as a side effect of answering a
             // question about telemetry.
@@ -1214,7 +1214,7 @@ impl StartupOrchestrator {
         tracing::info!(
             "settings loaded: model={}, effective_model={}",
             settings.model.as_deref().unwrap_or("default"),
-            std::env::var("CODEREX_MODEL")
+            std::env::var("CODAPE_MODEL")
                 .or_else(|_| std::env::var("ANTHROPIC_MODEL"))
                 .or_else(|_| std::env::var("OPENAI_MODEL"))
                 .ok()
@@ -1235,19 +1235,17 @@ impl StartupOrchestrator {
         // The panic hook is installed before settings are known, so it starts
         // inert and is enabled here. A user who never opted in must not have
         // crash files written on their behalf.
-        coderex_telemetry::set_capture_enabled(telemetry_enabled);
+        codape_telemetry::set_capture_enabled(telemetry_enabled);
         // Pending crash files written by an earlier (enabled) run are pruned
         // on every startup. The TTL used to be enforced only inside
         // `ingest_pending`, which the disabled path never reaches.
-        let pending_dir = coderex_config::config_home()
-            .join("crashes")
-            .join("pending");
+        let pending_dir = codape_config::config_home().join("crashes").join("pending");
         let cutoff = std::time::SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(
-                coderex_telemetry::DEFAULT_PENDING_MAX_AGE_SECS,
+                codape_telemetry::DEFAULT_PENDING_MAX_AGE_SECS,
             ))
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        match coderex_telemetry::prune_pending(&pending_dir, cutoff) {
+        match codape_telemetry::prune_pending(&pending_dir, cutoff) {
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "pruned expired pending crash reports"),
             Err(error) => tracing::warn!(
@@ -1275,25 +1273,25 @@ impl StartupOrchestrator {
     /// `TelemetryHandle::new` returns `None` for an opted-out configuration, so
     /// a disabled session has no task to start.
     fn spawn_telemetry_uploader(
-        uploader: Option<coderex_telemetry::TelemetryUploader>,
+        uploader: Option<codape_telemetry::TelemetryUploader>,
     ) -> Option<TelemetryUploaderGuard> {
         uploader.map(TelemetryUploaderGuard::spawn)
     }
 
     /// Build export-channel configuration from resolved settings, falling back
     /// to the environment for values the settings file does not set.
-    fn telemetry_channels(settings: &Settings) -> coderex_telemetry::ChannelConfig {
+    fn telemetry_channels(settings: &Settings) -> codape_telemetry::ChannelConfig {
         Self::apply_telemetry_channel_settings(
-            coderex_telemetry::ChannelConfig::from_env(),
+            codape_telemetry::ChannelConfig::from_env(),
             settings,
         )
     }
 
     /// Pure settings overlay for [`Self::telemetry_channels`].
     fn apply_telemetry_channel_settings(
-        mut channels: coderex_telemetry::ChannelConfig,
+        mut channels: codape_telemetry::ChannelConfig,
         settings: &Settings,
-    ) -> coderex_telemetry::ChannelConfig {
+    ) -> codape_telemetry::ChannelConfig {
         if let Some(telemetry) = &settings.telemetry {
             let set = |slot: &mut Option<String>, value: &Option<String>| {
                 if let Some(value) = value.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
@@ -1307,7 +1305,7 @@ impl StartupOrchestrator {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
-                channels.otlp_headers = coderex_telemetry::parse_otlp_headers(Some(headers));
+                channels.otlp_headers = codape_telemetry::parse_otlp_headers(Some(headers));
             }
             set(&mut channels.datadog_api_key, &telemetry.datadog_api_key);
             set(&mut channels.datadog_endpoint, &telemetry.datadog_endpoint);
@@ -1330,14 +1328,14 @@ impl StartupOrchestrator {
     fn init_telemetry(
         settings: &Settings,
     ) -> Option<(
-        coderex_telemetry::TelemetryHandle,
-        Option<coderex_telemetry::TelemetryUploader>,
+        codape_telemetry::TelemetryHandle,
+        Option<codape_telemetry::TelemetryUploader>,
     )> {
-        let config_home = coderex_config::config_home();
+        let config_home = codape_config::config_home();
         let db_path = config_home.join("telemetry.db");
         let pending_dir = config_home.join("crashes").join("pending");
 
-        let store = match coderex_telemetry::TelemetryStore::open(&db_path) {
+        let store = match codape_telemetry::TelemetryStore::open(&db_path) {
             Ok(store) => store,
             Err(e) => {
                 tracing::warn!("failed to open telemetry store: {e}");
@@ -1346,7 +1344,7 @@ impl StartupOrchestrator {
         };
 
         // Ingest crash reports from previous panics
-        let crash_reporter = coderex_telemetry::CrashReporter::new(pending_dir);
+        let crash_reporter = codape_telemetry::CrashReporter::new(pending_dir);
         match crash_reporter.ingest_pending(&store) {
             Ok(count) => {
                 if count > 0 {
@@ -1372,7 +1370,7 @@ impl StartupOrchestrator {
             .and_then(|telemetry| telemetry.endpoint.as_deref())
             .is_some_and(|endpoint| !endpoint.trim().is_empty());
         let has_destination = has_endpoint || channels.has_destination();
-        let (handle, uploader) = coderex_telemetry::TelemetryHandle::new(&store, telemetry_config);
+        let (handle, uploader) = codape_telemetry::TelemetryHandle::new(&store, telemetry_config);
         let uploader = uploader.map(|uploader| uploader.with_channels(channels));
         // Opting in without a destination keeps the data local instead of
         // posting to an endpoint the project does not operate.
@@ -1396,12 +1394,12 @@ impl StartupOrchestrator {
             return None;
         }
         eprintln!();
-        eprintln!("Help improve CodeRex by sending anonymous usage data?");
+        eprintln!("Help improve Codape by sending anonymous usage data?");
         eprintln!("  - No PII is collected");
         eprintln!(
             "  - Events are stored locally; they are uploaded only if you configure an endpoint"
         );
-        eprintln!("  - You can change this anytime in ~/.coderex/settings.json");
+        eprintln!("  - You can change this anytime in ~/.codape/settings.json");
         eprint!("Enable telemetry? [Y/n]: ");
 
         let mut input = String::new();
@@ -1427,7 +1425,7 @@ impl StartupOrchestrator {
             std::fs::create_dir_all(parent)?;
         }
         let document = serde_json::json!({
-            "config_version": coderex_config::settings::CURRENT_SCHEMA_VERSION,
+            "config_version": codape_config::settings::CURRENT_SCHEMA_VERSION,
             "telemetry_enabled": enabled,
         });
         let json = serde_json::to_string_pretty(&document).unwrap_or_default();
@@ -1443,8 +1441,8 @@ impl StartupOrchestrator {
         let _settings = self.ctx.settings.clone().unwrap_or_default();
 
         // Build remote settings client from environment / config
-        let base_url = std::env::var("CODEREX_REMOTE_SETTINGS_URL").unwrap_or_default();
-        let api_key = std::env::var("CODEREX_REMOTE_API_KEY").unwrap_or_default();
+        let base_url = std::env::var("CODAPE_REMOTE_SETTINGS_URL").unwrap_or_default();
+        let api_key = std::env::var("CODAPE_REMOTE_API_KEY").unwrap_or_default();
 
         let mgr = RemoteSettingsManager::new(
             base_url,
@@ -1468,13 +1466,13 @@ impl StartupOrchestrator {
             match barrier_result {
                 Ok(state) => {
                     match state {
-                        coderex_config::FetchState::Ready {
+                        codape_config::FetchState::Ready {
                             settings: remote, ..
                         } => {
                             tracing::info!("remote settings applied");
                             self.ctx.remote_settings = Some(remote);
                         }
-                        coderex_config::FetchState::Failed { error, .. } => {
+                        codape_config::FetchState::Failed { error, .. } => {
                             tracing::warn!("remote settings fetch failed (failing open): {error}");
                         }
                         _ => {
@@ -1536,12 +1534,12 @@ impl StartupOrchestrator {
         Ok(())
     }
 
-    /// LoadCommands: discover and register custom commands from `.coderex/commands/`.
+    /// LoadCommands: discover and register custom commands from `.codape/commands/`.
     // Retained `async`: the startup/dispatch pipeline awaits these on the current
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_load_commands(&self) -> Result<()> {
-        let commands_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex/commands");
+        let commands_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/commands");
         if commands_dir.exists() {
             let mut count = 0;
             if let Ok(entries) = std::fs::read_dir(&commands_dir) {
@@ -1564,12 +1562,12 @@ impl StartupOrchestrator {
         Ok(())
     }
 
-    /// LoadSkills: discover and register skills from .coderex/skills/.
+    /// LoadSkills: discover and register skills from .codape/skills/.
     // Retained `async`: the startup/dispatch pipeline awaits these on the current
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_load_skills(&self) -> Result<()> {
-        let skills_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex/skills");
+        let skills_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/skills");
         if skills_dir.exists() {
             let count = std::fs::read_dir(&skills_dir).map_or(0, std::iter::Iterator::count);
             tracing::info!("skills loaded: {count} from {skills_dir:?}");
@@ -1583,16 +1581,16 @@ impl StartupOrchestrator {
     ///
     /// The session's dispatcher is built per query and is not reachable from
     /// plugin startup, so this mirrors the registration source both the REPL
-    /// and the served engine use: [`coderex_tools::register_builtin_tools`].
+    /// and the served engine use: [`codape_tools::register_builtin_tools`].
     /// MCP and other dynamic tools only exist after a session connects, so
     /// they are not part of the generated declaration.
-    fn builtin_tool_type_schemas() -> Vec<coderex_plugins::declarations::ToolTypeSchema> {
-        let mut registry = coderex_tools::ToolRegistry::new();
-        coderex_tools::register_builtin_tools(&mut registry);
+    fn builtin_tool_type_schemas() -> Vec<codape_plugins::declarations::ToolTypeSchema> {
+        let mut registry = codape_tools::ToolRegistry::new();
+        codape_tools::register_builtin_tools(&mut registry);
         registry
             .all_descriptors()
             .into_iter()
-            .map(|descriptor| coderex_plugins::declarations::ToolTypeSchema {
+            .map(|descriptor| codape_plugins::declarations::ToolTypeSchema {
                 name: descriptor.name,
                 input_schema: descriptor.input_schema,
                 output_schema: schema_is_present(&descriptor.output_schema)
@@ -1607,14 +1605,14 @@ impl StartupOrchestrator {
         let mut plugin_dirs: Vec<std::path::PathBuf> = Vec::new();
 
         // Project-local plugins
-        let project_plugins = std::path::Path::new(&self.ctx.cwd).join(".coderex/plugins");
+        let project_plugins = std::path::Path::new(&self.ctx.cwd).join(".codape/plugins");
         if project_plugins.exists() {
             manager.add_plugin_dir(project_plugins.clone());
             plugin_dirs.push(project_plugins);
         }
 
         // Global plugins in config home
-        let global_plugins = coderex_config::config_home().join("plugins");
+        let global_plugins = codape_config::config_home().join("plugins");
         if global_plugins.exists() {
             manager.add_plugin_dir(global_plugins.clone());
             plugin_dirs.push(global_plugins);
@@ -1642,7 +1640,7 @@ impl StartupOrchestrator {
                     if manifest_path.exists() {
                         match std::fs::read_to_string(&manifest_path) {
                             Ok(content) => match serde_json::from_str::<
-                                coderex_plugins::plugins::PluginManifest,
+                                codape_plugins::plugins::PluginManifest,
                             >(&content)
                             {
                                 Ok(manifest) => {
@@ -1716,14 +1714,14 @@ impl StartupOrchestrator {
         // `tsconfig.json` that includes every emitted directory.
         let tool_schemas = Self::builtin_tool_type_schemas();
         self.ctx.plugin_types_dir = match manager.export_plugin_types(
-            &coderex_config::config_home().join("plugin-types"),
+            &codape_config::config_home().join("plugin-types"),
             &tool_schemas,
         ) {
             Ok(paths) if paths.is_empty() => None,
             Ok(paths) => {
                 tracing::info!(count = paths.len(), "plugin type declarations exported");
                 Some(
-                    coderex_config::config_home()
+                    codape_config::config_home()
                         .join("plugin-types")
                         .display()
                         .to_string(),
@@ -1739,32 +1737,32 @@ impl StartupOrchestrator {
         // underline. The compile runs off the startup thread and only when a
         // compiler exists; "no compiler" is said rather than treated as a pass.
         if let Some(root) = self.ctx.plugin_types_dir.clone()
-            && !Self::env_flag("CODEREX_PLUGIN_NO_TYPECHECK")
+            && !Self::env_flag("CODAPE_PLUGIN_NO_TYPECHECK")
         {
             let root = std::path::PathBuf::from(root);
             tokio::spawn(async move {
                 let outcome = tokio::task::spawn_blocking(move || {
-                    coderex_plugins::typecheck::typecheck(
+                    codape_plugins::typecheck::typecheck(
                         &root,
-                        coderex_plugins::typecheck::DEFAULT_TIMEOUT,
+                        codape_plugins::typecheck::DEFAULT_TIMEOUT,
                     )
                 })
                 .await;
                 match outcome {
-                    Ok(coderex_plugins::typecheck::TypeCheckOutcome::Failed(diagnostics)) => {
+                    Ok(codape_plugins::typecheck::TypeCheckOutcome::Failed(diagnostics)) => {
                         tracing::warn!(
                             count = diagnostics.len(),
                             first = %diagnostics[0].render(),
                             "plugin type declarations have errors"
                         );
                     }
-                    Ok(coderex_plugins::typecheck::TypeCheckOutcome::Passed) => {
+                    Ok(codape_plugins::typecheck::TypeCheckOutcome::Passed) => {
                         tracing::info!("plugin type declarations type-check");
                     }
-                    Ok(coderex_plugins::typecheck::TypeCheckOutcome::TimedOut(limit)) => {
+                    Ok(codape_plugins::typecheck::TypeCheckOutcome::TimedOut(limit)) => {
                         tracing::warn!(seconds = limit.as_secs(), "plugin type check timed out");
                     }
-                    Ok(coderex_plugins::typecheck::TypeCheckOutcome::Unavailable(reason)) => {
+                    Ok(codape_plugins::typecheck::TypeCheckOutcome::Unavailable(reason)) => {
                         tracing::debug!(%reason, "plugin type check unavailable");
                     }
                     Err(error) => {
@@ -1776,7 +1774,7 @@ impl StartupOrchestrator {
         // Declared binaries are pinned by SHA-256; fetch them once, after the
         // plugins are active. Failures are warnings: a plugin can still work
         // without its helper.
-        if !Self::env_flag("CODEREX_PLUGIN_NO_BINARIES") {
+        if !Self::env_flag("CODAPE_PLUGIN_NO_BINARIES") {
             for name in manager.list_plugins() {
                 match manager.fetch_plugin_binaries(&name).await {
                     Ok(paths) if !paths.is_empty() => {
@@ -1823,7 +1821,7 @@ impl StartupOrchestrator {
     /// 3. **Deep merge, user wins.** Every other key the resolved [`Settings`]
     ///    understands is merged into the current value with the user's value
     ///    taking precedence: the plugin fills only the gaps, recursively for
-    ///    nested objects. A key CodeRex does not know is warned about and
+    ///    nested objects. A key Codape does not know is warned about and
     ///    ignored.
     ///
     /// The mergeable set is [`mergeable_settings_keys`], derived from
@@ -1872,7 +1870,7 @@ impl StartupOrchestrator {
         if !unknown.is_empty() {
             tracing::warn!(
                 ignored = ?unknown,
-                "plugin settings contain keys CodeRex does not accept from plugins"
+                "plugin settings contain keys Codape does not accept from plugins"
             );
         }
 
@@ -1904,7 +1902,7 @@ impl StartupOrchestrator {
                 .iter()
                 .any(|change| change.key == "model");
             if model_is_explicit {
-                self.ctx.model = settings.model.clone().map(coderex_core::types::ModelId);
+                self.ctx.model = settings.model.clone().map(codape_core::types::ModelId);
             }
         }
         self.ctx.settings = Some(settings);
@@ -1916,14 +1914,14 @@ impl StartupOrchestrator {
     /// flag it carries is what makes the uploader redact, and a test that
     /// builds the uploader from this value exercises the same path a session
     /// does.
-    fn telemetry_config_from_settings(settings: &Settings) -> coderex_telemetry::TelemetryConfig {
+    fn telemetry_config_from_settings(settings: &Settings) -> codape_telemetry::TelemetryConfig {
         let api_key = settings
             .api_key
             .as_ref()
-            .map(|k| coderex_config::resolve_api_key(k));
-        let defaults = coderex_telemetry::TelemetryConfig::default();
+            .map(|k| codape_config::resolve_api_key(k));
+        let defaults = codape_telemetry::TelemetryConfig::default();
         let t = settings.telemetry.as_ref();
-        coderex_telemetry::TelemetryConfig {
+        codape_telemetry::TelemetryConfig {
             // No destination ships with the project: an opted-in session with
             // no endpoint configured records locally only.
             endpoint: t.and_then(|t| t.endpoint.clone()).unwrap_or_default(),
@@ -1939,7 +1937,7 @@ impl StartupOrchestrator {
                 .unwrap_or(defaults.sample_rate),
             pinned_cert_pem: t.and_then(|t| t.pinned_cert_pem.clone()),
             // Settings are a second trigger for the strict mode; the uploader
-            // ORs this with `CODEREX_HIPAA`, so neither source can turn the
+            // ORs this with `CODAPE_HIPAA`, so neither source can turn the
             // stricter redaction off.
             strict: t.and_then(|t| t.strict).unwrap_or(false),
         }
@@ -1947,10 +1945,10 @@ impl StartupOrchestrator {
 
     /// The redaction modes the uploader would resolve for this session.
     ///
-    /// `strict` is the OR of the settings key and `CODEREX_HIPAA`, exactly as
+    /// `strict` is the OR of the settings key and `CODAPE_HIPAA`, exactly as
     /// `TelemetryUploader::new` resolves it, so `telemetry preview-crash`
     /// prints the same payload a real upload would. `verbose` comes from
-    /// `CODEREX_CRASH_VERBOSE` and is ignored in strict mode.
+    /// `CODAPE_CRASH_VERBOSE` and is ignored in strict mode.
     fn telemetry_redaction_modes(&self) -> (bool, bool) {
         let settings_strict = self
             .plugin_host_config_service()
@@ -1960,8 +1958,8 @@ impl StartupOrchestrator {
             .and_then(|telemetry| telemetry.strict)
             .unwrap_or(false);
         (
-            coderex_telemetry::crash_verbose(),
-            settings_strict || coderex_telemetry::hipaa_enabled(),
+            codape_telemetry::crash_verbose(),
+            settings_strict || codape_telemetry::hipaa_enabled(),
         )
     }
 
@@ -1971,7 +1969,7 @@ impl StartupOrchestrator {
             .ctx
             .settings_path
             .clone()
-            .unwrap_or_else(|| coderex_config::config_home().join("settings.json"));
+            .unwrap_or_else(|| codape_config::config_home().join("settings.json"));
         ConfigService::new(user_path, Self::find_project_config(&self.ctx.cwd))
             .with_local_config_path(Self::local_config_path(&self.ctx.cwd))
     }
@@ -1984,7 +1982,7 @@ impl StartupOrchestrator {
     /// each tick, calls `retry_failed_plugins`, and awaits `spawn_plugin` for
     /// every plugin the retry brought back to `Loading`.
     fn spawn_plugin_restart_loop(
-        manager: &Arc<coderex_plugins::plugins::PluginManager>,
+        manager: &Arc<codape_plugins::plugins::PluginManager>,
         interval: std::time::Duration,
     ) -> tokio::task::JoinHandle<()> {
         let manager = Arc::downgrade(manager);
@@ -2003,7 +2001,7 @@ impl StartupOrchestrator {
                 // Error first so the retry pass can see it.
                 let _ = manager.reap_dead_plugins();
                 for outcome in manager.retry_failed_plugins() {
-                    if let coderex_plugins::plugins::RetryOutcome::RestartRequired(name) = outcome {
+                    if let codape_plugins::plugins::RetryOutcome::RestartRequired(name) = outcome {
                         match manager.spawn_plugin(&name).await {
                             Ok(()) => tracing::info!(
                                 plugin = %name,
@@ -2028,11 +2026,11 @@ impl StartupOrchestrator {
     /// go, and `plugin_channel_report()` says so. This is the production
     /// subscriber — the one place the channel layer is actually consumed.
     fn subscribe_plugin_channels(
-        manager: &Arc<coderex_plugins::plugins::PluginManager>,
-        tool_caller: Option<Arc<dyn coderex_plugins::channel_delivery::ToolCaller>>,
+        manager: &Arc<codape_plugins::plugins::PluginManager>,
+        tool_caller: Option<Arc<dyn codape_plugins::channel_delivery::ToolCaller>>,
     ) -> PluginChannelSubscriptions {
         let log = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        let sink: Arc<dyn coderex_plugins::plugins::ChannelSink> = Arc::new(PluginChannelSink {
+        let sink: Arc<dyn codape_plugins::plugins::ChannelSink> = Arc::new(PluginChannelSink {
             log: Arc::clone(&log),
         });
         let mut webhooks = Vec::new();
@@ -2045,16 +2043,16 @@ impl StartupOrchestrator {
             // invalid one has no `delivery` here and is left to the report to
             // explain.
             match &report.delivery {
-                Some(coderex_plugins::plugins::ChannelDelivery::Webhook { url }) => {
+                Some(codape_plugins::plugins::ChannelDelivery::Webhook { url }) => {
                     let webhook =
-                        coderex_plugins::channel_delivery::WebhookChannelSink::spawn(url.clone());
+                        codape_plugins::channel_delivery::WebhookChannelSink::spawn(url.clone());
                     manager.subscribe_channel(
                         &report.channel,
-                        Arc::clone(&webhook) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                        Arc::clone(&webhook) as Arc<dyn codape_plugins::plugins::ChannelSink>,
                     );
                     webhooks.push((report.channel.clone(), webhook));
                 }
-                Some(coderex_plugins::plugins::ChannelDelivery::McpTool { server, tool }) => {
+                Some(codape_plugins::plugins::ChannelDelivery::McpTool { server, tool }) => {
                     let Some(caller) = tool_caller.as_ref() else {
                         tracing::warn!(
                             channel = %report.channel,
@@ -2064,27 +2062,27 @@ impl StartupOrchestrator {
                         );
                         continue;
                     };
-                    let sink = coderex_plugins::channel_delivery::McpToolChannelSink::spawn(
+                    let sink = codape_plugins::channel_delivery::McpToolChannelSink::spawn(
                         server.clone(),
                         tool.clone(),
                         Arc::clone(caller),
                     );
                     manager.subscribe_channel(
                         &report.channel,
-                        Arc::clone(&sink) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                        Arc::clone(&sink) as Arc<dyn codape_plugins::plugins::ChannelSink>,
                     );
                     tools.push((report.channel.clone(), sink));
                 }
                 // A command needs nothing from the MCP layer: it is a process
                 // on this machine, so it is subscribed like a webhook.
-                Some(coderex_plugins::plugins::ChannelDelivery::Command { command, args }) => {
-                    let sink = coderex_plugins::channel_delivery::CommandChannelSink::spawn(
+                Some(codape_plugins::plugins::ChannelDelivery::Command { command, args }) => {
+                    let sink = codape_plugins::channel_delivery::CommandChannelSink::spawn(
                         command.clone(),
                         args.clone(),
                     );
                     manager.subscribe_channel(
                         &report.channel,
-                        Arc::clone(&sink) as Arc<dyn coderex_plugins::plugins::ChannelSink>,
+                        Arc::clone(&sink) as Arc<dyn codape_plugins::plugins::ChannelSink>,
                     );
                     commands.push((report.channel.clone(), sink));
                 }
@@ -2112,7 +2110,7 @@ impl StartupOrchestrator {
     /// Later duplicates (by name or URL) are dropped so a settings entry wins
     /// over the environment fallback rather than being registered twice.
     fn configured_marketplaces(
-        configured: &[coderex_config::MarketplaceSetting],
+        configured: &[codape_config::MarketplaceSetting],
     ) -> Vec<(String, String)> {
         let mut entries: Vec<(String, String)> = configured
             .iter()
@@ -2123,11 +2121,11 @@ impl StartupOrchestrator {
             })
             .collect();
 
-        if let Ok(url) = std::env::var("CODEREX_MARKETPLACE_URL") {
+        if let Ok(url) = std::env::var("CODAPE_MARKETPLACE_URL") {
             let url = url.trim().to_string();
             if !url.is_empty() {
                 let name =
-                    std::env::var("CODEREX_MARKETPLACE_NAME").unwrap_or_else(|_| "default".into());
+                    std::env::var("CODAPE_MARKETPLACE_NAME").unwrap_or_else(|_| "default".into());
                 entries.push((name, url));
             }
         }
@@ -2147,7 +2145,7 @@ impl StartupOrchestrator {
     /// A registration failure (for example an HTTP URL) is reported and
     /// skipped; it must not stop an install that may still be a direct URL.
     fn register_marketplaces(
-        manager: &coderex_plugins::plugins::PluginManager,
+        manager: &codape_plugins::plugins::PluginManager,
         marketplaces: &[(String, String)],
     ) {
         for (name, url) in marketplaces {
@@ -2163,7 +2161,7 @@ impl StartupOrchestrator {
     /// ReconcileMarketplaces: sync marketplace state.
     async fn phase_reconcile_marketplaces(&self) -> Result<()> {
         let manager = plugin_manager_with_signing_key();
-        let reconciler = coderex_plugins::plugins::MarketplaceReconciler::with_auto_install_enabled(
+        let reconciler = codape_plugins::plugins::MarketplaceReconciler::with_auto_install_enabled(
             300,
             Self::plugin_auto_install_enabled(),
         );
@@ -2171,7 +2169,7 @@ impl StartupOrchestrator {
         let marketplaces = Self::configured_marketplaces(&self.ctx.marketplaces);
         Self::register_marketplaces(&manager, &marketplaces);
 
-        let install_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex/plugins");
+        let install_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/plugins");
         match reconciler.reconcile(&manager, Some(&install_dir)).await {
             Ok(report) => {
                 if report.is_empty() {
@@ -2198,7 +2196,7 @@ impl StartupOrchestrator {
         let settings = self.ctx.settings.clone().unwrap_or_default();
         // Starts with whatever the McpAuth tool persisted, so a server signed
         // into in an earlier session is authenticated in this one.
-        let mut manager = coderex_mcp::manager::McpManager::new_with_stored_credentials();
+        let mut manager = codape_mcp::manager::McpManager::new_with_stored_credentials();
 
         // A `401 invalid_token` on a server that issued no refresh token is
         // recoverable only by signing in again. The CLI owns the interactive
@@ -2241,7 +2239,7 @@ impl StartupOrchestrator {
             .as_ref()
             .and_then(|manager| manager.plugin_mcp_servers())
         {
-            match serde_json::from_value::<coderex_mcp::config::McpConfig>(plugin_servers) {
+            match serde_json::from_value::<codape_mcp::config::McpConfig>(plugin_servers) {
                 Ok(config) if !config.is_empty() => {
                     tracing::info!(
                         "MCP config loaded: {} servers from plugins",
@@ -2287,7 +2285,7 @@ impl StartupOrchestrator {
             .clone()
             .unwrap_or_else(|| std::path::Path::new(&self.ctx.cwd).join(".mcp.json"));
         if mcp_path.exists() {
-            match coderex_mcp::config::McpConfig::load(&mcp_path) {
+            match codape_mcp::config::McpConfig::load(&mcp_path) {
                 Ok(config) => {
                     if !config.is_empty() {
                         manager.load_config(&config);
@@ -2323,7 +2321,7 @@ impl StartupOrchestrator {
                 let qualified_name = tool.qualified_name();
                 self.ctx
                     .mcp_skills
-                    .push(coderex_plugins::skills::SkillMetadata {
+                    .push(codape_plugins::skills::SkillMetadata {
                         name: qualified_name.clone(),
                         hooks: vec!["post-query".into()],
                         agent: Some(tool.server.clone()),
@@ -2361,14 +2359,14 @@ impl StartupOrchestrator {
     /// unsubscribed rather than silently dropped.
     fn subscribe_channels_for_mcp(
         ctx: &mut SessionContext,
-        manager: Option<Arc<coderex_mcp::manager::McpManager>>,
+        manager: Option<Arc<codape_mcp::manager::McpManager>>,
     ) {
         let Some(plugins) = ctx.plugin_manager.clone() else {
             return;
         };
         let caller = manager.map(|manager| {
             Arc::new(McpChannelToolCaller { manager })
-                as Arc<dyn coderex_plugins::channel_delivery::ToolCaller>
+                as Arc<dyn codape_plugins::channel_delivery::ToolCaller>
         });
         let subscriptions = Self::subscribe_plugin_channels(&plugins, caller);
         ctx.plugin_channel_events = subscriptions.log;
@@ -2382,7 +2380,7 @@ impl StartupOrchestrator {
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_init_memory(&mut self) -> Result<()> {
-        let memory_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex");
+        let memory_dir = std::path::Path::new(&self.ctx.cwd).join(".codape");
 
         if !memory_dir.exists() {
             std::fs::create_dir_all(&memory_dir)?;
@@ -2399,10 +2397,10 @@ impl StartupOrchestrator {
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_init_remote_services(&mut self) -> Result<()> {
         // Bridge transport initialization — best-effort, failures don't block startup
-        if let Ok(bridge_url) = std::env::var("CODEREX_BRIDGE_URL")
+        if let Ok(bridge_url) = std::env::var("CODAPE_BRIDGE_URL")
             && !bridge_url.is_empty()
         {
-            let factory = coderex_bridge::transport::default_factory();
+            let factory = codape_bridge::transport::default_factory();
             tracing::info!(
                 "bridge transport initialized: url={bridge_url}, transports={:?}",
                 factory.registered_types()
@@ -2437,14 +2435,14 @@ impl StartupOrchestrator {
     /// `/init` writes this path. It is not searched in ancestors: local
     /// settings belong to the directory the session was started in.
     fn local_config_path(cwd: &str) -> std::path::PathBuf {
-        std::path::Path::new(cwd).join(".coderex/settings.local.json")
+        std::path::Path::new(cwd).join(".codape/settings.local.json")
     }
 
     /// Find project config in CWD or nearest ancestor.
     fn find_project_config(cwd: &str) -> Option<std::path::PathBuf> {
         let mut current = std::path::Path::new(cwd);
         loop {
-            let candidate = current.join(".coderex/settings.json");
+            let candidate = current.join(".codape/settings.json");
             if candidate.exists() {
                 return Some(candidate);
             }
@@ -2488,7 +2486,7 @@ impl StartupOrchestrator {
     fn try_create_api_client(
         api_key_override: Option<&str>,
         prompt_caching: Option<bool>,
-        provider: Option<&coderex_config::ProviderSettings>,
+        provider: Option<&codape_config::ProviderSettings>,
     ) -> Option<Box<dyn ApiClient>> {
         Self::api_client_from_provider_config(
             ProviderConfig::from_env(),
@@ -2511,7 +2509,7 @@ impl StartupOrchestrator {
         mut config: ProviderConfig,
         api_key_override: Option<&str>,
         prompt_caching: Option<bool>,
-        provider: Option<&coderex_config::ProviderSettings>,
+        provider: Option<&codape_config::ProviderSettings>,
         get_env: impl Fn(&str) -> Option<String>,
     ) -> Option<Box<dyn ApiClient>> {
         if let Some(key) = api_key_override {
@@ -2600,8 +2598,8 @@ impl StartupOrchestrator {
         get_env: &impl Fn(&str) -> Option<String>,
     ) -> bool {
         let present = |name: &str| get_env(name).is_some_and(|value| !value.trim().is_empty());
-        let api_key = present("CODEREX_API_KEY")
-            || present("CODEREX_AUTH_TOKEN")
+        let api_key = present("CODAPE_API_KEY")
+            || present("CODAPE_AUTH_TOKEN")
             || present("ANTHROPIC_API_KEY")
             || present("ANTHROPIC_AUTH_TOKEN");
         match cloud.kind {
@@ -2624,7 +2622,7 @@ impl StartupOrchestrator {
     }
 
     /// Provider endpoint overrides from settings (user/managed layers only).
-    fn provider_settings(&self) -> Option<&coderex_config::ProviderSettings> {
+    fn provider_settings(&self) -> Option<&codape_config::ProviderSettings> {
         self.ctx
             .settings
             .as_ref()
@@ -2633,7 +2631,7 @@ impl StartupOrchestrator {
 
     /// The resolved `prompt_caching` setting, if the user set one.
     ///
-    /// `CODEREX_PROMPT_CACHING` is applied by the core client on top of this.
+    /// `CODAPE_PROMPT_CACHING` is applied by the core client on top of this.
     fn prompt_caching_from_settings(&self) -> Option<bool> {
         self.ctx
             .settings
@@ -2649,7 +2647,7 @@ impl StartupOrchestrator {
     /// resolver, provider construction, feature flags and telemetry channels
     /// read the environment.
     #[allow(unsafe_code)] // `set_var` is unsafe in edition 2024; applied once at startup.
-    fn apply_settings_env(settings: &coderex_config::Settings) {
+    fn apply_settings_env(settings: &codape_config::Settings) {
         let Some(env) = settings.env.as_ref() else {
             return;
         };
@@ -2689,7 +2687,7 @@ impl StartupOrchestrator {
             .settings
             .as_ref()
             .and_then(|s| s.permission_mode.as_deref())
-            .and_then(|m| m.parse::<coderex_core::permissions::PermissionMode>().ok());
+            .and_then(|m| m.parse::<codape_core::permissions::PermissionMode>().ok());
         repl.with_permission_mode(perm_mode);
         repl.with_permission_rules(
             self.ctx
@@ -2720,7 +2718,7 @@ impl StartupOrchestrator {
             .as_ref()
             .and_then(|manager| manager.plugin_hooks())
         {
-            let layers = hook_layers.get_or_insert_with(|| coderex_config::settings::HookLayers {
+            let layers = hook_layers.get_or_insert_with(|| codape_config::settings::HookLayers {
                 core: None,
                 plugin: None,
                 managed: None,
@@ -2797,7 +2795,7 @@ impl StartupOrchestrator {
     fn configure_plugin_components(
         &self,
         repl: &mut crate::repl::ReplLoop,
-        manager: &Arc<coderex_plugins::plugins::PluginManager>,
+        manager: &Arc<codape_plugins::plugins::PluginManager>,
     ) {
         let entries = |value: Option<serde_json::Value>| -> Vec<(String, serde_json::Value)> {
             value
@@ -2835,14 +2833,14 @@ impl StartupOrchestrator {
         // server that is not configured — so `/plugin components` shows the
         // truth about whether a notification could actually arrive.
         for report in manager.plugin_channel_report() {
-            if report.status == coderex_plugins::plugins::ChannelStatus::ServerNotConfigured {
+            if report.status == codape_plugins::plugins::ChannelStatus::ServerNotConfigured {
                 tracing::warn!(
                     channel = %report.channel,
                     server = %report.server,
                     "plugin channel names an MCP server that is not configured"
                 );
             }
-            if report.status == coderex_plugins::plugins::ChannelStatus::DeliveryInvalid {
+            if report.status == codape_plugins::plugins::ChannelStatus::DeliveryInvalid {
                 tracing::warn!(
                     channel = %report.channel,
                     error = report.delivery_error.as_deref().unwrap_or("refused"),
@@ -2969,14 +2967,14 @@ impl StartupOrchestrator {
             .mcp_elicitation
             .as_ref()
             .map(SessionElicitationHandler::inbound);
-        manager.set_inbound_handler(Arc::new(coderex_mcp::elicitation::McpRequestRouter::new(
+        manager.set_inbound_handler(Arc::new(codape_mcp::elicitation::McpRequestRouter::new(
             Some(sampling),
             other,
         )));
         tracing::info!(
             model = %model.0,
             "MCP sampling enabled by {}",
-            coderex_mcp::elicitation::SAMPLING_OPT_IN_ENV
+            codape_mcp::elicitation::SAMPLING_OPT_IN_ENV
         );
     }
 
@@ -3007,7 +3005,7 @@ impl StartupOrchestrator {
         }
         self.configure_repl(&mut repl, interactive);
         if streaming_protocol {
-            repl.with_protocol_sink(Some(coderex_events::MessageSink::new(
+            repl.with_protocol_sink(Some(codape_events::MessageSink::new(
                 Box::new(std::io::stdout()) as Box<dyn std::io::Write + Send + Sync>,
             )));
             // The host asked for the protocol, so it can answer tool approvals:
@@ -3232,18 +3230,18 @@ impl StartupOrchestrator {
 
     #[allow(clippy::unused_async)]
     async fn run_server(&self, cwd: &str, port: u16) -> Result<()> {
-        use coderex_server::{DaemonServer, ServerConfig};
+        use codape_server::{DaemonServer, ServerConfig};
 
         // Write PID file before starting
         daemon::write_pid_file().map_err(|e| anyhow::anyhow!("Failed to write PID file: {e}"))?;
 
         // Build server config from environment
-        let valid_keys: Vec<String> = std::env::var("CODEREX_API_KEYS")
+        let valid_keys: Vec<String> = std::env::var("CODAPE_API_KEYS")
             .ok()
             .map(|s| s.split(',').map(String::from).collect())
             .unwrap_or_default();
 
-        let idle_timeout = std::env::var("CODEREX_IDLE_TIMEOUT")
+        let idle_timeout = std::env::var("CODAPE_IDLE_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(3600);
@@ -3252,14 +3250,14 @@ impl StartupOrchestrator {
         // whole store unreachable from the production binary: sessions did not
         // survive a restart, and the "advance the id counter past restored
         // sessions" fix never ran. Persist to the config directory by default;
-        // `CODEREX_SERVER_PERSIST_PATH` overrides the file, and
-        // `CODEREX_SERVER_NO_PERSIST=1` turns it off. A failure to open the
+        // `CODAPE_SERVER_PERSIST_PATH` overrides the file, and
+        // `CODAPE_SERVER_NO_PERSIST=1` turns it off. A failure to open the
         // store is already non-fatal (the server warns and runs in memory).
-        let persist_path = if Self::env_flag("CODEREX_SERVER_NO_PERSIST") {
+        let persist_path = if Self::env_flag("CODAPE_SERVER_NO_PERSIST") {
             None
         } else {
-            Some(std::env::var_os("CODEREX_SERVER_PERSIST_PATH").map_or_else(
-                || coderex_config::config_home().join("server-sessions.db"),
+            Some(std::env::var_os("CODAPE_SERVER_PERSIST_PATH").map_or_else(
+                || codape_config::config_home().join("server-sessions.db"),
                 std::path::PathBuf::from,
             ))
         };
@@ -3268,7 +3266,7 @@ impl StartupOrchestrator {
         }
 
         let permission_mode = if self.ctx.skip_permissions {
-            coderex_core::permissions::PermissionMode::BypassPermissions
+            codape_core::permissions::PermissionMode::BypassPermissions
         } else {
             self.ctx
                 .settings
@@ -3293,22 +3291,22 @@ impl StartupOrchestrator {
         // Serve queries on a real engine. Without this the server could only
         // refuse them — and before it did, it echoed them back, which is worse
         // than refusing because it looked like an answer.
-        let context_window = coderex_core::types::ContextWindowResolver::from_env_and_client_data()
+        let context_window = codape_core::types::ContextWindowResolver::from_env_and_client_data()
             .with_settings(
                 self.ctx
                     .settings
                     .as_ref()
-                    .map(coderex_config::Settings::context_window_overrides)
+                    .map(codape_config::Settings::context_window_overrides)
                     .unwrap_or_default(),
             )
             .with_experiment(
-                coderex_config::flags::FeatureFlags::from_env().experiment_context_windows(),
+                codape_config::flags::FeatureFlags::from_env().experiment_context_windows(),
             );
         if let Some(factory) = Self::serve_engine_factory(
             cwd,
             Self::resolve_session_model(
                 self.ctx.model.clone(),
-                coderex_config::flags::FeatureFlags::from_env().fast_mode,
+                codape_config::flags::FeatureFlags::from_env().fast_mode,
             ),
             context_window,
             self.ctx.mcp_manager.clone(),
@@ -3329,11 +3327,11 @@ impl StartupOrchestrator {
             );
         }
 
-        tracing::info!("CodeRex server initialized: cwd={cwd}");
+        tracing::info!("Codape server initialized: cwd={cwd}");
         tracing::info!(
             "Server config: idle_timeout={idle_timeout}s, max_sessions=100, port={port}"
         );
-        println!("CodeRex server running on ws://0.0.0.0:{port}");
+        println!("Codape server running on ws://0.0.0.0:{port}");
         println!("Sessions: 0 active");
         println!("Press Ctrl+C to stop");
 
@@ -3356,11 +3354,11 @@ impl StartupOrchestrator {
     /// `fast_mode`.
     ///
     /// Precedence: an explicit model always wins — `--model`,
-    /// `CODEREX_MODEL`/`ANTHROPIC_MODEL`/`OPENAI_MODEL`, or a settings `model`
+    /// `CODAPE_MODEL`/`ANTHROPIC_MODEL`/`OPENAI_MODEL`, or a settings `model`
     /// value. `fast_mode`
     /// only changes the default used when nothing else chose one: on, the
     /// session resolves through [`ModelProfile::Lightweight`] (haiku,
-    /// overridable via `CODEREX_LIGHTWEIGHT_MODEL`); off, it is
+    /// overridable via `CODAPE_LIGHTWEIGHT_MODEL`); off, it is
     /// [`ModelId::sonnet`].
     fn resolve_session_model(explicit: Option<ModelId>, fast_mode: bool) -> ModelId {
         explicit.unwrap_or_else(|| {
@@ -3377,7 +3375,7 @@ impl StartupOrchestrator {
     /// Off by default: installing third-party code automatically is a
     /// decision the user makes, not a side effect of opening the session.
     fn plugin_auto_install_enabled() -> bool {
-        Self::env_flag("CODEREX_PLUGIN_AUTO_INSTALL")
+        Self::env_flag("CODAPE_PLUGIN_AUTO_INSTALL")
     }
 
     /// Parse the `mcp_servers` settings value.
@@ -3388,17 +3386,17 @@ impl StartupOrchestrator {
     /// config without an error; the wrapped retry is what makes it usable.
     fn parse_settings_mcp_servers(
         value: &serde_json::Value,
-    ) -> Result<coderex_mcp::config::McpConfig, String> {
+    ) -> Result<codape_mcp::config::McpConfig, String> {
         if value.is_null() {
-            return Ok(coderex_mcp::config::McpConfig::new());
+            return Ok(codape_mcp::config::McpConfig::new());
         }
-        if let Ok(config) = serde_json::from_value::<coderex_mcp::config::McpConfig>(value.clone())
+        if let Ok(config) = serde_json::from_value::<codape_mcp::config::McpConfig>(value.clone())
             && !config.is_empty()
         {
             return Ok(config);
         }
         let wrapped = serde_json::json!({ "mcpServers": value });
-        serde_json::from_value::<coderex_mcp::config::McpConfig>(wrapped)
+        serde_json::from_value::<codape_mcp::config::McpConfig>(wrapped)
             .map_err(|error| error.to_string())
     }
 
@@ -3412,16 +3410,16 @@ impl StartupOrchestrator {
     fn serve_engine_factory(
         cwd: &str,
         model: ModelId,
-        context_window: coderex_core::types::ContextWindowResolver,
-        mcp_manager: Option<std::sync::Arc<coderex_mcp::manager::McpManager>>,
-        permission_mode: coderex_core::permissions::PermissionMode,
-        permissions: Option<coderex_config::PermissionsSettings>,
+        context_window: codape_core::types::ContextWindowResolver,
+        mcp_manager: Option<std::sync::Arc<codape_mcp::manager::McpManager>>,
+        permission_mode: codape_core::permissions::PermissionMode,
+        permissions: Option<codape_config::PermissionsSettings>,
         effort: Option<&str>,
         prompt_caching: Option<bool>,
         api_key: Option<&str>,
-        provider: Option<&coderex_config::ProviderSettings>,
-    ) -> Option<coderex_server::session::EngineFactory> {
-        use coderex_tools::{
+        provider: Option<&codape_config::ProviderSettings>,
+    ) -> Option<codape_server::session::EngineFactory> {
+        use codape_tools::{
             ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
             TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
         };
@@ -3442,7 +3440,7 @@ impl StartupOrchestrator {
             // Same wired baseline tools the REPL registers.
             crate::repl::RuntimeToolHandles::new(&cwd, &mcp_slot).install(&mut registry);
 
-            let config_home = coderex_config::config_home();
+            let config_home = codape_config::config_home();
             let session_id = uuid::Uuid::new_v4().to_string();
 
             // The same shared state the REPL installs. Without it a served
@@ -3465,7 +3463,7 @@ impl StartupOrchestrator {
                 ExecutionContext::Normal,
                 std::path::PathBuf::from(&cwd),
             );
-            let flags = coderex_config::flags::FeatureFlags::from_env();
+            let flags = codape_config::flags::FeatureFlags::from_env();
             dispatcher.set_feature_flags(flags.clone());
             dispatcher.set_task_store(task_store);
             dispatcher.set_cron_scheduler(cron_scheduler);
@@ -3478,8 +3476,8 @@ impl StartupOrchestrator {
             // configured `auto`/`bypass-permissions` mode and the classifier,
             // explanation and background-deny hooks were all ignored on this
             // path while they were active in the REPL.
-            let mut checker = coderex_core::permissions::PermissionChecker::new(permission_mode);
-            if let Err(error) = coderex_config::permission_rules::install_settings_rules(
+            let mut checker = codape_core::permissions::PermissionChecker::new(permission_mode);
+            if let Err(error) = codape_config::permission_rules::install_settings_rules(
                 &mut checker,
                 permissions.as_ref(),
                 std::path::Path::new(&cwd),
@@ -3488,25 +3486,25 @@ impl StartupOrchestrator {
                 tracing::error!(%error, "served session permission rules were not installed");
             }
             let mut permission_engine =
-                coderex_core::permission_engine::PermissionEngine::new(checker);
+                codape_core::permission_engine::PermissionEngine::new(checker);
             permission_engine.add_hook(std::sync::Arc::new(
-                coderex_core::permission_engine::ExplainPermissionHook::new_with_event_tx(
+                codape_core::permission_engine::ExplainPermissionHook::new_with_event_tx(
                     api_client.clone_box(),
                     tx.clone(),
                 ),
             ));
             permission_engine.add_hook(std::sync::Arc::new(
-                coderex_core::permission_engine::AutoClassifierHook::new(api_client.clone_box()),
+                codape_core::permission_engine::AutoClassifierHook::new(api_client.clone_box()),
             ));
             permission_engine.add_hook(std::sync::Arc::new(
-                coderex_core::permission_engine::BackgroundAgentDenyHook,
+                codape_core::permission_engine::BackgroundAgentDenyHook,
             ));
-            coderex_tools::install_rule_exemptions(&mut permission_engine, &registry);
+            codape_tools::install_rule_exemptions(&mut permission_engine, &registry);
 
-            let mut engine = coderex_core::engine::QueryEngine::new(
+            let mut engine = codape_core::engine::QueryEngine::new(
                 api_client.clone_box(),
                 model.clone(),
-                coderex_core::state::SessionState::new(std::path::PathBuf::from(&cwd)),
+                codape_core::state::SessionState::new(std::path::PathBuf::from(&cwd)),
                 permission_engine,
                 tx,
             );
@@ -3515,7 +3513,7 @@ impl StartupOrchestrator {
             // The same flag behaviours the REPL installs: a served session
             // honours `coordinator_mode` and `history_snip` too.
             let memory_base = std::path::PathBuf::from(&cwd)
-                .join(".coderex")
+                .join(".codape")
                 .join("memory");
             crate::repl::apply_engine_flag_behaviours(&mut engine, &flags, Some(&memory_base));
             (engine, rx)
@@ -3563,11 +3561,11 @@ impl StartupOrchestrator {
 
         // Custom agents are user files; listing them is the discoverability
         // half of resolving `--agent <name>` and the Agent tool's `agent`.
-        let custom = coderex_agents::custom_agents::load_custom_agents();
+        let custom = codape_agents::custom_agents::load_custom_agents();
         let mut names: Vec<&str> = custom.keys().map(String::as_str).collect();
         names.sort_unstable();
         println!();
-        println!("Custom agents (~/.coderex/agents/*.json):");
+        println!("Custom agents (~/.codape/agents/*.json):");
         if names.is_empty() {
             println!("  none configured");
         } else if detailed {
@@ -3592,7 +3590,7 @@ impl StartupOrchestrator {
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn run_auth(&self) -> Result<()> {
-        let mut config = coderex_core::provider_config::ProviderConfig::from_env();
+        let mut config = codape_core::provider_config::ProviderConfig::from_env();
         // Apply CLI --api-key override if present
         if let Some(key) = self.api_key_from_settings() {
             config.set_anthropic_api_key(key.into());
@@ -3623,7 +3621,7 @@ impl StartupOrchestrator {
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn run_doctor(&self) -> Result<()> {
-        println!("CodeRex Doctor");
+        println!("Codape Doctor");
         println!("==============");
         let checks = [
             (
@@ -3637,7 +3635,7 @@ impl StartupOrchestrator {
             ),
             (
                 "Settings file exists",
-                coderex_config::config_home().join("settings.json").exists(),
+                codape_config::config_home().join("settings.json").exists(),
             ),
             (
                 "Working directory accessible",
@@ -3680,14 +3678,14 @@ impl StartupOrchestrator {
             ),
             None => match (report.update_available, &report.latest) {
                 (true, Some(latest)) => println!(
-                    "New version available: {latest} (current: {}). Run `coderex update` to install it.",
+                    "New version available: {latest} (current: {}). Run `codape update` to install it.",
                     report.current
                 ),
                 (true, None) => println!(
                     "A newer version may be available; the release lookup did not return one."
                 ),
-                (false, Some(latest)) => println!("CodeRex is up to date ({latest})."),
-                (false, None) => println!("CodeRex is up to date."),
+                (false, Some(latest)) => println!("Codape is up to date ({latest})."),
+                (false, None) => println!("Codape is up to date."),
             },
         }
         version::record_check_time(std::path::Path::new(&cwd));
@@ -3705,7 +3703,7 @@ impl StartupOrchestrator {
             Some(crate::cli::McpAction::List) => {
                 println!("Configured MCP servers:");
                 if mcp_path.exists() {
-                    match coderex_mcp::config::McpConfig::load(&mcp_path) {
+                    match codape_mcp::config::McpConfig::load(&mcp_path) {
                         Ok(config) => {
                             if config.mcp_servers.is_empty() {
                                 println!("  (none)");
@@ -3737,15 +3735,15 @@ impl StartupOrchestrator {
                 header,
             }) => {
                 let mut config = if mcp_path.exists() {
-                    coderex_mcp::config::McpConfig::load(&mcp_path)
-                        .unwrap_or_else(|_| coderex_mcp::config::McpConfig::new())
+                    codape_mcp::config::McpConfig::load(&mcp_path)
+                        .unwrap_or_else(|_| codape_mcp::config::McpConfig::new())
                 } else {
-                    coderex_mcp::config::McpConfig::new()
+                    codape_mcp::config::McpConfig::new()
                 };
                 let added = if let Some(url) = url {
                     let transport = match transport.as_deref().unwrap_or("http") {
-                        "http" | "streamable-http" => coderex_mcp::config::McpTransport::Http,
-                        "sse" => coderex_mcp::config::McpTransport::Sse,
+                        "http" | "streamable-http" => codape_mcp::config::McpTransport::Http,
+                        "sse" => codape_mcp::config::McpTransport::Sse,
                         other => {
                             println!("Error: unsupported transport '{other}' (use http or sse)");
                             return Ok(());
@@ -3775,10 +3773,10 @@ impl StartupOrchestrator {
             }
             Some(crate::cli::McpAction::Remove { name }) => {
                 let mut config = if mcp_path.exists() {
-                    coderex_mcp::config::McpConfig::load(&mcp_path)
-                        .unwrap_or_else(|_| coderex_mcp::config::McpConfig::new())
+                    codape_mcp::config::McpConfig::load(&mcp_path)
+                        .unwrap_or_else(|_| codape_mcp::config::McpConfig::new())
                 } else {
-                    coderex_mcp::config::McpConfig::new()
+                    codape_mcp::config::McpConfig::new()
                 };
                 if config.remove_server(&name).is_some() {
                     match config.save(&mcp_path) {
@@ -3796,7 +3794,7 @@ impl StartupOrchestrator {
                     println!("No MCP config found at {}", mcp_path.display());
                     return Ok(());
                 }
-                let config = match coderex_mcp::config::McpConfig::load(&mcp_path) {
+                let config = match codape_mcp::config::McpConfig::load(&mcp_path) {
                     Ok(config) => config,
                     Err(e) => {
                         println!("Error loading config: {e}");
@@ -3811,14 +3809,14 @@ impl StartupOrchestrator {
                 // Start exactly the named server. `load_config` inserts it
                 // into a fresh manager, so unrelated or broken servers in the
                 // same config file cannot affect this test.
-                let mut selected = coderex_mcp::config::McpConfig::new();
+                let mut selected = codape_mcp::config::McpConfig::new();
                 selected.mcp_servers.insert(name.clone(), server_config);
-                let manager = coderex_mcp::manager::McpManager::new();
+                let manager = codape_mcp::manager::McpManager::new();
                 manager.load_config(&selected);
                 manager.start_all().await;
 
                 let running = manager.is_running(&name);
-                let tools: Vec<coderex_mcp::proxy::McpToolInfo> = manager
+                let tools: Vec<codape_mcp::proxy::McpToolInfo> = manager
                     .list_tool_info()
                     .into_iter()
                     .filter(|tool| tool.server == name)
@@ -3871,7 +3869,7 @@ impl StartupOrchestrator {
                 }
             }
             None => {
-                println!("Usage: coderex mcp <list|add|remove|test|export-token|import-token>");
+                println!("Usage: codape mcp <list|add|remove|test|export-token|import-token>");
             }
         }
         Ok(())
@@ -3879,7 +3877,7 @@ impl StartupOrchestrator {
 
     #[allow(clippy::unused_async)]
     async fn run_plugin(&self, action: Option<crate::cli::PluginAction>) -> Result<()> {
-        let install_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex/plugins");
+        let install_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/plugins");
         match action {
             Some(crate::cli::PluginAction::List) => {
                 if let Some(ref pm) = self.ctx.plugin_manager {
@@ -3928,11 +3926,11 @@ impl StartupOrchestrator {
                 // A bare name is a marketplace listing; a URL, git remote, or
                 // existing directory is a source. `PluginSource` is the same
                 // classifier `install_plugin` uses internally.
-                let detected = coderex_plugins::plugins::PluginSource::detect(&source);
+                let detected = codape_plugins::plugins::PluginSource::detect(&source);
                 let result = if detected.is_marketplace() {
                     manager.install_plugin_by_name(&source, &install_dir).await
                 } else {
-                    let plugin = coderex_plugins::plugins::MarketplacePlugin {
+                    let plugin = codape_plugins::plugins::MarketplacePlugin {
                         name: source.clone(),
                         version: "latest".into(),
                         url: source.clone(),
@@ -3976,7 +3974,7 @@ impl StartupOrchestrator {
                 println!("Updating plugins...");
                 let manager = plugin_manager_with_signing_key();
                 let reconciler =
-                    coderex_plugins::plugins::MarketplaceReconciler::with_auto_install_enabled(
+                    codape_plugins::plugins::MarketplaceReconciler::with_auto_install_enabled(
                         300,
                         Self::plugin_auto_install_enabled(),
                     );
@@ -3991,7 +3989,7 @@ impl StartupOrchestrator {
                 }
             }
             None => {
-                println!("Usage: coderex plugin <list|install|uninstall|update>");
+                println!("Usage: codape plugin <list|install|uninstall|update>");
             }
         }
         Ok(())
@@ -4002,7 +4000,7 @@ impl StartupOrchestrator {
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn run_auto_mode(&self) -> Result<()> {
         println!("Auto-mode settings:");
-        let memory_dir = std::path::Path::new(&self.ctx.cwd).join(".coderex/memory");
+        let memory_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/memory");
         let dream_config_path = memory_dir.join("dream_config.json");
         if dream_config_path.exists() {
             match std::fs::read_to_string(&dream_config_path) {
@@ -4030,7 +4028,7 @@ impl StartupOrchestrator {
                 Self::preview_crash(file, verbose, strict)
             }
             None => {
-                println!("Usage: coderex telemetry preview-crash [FILE]");
+                println!("Usage: codape telemetry preview-crash [FILE]");
                 Ok(())
             }
         }
@@ -4043,9 +4041,7 @@ impl StartupOrchestrator {
     /// [`telemetry_redaction_modes`](Self::telemetry_redaction_modes), which
     /// resolves them the way the uploader does — settings included.
     fn preview_crash(file: Option<std::path::PathBuf>, verbose: bool, strict: bool) -> Result<()> {
-        let pending_dir = coderex_config::config_home()
-            .join("crashes")
-            .join("pending");
+        let pending_dir = codape_config::config_home().join("crashes").join("pending");
         let path = match file {
             Some(path) => path,
             None => Self::latest_pending_crash(&pending_dir)?.ok_or_else(|| {
@@ -4055,14 +4051,14 @@ impl StartupOrchestrator {
 
         let bytes = std::fs::read(&path)
             .with_context(|| format!("cannot read pending crash {}", path.display()))?;
-        let report: coderex_telemetry::CrashReport = serde_json::from_slice(&bytes)
+        let report: codape_telemetry::CrashReport = serde_json::from_slice(&bytes)
             .with_context(|| format!("cannot parse pending crash {}", path.display()))?;
 
         // The reporter supplies the ingestion modes (verbose/strict), so the
         // row shape matches what a real ingestion would have stored.
-        let reporter = coderex_telemetry::CrashReporter::new(pending_dir);
+        let reporter = codape_telemetry::CrashReporter::new(pending_dir);
         let pending = reporter.pending_crash_from_report(&report);
-        let payload = coderex_telemetry::preview_crash_payload_with(&pending, verbose, strict);
+        let payload = codape_telemetry::preview_crash_payload_with(&pending, verbose, strict);
         println!("{}", serde_json::to_string_pretty(&payload)?);
         Ok(())
     }
@@ -4113,7 +4109,7 @@ impl StartupOrchestrator {
     async fn run_resume(&self, cwd: &str, session_id: &str, model: ModelId) -> Result<()> {
         let resolved_session_id = if session_id.eq_ignore_ascii_case("latest") {
             session_resume::latest_session_id(cwd).ok_or_else(|| {
-                anyhow::anyhow!("No transcript found to resume in .coderex/transcripts")
+                anyhow::anyhow!("No transcript found to resume in .codape/transcripts")
             })?
         } else {
             session_id.to_string()
@@ -4131,11 +4127,11 @@ impl StartupOrchestrator {
         // Show a summary of the conversation history
         let user_msgs: Vec<_> = messages
             .iter()
-            .filter(|m| matches!(m.role, coderex_core::types::Role::User))
+            .filter(|m| matches!(m.role, codape_core::types::Role::User))
             .collect();
         println!("User messages in session: {}", user_msgs.len());
         for (i, msg) in user_msgs.iter().enumerate() {
-            if let coderex_core::types::MessageContent::Text(s) = &msg.content {
+            if let codape_core::types::MessageContent::Text(s) = &msg.content {
                 let preview = if s.len() > 80 {
                     format!("{}...", &s[..77])
                 } else {
@@ -4172,7 +4168,7 @@ impl StartupOrchestrator {
     fn load_resume_messages(
         cwd: &str,
         session_id: &str,
-    ) -> Result<Vec<coderex_core::types::Message>> {
+    ) -> Result<Vec<codape_core::types::Message>> {
         session_resume::load_resume_messages(cwd, session_id)
     }
 
@@ -4185,15 +4181,15 @@ impl StartupOrchestrator {
 /// Run the teleport rendezvous service until the process is stopped.
 ///
 /// A session shared with `/teleport --share` is uploaded here, and any machine
-/// pointed at this service with `CODEREX_TELEPORT_URL` can join it. The
+/// pointed at this service with `CODAPE_TELEPORT_URL` can join it. The
 /// service keeps no history: a share lives until it is revoked or its time to
 /// live runs out.
 async fn run_teleport_service(port: u16, ttl_secs: u64) -> Result<()> {
     let ttl = std::time::Duration::from_secs(ttl_secs);
-    let service = coderex_server::teleport::TeleportService::with_ttl(port, ttl);
+    let service = codape_server::teleport::TeleportService::with_ttl(port, ttl);
     println!(
         "Serving teleport shares on http://0.0.0.0:{port}/teleport/shares (ttl {ttl_secs}s). \
-         Point clients at it with CODEREX_TELEPORT_URL."
+         Point clients at it with CODAPE_TELEPORT_URL."
     );
     service.run().await.map_err(|error| anyhow::anyhow!(error))
 }
@@ -4203,14 +4199,14 @@ async fn run_teleport_service(port: u16, ttl_secs: u64) -> Result<()> {
 /// This is the on-demand half of the startup check: the same compiler, the
 /// same outcome, but printed for a person and with an exit status.
 fn run_plugin_typecheck(dir: Option<std::path::PathBuf>) {
-    let root = dir.unwrap_or_else(|| coderex_config::config_home().join("plugin-types"));
+    let root = dir.unwrap_or_else(|| codape_config::config_home().join("plugin-types"));
     let outcome =
-        coderex_plugins::typecheck::typecheck(&root, coderex_plugins::typecheck::DEFAULT_TIMEOUT);
+        codape_plugins::typecheck::typecheck(&root, codape_plugins::typecheck::DEFAULT_TIMEOUT);
     match &outcome {
-        coderex_plugins::typecheck::TypeCheckOutcome::Passed => {
+        codape_plugins::typecheck::TypeCheckOutcome::Passed => {
             println!("{}: {}", root.display(), outcome.summary());
         }
-        coderex_plugins::typecheck::TypeCheckOutcome::Failed(diagnostics) => {
+        codape_plugins::typecheck::TypeCheckOutcome::Failed(diagnostics) => {
             println!("{} type error(s) in {}", diagnostics.len(), root.display());
             for diagnostic in diagnostics {
                 println!("  {}", diagnostic.render());
@@ -4219,10 +4215,10 @@ fn run_plugin_typecheck(dir: Option<std::path::PathBuf>) {
         }
         // "Unavailable" is not a failure: there was nothing to check with, and
         // saying "failed" would blame the plugin for the host's toolchain.
-        coderex_plugins::typecheck::TypeCheckOutcome::Unavailable(reason) => {
+        codape_plugins::typecheck::TypeCheckOutcome::Unavailable(reason) => {
             println!("nothing checked: {reason}");
         }
-        coderex_plugins::typecheck::TypeCheckOutcome::TimedOut(limit) => {
+        codape_plugins::typecheck::TypeCheckOutcome::TimedOut(limit) => {
             eprintln!("the compiler did not finish within {}s", limit.as_secs());
             std::process::exit(2);
         }
@@ -4241,7 +4237,7 @@ async fn run_gateway(port: u16) -> Result<()> {
          (/api/environments/register, /api/environments/<env>/assignments, \
          /api/environments/<env>/frames)."
     );
-    coderex_server::gateway::GatewayServer::new(port)
+    codape_server::gateway::GatewayServer::new(port)
         .run()
         .await
         .map_err(|error| anyhow::anyhow!(error))
@@ -4506,8 +4502,8 @@ mod tests {
 
     #[test]
     fn plugin_channels_are_validated_and_listed() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
-        let manifest: coderex_plugins::plugins::PluginManifest =
+        let manager = codape_plugins::plugins::PluginManager::new();
+        let manifest: codape_plugins::plugins::PluginManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
                 "version": "1.0.0",
@@ -4546,7 +4542,7 @@ mod tests {
     /// report names the target so `/plugin components` shows where events go.
     #[tokio::test]
     async fn a_channel_with_a_delivery_gets_a_webhook_sink() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
+        let manager = codape_plugins::plugins::PluginManager::new();
         manager.load_plugin(
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
@@ -4555,7 +4551,7 @@ mod tests {
                 "channels": [{
                     "server": "chat",
                     "displayName": "Team chat",
-                    "deliver": {"url": "https://hooks.example.com/coderex"}
+                    "deliver": {"url": "https://hooks.example.com/codape"}
                 }]
             }))
             .expect("the manifest should parse"),
@@ -4569,17 +4565,17 @@ mod tests {
         assert_eq!(subscriptions.webhooks[0].0, "chat");
         assert_eq!(
             subscriptions.webhooks[0].1.url(),
-            "https://hooks.example.com/coderex"
+            "https://hooks.example.com/codape"
         );
         let report = manager.plugin_channel_report();
         assert_eq!(
             report[0].status,
-            coderex_plugins::plugins::ChannelStatus::Subscribed
+            codape_plugins::plugins::ChannelStatus::Subscribed
         );
         assert!(
             report[0]
                 .render()
-                .contains("https://hooks.example.com/coderex")
+                .contains("https://hooks.example.com/codape")
         );
     }
 
@@ -4591,7 +4587,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl coderex_plugins::channel_delivery::ToolCaller for FakeCaller {
+    impl codape_plugins::channel_delivery::ToolCaller for FakeCaller {
         async fn call_tool(
             &self,
             server: &str,
@@ -4611,7 +4607,7 @@ mod tests {
     /// arguments.
     #[tokio::test]
     async fn a_channel_with_a_tool_delivery_calls_that_tool() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
+        let manager = codape_plugins::plugins::PluginManager::new();
         manager.load_plugin(
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
@@ -4634,7 +4630,7 @@ mod tests {
 
         let subscriptions = StartupOrchestrator::subscribe_plugin_channels(
             &manager,
-            Some(Arc::clone(&caller) as Arc<dyn coderex_plugins::channel_delivery::ToolCaller>),
+            Some(Arc::clone(&caller) as Arc<dyn codape_plugins::channel_delivery::ToolCaller>),
         );
 
         assert_eq!(subscriptions.tools.len(), 1);
@@ -4664,7 +4660,7 @@ mod tests {
     /// not subscribed — and the channel says so rather than appearing healthy.
     #[tokio::test]
     async fn a_tool_delivery_without_a_manager_is_not_subscribed() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
+        let manager = codape_plugins::plugins::PluginManager::new();
         manager.load_plugin(
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
@@ -4707,7 +4703,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let command = script.to_string_lossy().to_string();
 
-        let manager = coderex_plugins::plugins::PluginManager::new();
+        let manager = codape_plugins::plugins::PluginManager::new();
         manager.load_plugin(
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
@@ -4775,7 +4771,7 @@ mod tests {
     /// silently behaving like a channel with no delivery.
     #[tokio::test]
     async fn a_refused_delivery_subscribes_no_webhook() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
+        let manager = codape_plugins::plugins::PluginManager::new();
         manager.load_plugin(
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
@@ -4794,7 +4790,7 @@ mod tests {
         let report = manager.plugin_channel_report();
         assert_eq!(
             report[0].status,
-            coderex_plugins::plugins::ChannelStatus::DeliveryInvalid
+            codape_plugins::plugins::ChannelStatus::DeliveryInvalid
         );
     }
 
@@ -4802,8 +4798,8 @@ mod tests {
     /// records what a routed notification delivers.
     #[test]
     fn subscribing_channels_consumes_a_configured_channels_notifications() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
-        let manifest: coderex_plugins::plugins::PluginManifest =
+        let manager = codape_plugins::plugins::PluginManager::new();
+        let manifest: codape_plugins::plugins::PluginManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
                 "version": "1.0.0",
@@ -4817,14 +4813,14 @@ mod tests {
         // With no subscriber the channel is honestly idle.
         assert_eq!(
             manager.plugin_channel_report()[0].status,
-            coderex_plugins::plugins::ChannelStatus::Idle
+            codape_plugins::plugins::ChannelStatus::Idle
         );
 
         let subscriptions = StartupOrchestrator::subscribe_plugin_channels(&manager, None);
         let report = manager.plugin_channel_report();
         assert_eq!(
             report[0].status,
-            coderex_plugins::plugins::ChannelStatus::Subscribed,
+            codape_plugins::plugins::ChannelStatus::Subscribed,
             "a configured channel with a subscriber is no longer idle"
         );
         assert_eq!(report[0].subscribers, 1);
@@ -4849,8 +4845,8 @@ mod tests {
     /// server no channel names delivers to nobody.
     #[test]
     fn the_channel_router_delivers_to_subscribed_channels_only() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
-        let manifest: coderex_plugins::plugins::PluginManifest =
+        let manager = codape_plugins::plugins::PluginManager::new();
+        let manifest: codape_plugins::plugins::PluginManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "chan",
                 "version": "1.0.0",
@@ -4866,7 +4862,7 @@ mod tests {
             manager: Arc::clone(&manager),
         };
 
-        coderex_mcp::manager::ServerNotificationRouter::route(
+        codape_mcp::manager::ServerNotificationRouter::route(
             &router,
             "chat",
             "notifications/message",
@@ -4875,7 +4871,7 @@ mod tests {
         assert_eq!(subscriptions.log.lock().unwrap().len(), 1);
 
         // A notification from a server no channel binds to goes nowhere.
-        coderex_mcp::manager::ServerNotificationRouter::route(
+        codape_mcp::manager::ServerNotificationRouter::route(
             &router,
             "unbound",
             "notifications/message",
@@ -4893,12 +4889,12 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("types")).unwrap();
         std::fs::write(
             plugin_root.join("types/index.d.ts"),
-            "declare module 'coderex' { export const x: number }",
+            "declare module 'codape' { export const x: number }",
         )
         .unwrap();
 
-        let manager = coderex_plugins::plugins::PluginManager::new();
-        let manifest: coderex_plugins::plugins::PluginManifest =
+        let manager = codape_plugins::plugins::PluginManager::new();
+        let manifest: codape_plugins::plugins::PluginManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "typed",
                 "version": "1.0.0",
@@ -4923,8 +4919,8 @@ mod tests {
 
     #[test]
     fn configure_repl_installs_plugin_hooks_as_their_own_tier() {
-        let manager = coderex_plugins::plugins::PluginManager::new();
-        let manifest: coderex_plugins::plugins::PluginManifest =
+        let manager = codape_plugins::plugins::PluginManager::new();
+        let manifest: codape_plugins::plugins::PluginManifest =
             serde_json::from_value(serde_json::json!({
                 "name": "hooky",
                 "version": "1.0.0",
@@ -5073,8 +5069,8 @@ mod tests {
         )
         .expect("write manifest");
 
-        let manager = Arc::new(coderex_plugins::plugins::PluginManager::new());
-        let manifest = coderex_plugins::plugins::PluginManifest {
+        let manager = Arc::new(codape_plugins::plugins::PluginManager::new());
+        let manifest = codape_plugins::plugins::PluginManifest {
             name: "recovering".into(),
             version: "1.0.0".into(),
             entrypoint: Some("bin/missing".into()),
@@ -5088,7 +5084,7 @@ mod tests {
         assert!(
             matches!(
                 manager.get_plugin("recovering").map(|p| p.state),
-                Some(coderex_plugins::plugins::PluginState::Error(_))
+                Some(codape_plugins::plugins::PluginState::Error(_))
             ),
             "the failed spawn did not leave the plugin in Error"
         );
@@ -5133,7 +5129,7 @@ mod tests {
         let mut state = None;
         for _ in 0..200 {
             state = manager.get_plugin("recovering").map(|p| p.state);
-            if matches!(state, Some(coderex_plugins::plugins::PluginState::Active)) {
+            if matches!(state, Some(codape_plugins::plugins::PluginState::Active)) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5141,7 +5137,7 @@ mod tests {
         handle.abort();
         let _ = manager.stop_plugin("recovering").await;
         assert!(
-            matches!(state, Some(coderex_plugins::plugins::PluginState::Active)),
+            matches!(state, Some(codape_plugins::plugins::PluginState::Active)),
             "the restart loop never spawned the recovered plugin: {state:?}"
         );
     }
@@ -5225,32 +5221,32 @@ mod tests {
         let cwd = tmp.path().to_string_lossy().to_string();
 
         // Write a transcript
-        let transcript_dir = std::path::Path::new(&cwd).join(".coderex/transcripts");
+        let transcript_dir = std::path::Path::new(&cwd).join(".codape/transcripts");
         std::fs::create_dir_all(&transcript_dir).unwrap();
-        let store = coderex_memory::transcript::TranscriptStore::new(transcript_dir);
+        let store = codape_memory::transcript::TranscriptStore::new(transcript_dir);
         store
             .append(
                 "sess_1",
-                &coderex_core::types::Message::system("you are helpful"),
+                &codape_core::types::Message::system("you are helpful"),
             )
             .unwrap();
         store
-            .append("sess_1", &coderex_core::types::Message::user("hello"))
+            .append("sess_1", &codape_core::types::Message::user("hello"))
             .unwrap();
         store
             .append(
                 "sess_1",
-                &coderex_core::types::Message::assistant("hi there"),
+                &codape_core::types::Message::assistant("hi there"),
             )
             .unwrap();
 
         let messages = StartupOrchestrator::load_resume_messages(&cwd, "sess_1")
             .expect("resume should load transcript messages");
         assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0].role, coderex_core::types::Role::User));
+        assert!(matches!(messages[0].role, codape_core::types::Role::User));
         assert!(matches!(
             messages[1].role,
-            coderex_core::types::Role::Assistant
+            codape_core::types::Role::Assistant
         ));
     }
 
@@ -5311,7 +5307,7 @@ mod tests {
     #[test]
     fn provider_gate_accepts_an_anthropic_key() {
         let config = ProviderConfig {
-            anthropic: Some(coderex_core::provider_config::ProviderEndpoint {
+            anthropic: Some(codape_core::provider_config::ProviderEndpoint {
                 api_key: "sk-test".into(),
                 base_url: None,
                 provider_profile: None,
@@ -5394,8 +5390,8 @@ mod tests {
 
     #[test]
     fn apply_effort_wraps_the_client_and_stamps_the_context() {
-        use coderex_core::api_client::{ApiResponse, RequestContext, StreamEvent};
-        use coderex_core::types::ModelId as CoreModelId;
+        use codape_core::api_client::{ApiResponse, RequestContext, StreamEvent};
+        use codape_core::types::ModelId as CoreModelId;
         use std::pin::Pin;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -5431,9 +5427,9 @@ mod tests {
                 _messages: &[serde_json::Value],
                 _model: &CoreModelId,
                 _max_tokens: u32,
-                _tools: &[coderex_core::tool_executor::ToolInfo],
-            ) -> Result<ApiResponse, coderex_core::api_client::ApiError> {
-                Err(coderex_core::api_client::ApiError::Auth("spy".into()))
+                _tools: &[codape_core::tool_executor::ToolInfo],
+            ) -> Result<ApiResponse, codape_core::api_client::ApiError> {
+                Err(codape_core::api_client::ApiError::Auth("spy".into()))
             }
 
             async fn create_message_streaming(
@@ -5442,7 +5438,7 @@ mod tests {
                 _messages: &[serde_json::Value],
                 _model: &CoreModelId,
                 _max_tokens: u32,
-                _tools: &[coderex_core::tool_executor::ToolInfo],
+                _tools: &[codape_core::tool_executor::ToolInfo],
             ) -> Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>> {
                 Box::pin(futures::stream::empty())
             }
@@ -5581,7 +5577,7 @@ mod tests {
     fn fallback_is_used_only_for_model_unavailability() {
         let primary = ModelId("claude-opus-4-6".into());
         let fallback = ModelId("claude-haiku-4-5-20251001".into());
-        let choose = coderex_core::engine::fallback_after_model_error;
+        let choose = codape_core::engine::fallback_after_model_error;
 
         assert_eq!(
             choose(
@@ -5618,7 +5614,7 @@ mod tests {
     #[test]
     fn telemetry_settings_override_environment_channels() {
         let settings = Settings {
-            telemetry: Some(coderex_config::settings::TelemetrySubConfig {
+            telemetry: Some(codape_config::settings::TelemetrySubConfig {
                 otlp_endpoint: Some("https://collector.example/v1/logs".into()),
                 otlp_headers: Some("Authorization=Bearer token,x-team=core".into()),
                 datadog_api_key: Some("dd-key".into()),
@@ -5629,7 +5625,7 @@ mod tests {
             ..Settings::defaults()
         };
         let channels = StartupOrchestrator::apply_telemetry_channel_settings(
-            coderex_telemetry::ChannelConfig::default(),
+            codape_telemetry::ChannelConfig::default(),
             &settings,
         );
         assert_eq!(
@@ -5654,7 +5650,7 @@ mod tests {
     /// Both payloads come from the same uploader constructor a session uses.
     #[test]
     fn the_strict_setting_changes_the_uploaded_crash_payload() {
-        let crash = coderex_telemetry::PendingCrash {
+        let crash = codape_telemetry::PendingCrash {
             id: 1,
             panic_info: r#"{"panic_type":"test","panic_location":"src/lib.rs:1"}"#.into(),
             backtrace: None,
@@ -5673,7 +5669,7 @@ mod tests {
 
         let payload_for = |strict: bool| {
             let settings = Settings {
-                telemetry: Some(coderex_config::settings::TelemetrySubConfig {
+                telemetry: Some(codape_config::settings::TelemetrySubConfig {
                     strict: Some(strict),
                     ..Default::default()
                 }),
@@ -5686,7 +5682,7 @@ mod tests {
             );
             let dir = tempfile::tempdir().unwrap();
             let uploader =
-                coderex_telemetry::TelemetryUploader::new(dir.path().join("telemetry.db"), config);
+                codape_telemetry::TelemetryUploader::new(dir.path().join("telemetry.db"), config);
             uploader.preview_crash_payload(&crash)
         };
 
@@ -5711,10 +5707,10 @@ mod tests {
     async fn uploader_task_is_spawned_only_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let disabled_store =
-            coderex_telemetry::TelemetryStore::open(&dir.path().join("off.db")).unwrap();
-        let (_handle, uploader) = coderex_telemetry::TelemetryHandle::new(
+            codape_telemetry::TelemetryStore::open(&dir.path().join("off.db")).unwrap();
+        let (_handle, uploader) = codape_telemetry::TelemetryHandle::new(
             &disabled_store,
-            Some(coderex_telemetry::TelemetryConfig {
+            Some(codape_telemetry::TelemetryConfig {
                 enabled: false,
                 ..Default::default()
             }),
@@ -5725,10 +5721,10 @@ mod tests {
         );
 
         let enabled_store =
-            coderex_telemetry::TelemetryStore::open(&dir.path().join("on.db")).unwrap();
-        let (_handle, uploader) = coderex_telemetry::TelemetryHandle::new(
+            codape_telemetry::TelemetryStore::open(&dir.path().join("on.db")).unwrap();
+        let (_handle, uploader) = codape_telemetry::TelemetryHandle::new(
             &enabled_store,
-            Some(coderex_telemetry::TelemetryConfig {
+            Some(codape_telemetry::TelemetryConfig {
                 enabled: true,
                 upload_interval_secs: 3600,
                 ..Default::default()
@@ -5744,12 +5740,12 @@ mod tests {
     fn session_guard_records_start_and_end_events() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("telemetry.db");
-        let store = coderex_telemetry::TelemetryStore::open(&db_path).unwrap();
-        let (handle, _uploader) = coderex_telemetry::TelemetryHandle::new(&store, None);
+        let store = codape_telemetry::TelemetryStore::open(&db_path).unwrap();
+        let (handle, _uploader) = codape_telemetry::TelemetryHandle::new(&store, None);
         {
             let _session = TelemetrySessionGuard::start(handle);
         }
-        let store = coderex_telemetry::TelemetryStore::open(&db_path).unwrap();
+        let store = codape_telemetry::TelemetryStore::open(&db_path).unwrap();
         assert_eq!(
             store.event_count().unwrap(),
             2,
@@ -5760,11 +5756,11 @@ mod tests {
     #[test]
     fn configured_marketplaces_include_settings_and_drop_duplicates() {
         let configured = vec![
-            coderex_config::MarketplaceSetting {
+            codape_config::MarketplaceSetting {
                 name: "internal".into(),
                 url: "https://plugins.example".into(),
             },
-            coderex_config::MarketplaceSetting {
+            codape_config::MarketplaceSetting {
                 name: "internal".into(),
                 url: "https://plugins.example".into(),
             },
@@ -5791,7 +5787,7 @@ mod tests {
         // the ambient environment contains.
         let client = StartupOrchestrator::api_client_from_provider_config(
             ProviderConfig {
-                anthropic: Some(coderex_core::provider_config::ProviderEndpoint {
+                anthropic: Some(codape_core::provider_config::ProviderEndpoint {
                     api_key: "sk-test".into(),
                     base_url: None,
                     provider_profile: None,

@@ -1,6 +1,6 @@
 //! What a headless run says when a tool needs approval and nothing can answer.
 //!
-//! `coderex -p` has no confirmation channel unless the host asked for one. A
+//! `codape -p` has no confirmation channel unless the host asked for one. A
 //! tool that needs approval is then not denied by a person — nobody was asked —
 //! and the model is told that, so it can try a different approach instead of
 //! believing a user refused it. The wording existed in the engine and had only
@@ -72,19 +72,19 @@ fn run_without_control(dir: &Path, base_url: &str) -> String {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .current_dir(dir)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -94,12 +94,12 @@ fn run_without_control(dir: &Path, base_url: &str) -> String {
     let output = child.wait_with_output().expect("wait");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     // The model sees the tool result; `-p` prints only the answer, so the
     // refusal is read from the persisted transcript.
-    let transcripts = dir.join(".coderex/transcripts");
+    let transcripts = dir.join(".codape/transcripts");
     let mut text = String::new();
     for entry in std::fs::read_dir(&transcripts).expect("transcripts were not written") {
         let path = entry.expect("entry").path();

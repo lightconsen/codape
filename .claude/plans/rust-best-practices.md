@@ -1,15 +1,15 @@
-# Rust Industry Best Practices for CodeRex
+# Rust Industry Best Practices for Codape
 
 ## Context
 
-CodeRex is a large-scale Rust project (~25 phases, 15+ crates) reimplementing Claude Code. Without explicit practices, the project risks:
+Codape is a large-scale Rust project (~25 phases, 15+ crates) reimplementing Claude Code. Without explicit practices, the project risks:
 - Unbounded compile times (30+ min in large monoliths)
 - Dependency version drift across crates
 - Inconsistent error handling patterns
 - Missing supply chain security
 - Poor IDE experience for contributors
 
-This plan covers 16 categories of industry best practices applicable to CodeRex.
+This plan covers 16 categories of industry best practices applicable to Codape.
 
 ---
 
@@ -171,7 +171,7 @@ wildcards = "deny"
 
 ## 7. Async Patterns (tokio)
 
-**Practices for CodeRex:**
+**Practices for Codape:**
 - Single `#[tokio::main]` entry point, pass `Runtime` handle explicitly
 - Never `block_on()` inside async code
 - Use `tokio::select!` for concurrent event consumption (as spec already describes)

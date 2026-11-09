@@ -30,9 +30,9 @@ struct SessionSnapshot {
 impl SessionStore {
     /// Open the store for a given session ID.
     ///
-    /// Files are written to `~/.coderex/sdk_sessions/{session_id}.json`.
+    /// Files are written to `~/.codape/sdk_sessions/{session_id}.json`.
     pub fn for_session(session_id: &str) -> Result<Self, StoreError> {
-        let dir = coderex_config::config_home().join("sdk_sessions");
+        let dir = codape_config::config_home().join("sdk_sessions");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{session_id}.json"));
         Ok(Self { path })

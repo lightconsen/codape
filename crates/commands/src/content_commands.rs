@@ -70,7 +70,7 @@ pub fn register(registry: &mut CommandRegistry) {
             } else {
                 &ctx.version
             };
-            CommandResult::success(format!("CodeRex {version}\nRust workspace\n"))
+            CommandResult::success(format!("Codape {version}\nRust workspace\n"))
         }),
     ));
 }
@@ -78,7 +78,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -128,7 +128,7 @@ mod tests {
             r
         };
         let result = reg.execute("version", &ctx(), &[]);
-        assert!(result.output.contains("CodeRex"));
+        assert!(result.output.contains("Codape"));
     }
 
     #[test]

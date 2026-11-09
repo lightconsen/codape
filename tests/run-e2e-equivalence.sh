@@ -5,4 +5,4 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-cargo test -p coderex-cli --test e2e_equivalence -- --test-threads=1 "$@"
+cargo test -p codape-cli --test e2e_equivalence -- --test-threads=1 "$@"

@@ -8,8 +8,8 @@
 //! - Delta sync for merging concurrent session changes
 
 use crate::delta_sync::{StateDelta, compute_delta, compute_revision_hash};
-use coderex_core::state::SessionState;
-use coderex_core::types::{Message, UsageSummary};
+use codape_core::state::SessionState;
+use codape_core::types::{Message, UsageSummary};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -156,7 +156,7 @@ pub struct TeleportRendezvous {
 
 impl TeleportRendezvous {
     /// The environment variable that configures a rendezvous service.
-    pub const ENV: &'static str = "CODEREX_TELEPORT_URL";
+    pub const ENV: &'static str = "CODAPE_TELEPORT_URL";
 
     /// Point at a rendezvous service.
     #[must_use]
@@ -311,12 +311,12 @@ pub struct TeleportManager {
 }
 
 impl TeleportManager {
-    /// Create a new manager with the default share base (`~/.coderex/teleport/shared`).
+    /// Create a new manager with the default share base (`~/.codape/teleport/shared`).
     #[must_use]
     pub fn new() -> Self {
         let share_base = home::home_dir()
             .unwrap_or_default()
-            .join(".coderex")
+            .join(".codape")
             .join("teleport")
             .join("shared");
         Self {
@@ -406,18 +406,18 @@ impl TeleportManager {
     /// Path to the teleport state file inside a directory.
     #[must_use]
     pub fn state_file_for(dir: &Path) -> PathBuf {
-        dir.join(".coderex").join("teleport_state.json")
+        dir.join(".codape").join("teleport_state.json")
     }
 
-    /// Save a session snapshot to the given directory's `.coderex/teleport_state.json`.
+    /// Save a session snapshot to the given directory's `.codape/teleport_state.json`.
     pub fn save_to_directory(
         &self,
         state: &SessionState,
         dir: &Path,
     ) -> Result<PathBuf, TeleportError> {
-        let coderex_dir = dir.join(".coderex");
-        std::fs::create_dir_all(&coderex_dir)?;
-        let path = coderex_dir.join("teleport_state.json");
+        let codape_dir = dir.join(".codape");
+        std::fs::create_dir_all(&codape_dir)?;
+        let path = codape_dir.join("teleport_state.json");
         let snapshot = TeleportSnapshot::from_session(state);
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| TeleportError::Serialize(e.to_string()))?;
@@ -425,7 +425,7 @@ impl TeleportManager {
         Ok(path)
     }
 
-    /// Load a session snapshot from a directory's `.coderex/teleport_state.json`.
+    /// Load a session snapshot from a directory's `.codape/teleport_state.json`.
     ///
     /// Returns `None` if the file does not exist.
     pub fn load_from_directory(&self, dir: &Path) -> Result<Option<SessionState>, TeleportError> {
@@ -532,7 +532,7 @@ impl Default for TeleportManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::Message;
+    use codape_core::types::Message;
     use std::path::PathBuf;
 
     #[test]

@@ -1,19 +1,19 @@
-//! `coderex telemetry preview-crash` through the real binary: the command
+//! `codape telemetry preview-crash` through the real binary: the command
 //! prints the wire payload for a pending crash, locally, without uploading.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn run(config_home: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(args)
         .env("CLAUDE_CONFIG_DIR", config_home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 fn write_pending(config_home: &Path, name: &str) -> PathBuf {

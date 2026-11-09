@@ -23,12 +23,12 @@ use std::path::Path;
 pub fn default_sandbox_config(
     tool_name: &str,
     cwd: &Path,
-) -> Option<coderex_core::sandbox::SandboxConfig> {
+) -> Option<codape_core::sandbox::SandboxConfig> {
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
 
     match tool_name {
         "Bash" | "bash" | "PowerShell" | "powershell" => {
-            Some(coderex_core::sandbox::SandboxConfig {
+            Some(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![canonical_cwd.clone()],
                 allowed_write_paths: vec![canonical_cwd.clone()],
                 allowed_exec_paths: system_exec_paths(),
@@ -39,7 +39,7 @@ pub fn default_sandbox_config(
                 allow_network: false,
             })
         }
-        "Edit" | "edit" | "Write" | "write" => Some(coderex_core::sandbox::SandboxConfig {
+        "Edit" | "edit" | "Write" | "write" => Some(codape_core::sandbox::SandboxConfig {
             allowed_read_paths: vec![canonical_cwd.clone()],
             allowed_write_paths: vec![canonical_cwd.clone()],
             allowed_exec_paths: vec![],
@@ -50,7 +50,7 @@ pub fn default_sandbox_config(
             allow_network: false,
         }),
         // Default policy for any other tool that touches files or spawns processes
-        _ => Some(coderex_core::sandbox::SandboxConfig {
+        _ => Some(codape_core::sandbox::SandboxConfig {
             allowed_read_paths: vec![canonical_cwd.clone()],
             allowed_write_paths: vec![canonical_cwd.clone()],
             allowed_exec_paths: vec![],

@@ -129,7 +129,7 @@ async fn model_for(args: Vec<String>) -> String {
     let _ = server.await;
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let models = models.lock().unwrap().clone();
@@ -137,23 +137,23 @@ async fn model_for(args: Vec<String>) -> String {
 }
 
 fn run(cwd: &Path, home: &Path, base_url: &str, args: &[String]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .args(args)
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .env_remove("ANTHROPIC_MODEL")
-        .env_remove("CODEREX_MAIN_MODEL")
-        .env_remove("CODEREX_LIGHTWEIGHT_MODEL")
+        .env_remove("CODAPE_MAIN_MODEL")
+        .env_remove("CODAPE_LIGHTWEIGHT_MODEL")
         .env_remove("ANTHROPIC_LIGHTWEIGHT_MODEL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()

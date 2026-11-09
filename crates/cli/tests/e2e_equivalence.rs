@@ -1,4 +1,4 @@
-//! CodeRex Equivalence Tests — API, behavioural and boundary parity across
+//! Codape Equivalence Tests — API, behavioural and boundary parity across
 //! all 14 modules.
 //!
 //! These tests verify API parity, behavioral parity, and boundary parity
@@ -12,7 +12,7 @@
 //! slash commands, MCP, bridge, server, UI. See module headers below.
 //!
 //! ## Running
-//!   cargo test -p coderex-cli --test e2e_equivalence
+//!   cargo test -p codape-cli --test e2e_equivalence
 //!
 //! The provider calls replay tests/cassettes/e2e_equivalence, so no key or
 //! network is needed. Refresh them with scripts/record-cassettes.sh --fresh.
@@ -36,11 +36,11 @@ const fn have_live_env() -> bool {
 }
 
 fn binary_path() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_coderex"))
+    Path::new(env!("CARGO_BIN_EXE_codape"))
 }
 
 #[derive(Debug)]
-struct CoderexOutput {
+struct CodapeOutput {
     stdout: String,
     #[allow(dead_code)]
     stderr: String,
@@ -49,7 +49,7 @@ struct CoderexOutput {
     duration: Duration,
 }
 
-fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
+fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CodapeOutput {
     let mut cmd = Command::new(binary_path());
     common::cassette("e2e_equivalence").configure_for(&mut cmd, cwd);
     cmd.arg("-p")
@@ -60,7 +60,7 @@ fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
         .stderr(Stdio::piped());
 
     let start = Instant::now();
-    let mut child = cmd.spawn().expect("spawn coderex");
+    let mut child = cmd.spawn().expect("spawn codape");
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).unwrap();
@@ -92,7 +92,7 @@ fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
             Ok(None) => {
                 if start.elapsed() > Duration::from_secs(timeout_secs) {
                     let _ = child.kill();
-                    panic!("coderex timed out after {timeout_secs}s");
+                    panic!("codape timed out after {timeout_secs}s");
                 }
                 thread::sleep(Duration::from_millis(200));
             }
@@ -103,7 +103,7 @@ fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
     let stdout = stdout_thread.join().unwrap();
     let stderr = stderr_thread.join().unwrap();
 
-    CoderexOutput {
+    CodapeOutput {
         stdout,
         stderr,
         exit_code: status.code(),
@@ -111,12 +111,7 @@ fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
     }
 }
 
-fn run_with_args(
-    cwd: &Path,
-    prompt: &str,
-    extra_args: &[&str],
-    timeout_secs: u64,
-) -> CoderexOutput {
+fn run_with_args(cwd: &Path, prompt: &str, extra_args: &[&str], timeout_secs: u64) -> CodapeOutput {
     let mut cmd = Command::new(binary_path());
     common::cassette("e2e_equivalence").configure_for(&mut cmd, cwd);
     cmd.arg("-p")
@@ -127,7 +122,7 @@ fn run_with_args(
         .stderr(Stdio::piped());
 
     let start = Instant::now();
-    let mut child = cmd.spawn().expect("spawn coderex");
+    let mut child = cmd.spawn().expect("spawn codape");
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).unwrap();
@@ -159,7 +154,7 @@ fn run_with_args(
             Ok(None) => {
                 if start.elapsed() > Duration::from_secs(timeout_secs) {
                     let _ = child.kill();
-                    panic!("coderex timed out after {timeout_secs}s");
+                    panic!("codape timed out after {timeout_secs}s");
                 }
                 thread::sleep(Duration::from_millis(200));
             }
@@ -170,7 +165,7 @@ fn run_with_args(
     let stdout = stdout_thread.join().unwrap();
     let stderr = stderr_thread.join().unwrap();
 
-    CoderexOutput {
+    CodapeOutput {
         stdout,
         stderr,
         exit_code: status.code(),
@@ -178,8 +173,8 @@ fn run_with_args(
     }
 }
 
-/// Run the coderex binary with arbitrary arguments (non-interactive mode).
-fn run_command(cwd: &Path, args: &[&str], timeout_secs: u64) -> CoderexOutput {
+/// Run the codape binary with arbitrary arguments (non-interactive mode).
+fn run_command(cwd: &Path, args: &[&str], timeout_secs: u64) -> CodapeOutput {
     let mut cmd = Command::new(binary_path());
     common::cassette("e2e_equivalence").configure_for(&mut cmd, cwd);
     cmd.args(args)
@@ -189,7 +184,7 @@ fn run_command(cwd: &Path, args: &[&str], timeout_secs: u64) -> CoderexOutput {
         .stderr(Stdio::piped());
 
     let start = Instant::now();
-    let mut child = cmd.spawn().expect("spawn coderex");
+    let mut child = cmd.spawn().expect("spawn codape");
 
     let stdout_handle = child.stdout.take().unwrap();
     let stderr_handle = child.stderr.take().unwrap();
@@ -216,7 +211,7 @@ fn run_command(cwd: &Path, args: &[&str], timeout_secs: u64) -> CoderexOutput {
             Ok(None) => {
                 if start.elapsed() > Duration::from_secs(timeout_secs) {
                     let _ = child.kill();
-                    panic!("coderex timed out after {timeout_secs}s");
+                    panic!("codape timed out after {timeout_secs}s");
                 }
                 thread::sleep(Duration::from_millis(200));
             }
@@ -227,7 +222,7 @@ fn run_command(cwd: &Path, args: &[&str], timeout_secs: u64) -> CoderexOutput {
     let stdout = stdout_thread.join().unwrap();
     let stderr = stderr_thread.join().unwrap();
 
-    CoderexOutput {
+    CodapeOutput {
         stdout,
         stderr,
         exit_code: status.code(),
@@ -922,8 +917,8 @@ fn hook_settings_load_without_crash() {
     create_rust_lib(dir.path());
 
     // Write a settings.json with hooks configured
-    let coderex_dir = dir.path().join(".coderex");
-    std::fs::create_dir_all(&coderex_dir).unwrap();
+    let codape_dir = dir.path().join(".codape");
+    std::fs::create_dir_all(&codape_dir).unwrap();
     let settings = serde_json::json!({
         "hooks": [
             {
@@ -947,9 +942,9 @@ fn hook_settings_load_without_crash() {
             }
         ]
     });
-    std::fs::write(coderex_dir.join("settings.json"), settings.to_string()).unwrap();
+    std::fs::write(codape_dir.join("settings.json"), settings.to_string()).unwrap();
 
-    // Run coderex with the hooked settings — should not crash during startup
+    // Run codape with the hooked settings — should not crash during startup
     let out = run_with_args(dir.path(), "Say hi briefly.", &[], 60);
     eprintln!("stdout:\n{}", out.stdout);
     eprintln!("stderr:\n{}", out.stderr);
@@ -968,8 +963,8 @@ fn hook_settings_sources_shows_hooks() {
     let dir = tempfile::tempdir().unwrap();
     create_rust_lib(dir.path());
 
-    let coderex_dir = dir.path().join(".coderex");
-    std::fs::create_dir_all(&coderex_dir).unwrap();
+    let codape_dir = dir.path().join(".codape");
+    std::fs::create_dir_all(&codape_dir).unwrap();
     let settings = serde_json::json!({
         "hooks": [
             {
@@ -978,7 +973,7 @@ fn hook_settings_sources_shows_hooks() {
             }
         ]
     });
-    std::fs::write(coderex_dir.join("settings.json"), settings.to_string()).unwrap();
+    std::fs::write(codape_dir.join("settings.json"), settings.to_string()).unwrap();
 
     let out = run_with_args(dir.path(), "", &["--setting-sources"], 30);
     eprintln!("stdout:\n{}", out.stdout);
@@ -992,8 +987,8 @@ fn hook_settings_sources_shows_hooks() {
 
 // NOTE: Full hook firing E2E (PreToolUse stopping a tool, UserPromptSubmit
 // modifying input, etc.) requires the REPL to wire HookRegistry into the
-// QueryEngine via set_hooks(). This is tested in coderex-hooks integration
-// tests and coderex-core engine tests.
+// QueryEngine via set_hooks(). This is tested in codape-hooks integration
+// tests and codape-core engine tests.
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Module 6: Agents
@@ -1044,13 +1039,13 @@ fn agent_cli_detailed_shows_descriptions() {
 // SendMessage, worktree isolation, tool whitelist) requires the CLI to
 // expose agent spawning commands. Currently agents are only spawned
 // programmatically via AgentManager. These behaviors are covered by
-// coderex-agents integration tests.
+// codape-agents integration tests.
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Module 7: Compact
 //  NOTE: Context compression is triggered by token budget thresholds.
 //  Hard to force in E2E without extremely long prompts.
-//  Test via: coderex-core unit tests for CompactRecovery.
+//  Test via: codape-core unit tests for CompactRecovery.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1183,11 +1178,11 @@ fn config_cli_project_settings_loaded() {
     let dir = tempfile::tempdir().unwrap();
     create_rust_lib(dir.path());
 
-    // Create .coderex/settings.json in the project directory
-    let coderex_dir = dir.path().join(".coderex");
-    std::fs::create_dir_all(&coderex_dir).unwrap();
+    // Create .codape/settings.json in the project directory
+    let codape_dir = dir.path().join(".codape");
+    std::fs::create_dir_all(&codape_dir).unwrap();
     std::fs::write(
-        coderex_dir.join("settings.json"),
+        codape_dir.join("settings.json"),
         r#"{"model":"claude-sonnet-4-6","permission_mode":"accept-edits"}"#,
     )
     .unwrap();
@@ -1198,7 +1193,7 @@ fn config_cli_project_settings_loaded() {
     // The project config should be loaded and visible in setting-sources output
     assert!(
         out.stdout.contains("accept-edits") || out.stdout.contains("Config diff"),
-        "expected project .coderex/settings.json to be loaded, got:\n{}",
+        "expected project .codape/settings.json to be loaded, got:\n{}",
         out.stdout
     );
 }
@@ -1206,7 +1201,7 @@ fn config_cli_project_settings_loaded() {
 // ═══════════════════════════════════════════════════════════════════════════
 //  Module 9: Slash Commands
 //  NOTE: Slash commands require interactive REPL mode.
-//  Not testable via `coderex -p` headless mode.
+//  Not testable via `codape -p` headless mode.
 //  Test via: REPL integration tests or manual testing.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -1458,20 +1453,20 @@ fn mcp_cli_test_server_not_found() {
 //  Module 12: Bridge / Remote
 //  NOTE: Bridge requires a running bridge server.
 //  Not testable via CLI E2E without bridge infrastructure.
-//  Test via: coderex-bridge crate integration tests.
+//  Test via: codape-bridge crate integration tests.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Module 13: Server / SDK
-//  NOTE: Server mode requires `coderex serve` daemon.
+//  NOTE: Server mode requires `codape serve` daemon.
 //  Not testable via CLI E2E without server lifecycle management.
-//  Test via: coderex-server crate integration tests.
+//  Test via: codape-server crate integration tests.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Module 14: UI / REPL
 //  NOTE: TUI components require interactive terminal.
-//  Not testable via headless `coderex -p` mode.
+//  Not testable via headless `codape -p` mode.
 //  Test via: Manual testing or terminal emulator automation.
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -5,7 +5,7 @@
 //! every event type must carry exactly its declared keys, and raw renderer
 //! fields must not survive the projection.
 
-use coderex_core::wire_protocol::WireEvent;
+use codape_core::wire_protocol::WireEvent;
 use std::collections::HashMap;
 
 const FIXTURE: &str = include_str!("fixtures/wire_contract.jsonl");
@@ -117,7 +117,7 @@ fn an_unknown_event_type_is_rejected() {
 
 #[test]
 fn every_wire_request_round_trips() {
-    use coderex_core::wire_protocol::WireRequest;
+    use codape_core::wire_protocol::WireRequest;
 
     for line in [
         r#"{"type":"submit","prompt":"hello"}"#,
@@ -140,7 +140,7 @@ fn every_wire_request_round_trips() {
 
 #[test]
 fn an_unknown_request_type_is_rejected() {
-    use coderex_core::wire_protocol::WireRequest;
+    use codape_core::wire_protocol::WireRequest;
 
     assert!(serde_json::from_str::<WireRequest>(r#"{"type":"reboot"}"#).is_err());
 }

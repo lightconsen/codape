@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 /// The default is `mcp__`, which makes the public name
 /// `mcp__<server>__<tool>`: two servers may expose the same raw tool name, and
 /// the server name is what keeps them apart.
-pub const MCP_PREFIX_ENV: &str = "CODEREX_MCP_PREFIX";
+pub const MCP_PREFIX_ENV: &str = "CODAPE_MCP_PREFIX";
 /// The prefix used when [`MCP_PREFIX_ENV`] is unset.
 pub const DEFAULT_MCP_PREFIX: &str = "mcp__";
 
@@ -464,16 +464,16 @@ mod tests {
     #[test]
     fn a_configured_prefix_replaces_the_default() {
         assert_eq!(resolve_prefix(None, None), DEFAULT_MCP_PREFIX);
-        assert_eq!(resolve_prefix(Some("coderex_"), None), "coderex_");
+        assert_eq!(resolve_prefix(Some("codape_"), None), "codape_");
         assert_eq!(resolve_prefix(Some(""), None), "");
-        set_mcp_prefix_for_test(Some("coderex_"));
+        set_mcp_prefix_for_test(Some("codape_"));
         assert_eq!(
             qualified_tool_name("filesystem", "read_file"),
-            "coderex_filesystem__read_file"
+            "codape_filesystem__read_file"
         );
         assert_eq!(
             sample_tool().qualified_name(),
-            "coderex_filesystem__read_file"
+            "codape_filesystem__read_file"
         );
         // The unambiguous spelling is still the default one.
         assert_eq!(sample_tool().prefixed_name(), "mcp__filesystem__read_file");
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(sample_tool().qualified_name(), "mcp__filesystem__read_file");
     }
 
-    /// `CODEREX_MCP_PREFIX` wins over the reference's no-prefix switch, and an
+    /// `CODAPE_MCP_PREFIX` wins over the reference's no-prefix switch, and an
     /// empty prefix is the way to ask for raw names.
     #[test]
     fn the_configured_prefix_wins_over_the_legacy_switch() {

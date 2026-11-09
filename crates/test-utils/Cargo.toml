@@ -1,19 +1,20 @@
 [package]
-name = "coderex-test-utils"
+name = "codape-test-utils"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
-description = "Test utilities, TestRig, snapshot helpers, and wire client for CodeRex"
+description = "Test utilities, TestRig, snapshot helpers, and wire client for Codape"
 
 [lints]
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
-coderex-tools = { path = "../tools" }
+codape-core = { path = "../core" }
+codape-tools = { path = "../tools" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

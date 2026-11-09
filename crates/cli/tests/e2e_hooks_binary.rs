@@ -1,7 +1,7 @@
 //! Hook firing through the real binary.
 //!
 //! The hooks crate tests the registry and the TUI tests one blocking hook;
-//! these prove what a user gets from `coderex -p`: a failed gating hook denies
+//! these prove what a user gets from `codape -p`: a failed gating hook denies
 //! the tool, a Stop hook runs after a completed turn, and a PostToolUse rewrite
 //! reaches the model's tool result.
 //!
@@ -88,7 +88,7 @@ fn run(
     prompt: &str,
     args: &[&str],
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .args(args)
         .current_dir(cwd)
@@ -96,12 +96,12 @@ fn run(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -281,7 +281,7 @@ fn the_setup_hook_runs_after_init() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
@@ -450,7 +450,7 @@ fn watch_paths_from_session_start_arm_file_changed() {
     let output = child.wait_with_output().expect("wait");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     drop(provider);
@@ -469,7 +469,7 @@ fn run_spawned(
     prompt: &str,
     args: &[&str],
 ) -> std::process::Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .args(args)
         .current_dir(cwd)
@@ -477,12 +477,12 @@ fn run_spawned(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -621,7 +621,7 @@ fn an_http_pretooluse_hook_can_block_the_tool() {
     let body = server.body.lock().unwrap().clone();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
@@ -668,7 +668,7 @@ fn a_model_backed_pretooluse_hook_can_block_the_tool() {
     let _ = api.0;
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
@@ -748,7 +748,7 @@ fn an_agent_hook_is_opt_in_and_can_block_the_tool() {
     let _ = api.0;
     assert!(
         gated.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&gated.stderr)
     );
     let content = std::fs::read_to_string(with.path().join("src/lib.rs")).unwrap();
@@ -960,7 +960,7 @@ fn tool_and_subagent_hooks_reach_their_configured_commands() {
         let _ = api.0;
         assert!(
             output.status.success(),
-            "coderex failed: {}",
+            "codape failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         recorded(&marker)
@@ -1032,11 +1032,11 @@ fn failure_and_compaction_events_reach_their_hooks() {
     // 1. A deny rule refuses the tool: PermissionDenied fires with the rule's
     //    reason, and PostToolUseFailure fires because the call failed.
     let denied_dir = tempfile::tempdir().expect("denied workspace");
-    std::fs::create_dir_all(denied_dir.path().join(".coderex")).unwrap();
+    std::fs::create_dir_all(denied_dir.path().join(".codape")).unwrap();
     let denied_marker = denied_dir.path().join("events");
     let hook = recorder(denied_dir.path(), &denied_marker);
     std::fs::write(
-        denied_dir.path().join(".coderex/settings.json"),
+        denied_dir.path().join(".codape/settings.json"),
         serde_json::json!({
             "permissions": {"deny": ["Bash(echo:*)"]},
         })
@@ -1062,7 +1062,7 @@ fn failure_and_compaction_events_reach_their_hooks() {
     let _ = api.0;
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let events = recorded(&denied_marker);
@@ -1094,20 +1094,20 @@ fn failure_and_compaction_events_reach_their_hooks() {
         }]
     }));
     let api = start_static_provider();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(compact_dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &api.1)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
-        .env("CODEREX_CONTEXT_WINDOW", "1000")
+        .env("CODAPE_LOG", "off")
+        .env("CODAPE_CONTEXT_WINDOW", "1000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()

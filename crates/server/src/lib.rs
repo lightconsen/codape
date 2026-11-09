@@ -1,4 +1,4 @@
-//! CodeRex daemon server — WebSocket sessions and SDK structured I/O.
+//! Codape daemon server — WebSocket sessions and SDK structured I/O.
 
 #![warn(missing_docs)]
 

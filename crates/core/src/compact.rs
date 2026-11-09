@@ -1,12 +1,12 @@
 //! Compact strategies for reducing context window size.
 //!
 //! Every strategy here is **client-side**: it rewrites the message list in
-//! this process, before the request is sent. CodeRex has no server-side
+//! this process, before the request is sent. Codape has no server-side
 //! context management, so nothing in this module corresponds to the reference
 //! implementation's `clear_tool_uses_20250919` context-management instruction,
 //! where the request tells the *server* to drop old tool results and the local
 //! transcript is left untouched. Do not read these functions as a wrapper over
-//! that mechanism — they are the whole of CodeRex's compaction, and the model
+//! that mechanism — they are the whole of Codape's compaction, and the model
 //! sees whatever this code leaves behind.
 //!
 //! Four strategies are available, ranging from light to aggressive:
@@ -523,11 +523,11 @@ pub fn insert_compact_boundary(messages: &mut Vec<Message>, at_index: usize) {
 #[must_use]
 pub fn compact_boundary_message() -> Message {
     Message::system(
-        "<coderex_compact_boundary>\n\
+        "<codape_compact_boundary>\n\
         Previous conversation history was truncated to reduce context size.\n\
         The conversation prior to this point has been summarized and removed.\n\
         Continue the conversation from this point.\n\
-        </coderex_compact_boundary>",
+        </codape_compact_boundary>",
     )
 }
 
@@ -1878,7 +1878,7 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m.role, Role::System)
                     && matches!(&m.content, MessageContent::Text(t)
-                    if t.contains("<coderex_compact_boundary>")))
+                    if t.contains("<codape_compact_boundary>")))
         );
         // The first user message and the last two turns survive.
         assert_eq!(
@@ -2002,9 +2002,9 @@ mod tests {
         let msg = compact_boundary_message();
         assert!(matches!(msg.role, Role::System));
         if let MessageContent::Text(s) = &msg.content {
-            assert!(s.contains("<coderex_compact_boundary>"));
+            assert!(s.contains("<codape_compact_boundary>"));
             assert!(s.contains("truncated"));
-            assert!(s.contains("</coderex_compact_boundary>"));
+            assert!(s.contains("</codape_compact_boundary>"));
         } else {
             panic!("expected text content");
         }
@@ -2202,7 +2202,7 @@ mod tests {
 
         let resolver = ContextWindowResolver::new(
             crate::types::ContextWindowOverrides::from_env_vars([(
-                "CODEREX_CONTEXT_WINDOW_GATEWAY_ALIAS",
+                "CODAPE_CONTEXT_WINDOW_GATEWAY_ALIAS",
                 "64000",
             )]),
             crate::types::ContextWindowOverrides::default(),
@@ -2259,7 +2259,7 @@ mod tests {
             crate::types::ContextWindowOverrides::default(),
             crate::types::ContextWindowOverrides::default(),
             crate::types::ContextWindowOverrides::from_env_vars([(
-                "CODEREX_CONTEXT_WINDOW_GATEWAY_ALIAS",
+                "CODAPE_CONTEXT_WINDOW_GATEWAY_ALIAS",
                 "64000",
             )]),
         );

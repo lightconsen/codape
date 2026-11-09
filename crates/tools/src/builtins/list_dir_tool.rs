@@ -112,7 +112,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "").unwrap();
-        std::fs::create_dir_all(tmp.path().join(".coderex")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".codape")).unwrap();
 
         let output = ListDirTool
             .execute(
@@ -128,6 +128,6 @@ mod tests {
 
         assert!(output.output.contains("Cargo.toml"));
         assert!(output.output.contains("src/"));
-        assert!(output.output.contains(".coderex/"));
+        assert!(output.output.contains(".codape/"));
     }
 }

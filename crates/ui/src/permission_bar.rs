@@ -1,6 +1,6 @@
 //! Permission bar — rendered below the input line, shows current permission mode.
 
-use coderex_core::permissions::PermissionMode;
+use codape_core::permissions::PermissionMode;
 use ratatui::style::Color;
 
 use crate::themes::Theme;

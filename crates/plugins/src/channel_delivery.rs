@@ -292,7 +292,7 @@ pub const COMMAND_DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The command is the manifest's absolute path; it runs with no shell, so
 /// arguments and the event cannot be reinterpreted as code. Its environment is
-/// cleared — only `PATH` and three `CODEREX_CHANNEL_*` markers are set — so a
+/// cleared — only `PATH` and three `CODAPE_CHANNEL_*` markers are set — so a
 /// session's provider credentials do not reach it.
 ///
 /// This is **not** sandboxed. A plugin manifest that can name a command can
@@ -383,9 +383,9 @@ async fn run_command(
         // No shell: the program is exactly what the manifest named.
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("CODEREX_CHANNEL", &event.channel)
-        .env("CODEREX_CHANNEL_PLUGIN", &event.plugin)
-        .env("CODEREX_CHANNEL_SERVER", &event.server)
+        .env("CODAPE_CHANNEL", &event.channel)
+        .env("CODAPE_CHANNEL_PLUGIN", &event.plugin)
+        .env("CODAPE_CHANNEL_SERVER", &event.server)
         .stdin(std::process::Stdio::piped())
         // Output is not part of the contract: stdout is discarded, and stderr
         // is read only as far as a failure report needs (see `bounded_stderr`).
@@ -775,13 +775,13 @@ mod tests {
 
         // SAFETY: reading this test process's own environment is safe; the
         // assertion only fires when the variable is actually set.
-        if let Ok(secret) = std::env::var("CODEREX_TEST_CHANNEL_SECRET") {
+        if let Ok(secret) = std::env::var("CODAPE_TEST_CHANNEL_SECRET") {
             assert!(
                 !dump.contains(&secret),
                 "a host variable reached the command"
             );
         }
-        assert!(dump.contains("CODEREX_CHANNEL=ops"), "{dump}");
+        assert!(dump.contains("CODAPE_CHANNEL=ops"), "{dump}");
         assert!(dump.lines().any(|line| line == "first-arg"), "{dump}");
     }
 

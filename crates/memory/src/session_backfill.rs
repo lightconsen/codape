@@ -7,7 +7,7 @@
 //! the rows the save path would have written.
 //!
 //! It lives here rather than in the CLI because the slash command that runs it
-//! (`crates/commands`) cannot depend on `coderex-cli`; the command crate does
+//! (`crates/commands`) cannot depend on `codape-cli`; the command crate does
 //! depend on this one. The CLI's save path uses the same [`session_content`]
 //! and [`index_transcript`] helpers, so a backfilled row and a saved row are
 //! indexed identically.
@@ -19,7 +19,7 @@
 //! metadata row.
 
 use chrono::{DateTime, Utc};
-use coderex_core::types::{Message, MessageContent, Role};
+use codape_core::types::{Message, MessageContent, Role};
 use std::path::{Path, PathBuf};
 
 use crate::entry::TranscriptEntry;
@@ -50,8 +50,8 @@ impl BackfillReport {
 
 /// Index every transcript in `cwd`'s session transcript directory.
 ///
-/// `session_transcripts` is `<cwd>/.coderex/transcripts`; the index lives at
-/// the path the caller opened, which the CLI derives from the same `.coderex`
+/// `session_transcripts` is `<cwd>/.codape/transcripts`; the index lives at
+/// the path the caller opened, which the CLI derives from the same `.codape`
 /// base directory.
 ///
 /// A transcript that cannot be read is counted as skipped rather than failing
@@ -245,7 +245,7 @@ fn truncate_at_char_boundary(mut text: String, max_bytes: usize) -> String {
 /// The transcript directory a workspace keeps its sessions in.
 #[must_use]
 pub fn transcript_dir(cwd: &str) -> PathBuf {
-    Path::new(cwd).join(".coderex").join("transcripts")
+    Path::new(cwd).join(".codape").join("transcripts")
 }
 
 #[cfg(test)]

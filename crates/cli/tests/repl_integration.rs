@@ -5,10 +5,10 @@
 //! 14.1 ReplLoop construction, 14.2 Headless execution, 14.3 Slash commands,
 //! 14.4 Command parsing, 14.5 CLI config effects, 14.6 Session state
 
-use coderex_cli::repl::{ReplLoop, ReplSession, parse_input};
-use coderex_core::permissions::PermissionMode;
-use coderex_core::types::ModelId;
-use coderex_test_utils::{MockApiClient, mock_response};
+use codape_cli::repl::{ReplLoop, ReplSession, parse_input};
+use codape_core::permissions::PermissionMode;
+use codape_core::types::ModelId;
+use codape_test_utils::{MockApiClient, mock_response};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  14.1 ReplLoop Construction
@@ -55,7 +55,7 @@ async fn headless_turn_persists_a_resumable_transcript() {
 
     repl.run_headless("hello").await.unwrap();
 
-    let dir = coderex_cli::session_resume::transcript_dir(&cwd);
+    let dir = codape_cli::session_resume::transcript_dir(&cwd);
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("the transcript directory should exist")
         .filter_map(Result::ok)
@@ -87,7 +87,7 @@ async fn a_headless_session_persists_after_every_turn() {
 
     repl.run_headless("first prompt").await.unwrap();
 
-    let dir = coderex_cli::session_resume::transcript_dir(&cwd);
+    let dir = codape_cli::session_resume::transcript_dir(&cwd);
     let transcript = |dir: &std::path::Path| {
         let entry = std::fs::read_dir(dir)
             .expect("transcript directory")
@@ -318,7 +318,7 @@ fn run_headless_pipe_operator() {
         "expected pipe separator, got: {result}"
     );
     assert!(
-        result.contains("CodeRex") && result.contains("Environment"),
+        result.contains("Codape") && result.contains("Environment"),
         "expected both commands' output, got: {result}"
     );
 }

@@ -3,36 +3,36 @@
 use crate::mcp_elicitation::{SessionElicitationHandler, TuiElicitationRequest};
 use crate::session_resume;
 use anyhow::Result;
-use coderex_agents::manager::{
+use codape_agents::manager::{
     AgentManager, AgentSubscription, ParentContextSnapshot, TeammateEvent,
 };
-use coderex_commands::registry::{CommandContext, CommandRegistry, CommandResult, SlashCommand};
-use coderex_commands::{CommandHistory, MacroRegistry};
-use coderex_core::api_client::ApiClient;
-use coderex_core::confirmation_bus::{ConfirmationBus, ConfirmationRequest, ConfirmationResponse};
-use coderex_core::elicitation::{ElicitationHandler, ElicitationResponse, ElicitationResult};
-use coderex_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
-use coderex_core::orchestrator::{
+use codape_commands::registry::{CommandContext, CommandRegistry, CommandResult, SlashCommand};
+use codape_commands::{CommandHistory, MacroRegistry};
+use codape_core::api_client::ApiClient;
+use codape_core::confirmation_bus::{ConfirmationBus, ConfirmationRequest, ConfirmationResponse};
+use codape_core::elicitation::{ElicitationHandler, ElicitationResponse, ElicitationResult};
+use codape_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
+use codape_core::orchestrator::{
     BackgroundFeatureKind, BackgroundFeatureRequest, background_feature_label,
 };
-use coderex_core::permission_engine::{
+use codape_core::permission_engine::{
     AutoClassifierHook, BackgroundAgentDenyHook, ExplainPermissionHook, PermissionEngine,
 };
-use coderex_core::permissions::{PermissionChecker, PermissionMode};
-use coderex_core::prompts;
-use coderex_core::query_profiles::{ModelProfile, PromptProfile, QueryKind, QueryRequest};
-use coderex_core::state::SessionState;
-use coderex_core::tool_executor::ToolExecutor as _;
-use coderex_core::types::ModelId;
-use coderex_core::types::{AgentLifecycleEvent, EngineEvent, Message, ToolCall};
-use coderex_memory::{
+use codape_core::permissions::{PermissionChecker, PermissionMode};
+use codape_core::prompts;
+use codape_core::query_profiles::{ModelProfile, PromptProfile, QueryKind, QueryRequest};
+use codape_core::state::SessionState;
+use codape_core::tool_executor::ToolExecutor as _;
+use codape_core::types::ModelId;
+use codape_core::types::{AgentLifecycleEvent, EngineEvent, Message, ToolCall};
+use codape_memory::{
     DreamCheckResult, ai_workflow,
     auto_dream::{AutoDream, DreamConfig},
     long_term::LongTermStore,
     session_memory::SessionMemoryStore,
     team_memory::TeamMemorySyncService,
 };
-use coderex_tools::{
+use codape_tools::{
     AgentTool, ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
     TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
 };
@@ -77,12 +77,12 @@ struct SessionEffects {
 
 /// The live MCP manager slot shared with [`ReplLoop`].
 pub(crate) type McpManagerSlot =
-    Arc<std::sync::RwLock<Option<Arc<coderex_mcp::manager::McpManager>>>>;
+    Arc<std::sync::RwLock<Option<Arc<codape_mcp::manager::McpManager>>>>;
 
 /// Shared team state for the `TeamCreate`/`TeamDelete` replacements.
 #[derive(Debug, Default)]
 pub(crate) struct TeamToolState {
-    manager: std::sync::Mutex<coderex_core::TeamManager>,
+    manager: std::sync::Mutex<codape_core::TeamManager>,
 }
 
 impl TeamToolState {
@@ -109,22 +109,22 @@ impl TeamToolState {
 /// Shared worktree state for the `EnterWorktree`/`ExitWorktree` replacements.
 ///
 /// `base` is the checkout the session started in; worktrees are created under
-/// `<base>/.coderex/worktrees`, the same layout `--worktree` uses.
+/// `<base>/.codape/worktrees`, the same layout `--worktree` uses.
 pub(crate) struct WorktreeToolState {
     base: std::path::PathBuf,
-    manager: std::sync::Mutex<coderex_core::worktree::WorktreeManager>,
+    manager: std::sync::Mutex<codape_core::worktree::WorktreeManager>,
     active: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl WorktreeToolState {
     fn new(base: &std::path::Path) -> Self {
-        let config = coderex_core::worktree::WorktreeConfig {
-            base_dir: base.join(".coderex").join("worktrees"),
-            ..coderex_core::worktree::WorktreeConfig::default()
+        let config = codape_core::worktree::WorktreeConfig {
+            base_dir: base.join(".codape").join("worktrees"),
+            ..codape_core::worktree::WorktreeConfig::default()
         };
         Self {
             base: base.to_path_buf(),
-            manager: std::sync::Mutex::new(coderex_core::worktree::WorktreeManager::new(config)),
+            manager: std::sync::Mutex::new(codape_core::worktree::WorktreeManager::new(config)),
             active: std::sync::Mutex::new(None),
         }
     }
@@ -337,7 +337,7 @@ impl RuntimeToolHandles {
     fn replace(
         registry: &mut ToolRegistry,
         name: &str,
-        make: impl FnOnce(Arc<dyn coderex_tools::Tool>) -> Arc<dyn coderex_tools::Tool>,
+        make: impl FnOnce(Arc<dyn codape_tools::Tool>) -> Arc<dyn codape_tools::Tool>,
     ) {
         if let Some(original) = registry.get_tool_arc(name) {
             registry.register(make(original));
@@ -346,41 +346,41 @@ impl RuntimeToolHandles {
 }
 
 struct TeamCreateWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<TeamToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for TeamCreateWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for TeamCreateWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let name = input
             .arguments
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| coderex_tools::ToolError::InvalidInput {
+            .ok_or_else(|| codape_tools::ToolError::InvalidInput {
                 message: "missing required field: name".into(),
             })?;
         let team_id = self
             .state
             .create(name)
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
-        Ok(coderex_tools::ToolOutput {
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
+        Ok(codape_tools::ToolOutput {
             output: team_id,
             is_display: true,
             images: Vec::new(),
@@ -389,40 +389,40 @@ impl coderex_tools::Tool for TeamCreateWithState {
 }
 
 struct TeamDeleteWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<TeamToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for TeamDeleteWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for TeamDeleteWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let team_id = input
             .arguments
             .get("team_id")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| coderex_tools::ToolError::InvalidInput {
+            .ok_or_else(|| codape_tools::ToolError::InvalidInput {
                 message: "missing required field: team_id".into(),
             })?;
         self.state
             .delete(team_id)
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
-        Ok(coderex_tools::ToolOutput {
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
+        Ok(codape_tools::ToolOutput {
             output: format!("deleted {team_id}"),
             is_display: true,
             images: Vec::new(),
@@ -431,29 +431,29 @@ impl coderex_tools::Tool for TeamDeleteWithState {
 }
 
 struct EnterWorktreeWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<WorktreeToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for EnterWorktreeWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for EnterWorktreeWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let branch = input
             .arguments
             .get("branch")
@@ -461,7 +461,7 @@ impl coderex_tools::Tool for EnterWorktreeWithState {
         let path = self
             .state
             .enter(branch)
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
         // The built-in tool fires `WorktreeCreate`; this replacement performs
         // the same work, so it has to fire the same event. Without this a
         // configured hook loaded, matched, and never ran in production.
@@ -470,8 +470,8 @@ impl coderex_tools::Tool for EnterWorktreeWithState {
         if let Some(branch) = branch {
             hook_context.insert("branch".to_string(), branch.to_string());
         }
-        coderex_tools::fire_tool_hook(&ctx, "WorktreeCreate", &path, &hook_context).await;
-        Ok(coderex_tools::ToolOutput {
+        codape_tools::fire_tool_hook(&ctx, "WorktreeCreate", &path, &hook_context).await;
+        Ok(codape_tools::ToolOutput {
             output: path,
             is_display: true,
             images: Vec::new(),
@@ -480,33 +480,33 @@ impl coderex_tools::Tool for EnterWorktreeWithState {
 }
 
 struct ExitWorktreeWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<WorktreeToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for ExitWorktreeWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for ExitWorktreeWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        _input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        _input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         self.state
             .exit()
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
-        Ok(coderex_tools::ToolOutput {
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
+        Ok(codape_tools::ToolOutput {
             output: "exited".into(),
             is_display: true,
             images: Vec::new(),
@@ -515,29 +515,29 @@ impl coderex_tools::Tool for ExitWorktreeWithState {
 }
 
 struct ListMcpResourcesWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<McpResourceToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for ListMcpResourcesWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for ListMcpResourcesWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        _input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        _input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let resources: Vec<_> = self
             .state
             .list()
@@ -546,7 +546,7 @@ impl coderex_tools::Tool for ListMcpResourcesWithState {
                 serde_json::json!({ "uri": uri, "name": name, "mime_type": mime_type })
             })
             .collect();
-        Ok(coderex_tools::ToolOutput {
+        Ok(codape_tools::ToolOutput {
             output: serde_json::to_string_pretty(&resources).unwrap_or_else(|_| "[]".into()),
             is_display: true,
             images: Vec::new(),
@@ -566,29 +566,29 @@ struct PluginLspDefaults {
 }
 
 struct LspWithPluginDefaults {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     defaults: Arc<std::sync::RwLock<Option<PluginLspDefaults>>>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for LspWithPluginDefaults {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for LspWithPluginDefaults {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let mut arguments = input.arguments.clone();
         let defaults = self
             .defaults
@@ -619,7 +619,7 @@ impl coderex_tools::Tool for LspWithPluginDefaults {
         }
         self.original
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: input.call_id,
                     name: input.name,
                     arguments,
@@ -631,42 +631,42 @@ impl coderex_tools::Tool for LspWithPluginDefaults {
 }
 
 struct ReadMcpResourceWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<McpResourceToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for ReadMcpResourceWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for ReadMcpResourceWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let uri = input
             .arguments
             .get("uri")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| coderex_tools::ToolError::InvalidInput {
+            .ok_or_else(|| codape_tools::ToolError::InvalidInput {
                 message: "missing required field: uri".into(),
             })?;
         let content = self
             .state
             .read(uri)
             .await
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
-        Ok(coderex_tools::ToolOutput {
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
+        Ok(codape_tools::ToolOutput {
             output: content,
             is_display: true,
             images: Vec::new(),
@@ -675,29 +675,29 @@ impl coderex_tools::Tool for ReadMcpResourceWithState {
 }
 
 struct ListMcpPromptsWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<McpPromptToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for ListMcpPromptsWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for ListMcpPromptsWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        _input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        _input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let prompts: Vec<_> = self
             .state
             .list()
@@ -721,7 +721,7 @@ impl coderex_tools::Tool for ListMcpPromptsWithState {
                 })
             })
             .collect();
-        Ok(coderex_tools::ToolOutput {
+        Ok(codape_tools::ToolOutput {
             output: serde_json::to_string_pretty(&prompts).unwrap_or_else(|_| "[]".into()),
             is_display: true,
             images: Vec::new(),
@@ -730,48 +730,48 @@ impl coderex_tools::Tool for ListMcpPromptsWithState {
 }
 
 struct GetMcpPromptWithState {
-    original: Arc<dyn coderex_tools::Tool>,
+    original: Arc<dyn codape_tools::Tool>,
     state: Arc<McpPromptToolState>,
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for GetMcpPromptWithState {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for GetMcpPromptWithState {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         self.original.descriptor()
     }
 
-    fn capabilities(&self) -> coderex_tools::ToolCapabilities {
+    fn capabilities(&self) -> codape_tools::ToolCapabilities {
         self.original.capabilities()
     }
 
-    fn rule_exemptions_for(&self, input: &serde_json::Value) -> coderex_tools::ToolRuleExemptions {
+    fn rule_exemptions_for(&self, input: &serde_json::Value) -> codape_tools::ToolRuleExemptions {
         self.original.rule_exemptions_for(input)
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         let server = input
             .arguments
             .get("server")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| coderex_tools::ToolError::InvalidInput {
+            .ok_or_else(|| codape_tools::ToolError::InvalidInput {
                 message: "missing required field: server".into(),
             })?;
         let name = input
             .arguments
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| coderex_tools::ToolError::InvalidInput {
+            .ok_or_else(|| codape_tools::ToolError::InvalidInput {
                 message: "missing required field: name".into(),
             })?;
         let arguments = match input.arguments.get("arguments") {
             None | Some(serde_json::Value::Null) => serde_json::Map::new(),
             Some(serde_json::Value::Object(arguments)) => arguments.clone(),
             Some(_) => {
-                return Err(coderex_tools::ToolError::InvalidInput {
+                return Err(codape_tools::ToolError::InvalidInput {
                     message: "'arguments' must be an object".into(),
                 });
             }
@@ -780,8 +780,8 @@ impl coderex_tools::Tool for GetMcpPromptWithState {
             .state
             .get(server, name, arguments)
             .await
-            .map_err(|message| coderex_tools::ToolError::InvalidInput { message })?;
-        Ok(coderex_tools::ToolOutput {
+            .map_err(|message| codape_tools::ToolError::InvalidInput { message })?;
+        Ok(codape_tools::ToolOutput {
             output: content,
             is_display: true,
             images: Vec::new(),
@@ -795,7 +795,7 @@ impl coderex_tools::Tool for GetMcpPromptWithState {
 /// is not: it is validated where it is read); the raw names stay with the
 /// handler and are what `prompts/get` sends.
 fn prompt_command_name(server: &str, prompt: &str) -> String {
-    coderex_mcp::proxy::qualified_tool_name(
+    codape_mcp::proxy::qualified_tool_name(
         &sanitize_prompt_component(server),
         &sanitize_prompt_component(prompt),
     )
@@ -825,10 +825,10 @@ fn execute_mcp_prompt_command(
     slot: &McpManagerSlot,
     server: &str,
     prompt: &str,
-    declared: &[coderex_mcp::prompts::McpPromptArgument],
+    declared: &[codape_mcp::prompts::McpPromptArgument],
     args: &[String],
 ) -> CommandResult {
-    let arguments = match coderex_mcp::prompts::parse_prompt_arguments(args, declared) {
+    let arguments = match codape_mcp::prompts::parse_prompt_arguments(args, declared) {
         Ok(arguments) => arguments,
         Err(error) => return CommandResult::error(error),
     };
@@ -853,7 +853,7 @@ fn execute_mcp_prompt_command(
 }
 
 /// The command result for a resolved prompt.
-fn prompt_result_command(result: &coderex_mcp::prompts::McpPromptResult) -> CommandResult {
+fn prompt_result_command(result: &codape_mcp::prompts::McpPromptResult) -> CommandResult {
     CommandResult::success(result.render_text())
 }
 
@@ -954,7 +954,7 @@ fn normalize_plan_label(label: &str) -> String {
 /// This deliberately does not touch the transcript: a tool call already has
 /// its own `ToolCall` row, and adding an activity row for it printed every
 /// tool call twice.
-fn record_activity(ui_state: &mut coderex_ui::state::UiState, label: &str) -> bool {
+fn record_activity(ui_state: &mut codape_ui::state::UiState, label: &str) -> bool {
     let concise = normalize_plan_label(label);
     let duplicate = ui_state
         .activity_log
@@ -972,13 +972,13 @@ fn record_activity(ui_state: &mut coderex_ui::state::UiState, label: &str) -> bo
     true
 }
 
-fn push_activity_row(ui_state: &mut coderex_ui::state::UiState, label: &str) {
+fn push_activity_row(ui_state: &mut codape_ui::state::UiState, label: &str) {
     let concise = normalize_plan_label(label);
     if !record_activity(ui_state, &concise) {
         return;
     }
-    ui_state.messages.push(coderex_ui::message_list::Message {
-        role: coderex_ui::message_list::MessageRole::System,
+    ui_state.messages.push(codape_ui::message_list::Message {
+        role: codape_ui::message_list::MessageRole::System,
         content: concise.into(),
         tool_name: None,
         streaming: false,
@@ -1008,7 +1008,7 @@ fn agent_event_label(agent_id: &str, event: &AgentLifecycleEvent) -> Option<Stri
 /// Put a sub-agent's lifecycle on screen: an activity row, and a notification
 /// for the transitions a person would want to notice.
 fn apply_agent_event(
-    ui_state: &mut coderex_ui::state::UiState,
+    ui_state: &mut codape_ui::state::UiState,
     agent_id: &str,
     event: &AgentLifecycleEvent,
 ) {
@@ -1034,7 +1034,7 @@ fn apply_agent_event(
     }
 }
 
-fn set_plan_step(ui_state: &mut coderex_ui::state::UiState, label: &str) {
+fn set_plan_step(ui_state: &mut codape_ui::state::UiState, label: &str) {
     let normalized = normalize_plan_label(label);
     if let Some(current) = ui_state.plan.steps.get_mut(ui_state.plan.current_step) {
         if current.label == normalized && !current.complete {
@@ -1044,7 +1044,7 @@ fn set_plan_step(ui_state: &mut coderex_ui::state::UiState, label: &str) {
         current.complete = true;
     }
 
-    ui_state.plan.steps.push(coderex_ui::state::PlanStep {
+    ui_state.plan.steps.push(codape_ui::state::PlanStep {
         label: normalized.clone(),
         complete: false,
     });
@@ -1052,14 +1052,14 @@ fn set_plan_step(ui_state: &mut coderex_ui::state::UiState, label: &str) {
     ui_state.plan.current_label = Some(normalized);
 }
 
-fn complete_plan(ui_state: &mut coderex_ui::state::UiState) {
+fn complete_plan(ui_state: &mut codape_ui::state::UiState) {
     if let Some(current) = ui_state.plan.steps.get_mut(ui_state.plan.current_step) {
         current.complete = true;
     }
 }
 
-fn selected_palette_command(ui_state: &coderex_ui::state::UiState) -> Option<String> {
-    let coderex_ui::overlay::Overlay::CommandPalette {
+fn selected_palette_command(ui_state: &codape_ui::state::UiState) -> Option<String> {
+    let codape_ui::overlay::Overlay::CommandPalette {
         commands, selected, ..
     } = ui_state.overlays.top()?
     else {
@@ -1073,16 +1073,14 @@ fn selected_palette_command(ui_state: &coderex_ui::state::UiState) -> Option<Str
 }
 
 fn show_detail_overlay(
-    ui_state: &mut coderex_ui::state::UiState,
+    ui_state: &mut codape_ui::state::UiState,
     title: impl Into<String>,
     body: impl Into<String>,
 ) {
-    ui_state
-        .overlays
-        .push(coderex_ui::overlay::Overlay::Detail {
-            title: title.into(),
-            body: body.into(),
-        });
+    ui_state.overlays.push(codape_ui::overlay::Overlay::Detail {
+        title: title.into(),
+        body: body.into(),
+    });
 }
 
 fn permission_request_args(arguments: &str) -> serde_json::Value {
@@ -1095,11 +1093,8 @@ fn permission_request_args(arguments: &str) -> serde_json::Value {
 /// the host cannot answer, an elevation request — rather than something a
 /// consumer outside the process acts on. The protocol is what a host reads to
 /// follow the conversation, not a mirror of everything the UI does.
-fn protocol_frame(
-    event: &EngineEvent,
-    session_id: &str,
-) -> Option<coderex_events::ProtocolMessage> {
-    use coderex_events::{
+fn protocol_frame(event: &EngineEvent, session_id: &str) -> Option<codape_events::ProtocolMessage> {
+    use codape_events::{
         AssistantFrame, MessageBody, ProtocolMessage, SystemFrame, UserFrame, protocol,
     };
 
@@ -1190,7 +1185,7 @@ fn control_response_from_line(
     line: &str,
     request_allows_session: bool,
 ) -> Option<(String, ConfirmationResponse)> {
-    use coderex_events::protocol::{ControlDecision, ControlResponseFrame};
+    use codape_events::protocol::{ControlDecision, ControlResponseFrame};
 
     let frame = ControlResponseFrame::parse_line(line).ok()?;
     let request_id = frame.response.request_id.clone();
@@ -1241,8 +1236,7 @@ fn spawn_headless_control_reader(
             // Parse the id once to look up whether this request permitted a
             // session-wide answer; the helper re-parses the same line to
             // apply the mapping.
-            let Ok(frame) = coderex_events::protocol::ControlResponseFrame::parse_line(&line)
-            else {
+            let Ok(frame) = codape_events::protocol::ControlResponseFrame::parse_line(&line) else {
                 tracing::debug!(line = %line, "ignoring a non-control line on stdin");
                 continue;
             };
@@ -1258,13 +1252,13 @@ fn spawn_headless_control_reader(
 }
 
 fn sync_permission_overlay(
-    ui_state: &mut coderex_ui::state::UiState,
+    ui_state: &mut codape_ui::state::UiState,
     tool: &str,
     args: &str,
     risk_summary: &str,
     always_option: bool,
 ) {
-    ui_state.permission_detail = Some(coderex_ui::state::PermissionDetail {
+    ui_state.permission_detail = Some(codape_ui::state::PermissionDetail {
         tool: tool.to_string(),
         args: args.to_string(),
         risk_summary: risk_summary.to_string(),
@@ -1272,14 +1266,14 @@ fn sync_permission_overlay(
 
     if matches!(
         ui_state.overlays.top(),
-        Some(coderex_ui::overlay::Overlay::PermissionDialog { .. })
+        Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
     ) {
         ui_state.overlays.pop();
     }
 
     ui_state
         .overlays
-        .push(coderex_ui::overlay::Overlay::PermissionDialog {
+        .push(codape_ui::overlay::Overlay::PermissionDialog {
             tool: tool.to_string(),
             args: args.to_string(),
             risk_summary: risk_summary.to_string(),
@@ -1287,12 +1281,12 @@ fn sync_permission_overlay(
         });
 }
 
-fn clear_permission_overlay(ui_state: &mut coderex_ui::state::UiState) {
+fn clear_permission_overlay(ui_state: &mut codape_ui::state::UiState) {
     ui_state.permission_detail = None;
     ui_state.permission_bar.clear_pending();
     if matches!(
         ui_state.overlays.top(),
-        Some(coderex_ui::overlay::Overlay::PermissionDialog { .. })
+        Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
     ) {
         ui_state.overlays.pop();
     }
@@ -1304,26 +1298,24 @@ fn clear_permission_overlay(ui_state: &mut coderex_ui::state::UiState) {
 const RESTORE_FOLD_LINES: usize = 12;
 
 fn core_message_to_ui_message(
-    message: &coderex_core::types::Message,
+    message: &codape_core::types::Message,
     tool_names: &std::collections::HashMap<String, String>,
-) -> coderex_ui::message_list::Message {
+) -> codape_ui::message_list::Message {
     let (role, content, tool_name, folded) = match (&message.role, &message.content) {
-        (coderex_core::types::Role::User, coderex_core::types::MessageContent::Text(text)) => (
-            coderex_ui::message_list::MessageRole::User,
+        (codape_core::types::Role::User, codape_core::types::MessageContent::Text(text)) => (
+            codape_ui::message_list::MessageRole::User,
             text.clone(),
             None,
             false,
         ),
-        (coderex_core::types::Role::Assistant, coderex_core::types::MessageContent::Text(text)) => {
-            (
-                coderex_ui::message_list::MessageRole::Assistant,
-                text.clone(),
-                None,
-                false,
-            )
-        }
-        (coderex_core::types::Role::System, coderex_core::types::MessageContent::Text(text)) => (
-            coderex_ui::message_list::MessageRole::System,
+        (codape_core::types::Role::Assistant, codape_core::types::MessageContent::Text(text)) => (
+            codape_ui::message_list::MessageRole::Assistant,
+            text.clone(),
+            None,
+            false,
+        ),
+        (codape_core::types::Role::System, codape_core::types::MessageContent::Text(text)) => (
+            codape_ui::message_list::MessageRole::System,
             text.clone(),
             None,
             false,
@@ -1332,21 +1324,21 @@ fn core_message_to_ui_message(
         // role. Matching only `Role::Tool` here made a resumed transcript show
         // the raw `ToolCall { .. }` debug dump instead of the call.
         (
-            coderex_core::types::Role::Assistant | coderex_core::types::Role::Tool,
-            coderex_core::types::MessageContent::ToolCall(call),
+            codape_core::types::Role::Assistant | codape_core::types::Role::Tool,
+            codape_core::types::MessageContent::ToolCall(call),
         ) => (
-            coderex_ui::message_list::MessageRole::ToolCall,
+            codape_ui::message_list::MessageRole::ToolCall,
             call.activity_summary(),
             Some(call.name.clone()),
             false,
         ),
         (
-            coderex_core::types::Role::Tool,
-            coderex_core::types::MessageContent::ToolResult(result),
+            codape_core::types::Role::Tool,
+            codape_core::types::MessageContent::ToolResult(result),
         ) => {
             let folded = result.output.lines().count() > RESTORE_FOLD_LINES;
             (
-                coderex_ui::message_list::MessageRole::ToolResult,
+                codape_ui::message_list::MessageRole::ToolResult,
                 result.output.clone(),
                 // The result carries the call id, not the tool name; the map
                 // was built from the calls in the same transcript.
@@ -1355,14 +1347,14 @@ fn core_message_to_ui_message(
             )
         }
         (_, content) => (
-            coderex_ui::message_list::MessageRole::System,
+            codape_ui::message_list::MessageRole::System,
             format!("{content:?}"),
             None,
             false,
         ),
     };
 
-    coderex_ui::message_list::Message {
+    codape_ui::message_list::Message {
         role,
         content: content.into(),
         tool_name: tool_name.map(Into::into),
@@ -1372,27 +1364,27 @@ fn core_message_to_ui_message(
 }
 
 fn restore_transcript_messages(
-    ui_state: &mut coderex_ui::state::UiState,
-    messages: &[coderex_core::types::Message],
+    ui_state: &mut codape_ui::state::UiState,
+    messages: &[codape_core::types::Message],
 ) {
     // Tool results carry only the call id. Build the id -> name map first so
     // the restored rows keep their tool identity (needed for labels, the Read
     // highlighter, and a meaningful failure message).
     let mut tool_names = std::collections::HashMap::new();
     for message in messages {
-        if let coderex_core::types::MessageContent::ToolCall(call) = &message.content {
+        if let codape_core::types::MessageContent::ToolCall(call) = &message.content {
             tool_names.insert(call.id.clone(), call.name.clone());
         }
     }
 
-    ui_state.messages = coderex_ui::message_list::MessageView::new(1000);
+    ui_state.messages = codape_ui::message_list::MessageView::new(1000);
     ui_state.messages.start = 0;
     for message in messages {
         // Thinking is provider state, not conversation: it must not reappear
         // in the transcript as a debug row after a resume.
         if matches!(
             message.content,
-            coderex_core::types::MessageContent::Thinking(_)
+            codape_core::types::MessageContent::Thinking(_)
         ) {
             continue;
         }
@@ -1403,14 +1395,14 @@ fn restore_transcript_messages(
 }
 
 fn apply_interactive_snapshot(
-    ui_state: &mut coderex_ui::state::UiState,
+    ui_state: &mut codape_ui::state::UiState,
     snapshot: &session_resume::InteractiveResumeSnapshot,
 ) {
     ui_state.plan.steps = snapshot
         .plan
         .steps
         .iter()
-        .map(|step| coderex_ui::state::PlanStep {
+        .map(|step| codape_ui::state::PlanStep {
             label: step.label.clone(),
             complete: step.complete,
         })
@@ -1424,7 +1416,7 @@ fn apply_interactive_snapshot(
 }
 
 fn build_interactive_snapshot(
-    ui_state: &coderex_ui::state::UiState,
+    ui_state: &codape_ui::state::UiState,
     session_title: Option<String>,
 ) -> session_resume::InteractiveResumeSnapshot {
     session_resume::InteractiveResumeSnapshot {
@@ -1476,12 +1468,12 @@ impl TuiElicitationHandler {
 }
 
 /// How a form field's type reads in the transcript.
-const fn field_type_label(field: &coderex_mcp::elicitation::FormField) -> &'static str {
+const fn field_type_label(field: &codape_mcp::elicitation::FormField) -> &'static str {
     match field.field_type {
-        coderex_mcp::elicitation::FormFieldType::String => "text",
-        coderex_mcp::elicitation::FormFieldType::Integer => "integer",
-        coderex_mcp::elicitation::FormFieldType::Number => "number",
-        coderex_mcp::elicitation::FormFieldType::Boolean => "true/false",
+        codape_mcp::elicitation::FormFieldType::String => "text",
+        codape_mcp::elicitation::FormFieldType::Integer => "integer",
+        codape_mcp::elicitation::FormFieldType::Number => "number",
+        codape_mcp::elicitation::FormFieldType::Boolean => "true/false",
     }
 }
 
@@ -1489,7 +1481,7 @@ const fn field_type_label(field: &coderex_mcp::elicitation::FormField) -> &'stat
 impl ElicitationHandler for TuiElicitationHandler {
     async fn request(
         &self,
-        questions: Vec<coderex_core::elicitation::ElicitationQuestion>,
+        questions: Vec<codape_core::elicitation::ElicitationQuestion>,
     ) -> ElicitationResult {
         let Some(question) = questions.first() else {
             return ElicitationResult::Cancelled;
@@ -1551,13 +1543,13 @@ struct WorkflowAgentRunner {
 }
 
 #[async_trait::async_trait]
-impl coderex_workflow::AgentRunner for WorkflowAgentRunner {
+impl codape_workflow::AgentRunner for WorkflowAgentRunner {
     async fn run(
         &self,
-        request: coderex_workflow::AgentRequest,
-    ) -> Result<coderex_workflow::AgentOutput, String> {
-        use coderex_agents::manager::SpawnOptions;
-        use coderex_agents::types::{AgentType, Thoroughness};
+        request: codape_workflow::AgentRequest,
+    ) -> Result<codape_workflow::AgentOutput, String> {
+        use codape_agents::manager::SpawnOptions;
+        use codape_agents::types::{AgentType, Thoroughness};
 
         // A tool the agent was told not to use cannot be spelled here, so the
         // spawn is refused rather than run un-narrowed — the script asked for
@@ -1606,7 +1598,7 @@ impl coderex_workflow::AgentRunner for WorkflowAgentRunner {
             .map_err(|error| format!("the agent did not finish: {error}"))?;
         drop(manager);
 
-        Ok(coderex_workflow::AgentOutput {
+        Ok(codape_workflow::AgentOutput {
             text: Some(result.output),
             tokens: result.token_usage.unwrap_or(0),
         })
@@ -1623,12 +1615,12 @@ impl coderex_workflow::AgentRunner for WorkflowAgentRunner {
 /// is offered) and the execute gate both read it, so the later overlay turns
 /// the already-registered tool on without rebuilding the registry.
 struct BetaGatedWorkflowTool {
-    inner: coderex_workflow::WorkflowTool,
+    inner: codape_workflow::WorkflowTool,
     enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl BetaGatedWorkflowTool {
-    fn new(inner: coderex_workflow::WorkflowTool) -> Self {
+    fn new(inner: codape_workflow::WorkflowTool) -> Self {
         Self {
             // The inner tool always accepts calls; the wrapper is the gate.
             inner: inner.with_enabled(true),
@@ -1655,8 +1647,8 @@ impl BetaGatedWorkflowTool {
 }
 
 #[async_trait::async_trait]
-impl coderex_tools::Tool for BetaGatedWorkflowTool {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
+impl codape_tools::Tool for BetaGatedWorkflowTool {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
         let mut descriptor = self.inner.descriptor();
         descriptor.is_enabled = self.enabled.load(std::sync::atomic::Ordering::Relaxed);
         descriptor
@@ -1664,14 +1656,14 @@ impl coderex_tools::Tool for BetaGatedWorkflowTool {
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         if !self.enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(coderex_tools::ToolError::InvalidInput {
+            return Err(codape_tools::ToolError::InvalidInput {
                 message: "workflow scripts are not enabled in this session — set \
                           --betas +workflow_scripts (or \
-                          CODEREX_FEATURE_FLAGS=+workflow_scripts) to turn them on"
+                          CODAPE_FEATURE_FLAGS=+workflow_scripts) to turn them on"
                     .to_string(),
             });
         }
@@ -1681,7 +1673,7 @@ impl coderex_tools::Tool for BetaGatedWorkflowTool {
 
 /// Resolve the organization scope for org memory.
 ///
-/// `CODEREX_ORG_ID` wins; otherwise the org id from the remote-managed
+/// `CODAPE_ORG_ID` wins; otherwise the org id from the remote-managed
 /// settings cache (written by the orchestrator's startup phase) is used. An
 /// absent or blank value leaves org memory unconfigured rather than inventing
 /// a scope, which would silently mix organizations.
@@ -1707,7 +1699,7 @@ fn org_id_from_remote_settings_json(json: &str) -> Option<String> {
 
 /// Read the org id the orchestrator cached, when remote settings configured one.
 fn cached_org_id() -> Option<String> {
-    let path = coderex_config::config_home().join("remote_settings_cache.json");
+    let path = codape_config::config_home().join("remote_settings_cache.json");
     let document = std::fs::read_to_string(path).ok()?;
     org_id_from_remote_settings_json(&document)
 }
@@ -1748,14 +1740,14 @@ const MOD_HASHES_INLINE_LIMIT: usize = 3;
 /// The one startup line that reports the mod load.
 ///
 /// It names the count and directory, and says plainly that the SHA-256 values
-/// are informational: CodeRex has no signature or trust store, so a hash is
+/// are informational: Codape has no signature or trust store, so a hash is
 /// not a verdict. For a small number of mods it also inlines a short hash per
 /// loaded file; otherwise the count alone keeps the line short.
-fn mods_startup_line(report: &[coderex_mods::ModInfo], dir: &std::path::Path) -> String {
+fn mods_startup_line(report: &[codape_mods::ModInfo], dir: &std::path::Path) -> String {
     use std::fmt::Write as _;
 
-    let loaded: Vec<&coderex_mods::ModInfo> = report.iter().filter(|info| info.loaded).collect();
-    let skipped: Vec<&coderex_mods::ModInfo> = report.iter().filter(|info| !info.loaded).collect();
+    let loaded: Vec<&codape_mods::ModInfo> = report.iter().filter(|info| info.loaded).collect();
+    let skipped: Vec<&codape_mods::ModInfo> = report.iter().filter(|info| !info.loaded).collect();
 
     let mut line = if skipped.is_empty() {
         format!("mods: {} loaded from {}", loaded.len(), dir.display())
@@ -1795,7 +1787,7 @@ fn mods_startup_line(report: &[coderex_mods::ModInfo], dir: &std::path::Path) ->
 /// Drop `type: "agent"` hook entries from a settings hooks document.
 ///
 /// Returns the filtered document and how many entries were removed. Both shapes
-/// [`coderex_hooks`] accepts are handled — a bare hooks array and an object
+/// [`codape_hooks`] accepts are handled — a bare hooks array and an object
 /// with a `hooks` array — so the caller can gate the agent-kind path without
 /// knowing which shape each source used. A document of any other shape is
 /// returned unchanged and reported as zero skipped, so the hooks crate still
@@ -1939,8 +1931,8 @@ impl HookFileWatcher {
 #[cfg(feature = "hot-reload")]
 fn default_settings_paths(cwd: &str) -> Vec<std::path::PathBuf> {
     [
-        coderex_config::config_home().join("settings.json"),
-        std::path::Path::new(cwd).join(".coderex/settings.json"),
+        codape_config::config_home().join("settings.json"),
+        std::path::Path::new(cwd).join(".codape/settings.json"),
     ]
     .into_iter()
     .filter(|path| path.exists())
@@ -1967,7 +1959,7 @@ fn file_changed_input(path: &str, kind: &str) -> String {
 /// two unrelated ones.
 #[cfg(feature = "hot-reload")]
 async fn fire_file_changed_batch(
-    hooks: &dyn coderex_core::hook_executor::HookExecutor,
+    hooks: &dyn codape_core::hook_executor::HookExecutor,
     session_id: &str,
     batch: &FileChangeBatch,
 ) {
@@ -1979,7 +1971,7 @@ async fn fire_file_changed_batch(
         context.insert("source".to_string(), "file_watcher".to_string());
         let result = hooks
             .fire_hook(
-                coderex_hooks::HookEvent::FileChanged.as_str(),
+                codape_hooks::HookEvent::FileChanged.as_str(),
                 &file_changed_input(path, batch.kind),
                 &context,
             )
@@ -2067,7 +2059,7 @@ pub struct ReplLoop {
     ///
     /// Used to record `tool_used`, `api_call` and `error` events; session
     /// start/end are owned by the orchestrator.
-    telemetry: Option<coderex_telemetry::TelemetryHandle>,
+    telemetry: Option<codape_telemetry::TelemetryHandle>,
     /// Agent definitions contributed by active plugins.
     plugin_agents: Vec<(String, serde_json::Value)>,
     /// Named workflow scripts contributed by plugins (shared with the tool).
@@ -2098,7 +2090,7 @@ pub struct ReplLoop {
     /// *which* tool failed. `ToolCallEnd` carries only the result.
     tool_names: std::collections::HashMap<String, String>,
     /// Session usage at the end of the previous turn, for per-turn deltas.
-    last_usage: coderex_core::types::UsageSummary,
+    last_usage: codape_core::types::UsageSummary,
     /// Model to retry with once when the primary model is unavailable
     /// (`--fallback-model`).
     fallback_model: Option<ModelId>,
@@ -2132,7 +2124,7 @@ pub struct ReplLoop {
     /// API client for orchestrator side-queries (title, permission explain, etc.).
     api_client: Option<Box<dyn ApiClient>>,
     /// Orchestrator for routing AI calls through product-level entry points.
-    orchestrator: Option<coderex_core::orchestrator::Orchestrator>,
+    orchestrator: Option<codape_core::orchestrator::Orchestrator>,
     /// Active background tasks (observable + cancelable).
     background_tasks: Vec<BackgroundTask>,
     /// Sender for background task results back to the UI thread.
@@ -2188,7 +2180,7 @@ pub struct ReplLoop {
     ///
     /// Edit tools snapshot through it before they write; `/rewind` restores
     /// the files a truncated turn touched, not just the conversation.
-    checkpoint_store: Option<Arc<coderex_core::checkpoints::CheckpointStore>>,
+    checkpoint_store: Option<Arc<codape_core::checkpoints::CheckpointStore>>,
     /// Command history with persistence.
     command_history: CommandHistory,
     /// Macro registry for user-defined command sequences.
@@ -2202,10 +2194,10 @@ pub struct ReplLoop {
     /// [`hooks_settings`](Self::hooks_settings) is the merged view kept for
     /// compatibility. When this is present it is authoritative for
     /// installation: managed hooks are installed as
-    /// [`HookTier::Managed`](coderex_hooks::HookTier::Managed) and the core
+    /// [`HookTier::Managed`](codape_hooks::HookTier::Managed) and the core
     /// document is installed as `Core`, so a managed hook neither loses its
     /// position nor runs a second time through the merged document.
-    hook_layers: Option<coderex_config::settings::HookLayers>,
+    hook_layers: Option<codape_config::settings::HookLayers>,
     /// How many hooks the installed executor is actually running.
     ///
     /// `/hooks` and `/status` used to read `CommandContext.active_hooks`,
@@ -2215,13 +2207,13 @@ pub struct ReplLoop {
     ///
     /// Kept after the executor is installed so the terminal can press a
     /// button without reaching into the engine.
-    mod_ui_handle: Option<coderex_mods::ModUiHandle>,
+    mod_ui_handle: Option<codape_mods::ModUiHandle>,
     /// Messages mods queued with `$.session.submit(text)`.
     ///
     /// The engine never drains this queue. The turn loop takes from it at an
     /// idle boundary and submits each message as an ordinary user turn. When
     /// mods are not installed it stays empty.
-    mod_submit_queue: coderex_mods::ModSubmitQueue,
+    mod_submit_queue: codape_mods::ModSubmitQueue,
     /// Consecutive mod-submitted turns since the last person-initiated prompt.
     ///
     /// The loop guard reads this through [`plan_mod_drain`]. Reset when a
@@ -2238,7 +2230,7 @@ pub struct ReplLoop {
     /// One writer, one consumer outside the process — not a bus. The writer is
     /// boxed rather than pinned to `Stdout` so a test can read back what a turn
     /// emitted.
-    protocol_sink: Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
+    protocol_sink: Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
     /// Whether a headless turn negotiates tool approvals over stdin.
     ///
     /// Enabled only when the host can answer (see
@@ -2250,10 +2242,9 @@ pub struct ReplLoop {
     /// Pending destructive command awaiting confirmation.
     pending_destructive_cmd: Option<(String, Vec<String>)>,
     /// Plugin manager for dynamic plugin commands and tools.
-    plugin_manager: Option<Arc<coderex_plugins::plugins::PluginManager>>,
+    plugin_manager: Option<Arc<codape_plugins::plugins::PluginManager>>,
     /// Primary tool executor (stored so plugin fallback can be layered on top).
-    _primary_tool_executor:
-        Option<Arc<dyn coderex_core::tool_executor::ToolExecutor + Send + Sync>>,
+    _primary_tool_executor: Option<Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync>>,
     /// Dispatcher reference for setting per-turn state (e.g., elicitation channel).
     dispatcher: Option<Arc<RegistryToolDispatcher>>,
     /// Sub-agent lifecycle manager shared with the registered Agent tool.
@@ -2271,7 +2262,7 @@ pub struct ReplLoop {
     /// A slot rather than a plain field because the sub-agent tool factory is
     /// built before the MCP servers are attached, and reads this when it later
     /// builds a child registry.
-    mcp_manager: Arc<std::sync::RwLock<Option<Arc<coderex_mcp::manager::McpManager>>>>,
+    mcp_manager: Arc<std::sync::RwLock<Option<Arc<codape_mcp::manager::McpManager>>>>,
     /// Slash-command names already registered for discovered MCP prompts.
     ///
     /// The command registry is append-only, so a refresh records what it has
@@ -2287,11 +2278,11 @@ pub struct ReplLoop {
     /// The server artifacts are published to, kept alive for the session.
     ///
     /// Dropping it would leave the model publishing pages nobody can open.
-    artifact_server: Option<coderex_artifacts::ArtifactServer>,
+    artifact_server: Option<codape_artifacts::ArtifactServer>,
     /// Where artifacts are stored, when it is not the default location.
     artifact_store_root: Option<std::path::PathBuf>,
     /// The turn currently running in a task, so a key handler can stop it.
-    running_query: Option<coderex_core::engine::InterruptHandle>,
+    running_query: Option<codape_core::engine::InterruptHandle>,
     /// Pending elicitation response sender — when set, user input is treated as an answer.
     pending_elicitation: Option<tokio::sync::oneshot::Sender<serde_json::Value>>,
     /// The multi-field form being filled, when the pending elicitation is one.
@@ -2304,14 +2295,14 @@ pub struct ReplLoop {
     /// Receiver for cron job fire events.
     cron_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>,
     /// Teleport manager for session sharing and directory switching.
-    teleport_manager: Option<coderex_bridge::teleport::TeleportManager>,
+    teleport_manager: Option<codape_bridge::teleport::TeleportManager>,
     /// Skip permission prompts (--dangerously-skip-permissions).
     skip_permissions: bool,
     /// Permission mode override (--permissions).
     permission_mode: Option<PermissionMode>,
     /// Settings-defined allow/deny/ask rules, installed once by
     /// `apply_cli_config`.
-    permission_rules: Option<coderex_config::PermissionsSettings>,
+    permission_rules: Option<codape_config::PermissionsSettings>,
     /// Whether the rules above have already been compiled into the checker.
     permission_rules_installed: bool,
     /// Disable session persistence (--no-session-persistence).
@@ -2337,17 +2328,17 @@ pub struct ReplLoop {
     betas: Vec<String>,
     /// Feature flags resolved for this session: the environment plus
     /// `--betas` overrides.
-    feature_flags: coderex_config::flags::FeatureFlags,
+    feature_flags: codape_config::flags::FeatureFlags,
     /// Shared enable bit of the already-registered Workflow tool.
     ///
     /// The registry is built before `--betas` is applied and cannot be
     /// mutated afterwards, so the tool reads this bit on every call.
     workflow_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Capabilities derived from [`Self::feature_flags`].
-    capabilities: coderex_config::flags::CapabilitySet,
+    capabilities: codape_config::flags::CapabilitySet,
     /// Settings-file context-window overrides, layered into the engine's
     /// resolver together with the environment, client data, and experiments.
-    context_window_settings: coderex_core::types::ContextWindowOverrides,
+    context_window_settings: codape_core::types::ContextWindowOverrides,
     /// Pull-request context fetched for `--from-pr`.
     pr_context: Option<String>,
     /// Chrome integration enabled (--chrome / --no-chrome).
@@ -2401,11 +2392,11 @@ impl std::fmt::Debug for ReplLoop {
 ///
 /// Needed because `Arc<dyn Trait>` does not automatically implement `Trait`.
 #[derive(Clone)]
-struct ArcToolExecutor(Arc<dyn coderex_core::tool_executor::ToolExecutor + Send + Sync>);
+struct ArcToolExecutor(Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync>);
 
 #[async_trait::async_trait]
-impl coderex_core::tool_executor::ToolExecutor for ArcToolExecutor {
-    fn list_tools(&self) -> Vec<coderex_core::tool_executor::ToolInfo> {
+impl codape_core::tool_executor::ToolExecutor for ArcToolExecutor {
+    fn list_tools(&self) -> Vec<codape_core::tool_executor::ToolInfo> {
         self.0.list_tools()
     }
 
@@ -2414,7 +2405,7 @@ impl coderex_core::tool_executor::ToolExecutor for ArcToolExecutor {
         tool_call_id: &str,
         tool_name: &str,
         input: &serde_json::Value,
-    ) -> coderex_core::tool_executor::ToolDispatchOutcome {
+    ) -> codape_core::tool_executor::ToolDispatchOutcome {
         self.0.execute(tool_call_id, tool_name, input).await
     }
 
@@ -2422,18 +2413,18 @@ impl coderex_core::tool_executor::ToolExecutor for ArcToolExecutor {
         &self,
         tool_name: &str,
         input: &serde_json::Value,
-    ) -> Vec<coderex_core::permissions::RuleSubject> {
+    ) -> Vec<codape_core::permissions::RuleSubject> {
         self.0.rule_subjects(tool_name, input)
     }
 
-    fn set_path_verifier(&self, verifier: Option<coderex_core::tool_executor::PathVerifier>) {
+    fn set_path_verifier(&self, verifier: Option<codape_core::tool_executor::PathVerifier>) {
         self.0.set_path_verifier(verifier);
     }
 
     fn note_permission_subjects(
         &self,
         call_id: &str,
-        subjects: &[coderex_core::permissions::RuleSubject],
+        subjects: &[codape_core::permissions::RuleSubject],
     ) {
         self.0.note_permission_subjects(call_id, subjects);
     }
@@ -2447,12 +2438,12 @@ impl coderex_core::tool_executor::ToolExecutor for ArcToolExecutor {
 #[derive(Clone)]
 struct PluginToolFallbackExecutor {
     primary: ArcToolExecutor,
-    plugin: Arc<coderex_plugins::tool_executor::PluginToolExecutor>,
+    plugin: Arc<codape_plugins::tool_executor::PluginToolExecutor>,
 }
 
 #[async_trait::async_trait]
-impl coderex_core::tool_executor::ToolExecutor for PluginToolFallbackExecutor {
-    fn list_tools(&self) -> Vec<coderex_core::tool_executor::ToolInfo> {
+impl codape_core::tool_executor::ToolExecutor for PluginToolFallbackExecutor {
+    fn list_tools(&self) -> Vec<codape_core::tool_executor::ToolInfo> {
         self.primary.list_tools()
     }
 
@@ -2461,7 +2452,7 @@ impl coderex_core::tool_executor::ToolExecutor for PluginToolFallbackExecutor {
         tool_call_id: &str,
         tool_name: &str,
         input: &serde_json::Value,
-    ) -> coderex_core::tool_executor::ToolDispatchOutcome {
+    ) -> codape_core::tool_executor::ToolDispatchOutcome {
         let primary = self.primary.execute(tool_call_id, tool_name, input).await;
 
         if primary.result.is_error && primary_tool_was_missing(&primary.result.output, tool_name) {
@@ -2475,7 +2466,7 @@ impl coderex_core::tool_executor::ToolExecutor for PluginToolFallbackExecutor {
         &self,
         tool_name: &str,
         input: &serde_json::Value,
-    ) -> Vec<coderex_core::permissions::RuleSubject> {
+    ) -> Vec<codape_core::permissions::RuleSubject> {
         let primary = self.primary.rule_subjects(tool_name, input);
         if primary.is_empty() {
             self.plugin.rule_subjects(tool_name, input)
@@ -2484,14 +2475,14 @@ impl coderex_core::tool_executor::ToolExecutor for PluginToolFallbackExecutor {
         }
     }
 
-    fn set_path_verifier(&self, verifier: Option<coderex_core::tool_executor::PathVerifier>) {
+    fn set_path_verifier(&self, verifier: Option<codape_core::tool_executor::PathVerifier>) {
         self.primary.set_path_verifier(verifier);
     }
 
     fn note_permission_subjects(
         &self,
         call_id: &str,
-        subjects: &[coderex_core::permissions::RuleSubject],
+        subjects: &[codape_core::permissions::RuleSubject],
     ) {
         self.primary.note_permission_subjects(call_id, subjects);
     }
@@ -2519,16 +2510,16 @@ fn primary_tool_was_missing(output: &str, tool_name: &str) -> bool {
 /// participates. Shared with the `serve` engine factory so both production
 /// engine-construction paths honour the flags.
 ///
-/// [`TeamContext`]: coderex_core::TeamContext
+/// [`TeamContext`]: codape_core::TeamContext
 ///
-/// [`CoordinatorState`]: coderex_core::coordinator::CoordinatorState
+/// [`CoordinatorState`]: codape_core::coordinator::CoordinatorState
 pub(crate) fn apply_engine_flag_behaviours(
     engine: &mut QueryEngine,
-    flags: &coderex_config::flags::FeatureFlags,
+    flags: &codape_config::flags::FeatureFlags,
     memory_base: Option<&std::path::Path>,
 ) {
     if flags.coordinator_mode {
-        let mut coordinator = coderex_core::coordinator::CoordinatorState::new();
+        let mut coordinator = codape_core::coordinator::CoordinatorState::new();
         coordinator.start();
         engine.set_coordinator(coordinator);
     }
@@ -2543,8 +2534,8 @@ pub(crate) fn apply_engine_flag_behaviours(
         // same stored team-memory entries `/team-memory` reads. An empty
         // context is still installed — the engine injects nothing from it,
         // and a later write is visible without rebuilding the engine.
-        let team_id = std::env::var("CODEREX_TEAM_ID").unwrap_or_else(|_| "local".to_string());
-        let mut context = coderex_core::TeamContext::new(team_id);
+        let team_id = std::env::var("CODAPE_TEAM_ID").unwrap_or_else(|_| "local".to_string());
+        let mut context = codape_core::TeamContext::new(team_id);
         if let Some(memory_base) = memory_base {
             let service =
                 TeamMemorySyncService::new("default".to_string(), memory_base.join("team"));
@@ -2571,7 +2562,7 @@ impl ReplLoop {
     #[must_use]
     pub fn new(cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
-        coderex_commands::registry::register_all_commands(&mut commands);
+        codape_commands::registry::register_all_commands(&mut commands);
         let mut this = Self {
             commands,
             model,
@@ -2589,7 +2580,7 @@ impl ReplLoop {
             tool_starts: std::collections::HashMap::new(),
             tool_use_summaries: std::collections::HashMap::new(),
             tool_names: std::collections::HashMap::new(),
-            last_usage: coderex_core::types::UsageSummary::default(),
+            last_usage: codape_core::types::UsageSummary::default(),
             max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
             explicit_model_override: false,
             cwd,
@@ -2612,7 +2603,7 @@ impl ReplLoop {
             team_memory_service: None,
             memory_writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             workflow_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
-                coderex_config::flags::FeatureFlags::from_env().workflow_scripts,
+                codape_config::flags::FeatureFlags::from_env().workflow_scripts,
             )),
             command_history: CommandHistory::new(1000),
             macro_registry: MacroRegistry::new(),
@@ -2620,7 +2611,7 @@ impl ReplLoop {
             hook_layers: None,
             active_hooks: 0,
             mod_ui_handle: None,
-            mod_submit_queue: coderex_mods::ModSubmitQueue::default(),
+            mod_submit_queue: codape_mods::ModSubmitQueue::default(),
             mod_auto_turns: 0,
             mod_prompts_this_turn: 0,
             mods_disabled_reported: false,
@@ -2644,7 +2635,7 @@ impl ReplLoop {
             pending_mcp_form: None,
             confirmation_bus: None,
             cron_rx: None,
-            teleport_manager: Some(coderex_bridge::teleport::TeleportManager::from_env()),
+            teleport_manager: Some(codape_bridge::teleport::TeleportManager::from_env()),
             #[cfg(feature = "hot-reload")]
             config_watcher: None,
             #[cfg(feature = "hot-reload")]
@@ -2665,9 +2656,9 @@ impl ReplLoop {
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
-            feature_flags: coderex_config::flags::FeatureFlags::from_env(),
-            capabilities: coderex_config::flags::FeatureFlags::from_env().capabilities(),
-            context_window_settings: coderex_core::types::ContextWindowOverrides::default(),
+            feature_flags: codape_config::flags::FeatureFlags::from_env(),
+            capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
+            context_window_settings: codape_core::types::ContextWindowOverrides::default(),
             pr_context: None,
             chrome_enabled: true,
             agent: None,
@@ -2695,7 +2686,7 @@ impl ReplLoop {
     /// Supply settings-file context-window overrides for this session.
     pub fn with_context_window_settings(
         &mut self,
-        overrides: coderex_core::types::ContextWindowOverrides,
+        overrides: codape_core::types::ContextWindowOverrides,
     ) {
         self.context_window_settings = overrides;
     }
@@ -2709,7 +2700,7 @@ impl ReplLoop {
     #[must_use]
     pub fn with_engine(api_client: Box<dyn ApiClient>, cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
-        coderex_commands::registry::register_all_commands(&mut commands);
+        codape_commands::registry::register_all_commands(&mut commands);
 
         let session = SessionState::new(std::path::PathBuf::from(&cwd));
         let session_id = session.session_id;
@@ -2717,7 +2708,7 @@ impl ReplLoop {
         let mut permission_engine = PermissionEngine::new(checker);
         let confirmation_bus = ConfirmationBus::new(10);
         let perm_path = std::path::PathBuf::from(&cwd)
-            .join(".coderex")
+            .join(".codape")
             .join("permissions.json");
         permission_engine.set_persist_path(perm_path);
         let (event_tx, event_rx) = mpsc::unbounded_channel::<EngineEvent>();
@@ -2732,7 +2723,7 @@ impl ReplLoop {
         permission_engine.add_hook(Arc::new(BackgroundAgentDenyHook));
 
         let memory_base = std::path::PathBuf::from(&cwd)
-            .join(".coderex")
+            .join(".codape")
             .join("memory");
         let session_memory_store = Arc::new(SessionMemoryStore::new(memory_base.join("session")));
         let long_term_store = Arc::new(LongTermStore::new(memory_base.join("long_term")));
@@ -2751,12 +2742,12 @@ impl ReplLoop {
         // org id from the orchestrator's remote-settings cache is used. When
         // neither exists the org store stays unconfigured and the tools report
         // that honestly.
-        let org_id = configured_org_id(std::env::var("CODEREX_ORG_ID").ok()).or_else(cached_org_id);
+        let org_id = configured_org_id(std::env::var("CODAPE_ORG_ID").ok()).or_else(cached_org_id);
         if org_id.is_none() {
             tracing::debug!("no organization id configured; org memory is not configured");
         }
         let org_memory_service = org_memory_service(&memory_base, org_id);
-        let mut memory_service = coderex_memory::service::MemoryService::new(
+        let mut memory_service = codape_memory::service::MemoryService::new(
             Arc::clone(&long_term_store),
             Arc::clone(&team_memory_service),
         )
@@ -2780,7 +2771,7 @@ impl ReplLoop {
         let mut engine = engine;
         // Persistent session memory that survives compaction.
         engine.set_session_memory(Arc::new(
-            coderex_memory::session_memory_backend::StoreSessionMemoryBackend::new(Arc::clone(
+            codape_memory::session_memory_backend::StoreSessionMemoryBackend::new(Arc::clone(
                 &session_memory_store,
             )),
         ));
@@ -2803,7 +2794,7 @@ impl ReplLoop {
         });
         agent_manager.set_event_sender(event_tx);
         agent_manager.set_permission_checker(engine.permission_checker());
-        let mcp_slot: Arc<std::sync::RwLock<Option<Arc<coderex_mcp::manager::McpManager>>>> =
+        let mcp_slot: Arc<std::sync::RwLock<Option<Arc<codape_mcp::manager::McpManager>>>> =
             Arc::new(std::sync::RwLock::new(None));
         let mcp_for_subagents = Arc::clone(&mcp_slot);
         // Team and MCP-resource state is session-wide; the worktree state is
@@ -2879,15 +2870,15 @@ impl ReplLoop {
         // with `apply_cli_config` rather than freezing it here.
         let lsp_defaults: Arc<std::sync::RwLock<Option<PluginLspDefaults>>> =
             Arc::new(std::sync::RwLock::new(None));
-        let workflows_enabled = coderex_config::flags::FeatureFlags::from_env().workflow_scripts;
+        let workflows_enabled = codape_config::flags::FeatureFlags::from_env().workflow_scripts;
         let workflow_tool = BetaGatedWorkflowTool::new(
-            coderex_workflow::WorkflowTool::new(Arc::new(WorkflowAgentRunner {
+            codape_workflow::WorkflowTool::new(Arc::new(WorkflowAgentRunner {
                 manager: Arc::clone(&agent_manager),
                 session_id: session_id.to_string(),
                 cwd: cwd.clone(),
             }))
-            .with_root(coderex_workflow::default_root())
-            .with_project_dir(std::path::Path::new(&cwd).join(".coderex/workflows")),
+            .with_root(codape_workflow::default_root())
+            .with_project_dir(std::path::Path::new(&cwd).join(".codape/workflows")),
         );
         workflow_tool.set_enabled(workflows_enabled);
         let workflow_enabled = workflow_tool.enabled_flag();
@@ -2912,7 +2903,7 @@ impl ReplLoop {
         // publish and honours it for a read — so the engine asks the registry
         // per call rather than being handed a table up front.
         let registry = Arc::new(registry);
-        coderex_tools::install_rule_exemptions(engine.permission_engine_mut(), &registry);
+        codape_tools::install_rule_exemptions(engine.permission_engine_mut(), &registry);
         let inner_executor = Arc::new(ToolsExecutor::new(crate::tool_sandbox::execution_config()));
         let mut dispatcher = RegistryToolDispatcher::new(
             registry,
@@ -2923,10 +2914,10 @@ impl ReplLoop {
         // Whether this session turned feature flags on decides whether a
         // gated tool is offered at all — the tool listing the model sees is
         // filtered by it.
-        dispatcher.set_feature_flags(coderex_config::flags::FeatureFlags::from_env());
+        dispatcher.set_feature_flags(codape_config::flags::FeatureFlags::from_env());
 
         // Shared task store with persistence
-        let config_home = coderex_config::config_home();
+        let config_home = codape_config::config_home();
         let task_store = Arc::new(TaskStore::new().with_storage(config_home.join("tasks.jsonl")));
         let _ = task_store.load();
         dispatcher.set_task_store(Arc::clone(&task_store));
@@ -2955,8 +2946,8 @@ impl ReplLoop {
 
         // The file checkpoint store lets `/rewind` undo the files a turn
         // edited, not only the conversation history.
-        let checkpoint_store: Option<Arc<coderex_core::checkpoints::CheckpointStore>> =
-            coderex_core::checkpoints::CheckpointStore::new(&config_home.join("file-history"))
+        let checkpoint_store: Option<Arc<codape_core::checkpoints::CheckpointStore>> =
+            codape_core::checkpoints::CheckpointStore::new(&config_home.join("file-history"))
                 .ok()
                 .map(Arc::new);
         if let Some(store) = &checkpoint_store {
@@ -2964,7 +2955,7 @@ impl ReplLoop {
         }
 
         let dispatcher = Arc::new(dispatcher);
-        let primary_executor: Arc<dyn coderex_core::tool_executor::ToolExecutor + Send + Sync> =
+        let primary_executor: Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync> =
             dispatcher.clone();
         let arc_exec = ArcToolExecutor(Arc::clone(&primary_executor));
         engine.set_tool_executor(Box::new(arc_exec));
@@ -2975,7 +2966,7 @@ impl ReplLoop {
 
         // Create event session and start its timeout checker
 
-        let orchestrator = coderex_core::orchestrator::Orchestrator::new(api_client.clone_box());
+        let orchestrator = codape_core::orchestrator::Orchestrator::new(api_client.clone_box());
         let (bg_tx, bg_rx) = mpsc::unbounded_channel::<BackgroundTaskResult>();
 
         #[cfg(feature = "hot-reload")]
@@ -2998,7 +2989,7 @@ impl ReplLoop {
             tool_starts: std::collections::HashMap::new(),
             tool_use_summaries: std::collections::HashMap::new(),
             tool_names: std::collections::HashMap::new(),
-            last_usage: coderex_core::types::UsageSummary::default(),
+            last_usage: codape_core::types::UsageSummary::default(),
             max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
             explicit_model_override: false,
             cwd,
@@ -3027,7 +3018,7 @@ impl ReplLoop {
             hook_layers: None,
             active_hooks: 0,
             mod_ui_handle: None,
-            mod_submit_queue: coderex_mods::ModSubmitQueue::default(),
+            mod_submit_queue: codape_mods::ModSubmitQueue::default(),
             mod_auto_turns: 0,
             mod_prompts_this_turn: 0,
             mods_disabled_reported: false,
@@ -3051,7 +3042,7 @@ impl ReplLoop {
             pending_mcp_form: None,
             confirmation_bus: Some(confirmation_bus),
             cron_rx: Some(cron_rx),
-            teleport_manager: Some(coderex_bridge::teleport::TeleportManager::from_env()),
+            teleport_manager: Some(codape_bridge::teleport::TeleportManager::from_env()),
             #[cfg(feature = "hot-reload")]
             config_watcher,
             #[cfg(feature = "hot-reload")]
@@ -3072,9 +3063,9 @@ impl ReplLoop {
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
-            feature_flags: coderex_config::flags::FeatureFlags::from_env(),
-            capabilities: coderex_config::flags::FeatureFlags::from_env().capabilities(),
-            context_window_settings: coderex_core::types::ContextWindowOverrides::default(),
+            feature_flags: codape_config::flags::FeatureFlags::from_env(),
+            capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
+            context_window_settings: codape_core::types::ContextWindowOverrides::default(),
             pr_context: None,
             chrome_enabled: true,
             agent: None,
@@ -3118,19 +3109,19 @@ impl ReplLoop {
             return;
         };
 
-        let store = coderex_artifacts::ArtifactStore::open(
+        let store = codape_artifacts::ArtifactStore::open(
             self.artifact_store_root
                 .clone()
-                .unwrap_or_else(coderex_artifacts::store::default_root),
+                .unwrap_or_else(codape_artifacts::store::default_root),
         );
 
         // Prefer the well-known port so a URL stays valid across sessions; a
         // free one is better than no server when it is taken.
-        let server = match coderex_artifacts::ArtifactServer::start(store.clone(), 8722).await {
+        let server = match codape_artifacts::ArtifactServer::start(store.clone(), 8722).await {
             Ok(server) => server,
             Err(error) => {
                 tracing::debug!("artifact port 8722 unavailable ({error}); taking a free one");
-                match coderex_artifacts::ArtifactServer::start(store.clone(), 0).await {
+                match codape_artifacts::ArtifactServer::start(store.clone(), 0).await {
                     Ok(server) => server,
                     Err(error) => {
                         tracing::warn!("artifact serving unavailable: {error}");
@@ -3140,14 +3131,14 @@ impl ReplLoop {
             }
         };
 
-        let service = Arc::new(coderex_artifacts::ArtifactService::new(
+        let service = Arc::new(codape_artifacts::ArtifactService::new(
             store,
             server.origin(),
             self.session_id
                 .map_or_else(|| "local".to_string(), |id| id.to_string()),
         ));
 
-        for tool in coderex_artifacts::ArtifactTools::new(service).all() {
+        for tool in codape_artifacts::ArtifactTools::new(service).all() {
             dispatcher.registry().register_dynamic(tool);
         }
         tracing::info!(origin = server.origin(), "artifacts are served locally");
@@ -3179,7 +3170,7 @@ impl ReplLoop {
     /// # Panics
     ///
     /// Panics if the MCP slot's lock is poisoned.
-    pub fn with_mcp_manager(&mut self, mcp_manager: Arc<coderex_mcp::manager::McpManager>) {
+    pub fn with_mcp_manager(&mut self, mcp_manager: Arc<codape_mcp::manager::McpManager>) {
         if let Some(ref dispatcher) = self.dispatcher {
             mcp_manager.register_tools_into(dispatcher.registry());
         }
@@ -3311,7 +3302,7 @@ impl ReplLoop {
                         .prompt
                         .arguments
                         .iter()
-                        .map(coderex_mcp::prompts::McpPromptArgument::display)
+                        .map(codape_mcp::prompts::McpPromptArgument::display)
                         .collect();
                     output.push_str(" (args: ");
                     output.push_str(&names.join(", "));
@@ -3336,10 +3327,10 @@ impl ReplLoop {
     /// tool executor as a fallback behind the primary tool registry.
     pub fn with_plugin_manager(
         &mut self,
-        plugin_manager: Arc<coderex_plugins::plugins::PluginManager>,
+        plugin_manager: Arc<codape_plugins::plugins::PluginManager>,
     ) {
         // Register plugin commands as /{plugin}/{command} slash commands
-        coderex_plugins::command_bridge::PluginCommandBridge::register_commands(
+        codape_plugins::command_bridge::PluginCommandBridge::register_commands(
             &plugin_manager,
             &mut self.commands,
         );
@@ -3348,9 +3339,9 @@ impl ReplLoop {
         if let Some(ref dispatcher) = self.dispatcher
             && let Some(ref mut engine) = self.engine
         {
-            let primary: Arc<dyn coderex_core::tool_executor::ToolExecutor + Send + Sync> =
+            let primary: Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync> =
                 dispatcher.clone();
-            let plugin_exec = Arc::new(coderex_plugins::tool_executor::PluginToolExecutor::new(
+            let plugin_exec = Arc::new(codape_plugins::tool_executor::PluginToolExecutor::new(
                 Arc::clone(&plugin_manager),
             ));
             let fallback = PluginToolFallbackExecutor {
@@ -3378,7 +3369,7 @@ impl ReplLoop {
     /// They are compiled against the session cwd once, by `apply_cli_config`.
     pub fn with_permission_rules(
         &mut self,
-        permissions: Option<coderex_config::PermissionsSettings>,
+        permissions: Option<codape_config::PermissionsSettings>,
     ) {
         self.permission_rules = permissions;
         self.permission_rules_installed = false;
@@ -3394,11 +3385,11 @@ impl ReplLoop {
     }
 
     /// Attach the hook documents split by source tier (see
-    /// [`ConfigService::resolve`](coderex_config::settings::ConfigService::resolve)).
+    /// [`ConfigService::resolve`](codape_config::settings::ConfigService::resolve)).
     ///
     /// When set, this supersedes [`with_hooks`](Self::with_hooks) at
     /// installation time.
-    pub fn with_hook_layers(&mut self, layers: Option<coderex_config::settings::HookLayers>) {
+    pub fn with_hook_layers(&mut self, layers: Option<codape_config::settings::HookLayers>) {
         self.hook_layers = layers;
     }
 
@@ -3409,7 +3400,7 @@ impl ReplLoop {
     /// hand it to, and there is not meant to be one.
     pub fn with_protocol_sink(
         &mut self,
-        sink: Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
+        sink: Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
     ) {
         self.protocol_sink = sink;
     }
@@ -3530,7 +3521,7 @@ impl ReplLoop {
     /// back at startup the commands claimed to persist a preference that was
     /// never applied.
     /// Attach the session's telemetry handle (only when the user opted in).
-    pub fn with_telemetry_handle(&mut self, handle: Option<coderex_telemetry::TelemetryHandle>) {
+    pub fn with_telemetry_handle(&mut self, handle: Option<codape_telemetry::TelemetryHandle>) {
         self.telemetry = handle;
     }
 
@@ -3649,14 +3640,14 @@ impl ReplLoop {
 
     /// The feature flags resolved for this session.
     #[must_use]
-    pub const fn feature_flags(&self) -> &coderex_config::flags::FeatureFlags {
+    pub const fn feature_flags(&self) -> &codape_config::flags::FeatureFlags {
         &self.feature_flags
     }
 
     /// The command context, for tests outside this module.
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn command_context_for_test(&self) -> coderex_commands::CommandContext {
+    pub(crate) fn command_context_for_test(&self) -> codape_commands::CommandContext {
         self.build_context()
     }
 
@@ -3665,13 +3656,13 @@ impl ReplLoop {
     #[must_use]
     pub(crate) const fn hook_layers_for_test(
         &self,
-    ) -> Option<&coderex_config::settings::HookLayers> {
+    ) -> Option<&codape_config::settings::HookLayers> {
         self.hook_layers.as_ref()
     }
 
     /// The capability set derived from the session's feature flags.
     #[must_use]
-    pub const fn capabilities(&self) -> coderex_config::flags::CapabilitySet {
+    pub const fn capabilities(&self) -> codape_config::flags::CapabilitySet {
         self.capabilities
     }
 
@@ -3772,7 +3763,7 @@ impl ReplLoop {
             if let (Some(rules), Some(engine)) = (rules, self.engine.as_ref()) {
                 let checker = engine.permission_checker();
                 let mut guard = checker.lock().unwrap();
-                match coderex_config::permission_rules::install_settings_rules(
+                match codape_config::permission_rules::install_settings_rules(
                     &mut guard,
                     Some(&rules),
                     std::path::Path::new(&self.cwd),
@@ -3868,7 +3859,7 @@ impl ReplLoop {
         {
             let user_msgs: Vec<_> = msgs
                 .into_iter()
-                .filter(|m| matches!(m.role, coderex_core::types::Role::User))
+                .filter(|m| matches!(m.role, codape_core::types::Role::User))
                 .collect();
             let mut session = engine.session().clone();
             session.messages.extend(user_msgs);
@@ -3893,7 +3884,7 @@ impl ReplLoop {
         // to the flag not existing.
         if !self.betas.is_empty() {
             let raw = self.betas.join(",");
-            let mut flags = coderex_config::flags::FeatureFlags::from_env();
+            let mut flags = codape_config::flags::FeatureFlags::from_env();
             match flags.apply_comma_list(&raw) {
                 Ok(()) => {
                     self.feature_flags = flags;
@@ -3943,7 +3934,7 @@ impl ReplLoop {
         // environment, client-data file and built-in table; settings and
         // experiment values are only reachable here, where both are resolved.
         if let Some(ref mut engine) = self.engine {
-            let resolver = coderex_core::types::ContextWindowResolver::from_env_and_client_data()
+            let resolver = codape_core::types::ContextWindowResolver::from_env_and_client_data()
                 .with_settings(self.context_window_settings.clone())
                 .with_experiment(self.feature_flags.experiment_context_windows());
             engine.set_context_window_resolver(resolver);
@@ -3954,7 +3945,7 @@ impl ReplLoop {
         // flag set is only final here, after `--betas` has been applied.
         if let Some(ref mut engine) = self.engine {
             let memory_base = std::path::PathBuf::from(&self.cwd)
-                .join(".coderex")
+                .join(".codape")
                 .join("memory");
             apply_engine_flag_behaviours(engine, &self.feature_flags, Some(&memory_base));
         }
@@ -4019,19 +4010,19 @@ impl ReplLoop {
         // `hook_layers` is the resolved split. `hooks_settings` alone is the
         // compatibility path for a hand-built `Settings` (and for callers of
         // `with_hooks`), where the merged value is treated as core.
-        let mut hook_sources: Vec<(coderex_hooks::HookTier, serde_json::Value)> = Vec::new();
+        let mut hook_sources: Vec<(codape_hooks::HookTier, serde_json::Value)> = Vec::new();
         if let Some(layers) = self.hook_layers.as_ref() {
             if let Some(value) = &layers.managed {
-                hook_sources.push((coderex_hooks::HookTier::Managed, value.clone()));
+                hook_sources.push((codape_hooks::HookTier::Managed, value.clone()));
             }
             if let Some(value) = &layers.plugin {
-                hook_sources.push((coderex_hooks::HookTier::Plugin, value.clone()));
+                hook_sources.push((codape_hooks::HookTier::Plugin, value.clone()));
             }
             if let Some(value) = &layers.core {
-                hook_sources.push((coderex_hooks::HookTier::Core, value.clone()));
+                hook_sources.push((codape_hooks::HookTier::Core, value.clone()));
             }
         } else if let Some(hooks) = &self.hooks_settings {
-            hook_sources.push((coderex_hooks::HookTier::Core, hooks.clone()));
+            hook_sources.push((codape_hooks::HookTier::Core, hooks.clone()));
         }
 
         // 15a. `agent_triggers` gates the agent-kind hook path. An `agent` hook
@@ -4060,15 +4051,15 @@ impl ReplLoop {
         }
 
         let mut installed_hook_count = 0;
-        // Mods are hooks too: a session with `CODEREX_MODS` but no settings
+        // Mods are hooks too: a session with `CODAPE_MODS` but no settings
         // hooks must still build the registry and attach the JS executor.
-        if !hook_sources.is_empty() || coderex_mods::is_enabled() {
+        if !hook_sources.is_empty() || codape_mods::is_enabled() {
             let hook_count: usize = hook_sources
                 .iter()
                 .map(|(_, value)| count_configured_hooks(value))
                 .sum();
             if let Some(ref mut engine) = self.engine {
-                match coderex_hooks::HookRegistry::from_settings_sources(
+                match codape_hooks::HookRegistry::from_settings_sources(
                     hook_sources.iter().map(|(tier, value)| (*tier, value)),
                 ) {
                     Ok(registry) => {
@@ -4102,23 +4093,23 @@ impl ReplLoop {
                             |poisoned| poisoned.into_inner().mode(),
                             |checker| checker.mode(),
                         );
-                        // The surface the session is presented in. CodeRex
+                        // The surface the session is presented in. Codape
                         // ships the terminal; registering it here is what
                         // makes its id and capabilities reach mods through
                         // `e.surface` / `e.surfaceCapabilities`.
-                        let mut surfaces = coderex_core::surface::SurfaceRegistry::new();
+                        let mut surfaces = codape_core::surface::SurfaceRegistry::new();
                         if let Err(error) =
-                            surfaces.register(Arc::new(coderex_ui::surface::TerminalSurface::new()))
+                            surfaces.register(Arc::new(codape_ui::surface::TerminalSurface::new()))
                         {
                             tracing::warn!(%error, "could not register the terminal surface");
                         }
-                        let mod_session = coderex_mods::ModSession {
+                        let mod_session = codape_mods::ModSession {
                             cwd: session_cwd.to_string_lossy().to_string(),
                             model: session_model.0.clone(),
                             permission_mode: format!("{permission_mode:?}"),
                             surface: surfaces
                                 .active_descriptor()
-                                .unwrap_or_else(coderex_core::surface::SurfaceDescriptor::terminal),
+                                .unwrap_or_else(codape_core::surface::SurfaceDescriptor::terminal),
                         };
                         registry.set_request_handler(Arc::new(
                             crate::hook_actions::SessionHookRequestHandler::new(
@@ -4128,39 +4119,38 @@ impl ReplLoop {
                                 engine.permission_checker(),
                             ),
                         ));
-                        // In-process JavaScript mods (opt-in via `CODEREX_MODS`
-                        // or `CODEREX_MODS_DIR`): their hooks run first, then
+                        // In-process JavaScript mods (opt-in via `CODAPE_MODS`
+                        // or `CODAPE_MODS_DIR`): their hooks run first, then
                         // the hooks from settings.
                         let inner = registry.into_executor();
-                        let hooks: Arc<
-                            dyn coderex_core::hook_executor::HookExecutor + Send + Sync,
-                        > = match coderex_mods::JsHookExecutor::load_from_env(
-                            mod_session,
-                            Some(Arc::clone(&inner)
-                                as Arc<
-                                    dyn coderex_core::hook_executor::HookExecutor + Send + Sync,
-                                >),
-                        ) {
-                            Some(Ok(executor)) => {
-                                // One startup line. The hashes come from
-                                // the load report and are informational:
-                                // there is no signature or trust store.
-                                let line = mods_startup_line(
-                                    executor.load_report(),
-                                    executor.runtime().dir(),
-                                );
-                                tracing::info!("{line}");
-                                eprintln!("{line}");
-                                self.mod_ui_handle = Some(executor.ui_handle());
-                                self.mod_submit_queue = executor.submit_queue();
-                                Arc::new(executor)
-                            }
-                            Some(Err(error)) => {
-                                tracing::warn!("mods were not loaded: {error}");
-                                inner
-                            }
-                            None => inner,
-                        };
+                        let hooks: Arc<dyn codape_core::hook_executor::HookExecutor + Send + Sync> =
+                            match codape_mods::JsHookExecutor::load_from_env(
+                                mod_session,
+                                Some(Arc::clone(&inner)
+                                    as Arc<
+                                        dyn codape_core::hook_executor::HookExecutor + Send + Sync,
+                                    >),
+                            ) {
+                                Some(Ok(executor)) => {
+                                    // One startup line. The hashes come from
+                                    // the load report and are informational:
+                                    // there is no signature or trust store.
+                                    let line = mods_startup_line(
+                                        executor.load_report(),
+                                        executor.runtime().dir(),
+                                    );
+                                    tracing::info!("{line}");
+                                    eprintln!("{line}");
+                                    self.mod_ui_handle = Some(executor.ui_handle());
+                                    self.mod_submit_queue = executor.submit_queue();
+                                    Arc::new(executor)
+                                }
+                                Some(Err(error)) => {
+                                    tracing::warn!("mods were not loaded: {error}");
+                                    inner
+                                }
+                                None => inner,
+                            };
                         engine.set_hooks(Arc::clone(&hooks));
                         // The hooks fired from inside a tool (`WorktreeCreate`,
                         // `TaskCompleted`) and from a sub-agent (`SubagentStart`,
@@ -4172,7 +4162,7 @@ impl ReplLoop {
                         // Trait upcasting drops the auto-trait bounds the
                         // engine's setter names; the executor is still one
                         // allocation.
-                        let plain: Arc<dyn coderex_core::hook_executor::HookExecutor> =
+                        let plain: Arc<dyn codape_core::hook_executor::HookExecutor> =
                             Arc::clone(&hooks) as _;
                         if let Some(ref dispatcher) = self.dispatcher {
                             dispatcher.set_hooks(Arc::clone(&plain));
@@ -4227,7 +4217,7 @@ impl ReplLoop {
             {
                 object.insert("name".to_string(), serde_json::Value::String(name.clone()));
             }
-            match serde_json::from_value::<coderex_agents::CustomAgentDef>(value) {
+            match serde_json::from_value::<codape_agents::CustomAgentDef>(value) {
                 Ok(definition) => {
                     if let Ok(mut manager) = manager.try_lock() {
                         manager.register_custom_agent(definition);
@@ -4260,7 +4250,7 @@ impl ReplLoop {
     /// Merge a resolved agent definition into the session effects.
     ///
     /// Split from [`Self::apply_agent_selection`] so the precedence rules can
-    /// be tested without reading the user's `~/.coderex/agents/`.
+    /// be tested without reading the user's `~/.codape/agents/`.
     fn apply_resolved_agent(&mut self, agent: crate::agent_selection::ResolvedAgent) {
         if self.session_effects.override_system_prompt.is_none() {
             self.session_effects.override_system_prompt = Some(agent.system_prompt);
@@ -4304,12 +4294,12 @@ impl ReplLoop {
     /// Split out because the flag works from the process's working directory,
     /// which a test cannot change.
     fn enter_worktree_mode_for(&mut self, base: &std::path::Path) {
-        use coderex_core::worktree::{WorktreeConfig, WorktreeManager};
+        use codape_core::worktree::{WorktreeConfig, WorktreeManager};
 
         let base = base.to_path_buf();
 
         let config = WorktreeConfig {
-            base_dir: base.join(".coderex").join("worktrees"),
+            base_dir: base.join(".codape").join("worktrees"),
             ..WorktreeConfig::default()
         };
         let mut manager = WorktreeManager::new(config);
@@ -4338,7 +4328,7 @@ impl ReplLoop {
 
         if let Some(ref mut engine) = self.engine {
             let mut session = engine.session().clone();
-            session.active_worktree = Some(coderex_core::state::WorktreeState {
+            session.active_worktree = Some(codape_core::state::WorktreeState {
                 path: created.path.clone(),
                 base: created.branch.clone(),
                 has_changes: false,
@@ -4397,7 +4387,7 @@ impl ReplLoop {
         replace_session_id: bool,
     ) -> std::result::Result<
         (
-            Vec<coderex_core::types::Message>,
+            Vec<codape_core::types::Message>,
             Option<session_resume::InteractiveResumeSnapshot>,
         ),
         String,
@@ -4424,8 +4414,8 @@ impl ReplLoop {
             .iter()
             .filter_map(|message| match (&message.role, &message.content) {
                 (
-                    coderex_core::types::Role::User,
-                    coderex_core::types::MessageContent::Text(text),
+                    codape_core::types::Role::User,
+                    codape_core::types::MessageContent::Text(text),
                 ) => Some(text.clone()),
                 _ => None,
             })
@@ -4437,13 +4427,13 @@ impl ReplLoop {
     /// Report background work the previous session left behind, and settle it.
     ///
     /// The reference re-attaches to a job because its jobs are separate
-    /// processes with recorded PIDs. CodeRex's run inside this one, so there is
+    /// processes with recorded PIDs. Codape's run inside this one, so there is
     /// nothing to re-attach to; the honest half is to say what was interrupted
     /// instead of dropping it silently.
-    fn adopt_background_jobs(&self, ui_state: &mut coderex_ui::state::UiState) {
+    fn adopt_background_jobs(&self, ui_state: &mut codape_ui::state::UiState) {
         for text in self.background_job_notifications() {
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::System,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
                 content: text.into(),
                 tool_name: None,
                 streaming: false,
@@ -4462,10 +4452,10 @@ impl ReplLoop {
         let session_id = self
             .current_session_id()
             .unwrap_or_else(|| "unknown".to_string());
-        let store = coderex_core::JobStore::new(&self.cwd);
-        let adopted = match coderex_core::adopt_for_session(
+        let store = codape_core::JobStore::new(&self.cwd);
+        let adopted = match codape_core::adopt_for_session(
             &store,
-            coderex_core::task::now_ms(),
+            codape_core::task::now_ms(),
             &session_id,
         ) {
             Ok(adopted) => adopted,
@@ -4481,7 +4471,7 @@ impl ReplLoop {
             .collect()
     }
 
-    fn persist_interactive_snapshot(&self, ui_state: &coderex_ui::state::UiState) {
+    fn persist_interactive_snapshot(&self, ui_state: &codape_ui::state::UiState) {
         if self.no_persistence {
             return;
         }
@@ -4490,7 +4480,7 @@ impl ReplLoop {
         };
         let session = engine.session();
         let session_id = session.session_id.to_string();
-        let transcript_store = coderex_memory::transcript::TranscriptStore::new(
+        let transcript_store = codape_memory::transcript::TranscriptStore::new(
             session_resume::transcript_dir(&self.cwd),
         );
         if let Err(err) = transcript_store.rewrite(&session_id, &session.messages) {
@@ -4536,15 +4526,15 @@ impl ReplLoop {
         }
     }
 
-    fn reset_restored_ui(ui_state: &mut coderex_ui::state::UiState) {
+    fn reset_restored_ui(ui_state: &mut codape_ui::state::UiState) {
         ui_state.overlays.clear();
         ui_state.notifications.dismiss_all();
-        ui_state.input = coderex_ui::input::InputBuffer::new();
+        ui_state.input = codape_ui::input::InputBuffer::new();
         ui_state.plan.reset();
         ui_state.activity_log.clear();
         ui_state.permission_bar.clear_status();
         clear_permission_overlay(ui_state);
-        ui_state.layout_mode = coderex_ui::state::LayoutMode::SinglePane;
+        ui_state.layout_mode = codape_ui::state::LayoutMode::SinglePane;
         ui_state.left_pane_content.clear();
         ui_state.left_pane_title.clear();
         ui_state.statusline.last_duration = None;
@@ -4553,8 +4543,8 @@ impl ReplLoop {
     }
 
     fn restore_session_into_ui(
-        ui_state: &mut coderex_ui::state::UiState,
-        messages: &[coderex_core::types::Message],
+        ui_state: &mut codape_ui::state::UiState,
+        messages: &[codape_core::types::Message],
         snapshot: Option<&session_resume::InteractiveResumeSnapshot>,
     ) {
         Self::reset_restored_ui(ui_state);
@@ -4604,7 +4594,7 @@ impl ReplLoop {
             }
             Some(requested) => Ok(requested.to_string()),
             None => session_resume::latest_session_id(&self.cwd).ok_or_else(|| {
-                "No previous sessions found in .coderex/transcripts for this workspace.".to_string()
+                "No previous sessions found in .codape/transcripts for this workspace.".to_string()
             }),
         }
     }
@@ -4612,7 +4602,7 @@ impl ReplLoop {
     fn resume_tui_session(
         &mut self,
         requested_session: Option<&str>,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
     ) -> std::result::Result<String, String> {
         let session_id = self.resolve_resume_session_id(requested_session)?;
         let (messages, snapshot) = self.load_session_state(&session_id, true)?;
@@ -4630,8 +4620,8 @@ impl ReplLoop {
             message.push_str(&summary);
         }
 
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::System,
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::System,
             content: message.clone().into(),
             tool_name: None,
             streaming: false,
@@ -4644,7 +4634,7 @@ impl ReplLoop {
 
     /// Initialize command history and macro registry from disk.
     fn init_command_persistence(&mut self) {
-        let config_dir = coderex_config::settings::config_home();
+        let config_dir = codape_config::settings::config_home();
         let history_path = config_dir.join("command_history.jsonl");
         self.command_history.set_file_path(history_path);
         if let Err(e) = self.command_history.load() {
@@ -4744,12 +4734,12 @@ impl ReplLoop {
 
     /// Run the interactive REPL with full ratatui TUI.
     pub async fn run_tui(&mut self) -> Result<()> {
-        use coderex_ui::input::{InputAction, InputBuffer};
-        use coderex_ui::message_list::{Message, MessageRole};
-        use coderex_ui::overlay::Overlay;
-        use coderex_ui::state::{TextSelection, UiState, ViewMode};
-        use coderex_ui::terminal::TerminalUi;
-        use coderex_ui::vim::{VimAction, VimMode, VimState};
+        use codape_ui::input::{InputAction, InputBuffer};
+        use codape_ui::message_list::{Message, MessageRole};
+        use codape_ui::overlay::Overlay;
+        use codape_ui::state::{TextSelection, UiState, ViewMode};
+        use codape_ui::terminal::TerminalUi;
+        use codape_ui::vim::{VimAction, VimMode, VimState};
         use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
         use std::fmt::Write as _;
@@ -4920,7 +4910,7 @@ impl ReplLoop {
         let mut query_done_rx: Option<
             tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
         > = None;
-        let mut elicit_rx: Option<tokio::sync::mpsc::Receiver<coderex_tools::ElicitRequest>> = None;
+        let mut elicit_rx: Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>> = None;
         let mut tui_elicit_rx: Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>> = None;
         // Questions from MCP servers are session-level: they arrive while a
         // tool is running but are not tied to the engine's per-turn channel.
@@ -4958,9 +4948,9 @@ impl ReplLoop {
 
         // Terminal notifications are a property of the environment, computed
         // once. Unsupported terminals simply get no sequence.
-        let notify_osc9 = coderex_ui::terminal_notification::env_supports_osc9_notification();
-        let notify_progress = coderex_ui::terminal_notification::env_supports_terminal_progress();
-        let notify_tmux = coderex_ui::terminal_notification::env_is_inside_tmux();
+        let notify_osc9 = codape_ui::terminal_notification::env_supports_osc9_notification();
+        let notify_progress = codape_ui::terminal_notification::env_supports_terminal_progress();
+        let notify_tmux = codape_ui::terminal_notification::env_is_inside_tmux();
         let mut progress_active = false;
 
         let result = loop {
@@ -4974,11 +4964,11 @@ impl ReplLoop {
                 progress_active = thinking;
                 if notify_progress {
                     let sequence = if thinking {
-                        coderex_ui::terminal_notification::progress_sequence(None, notify_tmux)
+                        codape_ui::terminal_notification::progress_sequence(None, notify_tmux)
                     } else {
-                        coderex_ui::terminal_notification::clear_progress_sequence(notify_tmux)
+                        codape_ui::terminal_notification::clear_progress_sequence(notify_tmux)
                     };
-                    let _ = coderex_ui::terminal_notification::write_sequences(&[sequence]);
+                    let _ = codape_ui::terminal_notification::write_sequences(&[sequence]);
                 }
             }
 
@@ -4988,7 +4978,7 @@ impl ReplLoop {
                 let reason = self
                     .mod_ui_handle
                     .as_ref()
-                    .and_then(coderex_mods::ModUiHandle::disabled_reason);
+                    .and_then(codape_mods::ModUiHandle::disabled_reason);
                 if let Some(reason) = reason {
                     self.mods_disabled_reported = true;
                     tracing::warn!("{reason}");
@@ -5024,8 +5014,8 @@ impl ReplLoop {
                 && matches!(
                     ui_state.overlays.top(),
                     Some(
-                        coderex_ui::overlay::Overlay::Detail { .. }
-                            | coderex_ui::overlay::Overlay::Notification { .. }
+                        codape_ui::overlay::Overlay::Detail { .. }
+                            | codape_ui::overlay::Overlay::Notification { .. }
                     )
                 )
             {
@@ -5160,8 +5150,8 @@ impl ReplLoop {
                     }
                     BackgroundFeatureKind::SessionMemoryUpdate => {
                         Self::handle_memory_update_result(&result);
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: if result.success {
                                 "Session memory updated.".into()
                             } else {
@@ -5174,8 +5164,8 @@ impl ReplLoop {
                     }
                     BackgroundFeatureKind::MemoryExtraction => {
                         Self::handle_memory_extraction_result(&result);
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: if result.success {
                                 "Long-term memories extracted.".into()
                             } else {
@@ -5192,8 +5182,8 @@ impl ReplLoop {
                             result.kind,
                             if result.success { "Done" } else { "Failed" }
                         );
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: format!("{label}\n{}", result.content).into(),
                             tool_name: None,
                             streaming: false,
@@ -5343,8 +5333,8 @@ impl ReplLoop {
                                 true,
                             );
                             ui_state.notifications.warn(label.clone());
-                            coderex_ui::terminal_notification::emit(
-                                "CodeRex",
+                            codape_ui::terminal_notification::emit(
+                                "Codape",
                                 &format!("Permission needed: {label}"),
                                 notify_osc9,
                                 notify_tmux,
@@ -5360,9 +5350,9 @@ impl ReplLoop {
                             // snapshot, so it renders here without touching
                             // the mod runtime. It belongs in the transcript,
                             // not on stdout interleaved with the turn.
-                            let rendered = coderex_ui::mod_elements::render_mod_ui_text(
+                            let rendered = codape_ui::mod_elements::render_mod_ui_text(
                                 &elements,
-                                coderex_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+                                codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
                             );
                             if rendered.is_empty() {
                                 // An empty tree clears what was focusable: there
@@ -5425,7 +5415,7 @@ impl ReplLoop {
                             // Windows always reports key releases, and the
                             // disambiguated protocol can too; acting on them
                             // types every character twice.
-                            let Some(key) = coderex_ui::input::key_press(key) else {
+                            let Some(key) = codape_ui::input::key_press(key) else {
                                 continue;
                             };
                             // A multi-field MCP form owns the keyboard while
@@ -5486,8 +5476,8 @@ impl ReplLoop {
                             if matches!(
                                 ui_state.overlays.top(),
                                 Some(
-                                    coderex_ui::overlay::Overlay::Detail { .. }
-                                        | coderex_ui::overlay::Overlay::Notification { .. }
+                                    codape_ui::overlay::Overlay::Detail { .. }
+                                        | codape_ui::overlay::Overlay::Notification { .. }
                                 )
                             ) {
                                 ui_state.overlays.clear();
@@ -5579,7 +5569,7 @@ impl ReplLoop {
                             if key.code == KeyCode::Char('S')
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
                             {
-                                use coderex_ui::state::LayoutMode;
+                                use codape_ui::state::LayoutMode;
                                 ui_state.layout_mode = match ui_state.layout_mode {
                                     LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
                                     LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
@@ -5588,7 +5578,7 @@ impl ReplLoop {
                             }
 
                             // Handle Confirm overlay for destructive commands
-                            if matches!(ui_state.overlays.top(), Some(coderex_ui::overlay::Overlay::Confirm { .. })) {
+                            if matches!(ui_state.overlays.top(), Some(codape_ui::overlay::Overlay::Confirm { .. })) {
                                 match key.code {
                                     KeyCode::Char('y' | 'Y') => {
                                         ui_state.overlays.pop();
@@ -5599,8 +5589,8 @@ impl ReplLoop {
                                     KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                                         ui_state.overlays.pop();
                                         self.pending_destructive_cmd = None;
-                                        ui_state.messages.push(coderex_ui::message_list::Message {
-                                            role: coderex_ui::message_list::MessageRole::System,
+                                        ui_state.messages.push(codape_ui::message_list::Message {
+                                            role: codape_ui::message_list::MessageRole::System,
                                             content: "Command cancelled.".into(),
                                             tool_name: None,
                                             streaming: false,
@@ -5614,7 +5604,7 @@ impl ReplLoop {
 
                             if matches!(
                                 ui_state.overlays.top(),
-                                Some(coderex_ui::overlay::Overlay::PermissionDialog { .. })
+                                Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
                             ) {
                                 match key.code {
                                     KeyCode::Char('a') => {
@@ -5659,7 +5649,7 @@ impl ReplLoop {
 
                             let inline_palette_active = matches!(
                                 ui_state.overlays.top(),
-                                Some(coderex_ui::overlay::Overlay::CommandPalette { query, .. })
+                                Some(codape_ui::overlay::Overlay::CommandPalette { query, .. })
                                     if query.starts_with('/')
                             );
                             if inline_palette_active {
@@ -5683,7 +5673,7 @@ impl ReplLoop {
                                     KeyCode::Esc if vim.is_insert() => {
                                         if matches!(
                                             ui_state.overlays.top(),
-                                            Some(coderex_ui::overlay::Overlay::CommandPalette { .. })
+                                            Some(codape_ui::overlay::Overlay::CommandPalette { .. })
                                         ) {
                                             ui_state.overlays.pop();
                                         }
@@ -5968,7 +5958,7 @@ impl ReplLoop {
                                     }
                                 }
                                 VimAction::ToggleSplit => {
-                                    use coderex_ui::state::LayoutMode;
+                                    use codape_ui::state::LayoutMode;
                                     ui_state.layout_mode = match ui_state.layout_mode {
                                         LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
                                         LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
@@ -5981,18 +5971,18 @@ impl ReplLoop {
                                     ui_state.search.prev();
                                 }
                                 VimAction::ExportCopy => {
-                                    use coderex_ui::export::{ExportFormat, export_messages, copy_to_clipboard};
-                                    use coderex_ui::selector::MessageSelector;
-                                    let core_msgs: Vec<coderex_core::types::Message> = ui_state.messages.messages.iter().map(|m| {
+                                    use codape_ui::export::{ExportFormat, export_messages, copy_to_clipboard};
+                                    use codape_ui::selector::MessageSelector;
+                                    let core_msgs: Vec<codape_core::types::Message> = ui_state.messages.messages.iter().map(|m| {
                                         let role = match m.role {
-                                            coderex_ui::message_list::MessageRole::User => coderex_core::types::Role::User,
-                                            coderex_ui::message_list::MessageRole::Assistant => coderex_core::types::Role::Assistant,
-                                            coderex_ui::message_list::MessageRole::System => coderex_core::types::Role::System,
-                                            coderex_ui::message_list::MessageRole::ToolCall | coderex_ui::message_list::MessageRole::ToolResult => coderex_core::types::Role::Tool,
+                                            codape_ui::message_list::MessageRole::User => codape_core::types::Role::User,
+                                            codape_ui::message_list::MessageRole::Assistant => codape_core::types::Role::Assistant,
+                                            codape_ui::message_list::MessageRole::System => codape_core::types::Role::System,
+                                            codape_ui::message_list::MessageRole::ToolCall | codape_ui::message_list::MessageRole::ToolResult => codape_core::types::Role::Tool,
                                         };
-                                        coderex_core::types::Message {
+                                        codape_core::types::Message {
                                             role,
-                                            content: coderex_core::types::MessageContent::Text(m.content.to_string()),
+                                            content: codape_core::types::MessageContent::Text(m.content.to_string()),
                                         }
                                     }).collect();
                                     let selector = MessageSelector::new(core_msgs.len());
@@ -6191,7 +6181,7 @@ impl ReplLoop {
                                         .iter()
                                         .rev()
                                         .find_map(|region| {
-                                            coderex_ui::mod_elements::button_at(
+                                            codape_ui::mod_elements::button_at(
                                                 region.rect,
                                                 region.scroll_offset,
                                                 mouse.column,
@@ -6226,7 +6216,7 @@ impl ReplLoop {
                                         && !selection.is_empty() {
                                             let text = terminal_ui.selected_text(&selection);
                                             if !text.is_empty() {
-                                                match coderex_ui::export::copy_to_clipboard(&text)
+                                                match codape_ui::export::copy_to_clipboard(&text)
                                                 {
                                                     Ok(()) => {
                                                         ui_state.notifications.success(format!(
@@ -6357,8 +6347,8 @@ impl ReplLoop {
                                 });
                             }
                             ui_state.notifications.success("Turn completed");
-                            coderex_ui::terminal_notification::emit(
-                                "CodeRex",
+                            codape_ui::terminal_notification::emit(
+                                "Codape",
                                 "Turn completed",
                                 notify_osc9,
                                 notify_tmux,
@@ -6369,8 +6359,8 @@ impl ReplLoop {
                         }
                         Err(e) => {
                             ui_state.notifications.err("Turn failed");
-                            coderex_ui::terminal_notification::emit(
-                                "CodeRex",
+                            codape_ui::terminal_notification::emit(
+                                "Codape",
                                 &format!("Turn failed: {e}"),
                                 notify_osc9,
                                 notify_tmux,
@@ -6677,7 +6667,7 @@ impl ReplLoop {
             return;
         }
         let session_id = session.session_id.to_string();
-        let store = coderex_memory::transcript::TranscriptStore::new(
+        let store = codape_memory::transcript::TranscriptStore::new(
             session_resume::transcript_dir(&self.cwd),
         );
         if let Err(error) = store.rewrite(&session_id, &session.messages) {
@@ -6766,7 +6756,7 @@ impl ReplLoop {
 
         if self.engine.is_none() {
             return Err(anyhow::anyhow!(
-                "No QueryEngine configured. Set ANTHROPIC_API_KEY or run `coderex --api-key <key>`"
+                "No QueryEngine configured. Set ANTHROPIC_API_KEY or run `codape --api-key <key>`"
             ));
         }
 
@@ -6798,7 +6788,7 @@ impl ReplLoop {
     fn drain_events_with_sink(
         &mut self,
         output: &mut String,
-        protocol: &mut Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
+        protocol: &mut Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
         session_id: &str,
     ) {
         self.drain_events_inner(output, protocol.as_mut(), session_id);
@@ -6813,7 +6803,7 @@ impl ReplLoop {
         &mut self,
         output: &mut String,
         mut protocol: Option<
-            &mut coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>,
+            &mut codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>,
         >,
         session_id: &str,
     ) {
@@ -6850,7 +6840,7 @@ impl ReplLoop {
 /// `error_during_execution` because nothing failed — the run was stopped from
 /// outside, and its container state is a partial answer.
 fn write_interrupted_result(
-    protocol: &mut Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
+    protocol: &mut Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
     session_id: &str,
     elapsed: std::time::Duration,
     num_turns: u32,
@@ -6860,9 +6850,9 @@ fn write_interrupted_result(
         return;
     };
     let turn = sink.begin_turn(session_id.to_string());
-    let mut frame = coderex_events::ResultFrame::error(
+    let mut frame = codape_events::ResultFrame::error(
         session_id.to_string(),
-        coderex_events::protocol::result_subtype::INTERRUPTED,
+        codape_events::protocol::result_subtype::INTERRUPTED,
         u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         num_turns,
     );
@@ -6880,10 +6870,10 @@ fn write_interrupted_result(
 /// Headless runs have no transcript pane; the block joins the turn's output
 /// rather than being printed live from the event loop. A blank line separates
 /// it from model text when the preceding output did not end with one.
-fn append_mod_ui_block(output: &mut String, elements: &[coderex_core::ui_protocol::UiElement]) {
-    let rendered = coderex_ui::mod_elements::render_mod_ui_text(
+fn append_mod_ui_block(output: &mut String, elements: &[codape_core::ui_protocol::UiElement]) {
+    let rendered = codape_ui::mod_elements::render_mod_ui_text(
         elements,
-        coderex_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+        codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
     );
     if rendered.is_empty() {
         return;
@@ -7017,13 +7007,13 @@ fn cycle_mod_ui_focus(current: Option<usize>, count: usize, forward: bool) -> us
 }
 
 /// The button ids in one mod UI tree, in render order.
-fn collect_button_ids(elements: &[coderex_core::ui_protocol::UiElement]) -> Vec<String> {
-    fn walk(elements: &[coderex_core::ui_protocol::UiElement], ids: &mut Vec<String>) {
+fn collect_button_ids(elements: &[codape_core::ui_protocol::UiElement]) -> Vec<String> {
+    fn walk(elements: &[codape_core::ui_protocol::UiElement], ids: &mut Vec<String>) {
         for element in elements {
             match element {
-                coderex_core::ui_protocol::UiElement::Button { id, .. } => ids.push(id.clone()),
-                coderex_core::ui_protocol::UiElement::Box { children, .. } => walk(children, ids),
-                coderex_core::ui_protocol::UiElement::Text { .. } => {}
+                codape_core::ui_protocol::UiElement::Button { id, .. } => ids.push(id.clone()),
+                codape_core::ui_protocol::UiElement::Box { children, .. } => walk(children, ids),
+                codape_core::ui_protocol::UiElement::Text { .. } => {}
             }
         }
     }
@@ -7040,7 +7030,7 @@ fn collect_button_ids(elements: &[coderex_core::ui_protocol::UiElement]) -> Vec<
 /// so a focus change can redraw exactly the message the tree came from.
 #[derive(Debug, Default)]
 struct ModUiFocus {
-    elements: Vec<coderex_core::ui_protocol::UiElement>,
+    elements: Vec<codape_core::ui_protocol::UiElement>,
     button_ids: Vec<String>,
     focused: Option<usize>,
     message_index: Option<usize>,
@@ -7052,14 +7042,14 @@ struct ModUiFocus {
 
 impl ModUiFocus {
     /// Adopt a newly rendered block, with no button focused yet.
-    fn reset(&mut self, elements: &[coderex_core::ui_protocol::UiElement], message_index: usize) {
+    fn reset(&mut self, elements: &[codape_core::ui_protocol::UiElement], message_index: usize) {
         self.elements = elements.to_vec();
         self.button_ids = collect_button_ids(elements);
         self.focused = None;
         self.message_index = (!self.button_ids.is_empty()).then_some(message_index);
-        self.rendered = Some(coderex_ui::mod_elements::render_mod_ui_text(
+        self.rendered = Some(codape_ui::mod_elements::render_mod_ui_text(
             elements,
-            coderex_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+            codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
         ));
     }
 
@@ -7097,8 +7087,8 @@ impl ModUiFocus {
     ///
     /// A block without buttons owns no focus and no interactive region, so it
     /// needs no spec.
-    fn spec(&self) -> Option<coderex_ui::terminal::ModUiBlockSpec> {
-        Some(coderex_ui::terminal::ModUiBlockSpec {
+    fn spec(&self) -> Option<codape_ui::terminal::ModUiBlockSpec> {
+        Some(codape_ui::terminal::ModUiBlockSpec {
             message_index: self.message_index?,
             content: self.rendered.clone()?,
             elements: self.elements.clone(),
@@ -7114,7 +7104,7 @@ impl ReplLoop {
     /// mod's next UI snapshot (or the failure) the same way.
     async fn activate_mod_ui_button(
         &self,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         focus: &mut ModUiFocus,
         id: String,
     ) {
@@ -7127,17 +7117,17 @@ impl ReplLoop {
         };
         match outcome {
             Ok(elements) => {
-                let rendered = coderex_ui::mod_elements::render_mod_ui_text(
+                let rendered = codape_ui::mod_elements::render_mod_ui_text(
                     &elements,
-                    coderex_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+                    codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
                 );
                 let content = if rendered.is_empty() {
                     "Mod UI action completed with no elements.".to_string()
                 } else {
                     rendered
                 };
-                ui_state.messages.push(coderex_ui::message_list::Message {
-                    role: coderex_ui::message_list::MessageRole::System,
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
                     content: content.into(),
                     tool_name: None,
                     streaming: false,
@@ -7147,8 +7137,8 @@ impl ReplLoop {
                 focus.reset(&elements, index);
             }
             Err(error) => {
-                ui_state.messages.push(coderex_ui::message_list::Message {
-                    role: coderex_ui::message_list::MessageRole::System,
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
                     content: format!("Mod UI action failed: {error}").into(),
                     tool_name: None,
                     streaming: false,
@@ -7165,7 +7155,7 @@ impl ReplLoop {
     /// the snapshot again rather than by mutating a live widget.
     fn redraw_mod_ui_focus(
         &self,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         focus: &mut ModUiFocus,
     ) {
         let Some(index) = focus.message_index else {
@@ -7187,9 +7177,9 @@ impl ReplLoop {
             focus.rendered = None;
             return;
         }
-        let rendered = coderex_ui::mod_elements::render_mod_ui_text_with_focus(
+        let rendered = codape_ui::mod_elements::render_mod_ui_text_with_focus(
             &focus.elements,
-            coderex_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+            codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
             focus.focused_id(),
         );
         message.content = rendered.clone().into();
@@ -7209,7 +7199,7 @@ impl ReplLoop {
             }
             EngineEvent::ToolCallEnd { id, result } => {
                 if let Some((tool_name, started)) = self.tool_starts.remove(id) {
-                    handle.record(coderex_telemetry::TelemetryEvent::ToolUsed {
+                    handle.record(codape_telemetry::TelemetryEvent::ToolUsed {
                         tool_name,
                         success: !result.is_error,
                         duration_ms: u64::try_from(started.elapsed().as_millis())
@@ -7241,7 +7231,7 @@ impl ReplLoop {
                 } else {
                     "custom"
                 };
-                handle.record(coderex_telemetry::TelemetryEvent::ApiCall {
+                handle.record(codape_telemetry::TelemetryEvent::ApiCall {
                     provider: provider.to_string(),
                     model: self.model.0.clone(),
                     tokens_in: u32::try_from(tokens_in).unwrap_or(u32::MAX),
@@ -7258,7 +7248,7 @@ impl ReplLoop {
             Err(message) => ("fatal", message.clone()),
             _ => return,
         };
-        handle.record(coderex_telemetry::TelemetryEvent::Error {
+        handle.record(codape_telemetry::TelemetryEvent::Error {
             error_type: error_type.to_string(),
             message,
             timestamp: chrono::Utc::now(),
@@ -7525,11 +7515,11 @@ impl ReplLoop {
             let result = tokio::select! {
                 biased;
                 () = task_cancel.cancelled() => {
-                    Err(coderex_core::orchestrator::OrchestratorError::Config(
+                    Err(codape_core::orchestrator::OrchestratorError::Config(
                         "Cancelled by user".into()
                     ))
                 }
-                res = coderex_core::orchestrator::run_background_feature(
+                res = codape_core::orchestrator::run_background_feature(
                     client.as_ref(), request
                 ) => res,
             };
@@ -7579,7 +7569,7 @@ impl ReplLoop {
         let Some(ref client) = self.api_client else {
             return "No API client configured.".into();
         };
-        match coderex_core::prompts::generate_agent(client.as_ref(), description).await {
+        match codape_core::prompts::generate_agent(client.as_ref(), description).await {
             Ok(spec) => format!(
                 "Agent Generated\n──────────────\nName: {}\nDescription: {}\nModel: {}\nAllowed Tools: {}\n\nSystem Prompt:\n{}",
                 spec.name,
@@ -7597,7 +7587,7 @@ impl ReplLoop {
     /// Compact the session context by truncating older messages.
     /// Keeps the first user message and the most recent 3 turns.
     #[allow(dead_code)]
-    fn compact_context(&mut self, ui_state: &mut coderex_ui::state::UiState) -> String {
+    fn compact_context(&mut self, ui_state: &mut codape_ui::state::UiState) -> String {
         let Some(engine) = self.engine.as_mut() else {
             return "No engine configured.".into();
         };
@@ -7678,13 +7668,13 @@ impl ReplLoop {
             let result = tokio::select! {
                 biased;
                 () = task_cancel.cancelled() => {
-                    Err(coderex_core::orchestrator::OrchestratorError::Config(
+                    Err(codape_core::orchestrator::OrchestratorError::Config(
                         "Cancelled by user".into()
                     ))
                 }
                 res = ai_workflow::update_session_memory_ai(
                     client.as_ref(), &store, session_id, &current_memory, &conversation
-                ) => res.map_err(|e| coderex_core::orchestrator::OrchestratorError::Config(e.to_string())),
+                ) => res.map_err(|e| codape_core::orchestrator::OrchestratorError::Config(e.to_string())),
             };
             let (success, content) = match result {
                 Ok(text) => (true, text),
@@ -7738,13 +7728,13 @@ impl ReplLoop {
             let result = tokio::select! {
                 biased;
                 () = task_cancel.cancelled() => {
-                    Err(coderex_core::orchestrator::OrchestratorError::Config(
+                    Err(codape_core::orchestrator::OrchestratorError::Config(
                         "Cancelled by user".into()
                     ))
                 }
                 res = ai_workflow::extract_long_term_memories_ai(
                     client.as_ref(), &store, &conversation
-                ) => res.map_err(|e| coderex_core::orchestrator::OrchestratorError::Config(e.to_string())),
+                ) => res.map_err(|e| codape_core::orchestrator::OrchestratorError::Config(e.to_string())),
             };
             let (success, content) = match result {
                 Ok(topics) => (true, topics.join(", ")),
@@ -7932,10 +7922,10 @@ impl ReplLoop {
     fn run_session_backfill(&mut self) {
         let transcripts = session_resume::transcript_dir(&self.cwd);
         let db = session_resume::sessions_db_path(&self.cwd);
-        let report = coderex_memory::session_index::SessionIndex::open(&db)
+        let report = codape_memory::session_index::SessionIndex::open(&db)
             .map_err(|error| error.to_string())
             .and_then(|index| {
-                coderex_memory::session_backfill::backfill(&index, &self.cwd, &transcripts)
+                codape_memory::session_backfill::backfill(&index, &self.cwd, &transcripts)
                     .map_err(|error| error.to_string())
             });
         self.last_backfill = Some(match report {
@@ -7987,7 +7977,7 @@ impl ReplLoop {
         let mut context = std::collections::HashMap::new();
         context.insert("command".to_string(), command.clone());
         let result = engine
-            .fire_lifecycle_hook(coderex_hooks::HookEvent::Setup.as_str(), &command, &context)
+            .fire_lifecycle_hook(codape_hooks::HookEvent::Setup.as_str(), &command, &context)
             .await;
         if !result.errors.is_empty() {
             tracing::warn!(errors = ?result.errors, "Setup hook errors");
@@ -8010,12 +8000,12 @@ impl ReplLoop {
         fire_file_changed_batch(hooks.as_ref(), &session_id, batch).await;
     }
 
-    fn apply_tui_theme(&self, ui_state: &mut coderex_ui::state::UiState, theme_name: &str) -> bool {
+    fn apply_tui_theme(&self, ui_state: &mut codape_ui::state::UiState, theme_name: &str) -> bool {
         let manager = self.theme_manager();
         if let Some(theme) = manager.get_theme(theme_name) {
             // Terminal.app only reports 256 colours; 24-bit background
             // sequences render unreliably there, so approximate the palette.
-            ui_state.theme = if coderex_ui::themes::supports_truecolor() {
+            ui_state.theme = if codape_ui::themes::supports_truecolor() {
                 theme.clone()
             } else {
                 theme.quantized()
@@ -8029,16 +8019,16 @@ impl ReplLoop {
     /// Build a theme manager with the built-ins, the user's custom themes and
     /// the plugins' themes.
     ///
-    /// `~/.coderex/themes/*.json` is the directory `ThemeManager` reads; both
+    /// `~/.codape/themes/*.json` is the directory `ThemeManager` reads; both
     /// startup (`statusline.theme`) and `/theme` go through this builder, so a
     /// custom theme can be selected in either place.
-    fn theme_manager(&self) -> coderex_ui::themes::ThemeManager {
-        self.theme_manager_at(coderex_config::config_home().join("themes"))
+    fn theme_manager(&self) -> codape_ui::themes::ThemeManager {
+        self.theme_manager_at(codape_config::config_home().join("themes"))
     }
 
     /// [`Self::theme_manager`] against an explicit theme directory.
-    fn theme_manager_at(&self, theme_dir: std::path::PathBuf) -> coderex_ui::themes::ThemeManager {
-        let mut manager = coderex_ui::themes::ThemeManager::new();
+    fn theme_manager_at(&self, theme_dir: std::path::PathBuf) -> codape_ui::themes::ThemeManager {
+        let mut manager = codape_ui::themes::ThemeManager::new();
         manager.set_theme_dir(theme_dir);
         if let Err(error) = manager.load_custom_themes() {
             tracing::warn!(%error, "custom themes could not be loaded");
@@ -8055,7 +8045,7 @@ impl ReplLoop {
     }
 
     /// Apply the persisted statusline theme at startup, including plugins.
-    fn apply_startup_theme(&self, ui_state: &mut coderex_ui::state::UiState) {
+    fn apply_startup_theme(&self, ui_state: &mut codape_ui::state::UiState) {
         let name = self.current_theme.clone();
         if !self.apply_tui_theme(ui_state, &name) && name != "dark" {
             tracing::warn!(theme = %name, "configured theme was not found");
@@ -8064,7 +8054,7 @@ impl ReplLoop {
 
     async fn submit_prompt(&mut self, prompt: &str, headless_mode: bool) -> String {
         let (elicit_tx, mut elicit_rx) =
-            tokio::sync::mpsc::channel::<coderex_tools::ElicitRequest>(4);
+            tokio::sync::mpsc::channel::<codape_tools::ElicitRequest>(4);
 
         if let Some(ref dispatcher) = self.dispatcher {
             dispatcher.set_elicit_tx(Some(elicit_tx));
@@ -8152,7 +8142,7 @@ impl ReplLoop {
         //
         // `play-zork` in the twelfth terminal-bench batch and `polyglot-rust-c`
         // in the ninth are the same shape: the last line of the stream is a
-        // tool result, `coderex-exit-code` is 124 from the harness's `timeout`,
+        // tool result, `codape-exit-code` is 124 from the harness's `timeout`,
         // and the outcome has to be inferred from timestamps.
         #[cfg(unix)]
         let mut sigterm = {
@@ -8260,7 +8250,7 @@ impl ReplLoop {
                     approvals.insert(request.id.clone(), request.allow_session);
                 }
                 if let Some(sink) = protocol.as_mut() {
-                    let frame = coderex_events::protocol::ControlRequestFrame::can_use_tool(
+                    let frame = codape_events::protocol::ControlRequestFrame::can_use_tool(
                         request.id.clone(),
                         request.tool_name.clone(),
                         permission_request_args(&request.arguments),
@@ -8268,7 +8258,7 @@ impl ReplLoop {
                         request.allow_session,
                     );
                     if let Err(error) =
-                        sink.emit(&coderex_events::ProtocolMessage::ControlRequest(frame))
+                        sink.emit(&codape_events::ProtocolMessage::ControlRequest(frame))
                     {
                         tracing::warn!("could not write a control request: {error}");
                     }
@@ -8294,9 +8284,9 @@ impl ReplLoop {
                     let message = "the query task ended without returning its engine";
                     if let Some(mut sink) = protocol.take() {
                         let turn = sink.begin_turn(session_id.clone());
-                        let mut frame = coderex_events::ResultFrame::error(
+                        let mut frame = codape_events::ResultFrame::error(
                             session_id.clone(),
-                            coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                            codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
                             u64::try_from(turn_started.elapsed().as_millis())
                                 .unwrap_or(u64::MAX),
                             1,
@@ -8356,9 +8346,9 @@ impl ReplLoop {
             let turn = sink.begin_turn(session_id.clone());
             let turns_used = turn_counter.consumed_since(turns_before);
             let frame = match &result {
-                Ok(TerminalReason::MaxTurnsReached) => coderex_events::ResultFrame::error(
+                Ok(TerminalReason::MaxTurnsReached) => codape_events::ResultFrame::error(
                     session_id.clone(),
-                    coderex_events::protocol::result_subtype::ERROR_MAX_TURNS,
+                    codape_events::protocol::result_subtype::ERROR_MAX_TURNS,
                     u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     turns_used,
                 ),
@@ -8375,14 +8365,14 @@ impl ReplLoop {
                 ) => {
                     let subtype = match reason {
                         TerminalReason::TokenLimitStop => {
-                            coderex_events::protocol::result_subtype::ERROR_MAX_OUTPUT_TOKENS
+                            codape_events::protocol::result_subtype::ERROR_MAX_OUTPUT_TOKENS
                         }
                         TerminalReason::LoopDetected { .. } => {
-                            coderex_events::protocol::result_subtype::ERROR_LOOP_DETECTED
+                            codape_events::protocol::result_subtype::ERROR_LOOP_DETECTED
                         }
-                        _ => coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                        _ => codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
                     };
-                    let mut frame = coderex_events::ResultFrame::error(
+                    let mut frame = codape_events::ResultFrame::error(
                         session_id.clone(),
                         subtype,
                         u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -8409,9 +8399,9 @@ impl ReplLoop {
                         | TerminalReason::ApiUnavailable { message } => message.clone(),
                         _ => "the token budget was exhausted before the task finished".into(),
                     };
-                    let mut frame = coderex_events::ResultFrame::error(
+                    let mut frame = codape_events::ResultFrame::error(
                         session_id.clone(),
-                        coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                        codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
                         u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         turns_used,
                     );
@@ -8421,16 +8411,16 @@ impl ReplLoop {
                         .insert("error".to_string(), serde_json::Value::String(message));
                     frame
                 }
-                Ok(_) => coderex_events::ResultFrame::success(
+                Ok(_) => codape_events::ResultFrame::success(
                     session_id.clone(),
                     output.trim(),
                     u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     turns_used,
                 ),
                 Err(error) => {
-                    let mut frame = coderex_events::ResultFrame::error(
+                    let mut frame = codape_events::ResultFrame::error(
                         session_id.clone(),
-                        coderex_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+                        codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
                         u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
                         turns_used,
                     );
@@ -8493,7 +8483,7 @@ impl ReplLoop {
     }
 
     /// Sync REPL state into the TUI statusline.
-    fn sync_statusline(&self, statusline: &mut coderex_ui::statusline::Statusline) {
+    fn sync_statusline(&self, statusline: &mut codape_ui::statusline::Statusline) {
         statusline.model.clone_from(&self.model.0);
         statusline
             .format
@@ -8509,7 +8499,7 @@ impl ReplLoop {
     }
 
     /// Sync current permission mode into the TUI permission bar.
-    fn sync_permission_bar(&self, bar: &mut coderex_ui::permission_bar::PermissionBar) {
+    fn sync_permission_bar(&self, bar: &mut codape_ui::permission_bar::PermissionBar) {
         if let Some(ref engine) = self.engine {
             let checker = engine.permission_checker();
             if let Ok(c) = checker.lock() {
@@ -8519,8 +8509,8 @@ impl ReplLoop {
     }
 
     /// Update slash-command suggestion overlay based on current input.
-    fn update_slash_suggestions(&self, ui_state: &mut coderex_ui::state::UiState) {
-        use coderex_ui::overlay::Overlay;
+    fn update_slash_suggestions(&self, ui_state: &mut codape_ui::state::UiState) {
+        use codape_ui::overlay::Overlay;
 
         if ui_state.input.text.starts_with('/') {
             let query = ui_state.input.text.trim_start_matches('/');
@@ -8560,7 +8550,7 @@ impl ReplLoop {
     fn handle_mcp_form_key(
         &mut self,
         key: &crossterm::event::KeyEvent,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
     ) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -8576,8 +8566,8 @@ impl ReplLoop {
                 if let Some(tx) = self.pending_elicitation.take() {
                     let _ = tx.send(serde_json::json!({ "cancelled": true }));
                 }
-                ui_state.messages.push(coderex_ui::message_list::Message {
-                    role: coderex_ui::message_list::MessageRole::System,
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
                     content: "MCP form cancelled.".into(),
                     tool_name: None,
                     streaming: false,
@@ -8603,8 +8593,8 @@ impl ReplLoop {
                         if let Some(tx) = self.pending_elicitation.take() {
                             let _ = tx.send(serde_json::json!({ "content": content }));
                         }
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: "MCP form submitted.".into(),
                             tool_name: None,
                             streaming: false,
@@ -8614,8 +8604,8 @@ impl ReplLoop {
                     Err(message) => {
                         // Do not send: the schema rejected the answer, and a
                         // server must never receive an invalid `accept`.
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: format!("MCP form: {message}").into(),
                             tool_name: None,
                             streaming: false,
@@ -8653,13 +8643,13 @@ impl ReplLoop {
     fn process_tui_input(
         &mut self,
         text: &str,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         thinking: &mut bool,
         phase: &mut InteractivePhase,
         query_done_rx: &mut Option<
             tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
         >,
-        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<coderex_tools::ElicitRequest>>,
+        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
         tui_elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
         queued_prompts: &mut std::collections::VecDeque<String>,
     ) {
@@ -8678,8 +8668,8 @@ impl ReplLoop {
         // If there's a pending elicitation, treat this input as the answer.
         if let Some(tx) = self.pending_elicitation.take() {
             self.history.push(text.to_string());
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::User,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::User,
                 content: text.into(),
                 tool_name: None,
                 streaming: false,
@@ -8696,8 +8686,8 @@ impl ReplLoop {
         self.history.push(text.to_string());
 
         // Add user message
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::User,
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::User,
             content: text.into(),
             tool_name: None,
             streaming: false,
@@ -8740,8 +8730,8 @@ impl ReplLoop {
                     }
                     "mcp" => {
                         let result = self.run_mcp_command(&args);
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: result.output.into(),
                             tool_name: None,
                             streaming: false,
@@ -8752,8 +8742,8 @@ impl ReplLoop {
                     "compact" => {
                         let msg = self.compact_context(ui_state);
                         ui_state.notifications.info(&msg);
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: msg.into(),
                             tool_name: None,
                             streaming: false,
@@ -8781,8 +8771,8 @@ impl ReplLoop {
                         if toggled {
                             ui_state.notifications.info(&result.output);
                         }
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: result.output.into(),
                             tool_name: None,
                             streaming: false,
@@ -8796,8 +8786,8 @@ impl ReplLoop {
                         let body = ui_state.plan.render_detail();
                         show_detail_overlay(ui_state, "Current Plan", body);
                         if !registry_output.output.is_empty() {
-                            ui_state.messages.push(coderex_ui::message_list::Message {
-                                role: coderex_ui::message_list::MessageRole::System,
+                            ui_state.messages.push(codape_ui::message_list::Message {
+                                role: codape_ui::message_list::MessageRole::System,
                                 content: registry_output.output.into(),
                                 tool_name: None,
                                 streaming: false,
@@ -8811,8 +8801,8 @@ impl ReplLoop {
                             let message =
                                 "Finish or cancel the active turn before resuming another session.";
                             ui_state.notifications.warn(message);
-                            ui_state.messages.push(coderex_ui::message_list::Message {
-                                role: coderex_ui::message_list::MessageRole::System,
+                            ui_state.messages.push(codape_ui::message_list::Message {
+                                role: codape_ui::message_list::MessageRole::System,
                                 content: message.into(),
                                 tool_name: None,
                                 streaming: false,
@@ -8824,8 +8814,8 @@ impl ReplLoop {
                             Ok(_) => {}
                             Err(err) => {
                                 ui_state.notifications.err(&err);
-                                ui_state.messages.push(coderex_ui::message_list::Message {
-                                    role: coderex_ui::message_list::MessageRole::System,
+                                ui_state.messages.push(codape_ui::message_list::Message {
+                                    role: codape_ui::message_list::MessageRole::System,
                                     content: format!("Error: {err}").into(),
                                     tool_name: None,
                                     streaming: false,
@@ -8846,8 +8836,8 @@ impl ReplLoop {
                     }
                     "open" => {
                         if args.is_empty() {
-                            ui_state.messages.push(coderex_ui::message_list::Message {
-                                role: coderex_ui::message_list::MessageRole::System,
+                            ui_state.messages.push(codape_ui::message_list::Message {
+                                role: codape_ui::message_list::MessageRole::System,
                                 content: "Usage: /open <path>".into(),
                                 tool_name: None,
                                 streaming: false,
@@ -8867,7 +8857,7 @@ impl ReplLoop {
                                 ui_state.left_pane_content = content;
                                 ui_state.left_pane_title.clone_from(&args[0]);
                                 ui_state.layout_mode =
-                                    coderex_ui::state::LayoutMode::HorizontalSplit {
+                                    codape_ui::state::LayoutMode::HorizontalSplit {
                                         left_percent: 50,
                                     };
                                 ui_state
@@ -8880,8 +8870,8 @@ impl ReplLoop {
                                 let detail = format!("Failed to open {}: {}", args[0], err);
                                 ui_state.notifications.err(&detail);
                                 show_detail_overlay(ui_state, "Failure Details", detail.clone());
-                                ui_state.messages.push(coderex_ui::message_list::Message {
-                                    role: coderex_ui::message_list::MessageRole::System,
+                                ui_state.messages.push(codape_ui::message_list::Message {
+                                    role: codape_ui::message_list::MessageRole::System,
                                     content: detail.into(),
                                     tool_name: None,
                                     streaming: false,
@@ -8893,8 +8883,8 @@ impl ReplLoop {
                     }
                     "style" => {
                         let message = self.handle_output_style_command(&args);
-                        ui_state.messages.push(coderex_ui::message_list::Message {
-                            role: coderex_ui::message_list::MessageRole::System,
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
                             content: message.into(),
                             tool_name: None,
                             streaming: false,
@@ -8905,8 +8895,8 @@ impl ReplLoop {
                     "macro" => {
                         match self.handle_macro_command(&args) {
                             MacroCommandOutcome::Message(message) => {
-                                ui_state.messages.push(coderex_ui::message_list::Message {
-                                    role: coderex_ui::message_list::MessageRole::System,
+                                ui_state.messages.push(codape_ui::message_list::Message {
+                                    role: codape_ui::message_list::MessageRole::System,
                                     content: message.into(),
                                     tool_name: None,
                                     streaming: false,
@@ -8951,7 +8941,7 @@ impl ReplLoop {
                 self.pending_destructive_cmd = Some((cmd_name.to_string(), args));
                 ui_state
                     .overlays
-                    .push(coderex_ui::overlay::Overlay::Confirm {
+                    .push(codape_ui::overlay::Overlay::Confirm {
                         message: format!(
                             "Are you sure you want to run /{}? This action may be destructive.",
                             cmd.name
@@ -8981,16 +8971,16 @@ impl ReplLoop {
             self.mod_auto_turns = 0;
             self.mod_prompts_this_turn = 0;
             queued_prompts.push_back(text.to_string());
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::System,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
                 content: "[Queued until current turn finishes]".into(),
                 tool_name: None,
                 streaming: false,
                 folded: false,
             });
         } else {
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::Assistant,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::Assistant,
                 content: "[No engine configured]".into(),
                 tool_name: None,
                 streaming: false,
@@ -9002,21 +8992,21 @@ impl ReplLoop {
     fn start_tui_query(
         &mut self,
         prompt: String,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         thinking: &mut bool,
         phase: &mut InteractivePhase,
         query_done_rx: &mut Option<
             tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
         >,
-        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<coderex_tools::ElicitRequest>>,
+        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
         tui_elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
     ) {
         ui_state.statusline.last_duration = None;
         ui_state.statusline.thinking_started = None;
         ui_state.statusline.spinner_frame = 0;
         ui_state.messages.scroll_to_bottom();
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::Assistant,
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::Assistant,
             content: "".into(),
             tool_name: None,
             streaming: true,
@@ -9058,7 +9048,7 @@ impl ReplLoop {
         &self,
         request: ConfirmationRequest,
         response: ConfirmationResponse,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         phase: &mut InteractivePhase,
     ) {
         if let Some(bus) = self.confirmation_bus.as_ref() {
@@ -9105,13 +9095,13 @@ impl ReplLoop {
     #[allow(clippy::needless_pass_by_ref_mut)]
     fn stop_running_query(
         &mut self,
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
         thinking: &mut bool,
         phase: &mut InteractivePhase,
         query_done_rx: &mut Option<
             tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
         >,
-        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<coderex_tools::ElicitRequest>>,
+        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
         tui_elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
         marker: &str,
     ) {
@@ -9134,7 +9124,7 @@ impl ReplLoop {
         self.pending_mcp_form = None;
         clear_permission_overlay(ui_state);
         if let Some(last) = ui_state.messages.messages.iter_mut().rev().find(|msg| {
-            msg.role == coderex_ui::message_list::MessageRole::Assistant && msg.streaming
+            msg.role == codape_ui::message_list::MessageRole::Assistant && msg.streaming
         }) {
             last.streaming = false;
             let mut msg = last.content.to_string();
@@ -9151,7 +9141,7 @@ impl ReplLoop {
         &mut self,
         cmd_name: &str,
         args: &[String],
-        ui_state: &mut coderex_ui::state::UiState,
+        ui_state: &mut codape_ui::state::UiState,
     ) {
         // `/rewind` needs the session and the checkpoint store, which the
         // registry cannot reach; it is handled here so the TUI path restores
@@ -9170,8 +9160,8 @@ impl ReplLoop {
                         Err(error) => error,
                     },
                 );
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::System,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
                 content: message.into(),
                 tool_name: None,
                 streaming: false,
@@ -9210,11 +9200,11 @@ impl ReplLoop {
         }
 
         let output = self.with_backfill_report(cmd_name, &result.output);
-        ui_state.messages.push(coderex_ui::message_list::Message {
+        ui_state.messages.push(codape_ui::message_list::Message {
             role: if result.scrollable {
-                coderex_ui::message_list::MessageRole::Assistant
+                codape_ui::message_list::MessageRole::Assistant
             } else {
-                coderex_ui::message_list::MessageRole::System
+                codape_ui::message_list::MessageRole::System
             },
             content: output.into(),
             tool_name: None,
@@ -9250,13 +9240,13 @@ impl ReplLoop {
         }
     }
 
-    fn clear_tui_session(&mut self, ui_state: &mut coderex_ui::state::UiState, message: String) {
+    fn clear_tui_session(&mut self, ui_state: &mut codape_ui::state::UiState, message: String) {
         let prior_session_id = self.current_session_id();
         self.history.clear();
-        ui_state.messages = coderex_ui::message_list::MessageView::new(1000);
+        ui_state.messages = codape_ui::message_list::MessageView::new(1000);
         ui_state.overlays.clear();
         ui_state.notifications.dismiss_all();
-        ui_state.input = coderex_ui::input::InputBuffer::new();
+        ui_state.input = codape_ui::input::InputBuffer::new();
         ui_state.plan.reset();
         ui_state.activity_log.clear();
         ui_state.permission_bar.clear_status();
@@ -9264,8 +9254,8 @@ impl ReplLoop {
         ui_state.statusline.last_duration = None;
         ui_state.statusline.thinking = false;
         ui_state.statusline.thinking_label = None;
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::System,
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::System,
             content: message.into(),
             tool_name: None,
             streaming: false,
@@ -9275,7 +9265,7 @@ impl ReplLoop {
     }
 
     /// Execute piped commands: split on `|`, run sequentially, pass output as pipe_input.
-    fn execute_piped_commands(&mut self, text: &str, ui_state: &mut coderex_ui::state::UiState) {
+    fn execute_piped_commands(&mut self, text: &str, ui_state: &mut codape_ui::state::UiState) {
         let segments: Vec<&str> = text.trim_start_matches('/').split('|').collect();
         let mut pipe_input: Option<String> = None;
         let mut outputs = Vec::new();
@@ -9307,8 +9297,8 @@ impl ReplLoop {
         }
 
         let combined = outputs.join("\n---\n");
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::Assistant,
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::Assistant,
             content: combined.into(),
             tool_name: None,
             streaming: false,
@@ -9317,7 +9307,7 @@ impl ReplLoop {
     }
 
     /// Execute a single command string (from macro expansion) in the TUI.
-    fn execute_single_command(&mut self, cmd_str: &str, ui_state: &mut coderex_ui::state::UiState) {
+    fn execute_single_command(&mut self, cmd_str: &str, ui_state: &mut codape_ui::state::UiState) {
         let trimmed = cmd_str.trim();
         if trimmed.starts_with('/') {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -9333,11 +9323,11 @@ impl ReplLoop {
             let ctx = self.build_context();
             let result = self.commands.execute(cmd_name, &ctx, &args);
             self.sync_command_state(cmd_name, &result);
-            ui_state.messages.push(coderex_ui::message_list::Message {
+            ui_state.messages.push(codape_ui::message_list::Message {
                 role: if result.scrollable {
-                    coderex_ui::message_list::MessageRole::Assistant
+                    codape_ui::message_list::MessageRole::Assistant
                 } else {
-                    coderex_ui::message_list::MessageRole::System
+                    codape_ui::message_list::MessageRole::System
                 },
                 content: result.output.into(),
                 tool_name: None,
@@ -9346,8 +9336,8 @@ impl ReplLoop {
             });
         } else {
             // Non-command string: treat as a user message
-            ui_state.messages.push(coderex_ui::message_list::Message {
-                role: coderex_ui::message_list::MessageRole::System,
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
                 content: format!("[Macro] {trimmed}").into(),
                 tool_name: None,
                 streaming: false,
@@ -9379,8 +9369,8 @@ impl ReplLoop {
             .iter()
             .skip(n)
             .filter_map(|message| match &message.content {
-                coderex_core::types::MessageContent::ToolCall(call) => Some(call.id.clone()),
-                coderex_core::types::MessageContent::ToolResult(result) => {
+                codape_core::types::MessageContent::ToolCall(call) => Some(call.id.clone()),
+                codape_core::types::MessageContent::ToolResult(result) => {
                     Some(result.tool_call_id.clone())
                 }
                 _ => None,
@@ -10176,7 +10166,7 @@ impl ReplLoop {
         let Some(ref client) = self.api_client else {
             return "No API client available.".into();
         };
-        match coderex_core::prompts::generate_session_title(client.as_ref(), &text).await {
+        match codape_core::prompts::generate_session_title(client.as_ref(), &text).await {
             Ok(title) => format!("Feedback title: \"{title}\"\n\nFeedback: {text}"),
             Err(e) => format!("Failed to generate title: {e}"),
         }
@@ -10185,7 +10175,7 @@ impl ReplLoop {
     /// Handle the /teleport command: directory switching, share, join, list, revoke.
     ///
     /// Share/join/list/revoke go through the configured rendezvous service when
-    /// `CODEREX_TELEPORT_URL` names one, and through the local share directory
+    /// `CODAPE_TELEPORT_URL` names one, and through the local share directory
     /// otherwise.
     async fn handle_teleport_command(&mut self, args: &[String]) -> String {
         let mgr = match self.teleport_manager {
@@ -10206,7 +10196,7 @@ impl ReplLoop {
                     Ok(token) => match mgr.rendezvous() {
                         Some(rendezvous) => {
                             format!(
-                                "Share token: {token}\nJoin it from another machine with: \n  CODEREX_TELEPORT_URL={} coderex, then /teleport --join {token}",
+                                "Share token: {token}\nJoin it from another machine with: \n  CODAPE_TELEPORT_URL={} codape, then /teleport --join {token}",
                                 rendezvous.base_url()
                             )
                         }
@@ -10353,7 +10343,7 @@ impl ReplLoop {
                     },
                     None => 20,
                 };
-                match coderex_agents::read_agent_log(agent_id) {
+                match codape_agents::read_agent_log(agent_id) {
                     Err(error) => format!("Could not read the log for {agent_id}: {error}"),
                     Ok(events) if events.is_empty() => {
                         format!("No logged events for {agent_id}.")
@@ -10458,7 +10448,7 @@ impl ReplLoop {
         // Commands gate themselves by name (`is_feature_enabled`), so the
         // resolved flags have to reach the context. Leaving this empty made
         // every flag-gated command dead in production, even when the user
-        // passed `--betas` or `CODEREX_FEATURE_FLAGS`.
+        // passed `--betas` or `CODAPE_FEATURE_FLAGS`.
         ctx.feature_flags = self.feature_flags.as_map();
         // These two fields were never assigned, so `/mcp`, `/status`,
         // `/doctor`, `/config` always said "disconnected" and `/hooks`
@@ -10497,7 +10487,7 @@ impl ReplLoop {
         // Remote environment variables live in their own file, never in
         // settings (a repository-controlled settings file must not be able to
         // inject environment variables).
-        ctx.env = coderex_commands::load_remote_env();
+        ctx.env = codape_commands::load_remote_env();
         ctx.recent_commands = self
             .command_history
             .list(1000)
@@ -10527,7 +10517,7 @@ impl ReplLoop {
 
 /// Get the current git branch for the statusline.
 fn current_git_branch(cwd: &str) -> String {
-    coderex_core::git_hardening::git_command()
+    codape_core::git_hardening::git_command()
         .args(["branch", "--show-current"])
         .current_dir(cwd)
         .output()
@@ -10591,11 +10581,11 @@ pub fn parse_input(line: &str) -> Option<(&str, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::api_client::{ApiError, ApiResponse, StreamEvent};
-    use coderex_core::tool_executor::{
+    use codape_core::api_client::{ApiError, ApiResponse, StreamEvent};
+    use codape_core::tool_executor::{
         ToolDispatchOutcome, ToolExecutor as CoreToolExecutor, ToolInfo,
     };
-    use coderex_core::types::{ToolResult, UsageSummary};
+    use codape_core::types::{ToolResult, UsageSummary};
 
     // ── Mod UI focus ────────────────────────────────────────────────────────
 
@@ -10674,7 +10664,7 @@ mod tests {
 
     #[test]
     fn mod_ui_focus_walks_nested_buttons_and_clears() {
-        use coderex_core::ui_protocol::UiElement;
+        use codape_core::ui_protocol::UiElement;
 
         let tree = vec![
             UiElement::Box {
@@ -10713,7 +10703,7 @@ mod tests {
         focus.reset(
             &[UiElement::Text {
                 text: "nothing to press".to_string(),
-                style: coderex_core::ui_protocol::UiStyle::Plain,
+                style: codape_core::ui_protocol::UiStyle::Plain,
             }],
             9,
         );
@@ -10732,18 +10722,18 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl coderex_core::hook_executor::HookExecutor for RecordingHookExecutor {
+    impl codape_core::hook_executor::HookExecutor for RecordingHookExecutor {
         async fn fire_hook(
             &self,
             event_name: &str,
             input: &str,
             context: &std::collections::HashMap<String, String>,
-        ) -> coderex_core::hook_executor::HookFireResult {
+        ) -> codape_core::hook_executor::HookFireResult {
             self.events
                 .lock()
                 .expect("the recording hook lock is not poisoned")
                 .push((event_name.to_string(), input.to_string(), context.clone()));
-            coderex_core::hook_executor::HookFireResult::default()
+            codape_core::hook_executor::HookFireResult::default()
         }
     }
 
@@ -10769,7 +10759,7 @@ mod tests {
     #[test]
     fn a_non_init_command_does_not_queue_setup() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        repl.sync_command_state("version", &CommandResult::success("CodeRex 0.1.0"));
+        repl.sync_command_state("version", &CommandResult::success("Codape 0.1.0"));
         assert!(repl.pending_setup.is_none());
     }
 
@@ -10827,7 +10817,7 @@ mod tests {
         // The command context used to be built with an empty map, so a command
         // that asked whether its flag was on always heard "no".
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        repl.feature_flags = coderex_config::flags::FeatureFlags::parse("+voice_mode,+heapdump");
+        repl.feature_flags = codape_config::flags::FeatureFlags::parse("+voice_mode,+heapdump");
         let ctx = repl.build_context();
         assert!(ctx.is_feature_enabled("voice_mode"));
         assert!(ctx.is_feature_enabled("heapdump"));
@@ -10853,7 +10843,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            String::from_utf8_lossy(&out).contains("CodeRex"),
+            String::from_utf8_lossy(&out).contains("Codape"),
             "the macro did not run its command: {}",
             String::from_utf8_lossy(&out)
         );
@@ -10948,8 +10938,8 @@ mod tests {
     #[test]
     fn tool_events_are_recorded_in_telemetry() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let store = coderex_telemetry::TelemetryStore::open(file.path()).unwrap();
-        let (handle, _uploader) = coderex_telemetry::TelemetryHandle::new(&store, None);
+        let store = codape_telemetry::TelemetryStore::open(file.path()).unwrap();
+        let (handle, _uploader) = codape_telemetry::TelemetryHandle::new(&store, None);
 
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_telemetry_handle(Some(handle.clone()));
@@ -10969,7 +10959,7 @@ mod tests {
         });
         handle.shutdown();
 
-        let store = coderex_telemetry::TelemetryStore::open(file.path()).unwrap();
+        let store = codape_telemetry::TelemetryStore::open(file.path()).unwrap();
         let events = store.pending_events(10).unwrap();
         assert!(
             events.iter().any(|event| event.event_type == "tool_used"),
@@ -10988,7 +10978,7 @@ mod tests {
         repl.apply_cli_config();
         assert!(repl.vim_mode_enabled, "vim_mode was not applied");
         assert_eq!(repl.current_theme, "light");
-        let mut statusline = coderex_ui::statusline::Statusline::new();
+        let mut statusline = codape_ui::statusline::Statusline::new();
         repl.sync_statusline(&mut statusline);
         assert_eq!(
             statusline.format.as_deref(),
@@ -11002,15 +10992,15 @@ mod tests {
     /// and must fold a long historical output.
     #[test]
     fn resume_projection_drops_thinking_and_folds_long_tool_output() {
-        use coderex_core::types::{MessageContent, Role, ThinkingBlock, ToolCall, ToolResult};
-        use coderex_ui::message_list::MessageRole;
+        use codape_core::types::{MessageContent, Role, ThinkingBlock, ToolCall, ToolResult};
+        use codape_ui::message_list::MessageRole;
 
         let call = ToolCall {
             id: "call_1".into(),
             name: "Read".into(),
             input: serde_json::json!({"file_path": "src/lib.rs"}),
         };
-        let result = |output: &str| coderex_core::types::Message {
+        let result = |output: &str| codape_core::types::Message {
             role: Role::Tool,
             content: MessageContent::ToolResult(ToolResult {
                 tool_call_id: "call_1".into(),
@@ -11020,14 +11010,14 @@ mod tests {
             }),
         };
         let messages = vec![
-            coderex_core::types::Message {
+            codape_core::types::Message {
                 role: Role::Assistant,
                 content: MessageContent::Thinking(ThinkingBlock {
                     thinking: "provider state".into(),
                     signature: "sig".into(),
                 }),
             },
-            coderex_core::types::Message {
+            codape_core::types::Message {
                 role: Role::Assistant,
                 content: MessageContent::ToolCall(call),
             },
@@ -11035,7 +11025,7 @@ mod tests {
             result(&"line\n".repeat(20)),
         ];
 
-        let mut ui = coderex_ui::state::UiState::new();
+        let mut ui = codape_ui::state::UiState::new();
         restore_transcript_messages(&mut ui, &messages);
         let rows = &ui.messages.messages;
 
@@ -11052,7 +11042,7 @@ mod tests {
         assert!(rows[2].folded, "a long historical output should be folded");
     }
 
-    /// Themes installed as files under `~/.coderex/themes` must reach the
+    /// Themes installed as files under `~/.codape/themes` must reach the
     /// manager both startup and `/theme` apply from.
     #[test]
     fn custom_theme_files_are_available_at_runtime() {
@@ -11527,8 +11517,8 @@ mod tests {
         let inner: Arc<dyn CoreToolExecutor + Send + Sync> =
             Arc::new(StubToolExecutor { tools: vec![tool] });
         let primary = ArcToolExecutor(inner);
-        let plugin = Arc::new(coderex_plugins::tool_executor::PluginToolExecutor::new(
-            Arc::new(coderex_plugins::plugins::PluginManager::new()),
+        let plugin = Arc::new(codape_plugins::tool_executor::PluginToolExecutor::new(
+            Arc::new(codape_plugins::plugins::PluginManager::new()),
         ));
         let wrapped = PluginToolFallbackExecutor { primary, plugin };
         let tools = wrapped.list_tools();
@@ -11545,8 +11535,8 @@ mod tests {
             is_error: true,
         });
         let primary = ArcToolExecutor(inner);
-        let plugin = Arc::new(coderex_plugins::tool_executor::PluginToolExecutor::new(
-            Arc::new(coderex_plugins::plugins::PluginManager::new()),
+        let plugin = Arc::new(codape_plugins::tool_executor::PluginToolExecutor::new(
+            Arc::new(codape_plugins::plugins::PluginManager::new()),
         ));
         let wrapped = PluginToolFallbackExecutor { primary, plugin };
 
@@ -11570,8 +11560,8 @@ mod tests {
             is_error: true,
         });
         let primary = ArcToolExecutor(inner);
-        let plugin = Arc::new(coderex_plugins::tool_executor::PluginToolExecutor::new(
-            Arc::new(coderex_plugins::plugins::PluginManager::new()),
+        let plugin = Arc::new(codape_plugins::tool_executor::PluginToolExecutor::new(
+            Arc::new(codape_plugins::plugins::PluginManager::new()),
         ));
         let wrapped = PluginToolFallbackExecutor { primary, plugin };
 
@@ -11626,9 +11616,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         repl.event_rx = Some(rx);
         tx.send(EngineEvent::ModUi(vec![
-            coderex_core::ui_protocol::UiElement::Box {
+            codape_core::ui_protocol::UiElement::Box {
                 title: Some("Mods".to_string()),
-                children: vec![coderex_core::ui_protocol::UiElement::Button {
+                children: vec![codape_core::ui_protocol::UiElement::Button {
                     label: "Retry".to_string(),
                     id: "retry".to_string(),
                 }],
@@ -11652,9 +11642,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         repl.event_rx = Some(rx);
         tx.send(EngineEvent::ModUi(vec![
-            coderex_core::ui_protocol::UiElement::Text {
+            codape_core::ui_protocol::UiElement::Text {
                 text: "the mod noticed something".to_string(),
-                style: coderex_core::ui_protocol::UiStyle::Notice,
+                style: codape_core::ui_protocol::UiStyle::Notice,
             },
         ]))
         .unwrap();
@@ -11715,7 +11705,7 @@ mod tests {
         let effects = SessionEffects::default();
         assert_eq!(
             effects.prompt_profiles,
-            [] as [coderex_core::PromptProfile; 0]
+            [] as [codape_core::PromptProfile; 0]
         );
         assert!(effects.append_system_prompt.is_none());
         assert!(effects.allowed_tools_override.is_none());
@@ -11727,12 +11717,12 @@ mod tests {
     fn apply_command_effects_from_profile() {
         let mut loop_obj = ReplLoop::new("/src".into(), ModelId::sonnet());
         let result = CommandResult::success("advisor mode")
-            .with_prompt_profile(coderex_core::query_profiles::PromptProfile::Advisor);
+            .with_prompt_profile(codape_core::query_profiles::PromptProfile::Advisor);
         loop_obj.apply_command_effects(&result);
         assert_eq!(loop_obj.session_effects.prompt_profiles.len(), 1);
         assert_eq!(
             loop_obj.session_effects.prompt_profiles[0],
-            coderex_core::query_profiles::PromptProfile::Advisor
+            codape_core::query_profiles::PromptProfile::Advisor
         );
     }
 
@@ -11740,8 +11730,8 @@ mod tests {
     fn build_submit_options_includes_effects() {
         let mut loop_obj = ReplLoop::new("/src".into(), ModelId::sonnet());
         loop_obj.session_effects.prompt_profiles = vec![
-            coderex_core::query_profiles::PromptProfile::Advisor,
-            coderex_core::query_profiles::PromptProfile::Reviewer,
+            codape_core::query_profiles::PromptProfile::Advisor,
+            codape_core::query_profiles::PromptProfile::Reviewer,
         ];
         let options = loop_obj.build_submit_options();
         assert!(options.custom_system_prompt.is_some());
@@ -11769,10 +11759,10 @@ mod tests {
         phase.note_text_delta();
         assert_eq!(phase.status_label().as_deref(), Some("Thinking..."));
 
-        phase.note_tool_start("Running cargo test -p coderex-cli...");
+        phase.note_tool_start("Running cargo test -p codape-cli...");
         assert_eq!(
             phase.status_label().as_deref(),
-            Some("Running cargo test -p coderex-cli...")
+            Some("Running cargo test -p codape-cli...")
         );
 
         phase.note_permission_request("Read", &serde_json::json!({"file_path":"src/lib.rs"}));
@@ -11847,7 +11837,7 @@ mod tests {
     /// A `hooks` block in settings used to be parsed, validated, and then
     /// dropped: the engine kept the no-op executor it is constructed with, so a
     /// configured hook never ran. This pins the install, not the registry —
-    /// `coderex-hooks` has its own tests for loading.
+    /// `codape-hooks` has its own tests for loading.
     #[tokio::test]
     async fn hooks_from_settings_run_before_the_turn() {
         let temp = tempfile::tempdir().unwrap();
@@ -12135,7 +12125,7 @@ mod tests {
     /// about — and nothing for this process's own dialogs.
     #[test]
     fn engine_events_map_to_the_protocol_frames_a_host_reads() {
-        use coderex_events::ProtocolMessage;
+        use codape_events::ProtocolMessage;
 
         let delta = protocol_frame(&EngineEvent::TextDelta("hello".into()), "s1");
         let Some(ProtocolMessage::StreamEvent(frame)) = delta else {
@@ -12182,7 +12172,7 @@ mod tests {
         assert_eq!(frame.subtype, "compact_boundary");
 
         let mod_ui = protocol_frame(
-            &EngineEvent::ModUi(vec![coderex_core::ui_protocol::UiElement::Button {
+            &EngineEvent::ModUi(vec![codape_core::ui_protocol::UiElement::Button {
                 label: "Retry".into(),
                 id: "retry".into(),
             }]),
@@ -12232,7 +12222,7 @@ mod tests {
             temp.path().to_string_lossy().into_owned(),
             ModelId::sonnet(),
         );
-        repl.with_protocol_sink(Some(coderex_events::MessageSink::new(
+        repl.with_protocol_sink(Some(codape_events::MessageSink::new(
             Box::new(buffer.clone()) as Box<dyn std::io::Write + Send + Sync>,
         )));
 
@@ -12264,8 +12254,8 @@ mod tests {
     #[test]
     fn an_interrupted_turn_writes_the_result_frame_the_turn_never_reached() {
         let buffer = SharedBuffer::default();
-        let mut sink: Option<coderex_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>> =
-            Some(coderex_events::MessageSink::new(
+        let mut sink: Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>> =
+            Some(codape_events::MessageSink::new(
                 Box::new(buffer.clone()) as Box<dyn std::io::Write + Send + Sync>
             ));
 
@@ -12283,7 +12273,7 @@ mod tests {
         assert_eq!(parsed["type"], "result");
         assert_eq!(
             parsed["subtype"],
-            coderex_events::protocol::result_subtype::INTERRUPTED
+            codape_events::protocol::result_subtype::INTERRUPTED
         );
         assert_eq!(parsed["is_error"], true);
         assert_eq!(parsed["session_id"], "session-1");
@@ -12385,12 +12375,12 @@ mod tests {
     #[tokio::test]
     async fn stopping_a_running_query_asks_the_engine_and_closes_the_ui() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        let handle = coderex_core::engine::InterruptHandle::default();
+        let handle = codape_core::engine::InterruptHandle::default();
         repl.running_query = Some(handle.clone());
 
-        let mut ui_state = coderex_ui::state::UiState::new();
-        ui_state.messages.push(coderex_ui::message_list::Message {
-            role: coderex_ui::message_list::MessageRole::Assistant,
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::Assistant,
             content: "answering…".into(),
             tool_name: None,
             streaming: true,
@@ -12428,8 +12418,8 @@ mod tests {
     #[test]
     fn permission_activity_labels_are_user_facing() {
         assert_eq!(
-            permission_activity_label("Running cargo test -p coderex-cli..."),
-            "Waiting for permission: Running cargo test -p coderex-cli..."
+            permission_activity_label("Running cargo test -p codape-cli..."),
+            "Waiting for permission: Running cargo test -p codape-cli..."
         );
     }
 
@@ -12438,7 +12428,7 @@ mod tests {
     /// result already carries it.
     #[test]
     fn sub_agent_events_reach_the_activity_log() {
-        let mut ui_state = coderex_ui::state::UiState::new();
+        let mut ui_state = codape_ui::state::UiState::new();
 
         apply_agent_event(
             &mut ui_state,
@@ -12482,7 +12472,7 @@ mod tests {
         assert!(latest.message.contains("it broke"), "{}", latest.message);
         assert_eq!(
             latest.kind,
-            coderex_ui::notification_center::NotificationKind::Error
+            codape_ui::notification_center::NotificationKind::Error
         );
 
         // Text belongs to the Agent tool's result, not the main transcript.
@@ -12545,7 +12535,7 @@ mod tests {
         assert_eq!(manager.list_agents().len(), 1);
         assert_eq!(
             manager.list_agents()[0].status(),
-            coderex_agents::AgentStatus::Completed
+            codape_agents::AgentStatus::Completed
         );
         drop(manager);
 
@@ -12554,8 +12544,8 @@ mod tests {
         while let Ok(event) = repl.event_rx.as_mut().unwrap().try_recv() {
             if let EngineEvent::AgentEvent { event, .. } = event {
                 match event {
-                    coderex_core::types::AgentLifecycleEvent::Started => saw_started = true,
-                    coderex_core::types::AgentLifecycleEvent::Completed { .. } => {
+                    codape_core::types::AgentLifecycleEvent::Started => saw_started = true,
+                    codape_core::types::AgentLifecycleEvent::Completed { .. } => {
                         saw_completed = true;
                     }
                     _ => {}
@@ -12582,7 +12572,7 @@ mod tests {
             vec!["init", "--quiet"],
             vec!["commit", "--quiet", "--allow-empty", "-m", "init"],
         ] {
-            let status = coderex_core::git_hardening::git_command()
+            let status = codape_core::git_hardening::git_command()
                 .args(&args)
                 .current_dir(repo.path())
                 .env("GIT_AUTHOR_NAME", "test")
@@ -12646,7 +12636,7 @@ mod tests {
     }
 
     /// Compaction's transcript backup needs a directory. The CLI was already
-    /// writing transcripts under `<cwd>/.coderex/transcripts`, but the engine
+    /// writing transcripts under `<cwd>/.codape/transcripts`, but the engine
     /// never learned that path, so `--no-session-persistence` was not the only
     /// reason the backup could be skipped.
     #[tokio::test]
@@ -12795,9 +12785,9 @@ mod tests {
             let mut mgr = manager.lock().await;
             let instance = mgr
                 .spawn_agent(
-                    coderex_agents::AgentType::GeneralPurpose,
+                    codape_agents::AgentType::GeneralPurpose,
                     "wait for work",
-                    coderex_agents::SpawnOptions::default(),
+                    codape_agents::SpawnOptions::default(),
                     "sess_teammate",
                     &cwd,
                     0,
@@ -12946,13 +12936,13 @@ mod tests {
         let tool = dispatcher.registry().get_tool_arc("Workflow").unwrap();
         let refused = tool
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: "c".into(),
                     name: "Workflow".into(),
                     arguments: serde_json::json!({"script": "export const meta = { name: 'a', description: 'b' }"}),
                 },
-                coderex_tools::ToolContext::new(
-                    coderex_tools::ExecutionContext::Normal,
+                codape_tools::ToolContext::new(
+                    codape_tools::ExecutionContext::Normal,
                     temp.path(),
                 ),
             )
@@ -12996,7 +12986,7 @@ mod tests {
         let tool = registry.get_tool_arc("Artifact").unwrap();
         let output = tool
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: "call_1".into(),
                     name: "Artifact".into(),
                     arguments: serde_json::json!({
@@ -13004,8 +12994,8 @@ mod tests {
                         "files": { "index.html": "<html><body>hello</body></html>" }
                     }),
                 },
-                coderex_tools::ToolContext::new(
-                    coderex_tools::ExecutionContext::Normal,
+                codape_tools::ToolContext::new(
+                    codape_tools::ExecutionContext::Normal,
                     std::path::Path::new("/tmp"),
                 ),
             )
@@ -13082,23 +13072,23 @@ mod tests {
         assert!(repl.feature_flags().voice_mode);
         assert!(
             repl.capabilities()
-                .contains(coderex_config::flags::CapabilitySet::TEAM),
+                .contains(codape_config::flags::CapabilitySet::TEAM),
             "an enabled beta did not reach the session capability set"
         );
         assert!(
             repl.capabilities()
-                .contains(coderex_config::flags::CapabilitySet::VOICE)
+                .contains(codape_config::flags::CapabilitySet::VOICE)
         );
         assert!(
             !repl
                 .capabilities()
-                .contains(coderex_config::flags::CapabilitySet::WEB_BROWSER)
+                .contains(codape_config::flags::CapabilitySet::WEB_BROWSER)
         );
     }
 
     #[tokio::test]
     async fn engine_flag_behaviours_install_the_wired_flags() {
-        use coderex_config::flags::FeatureFlags;
+        use codape_config::flags::FeatureFlags;
 
         struct FlagTestApi;
 
@@ -13154,7 +13144,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         let dir =
-            std::env::temp_dir().join(format!("coderex-team-flag-{}-{unique}", std::process::id()));
+            std::env::temp_dir().join(format!("codape-team-flag-{}-{unique}", std::process::id()));
         let memory_base = dir.join("memory");
         TeamMemorySyncService::new("default".to_string(), memory_base.join("team"))
             .upsert("architecture", "Use Postgres for durable state")
@@ -13233,14 +13223,14 @@ mod tests {
     fn mods_startup_line_is_built_from_the_load_report() {
         let directory = std::path::Path::new("/tmp/example-mods");
         let report = vec![
-            coderex_mods::ModInfo {
+            codape_mods::ModInfo {
                 name: "a.js".to_string(),
                 path: directory.join("a.js"),
                 sha256: "a".repeat(64),
                 loaded: true,
                 errors: Vec::new(),
             },
-            coderex_mods::ModInfo {
+            codape_mods::ModInfo {
                 name: "b.js".to_string(),
                 path: directory.join("b.js"),
                 sha256: "b".repeat(64),
@@ -13269,8 +13259,8 @@ mod tests {
     #[test]
     fn mods_startup_line_counts_skipped_mods_and_keeps_long_lists_short() {
         let directory = std::path::Path::new("/tmp/many-mods");
-        let report: Vec<coderex_mods::ModInfo> = (0..5)
-            .map(|index| coderex_mods::ModInfo {
+        let report: Vec<codape_mods::ModInfo> = (0..5)
+            .map(|index| codape_mods::ModInfo {
                 name: format!("m{index}.js"),
                 path: directory.join(format!("m{index}.js")),
                 sha256: "c".repeat(64),
@@ -13545,8 +13535,8 @@ mod tests {
         };
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
 
-        let manager = Arc::new(coderex_mcp::manager::McpManager::new());
-        manager.register_tool(coderex_mcp::proxy::McpToolInfo {
+        let manager = Arc::new(codape_mcp::manager::McpManager::new());
+        manager.register_tool(codape_mcp::proxy::McpToolInfo {
             server: "mock".into(),
             name: "ping".into(),
             description: "Ping the mock server".into(),
@@ -13602,8 +13592,8 @@ mod tests {
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
         let dispatcher = repl.dispatcher.take().unwrap();
         let registry = dispatcher.registry();
-        let ctx = coderex_tools::ToolContext::new(
-            coderex_tools::ExecutionContext::Normal,
+        let ctx = codape_tools::ToolContext::new(
+            codape_tools::ExecutionContext::Normal,
             std::path::Path::new("/tmp"),
         );
 
@@ -13611,7 +13601,7 @@ mod tests {
             .get_tool("TeamCreate")
             .unwrap()
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: "1".into(),
                     name: "TeamCreate".into(),
                     arguments: serde_json::json!({"name": "alpha"}),
@@ -13626,7 +13616,7 @@ mod tests {
             .get_tool("TeamDelete")
             .unwrap()
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: "2".into(),
                     name: "TeamDelete".into(),
                     arguments: serde_json::json!({"team_id": "team_0"}),
@@ -13648,8 +13638,8 @@ mod tests {
         };
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
         let dispatcher = repl.dispatcher.take().unwrap();
-        let ctx = coderex_tools::ToolContext::new(
-            coderex_tools::ExecutionContext::Normal,
+        let ctx = codape_tools::ToolContext::new(
+            codape_tools::ExecutionContext::Normal,
             std::path::Path::new("/tmp"),
         );
         let listed = dispatcher
@@ -13657,7 +13647,7 @@ mod tests {
             .get_tool("ListMcpResources")
             .unwrap()
             .execute(
-                coderex_tools::ToolInput {
+                codape_tools::ToolInput {
                     call_id: "1".into(),
                     name: "ListMcpResources".into(),
                     arguments: serde_json::json!({}),
@@ -13687,24 +13677,24 @@ mod tests {
     /// the default they would name a tool the registry does not have.
     #[test]
     fn a_custom_mcp_prefix_reaches_prompt_commands() {
-        coderex_mcp::proxy::set_mcp_prefix_for_test(Some("custom_"));
+        codape_mcp::proxy::set_mcp_prefix_for_test(Some("custom_"));
         assert_eq!(
             prompt_command_name("my server", "review/file"),
             "custom_my_server__review_file"
         );
-        coderex_mcp::proxy::set_mcp_prefix_for_test(Some(""));
+        codape_mcp::proxy::set_mcp_prefix_for_test(Some(""));
         // No prefix: the raw prompt name, matching how tools are exposed.
         assert_eq!(prompt_command_name("srv", "ask"), "ask");
-        coderex_mcp::proxy::clear_mcp_prefix_override();
+        codape_mcp::proxy::clear_mcp_prefix_override();
     }
 
-    fn sample_prompt() -> coderex_mcp::prompts::ServerPrompt {
-        coderex_mcp::prompts::ServerPrompt {
+    fn sample_prompt() -> codape_mcp::prompts::ServerPrompt {
+        codape_mcp::prompts::ServerPrompt {
             server: "my server".into(),
-            prompt: coderex_mcp::prompts::McpPromptInfo {
+            prompt: codape_mcp::prompts::McpPromptInfo {
                 name: "review/file".into(),
                 description: Some("Review a file".into()),
-                arguments: vec![coderex_mcp::prompts::McpPromptArgument {
+                arguments: vec![codape_mcp::prompts::McpPromptArgument {
                     name: "path".into(),
                     description: None,
                     required: true,
@@ -13716,7 +13706,7 @@ mod tests {
     #[test]
     fn prompt_commands_are_registered_for_discovered_prompts() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        let manager = Arc::new(coderex_mcp::manager::McpManager::new());
+        let manager = Arc::new(codape_mcp::manager::McpManager::new());
         manager.register_prompt(sample_prompt());
         repl.with_mcp_manager(manager);
 
@@ -13735,7 +13725,7 @@ mod tests {
     #[test]
     fn refresh_registers_prompts_discovered_after_the_manager_was_attached() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        let manager = Arc::new(coderex_mcp::manager::McpManager::new());
+        let manager = Arc::new(codape_mcp::manager::McpManager::new());
         repl.with_mcp_manager(Arc::clone(&manager));
         assert!(repl.commands.find("mcp__my_server__review_file").is_none());
 
@@ -13748,7 +13738,7 @@ mod tests {
 
     #[test]
     fn prompt_result_renders_messages_for_the_transcript() {
-        use coderex_mcp::prompts::{McpPromptContent, McpPromptMessage, McpPromptResult};
+        use codape_mcp::prompts::{McpPromptContent, McpPromptMessage, McpPromptResult};
 
         let result = McpPromptResult {
             description: Some("Resolved".into()),

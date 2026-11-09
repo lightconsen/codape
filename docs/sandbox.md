@@ -85,14 +85,14 @@ the syscalls an allowlist for a shell refuses. `filesystem_isolation()` reports
 the policy they encode is compiled and tested on every platform, not only on the
 one that runs it.
 
-`CODEREX_BWRAP=0` switches the wrapper off. Anything but an explicit negative
+`CODAPE_BWRAP=0` switches the wrapper off. Anything but an explicit negative
 (`0`, `false`, `no`) leaves it on, because a sandbox that disables itself over an
 unexpected value is worse than one that says what it wants.
 
 **Without `bwrap` — Landlock first.** When bubblewrap is absent, or switched off
-with `CODEREX_BWRAP=0`, `prepare()` uses the Landlock LSM as the filesystem
+with `CODAPE_BWRAP=0`, `prepare()` uses the Landlock LSM as the filesystem
 fallback. It is in force (`landlock_in_force()`) when the kernel reports ABI 1 or
-newer and `CODEREX_LANDLOCK` is not `0`/`false`/`no`. The ABI is read with
+newer and `CODAPE_LANDLOCK` is not `0`/`false`/`no`. The ABI is read with
 `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`; the ruleset
 is built in the parent, its descriptor survives `fork`, and `pre_exec` calls
 `landlock_restrict_self` after the rlimits and before `execve`.
@@ -146,19 +146,19 @@ fork). It is **not** installed when bubblewrap wraps the command: the wrapper
 needs `unshare`/`mount`/`pivot_root` and inherits any filter, so the two cannot
 run together.
 
-When both backends are unavailable — no `bwrap`, `CODEREX_LANDLOCK=0` set or a
+When both backends are unavailable — no `bwrap`, `CODAPE_LANDLOCK=0` set or a
 kernel without Landlock — `filesystem_isolation()` reports `None` and a gating
 hook is denied rather than run unconfined. Nothing silently claims otherwise.
 
 The shell tools still run in that state, with seccomp and rlimits only, and log
-a warning saying so. Set `CODEREX_REQUIRE_SANDBOX=1` to make that a refusal
+a warning saying so. Set `CODAPE_REQUIRE_SANDBOX=1` to make that a refusal
 instead: `SandboxHandle::create` then fails with `IsolationUnavailable` and the
 command is not started (`crates/cli/tests/e2e_sandbox_binary.rs` proves both the
 refusal and the unset control). The switch only changes the case where the
 backend is missing — macOS always reports kernel isolation, and Windows already
 fails closed when the AppContainer runtime is absent.
 
-**Turning the shell sandbox off.** `CODEREX_SANDBOX=off` (also `0`, `false`,
+**Turning the shell sandbox off.** `CODAPE_SANDBOX=off` (also `0`, `false`,
 `no`, `disabled`) disables sandboxing for tool execution in this process:
 Bash/PowerShell commands run directly, with the network and the full
 filesystem available. It exists for environments that are **already an
@@ -169,8 +169,8 @@ default: unset or any other value leaves the sandbox on. Do not set it in a
 session running on a machine you care about.
 
 **cgroup v2 memory limits.** When `max_memory_bytes` is configured, Linux also
-creates a `coderex-<pid>-<id>` cgroup under the process's own cgroup (or
-`$CODEREX_CGROUP_ROOT`, or `/sys/fs/cgroup`), sets `memory.max`, `pids.max`
+creates a `codape-<pid>-<id>` cgroup under the process's own cgroup (or
+`$CODAPE_CGROUP_ROOT`, or `/sys/fs/cgroup`), sets `memory.max`, `pids.max`
 (default 256) and `memory.oom.group=1`, and attaches the child by writing its pid
 to `cgroup.procs` immediately after spawn. This is in addition to `RLIMIT_AS`:
 `RLIMIT_AS` caps one process's address space, while the cgroup caps the whole
@@ -182,8 +182,8 @@ read-only, and a parent that has not delegated `memory`/`pids` through
 `cgroup.subtree_control` rejects the child's limits. In every one of those cases
 the caller logs a warning naming the failed path and continues with `RLIMIT_AS`
 only — the command is never counted as cgroup-limited when it was not.
-`CODEREX_CGROUP_ROOT` selects a writable delegated tree for containers and
-tests. The helper is reusable (`coderex_core::sandbox::CgroupMemoryLimit`):
+`CODAPE_CGROUP_ROOT` selects a writable delegated tree for containers and
+tests. The helper is reusable (`codape_core::sandbox::CgroupMemoryLimit`):
 create, spawn, `attach(pid)`, keep alive until exit. The WASM compiler helper
 uses it directly with `memory.max` only — no `pids.max`, because the process
 ceiling counts threads and Cranelift sizes its compilation pool from the core
@@ -208,7 +208,7 @@ different environments.
   The hooks sandbox suite (13 tests) and the shell-tool suite (3 tests) pass in
   the same container, including
   `linux_hook_landlock_denies_a_write_outside_the_allowed_paths`.
-  `CODEREX_BWRAP=0` is not needed there because the image has no `bwrap`.
+  `CODAPE_BWRAP=0` is not needed there because the image has no `bwrap`.
 
 The first Landlock run failed at `execve` with `EACCES` for every dynamically
 linked program: the kernel opens the ELF interpreter with `MAY_EXEC`, and the
@@ -221,12 +221,12 @@ The cgroup tests (`cgroup_memory_limit_attaches_a_real_child` and
 with an explicit message: Docker mounts `/sys/fs/cgroup` read-only, so there is
 no writable delegated tree. They run where one exists — a host with delegation,
 or a container started with a writable cgroup mount and
-`CODEREX_CGROUP_ROOT` pointing at a delegated subtree. The creation/attach
+`CODAPE_CGROUP_ROOT` pointing at a delegated subtree. The creation/attach
 failure path is what the standard container exercised, and it fell back to
 `RLIMIT_AS` with a warning rather than reporting a cgroup limit.
 
 That verification is what found the defects this file used to describe as
-"reviewed only": `coderex-core` did not compile on Linux at all (`libc` was
+"reviewed only": `codape-core` did not compile on Linux at all (`libc` was
 declared in the workspace and never listed in the crate), `sandboxed_program`
 was gated to macOS so the Linux caller could not see it, the seccomp filter read
 the architecture and syscall numbers from each other's offsets, and the shell
@@ -239,7 +239,7 @@ code.
 Two layers, both applied to a shell child:
 
 1. **AppContainer** — the real security boundary. A profile with a stable name
-   (`CodeRex.Sandbox`, or `CodeRex.Sandbox.Network` when the policy allows the
+   (`Codape.Sandbox`, or `Codape.Sandbox.Network` when the policy allows the
    network) gives the child a container SID instead of the user's SID. The SID
    is granted read/execute on the configured read and execute paths and
    read/write on the configured write paths and the working directories. No
@@ -266,7 +266,7 @@ container SID gets:
 The user's shared `%TEMP%` is deliberately **not** granted. Lowering its
 integrity label (see below) to make it writable would let every Low-integrity
 process on the machine write there. Each sandbox instead creates
-`%LOCALAPPDATA%\coderex\sandbox-tmp\<pid>-<n>`, grants it like any other write
+`%LOCALAPPDATA%\codape\sandbox-tmp\<pid>-<n>`, grants it like any other write
 path, and exports it to the child as `TEMP`/`TMP`/`TMPDIR`.
 
 
@@ -358,9 +358,9 @@ host:
 ```text
 cargo check --workspace --target x86_64-pc-windows-gnu                      # passes
 cargo check --tests --target x86_64-pc-windows-gnu \
-  -p coderex-core -p coderex-tools -p coderex-hooks -p coderex-config   # passes
+  -p codape-core -p codape-tools -p codape-hooks -p codape-config   # passes
 cargo test --no-run --lib --target x86_64-pc-windows-gnu \
-  -p coderex-core -p coderex-tools -p coderex-hooks -p coderex-config -p coderex-cli
+  -p codape-core -p codape-tools -p codape-hooks -p codape-config -p codape-cli
                                                                         # links 5 test .exe
 ```
 
@@ -368,14 +368,14 @@ That compiles the `cfg(target_os = "windows")` code, the Windows-gated tests,
 and links the five test executables with the mingw linker. It does **not** run
 them: a macOS host cannot create an AppContainer, attach a container token, or
 spawn a confined process, so those runtime paths are still unverified locally.
-The `coderex-cli` lib-test target now compiles and links too: its test helpers
+The `codape-cli` lib-test target now compiles and links too: its test helpers
 in `crates/cli/src/from_pr.rs` and `crates/cli/src/tmux.rs` use Unix-only
 `PermissionsExt::set_mode` and `/bin/sh` scripts, so those test modules are
 `cfg(unix)`-gated. `cargo test --no-run --lib --target x86_64-pc-windows-gnu`
 links five test executables (core, tools, hooks, config, cli).
 
 `cargo check --workspace --target x86_64-pc-windows-gnu` also passes (the
-Unix-only `openssh` dependency in `coderex-bridge` is target-gated; the Windows
+Unix-only `openssh` dependency in `codape-bridge` is target-gated; the Windows
 build refuses the SSH spawn mode instead of failing to compile). CI now runs
 this cross-check and the test-binary link as a **required** `cross-check-windows`
 job; actual AppContainer/HKLM execution is delegated to the advisory
@@ -405,7 +405,7 @@ Default policy for a hook:
 - **Network:** denied.
 
 A hook may extend these sets, permit the network, or opt out with
-`sandbox: false` / `sandbox.enabled: false`; `CODEREX_HOOK_SANDBOX=0` opts out
+`sandbox: false` / `sandbox.enabled: false`; `CODAPE_HOOK_SANDBOX=0` opts out
 process-wide. Additional paths are absolute or the load is refused; unknown
 sandbox keys are load errors. See `docs/hooks.md` for the settings shape.
 
@@ -415,7 +415,7 @@ without `bwrap` it is confined by Landlock when the kernel provides it. On
 Windows the hook engine creates its own child and has no AppContainer
 post-spawn attach step, so hooks are not confined there even though shell tools
 are. Where there is no hook filesystem isolation at all — Windows, or Linux
-with neither `bwrap` nor Landlock (or with `CODEREX_LANDLOCK=0`) — a gating hook
+with neither `bwrap` nor Landlock (or with `CODAPE_LANDLOCK=0`) — a gating hook
 (`PreToolUse`, `UserPromptSubmit`) fails closed with
 `HookError::SandboxUnavailable` rather than running unconfined, and a
 non-gating hook logs a warning and runs with resource limits only. An explicit
@@ -441,7 +441,7 @@ filters that run on diff, `init.templateDir` can land hooks in a clone,
 definition, and `protocol.*.allow` can re-enable transports that execute. None of
 it appears in a command line.
 
-Every `git` process CodeRex spawns on its own behalf therefore gets a fixed
+Every `git` process Codape spawns on its own behalf therefore gets a fixed
 config table injected through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` /
 `GIT_CONFIG_VALUE_<n>` — the reference's mechanism, key for key
 (`crates/core/src/git_hardening.rs`). Injecting through the environment rather
@@ -455,7 +455,7 @@ A test builds a repository whose `core.fsmonitor` writes a marker and runs
 
 **Not covered:** the user's own `git` inside the Bash tool is governed by the
 sandbox, not by this table. The reference injects it into the shell it runs; this
-port applies it to CodeRex's internal invocations.
+port applies it to Codape's internal invocations.
 
 ### Credential stripping
 
@@ -520,7 +520,7 @@ Limits of this check, stated plainly:
 
 ## In-process checks — not kernel-enforced
 
-These refuse an operation inside the CodeRex process. They are policy, not
+These refuse an operation inside the Codape process. They are policy, not
 confinement: a subprocess spawned by `Bash` is not bound by them, and code that
 does not go through the tool layer is not bound by them either.
 
@@ -534,7 +534,7 @@ does not go through the tool layer is not bound by them either.
 ## Not enforced, and not claimed
 
 - Linux filesystem confinement when **neither** `bwrap` nor Landlock is
-  available (an old kernel, Landlock compiled out, or `CODEREX_LANDLOCK=0`).
+  available (an old kernel, Landlock compiled out, or `CODAPE_LANDLOCK=0`).
   `filesystem_isolation()` reports which backend, if any, is in force.
 - Filesystem confinement on Windows when the AppContainer APIs are unavailable —
   creation fails and `filesystem_isolation()` reports `None`; it does not fall
@@ -554,7 +554,7 @@ does not go through the tool layer is not bound by them either.
   Linux with neither `bwrap` nor Landlock. On Windows the hook engine has no
   AppContainer post-spawn attach step; the hook still gets the Job Object's
   resource limits. There, a gating hook is denied rather than run unconfined; a
-  non-gating one runs with a warning. `CODEREX_HOOK_SANDBOX=0` and the per-hook
+  non-gating one runs with a warning. `CODAPE_HOOK_SANDBOX=0` and the per-hook
   `sandbox.enabled: false` opt out deliberately.
 
 ## Verifying the macOS guarantees
@@ -579,8 +579,8 @@ The Seatbelt behaviour is covered by tests that actually spawn `sandbox-exec`:
   `RLIMIT_DATA`: on macOS 15 it prints that the kernel rejects the limit and
   skips enforcement instead of claiming a ceiling that is not there.
 
-**Run on macOS (Darwin 24.6, macOS 15):** `cargo test -p coderex-core --lib
-sandbox::` — 34 passed; `cargo test -p coderex-hooks --lib sandbox::` — 13
+**Run on macOS (Darwin 24.6, macOS 15):** `cargo test -p codape-core --lib
+sandbox::` — 34 passed; `cargo test -p codape-hooks --lib sandbox::` — 13
 passed (including the skip above). The macOS tests skip themselves when
 `/usr/bin/sandbox-exec` is absent.
 
@@ -594,9 +594,9 @@ Windows behaviour is exercised automatically by the `test-windows` job in
 `.github/workflows/ci.yml` (on `windows-latest` with the MSVC toolchain). It
 runs `sandbox_windows::tests::spawn_in_container_confines_a_real_process` (the
 documented `STARTUPINFOEX` spawn), `sandbox::tests::windows_sandbox_confines_a_suspended_child`
-(the token-attach path the shell tools use), the `coderex-tools` and
-`coderex-hooks` sandbox tests, the `coderex-config` tests (which compile the
-Windows registry reader), and `cargo test -p coderex-cli --lib`, all with
+(the token-attach path the shell tools use), the `codape-tools` and
+`codape-hooks` sandbox tests, the `codape-config` tests (which compile the
+Windows registry reader), and `cargo test -p codape-cli --lib`, all with
 `--no-fail-fast`. Both sandbox tests write inside a granted directory and assert
 an ungranted sibling stays unwritable; the suspended-child test also asserts the
 fail-closed path when the AppContainer APIs are missing. The job is **advisory**

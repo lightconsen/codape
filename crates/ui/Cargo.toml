@@ -1,10 +1,11 @@
 [package]
-name = "coderex-ui"
+name = "codape-ui"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Terminal UI — ratatui rendering, input handling, overlays, themes, Vim mode"
 
@@ -17,7 +18,7 @@ voice = []
 buddy = []
 
 [dependencies]
-coderex-core = { path = "../core" }
+codape-core = { path = "../core" }
 
 ratatui.workspace = true
 crossterm.workspace = true

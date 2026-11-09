@@ -1,6 +1,6 @@
 # Mods — in-process JavaScript, TypeScript and JSX hooks
 
-A **mod** is a `.js`, `.jsx`, `.ts` or `.tsx` file that turns CodeRex hook
+A **mod** is a `.js`, `.jsx`, `.ts` or `.tsx` file that turns Codape hook
 events into decisions. It can observe an event, return `stop`, an updated
 input, an updated tool output, or paths to watch, and it can call `next(e)` to
 run the rest of the matching hooks and the downstream chain, and inspect or
@@ -12,19 +12,19 @@ transformed first: TypeScript types are stripped and JSX is lowered to the
 classic runtime, with `h` and `Fragment` mapped onto the same UI descriptors
 as `$.ui`. See [TypeScript and JSX](#typescript-and-jsx).
 
-The runtime is opt-in. Without the environment variable below, CodeRex does not
+The runtime is opt-in. Without the environment variable below, Codape does not
 load mods at all and behaves exactly as before.
 
 ```
-CODEREX_MODS=1                  # opt in
-CODEREX_MODS_DIR=...            # optional directory override
-CODEREX_MODS_TIMEOUT_LIMIT=3    # optional timeout-breaker threshold
-CODEREX_MODS_MEMORY_LIMIT=64m   # optional JavaScript heap cap per runtime
+CODAPE_MODS=1                  # opt in
+CODAPE_MODS_DIR=...            # optional directory override
+CODAPE_MODS_TIMEOUT_LIMIT=3    # optional timeout-breaker threshold
+CODAPE_MODS_MEMORY_LIMIT=64m   # optional JavaScript heap cap per runtime
 ```
 
-`CODEREX_MODS` accepts `1`, `true`, `yes` or `on` (case-insensitive). Setting
-`CODEREX_MODS_DIR` to a non-empty path also opts in. The default directory is
-`config_home()/mods` — `~/.coderex/mods`, unless `CLAUDE_CONFIG_DIR` overrides
+`CODAPE_MODS` accepts `1`, `true`, `yes` or `on` (case-insensitive). Setting
+`CODAPE_MODS_DIR` to a non-empty path also opts in. The default directory is
+`config_home()/mods` — `~/.codape/mods`, unless `CLAUDE_CONFIG_DIR` overrides
 the config home.
 
 ## A mod file
@@ -35,7 +35,7 @@ file with any other extension is ignored. A file must define a global
 `register(on, options)` function:
 
 ```js
-// ~/.coderex/mods/guard.js
+// ~/.codape/mods/guard.js
 function register(on, options) {
   on('PreToolUse', 'Bash|Write', function ($, e) {
     if (e.tool_input && String(e.tool_input.command || '').includes('rm -rf /')) {
@@ -99,7 +99,7 @@ may register at most 256 hooks.
 - `e.surface` says where the person is seeing this session. The **host**
   supplies it: the surface registry's active surface provides the id, so a host
   that presents the session somewhere else (an IDE panel, a web page) passes its
-  own id without changing the mod runtime. CodeRex registers only the terminal
+  own id without changing the mod runtime. Codape registers only the terminal
   surface, so the value is `"terminal"` in every session it ships — but it is no
   longer a constant in the mod runtime.
 - `e.surfaceCapabilities` says what that surface can present:
@@ -206,8 +206,8 @@ function register(on) {
 The transform is implemented with oxc (`oxc_parser`, `oxc_semantic`,
 `oxc_transformer`, `oxc_codegen`, `oxc_allocator`, `oxc_span`, plus
 `oxc_diagnostics` for locations), pinned at `0.155`. It adds 47 package names
-to `coderex-mods`' resolved dependency tree (311 with it, 264 without), and a
-cold `cargo check -p coderex-mods` completed in about 26 seconds on the
+to `codape-mods`' resolved dependency tree (311 with it, 264 without), and a
+cold `cargo check -p codape-mods` completed in about 26 seconds on the
 development machine used for this change.
 
 `swc_core` was the first choice but cannot resolve in this workspace at
@@ -363,7 +363,7 @@ and the inner executor. See [Limits and isolation](#limits-and-isolation).
 | Member | Meaning |
 | --- | --- |
 | `$.session` | Frozen `{ cwd, model, permission_mode }`, captured when the runtime was constructed. Also carries `$.session.notify(text)` and `$.session.submit(text)`. See [Notices](#sessionnotifytext) and [Queued user messages](#sessionsubmittext). |
-| `$.log(message)` | Writes a line at `info` under the `coderex_mods` tracing target. |
+| `$.log(message)` | Writes a line at `info` under the `codape_mods` tracing target. |
 | `$.env(name)` | The value of an allowlisted environment variable, or `null`. |
 | `$.ui` | Build and render a declarative UI tree, and register button handlers. See [UI elements](#ui-elements). |
 
@@ -375,7 +375,7 @@ TERM  TERM_PROGRAM  TERM_PROGRAM_VERSION  OS  CI
 ```
 
 Credentials, tokens, keys, passwords, `HOME`, `PATH`, user names, working
-directories and every `CODEREX_*` variable are not readable. The session facts
+directories and every `CODAPE_*` variable are not readable. The session facts
 a mod legitimately needs come from `$.session`.
 
 ### `$.session.notify(text)`
@@ -494,7 +494,7 @@ runaway delays only its own runtime.
 | Limit | Default | Behaviour |
 | --- | --- | --- |
 | Wall clock | 5 s per call | Covers every matching JavaScript hook, every nested `next` **and** the downstream run. The engine interrupts JavaScript at the deadline; the caller's backstop detaches the worker only if that cannot stop the work. |
-| Heap | 64 MiB | `JS_SetMemoryLimit`. An over-limit allocation throws an out-of-memory error, reported as a hook error. `CODEREX_MODS_MEMORY_LIMIT` overrides it (bytes, or `k`/`m`/`g` with optional `i`/`b`); values below 4 MiB are clamped up. |
+| Heap | 64 MiB | `JS_SetMemoryLimit`. An over-limit allocation throws an out-of-memory error, reported as a hook error. `CODAPE_MODS_MEMORY_LIMIT` overrides it (bytes, or `k`/`m`/`g` with optional `i`/`b`); values below 4 MiB are clamped up. |
 | Stack | 4 MiB | `JS_SetMaxStackSize`, clamped to 256 KiB..=8 MiB. A runaway recursion throws a `RangeError`. The worker thread's native stack is 16 MiB so QuickJS can raise that error before the process aborts. |
 | GC threshold | 2 MiB | `JS_SetGCThreshold`, clamped below the heap cap. |
 | Chain depth | 64 nested `next(e)` calls per call | The 65th `next` throws a `RangeError`; uncaught, it marks that hook failed. |
@@ -505,7 +505,7 @@ runaway delays only its own runtime.
 | Queued messages per turn | 8 | The runtime drops further submissions for that turn and reports the count. |
 | Consecutive auto-turns | 3 per person-initiated turn | The CLI stops draining, drops the rest with a system notice, and resets the counter at the next person prompt. |
 | Timeouts | 3 per session | The circuit breaker disables mods for the rest of the session. See below. |
-| Consecutive downstream timeouts | 8 per session | The downstream pool stops running the settings hooks for the rest of the session. `CODEREX_DOWNSTREAM_TIMEOUT_LIMIT` overrides it; `0` disables the cap. See below. |
+| Consecutive downstream timeouts | 8 per session | The downstream pool stops running the settings hooks for the rest of the session. `CODAPE_DOWNSTREAM_TIMEOUT_LIMIT` overrides it; `0` disables the cap. See below. |
 
 A file that fails to read, transform, parse, evaluate or register is reported
 **once** at load (`tracing::warn!`, plus `ModRuntime::load_errors`) and
@@ -515,13 +515,13 @@ a hook call, so a mod that loops forever while loading is skipped instead of
 hanging the session.
 
 The heap cap is not a full sandbox. It bounds what the script can allocate for
-itself, but QuickJS still runs in the CodeRex process; do not load untrusted
+itself, but QuickJS still runs in the Codape process; do not load untrusted
 mods. The directory is for code the person chose to install.
 
 ### Timeout circuit breaker
 
 Every wall-clock timeout counts, whether the engine's interrupt handler stopped
-the JavaScript or the caller's backstop had to detach the worker. CodeRex
+the JavaScript or the caller's backstop had to detach the worker. Codape
 counts them per runtime (one runtime per session) and stops feeding the problem
 after a small threshold.
 
@@ -543,7 +543,7 @@ separately from the mod breaker: it counts **consecutive** downstream timeouts,
 and after 8 in a row it stops starting runners for the rest of the session.
 `next()` then rejects with a message saying the settings hooks are disabled, and
 the disabled-mods path stops delegating to them; a call the executor answers
-resets the count. `CODEREX_DOWNSTREAM_TIMEOUT_LIMIT` overrides the limit and `0`
+resets the count. `CODAPE_DOWNSTREAM_TIMEOUT_LIMIT` overrides the limit and `0`
 disables it. This trades "every later hook call pays the budget and leaks a
 thread" for "the configured hooks stop, and the person is told why".
 
@@ -551,7 +551,7 @@ thread" for "the configured hooks stop, and the person is told why".
   `fire`, a nested `next`, or a UI activation handler. Ordinary hook
   exceptions, heap and stack errors, and a worker that disconnects do **not**
   count.
-- **Threshold:** `3` by default. `CODEREX_MODS_TIMEOUT_LIMIT` overrides it with
+- **Threshold:** `3` by default. `CODAPE_MODS_TIMEOUT_LIMIT` overrides it with
   a non-negative integer; `0` disables the breaker, and an invalid value falls
   back to `3`.
 - **What happens at the threshold:** mods are disabled for the rest of the
@@ -600,7 +600,7 @@ be read (there are no bytes to hash); a file that read but failed to transform
 or evaluate still has its hash.
 
 **What the hash does not establish.** It is an integrity fingerprint, not a
-trust decision. CodeRex has **no signature scheme and no trust store**, and
+trust decision. Codape has **no signature scheme and no trust store**, and
 does not compare hashes against any allowlist. A hash proves only that two
 byte sequences are the same; it says nothing about who wrote them or whether
 they are safe. Mods are trusted because the person chose to put the files in
@@ -618,12 +618,12 @@ directory does not turn startup into a wall of hashes. The full report is
 always available programmatically.
 
 ```text
-mods: 2 loaded from /home/you/.coderex/mods [guard.js=1f2e3d4c5b6a, fmt.js=9a8b7c6d5e4f]; sha256 is informational only (no signature or trust store); this code runs because you installed it
+mods: 2 loaded from /home/you/.codape/mods [guard.js=1f2e3d4c5b6a, fmt.js=9a8b7c6d5e4f]; sha256 is informational only (no signature or trust store); this code runs because you installed it
 ```
 
 ## Composing with settings hooks
 
-`JsHookExecutor` implements `coderex_core::hook_executor::HookExecutor` and can
+`JsHookExecutor` implements `codape_core::hook_executor::HookExecutor` and can
 wrap the existing `HookRegistry`:
 
 1. JavaScript hooks run in load order. Each one may call `next(e)` to run the
@@ -767,7 +767,7 @@ unaffected. In the compact transcript (a message pane shorter than ten rows) a
 block is truncated to one line and is not clickable; keyboard activation still
 works there.
 
-Mouse reporting must be enabled and supported by the terminal. CodeRex enables
+Mouse reporting must be enabled and supported by the terminal. Codape enables
 it when the TUI starts (`EnableMouseCapture`) and disables it on exit; iTerm2,
 kitty, WezTerm, Ghostty, Windows Terminal and the VS Code/Cursor terminals
 report mouse input. In a terminal that does not, or with mouse reporting

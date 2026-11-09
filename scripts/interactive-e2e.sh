@@ -11,5 +11,5 @@ if [ "$#" -eq 0 ]; then
 fi
 
 cd "$REPO_ROOT"
-cargo build -p coderex-cli --bin coderex --bin coderex-interactive-e2e
-exec "$REPO_ROOT/target/debug/coderex-interactive-e2e" "$@"
+cargo build -p codape-cli --bin codape --bin codape-interactive-e2e
+exec "$REPO_ROOT/target/debug/codape-interactive-e2e" "$@"

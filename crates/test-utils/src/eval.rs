@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use coderex_test_utils::{EvalScenario, EvalAssertion, eval_test};
+//! use codape_test_utils::{EvalScenario, EvalAssertion, eval_test};
 //!
 //! # async fn example() {
 //! eval_test!("read_file_scenario",
@@ -26,7 +26,7 @@ use crate::mock_api::{
     MockApiClient, MockResponseType, mock_response, mock_response_with_tool_calls,
 };
 use crate::rig::{StubOkToolExecutor, TestRigBuilder};
-use coderex_core::types::{EngineEvent, ToolCall};
+use codape_core::types::{EngineEvent, ToolCall};
 
 /// A single eval scenario.
 pub struct EvalScenario {
@@ -37,7 +37,7 @@ pub struct EvalScenario {
     /// Assertions to verify.
     pub assertions: Vec<EvalAssertion>,
     /// Optional tool executor override.
-    pub tool_executor: Option<Box<dyn coderex_core::tool_executor::ToolExecutor + Send + Sync>>,
+    pub tool_executor: Option<Box<dyn codape_core::tool_executor::ToolExecutor + Send + Sync>>,
 }
 
 impl std::fmt::Debug for EvalScenario {
@@ -164,7 +164,7 @@ pub async fn run_eval(scenario: EvalScenario) -> EvalResult {
 fn check_assertion(
     assertion: &EvalAssertion,
     events: &[EngineEvent],
-    reason: &Result<coderex_core::engine::TerminalReason, String>,
+    reason: &Result<codape_core::engine::TerminalReason, String>,
 ) -> AssertionResult {
     match assertion {
         EvalAssertion::ToolCalled { name } => {
@@ -290,7 +290,7 @@ fn check_assertion(
 /// # Example
 ///
 /// ```rust,ignore
-/// use coderex_test_utils::{eval_test, EvalAssertion};
+/// use codape_test_utils::{eval_test, EvalAssertion};
 ///
 /// # async fn example() {
 /// eval_test!("my_eval",

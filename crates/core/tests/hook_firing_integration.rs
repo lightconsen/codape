@@ -6,14 +6,14 @@
 //! request are covered without a subprocess.
 
 use async_trait::async_trait;
-use coderex_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
-use coderex_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
-use coderex_core::hook_executor::{HookExecutor, HookFireResult};
-use coderex_core::permission_engine::PermissionEngine;
-use coderex_core::permissions::{PermissionChecker, PermissionMode};
-use coderex_core::state::SessionState;
-use coderex_core::tool_executor::{ToolDispatchOutcome, ToolExecutor, ToolInfo};
-use coderex_core::types::{
+use codape_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
+use codape_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
+use codape_core::hook_executor::{HookExecutor, HookFireResult};
+use codape_core::permission_engine::PermissionEngine;
+use codape_core::permissions::{PermissionChecker, PermissionMode};
+use codape_core::state::SessionState;
+use codape_core::tool_executor::{ToolDispatchOutcome, ToolExecutor, ToolInfo};
+use codape_core::types::{
     ContextWindowOverrides, ContextWindowResolver, EngineEvent, ModelId, ToolCall, ToolResult,
     UsageSummary,
 };
@@ -532,7 +532,7 @@ async fn ndjson_resume_replay_still_fires_user_prompt_submit() {
         make_engine(Box::new(api), Box::new(CountingTools::ok()), hooks.clone());
 
     let options = SubmitOptions {
-        replay_user_messages: Some(vec![coderex_core::types::Message::user("replayed")]),
+        replay_user_messages: Some(vec![codape_core::types::Message::user("replayed")]),
         ..SubmitOptions::default()
     };
     engine

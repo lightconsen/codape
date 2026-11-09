@@ -1,4 +1,4 @@
-//! Test utilities for CodeRex.
+//! Test utilities for Codape.
 //!
 //! Provides [`TestRig`] for spinning up a `QueryEngine` with mock
 //! dependencies, snapshot assertion helpers, and a wire-protocol

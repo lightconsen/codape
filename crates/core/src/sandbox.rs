@@ -291,7 +291,7 @@ pub fn filesystem_isolation() -> FilesystemIsolation {
 /// seccomp and rlimits only (and says so in a warning). With it, that is an
 /// error: a caller that asked for confinement gets confinement or a refusal,
 /// never a quietly weaker boundary.
-pub const REQUIRE_SANDBOX_ENV: &str = "CODEREX_REQUIRE_SANDBOX";
+pub const REQUIRE_SANDBOX_ENV: &str = "CODAPE_REQUIRE_SANDBOX";
 
 /// Whether the requirement in [`REQUIRE_SANDBOX_ENV`] is on.
 ///
@@ -396,7 +396,7 @@ pub const fn bubblewrap_in_force() -> bool {
 }
 
 /// The environment variable that switches the bubblewrap wrapper off.
-pub const BWRAP_ENV: &str = "CODEREX_BWRAP";
+pub const BWRAP_ENV: &str = "CODAPE_BWRAP";
 
 /// The `bwrap` invocation for a config, when the wrapper is in force.
 ///
@@ -682,7 +682,7 @@ mod memory_watchdog {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let thread = std::thread::Builder::new()
-                .name("coderex-mem-watchdog".into())
+                .name("codape-mem-watchdog".into())
                 .spawn(move || watch(read_fd, limit_bytes, &thread_stop))
                 .ok();
             Self { stop, thread }
@@ -892,7 +892,7 @@ use memory_watchdog::MemoryWatchdog;
 // ─── Linux: Landlock path confinement ───────────────────────────────────────
 
 /// The environment variable that switches the Landlock fallback off.
-pub const LANDLOCK_ENV: &str = "CODEREX_LANDLOCK";
+pub const LANDLOCK_ENV: &str = "CODAPE_LANDLOCK";
 
 /// System roots a confined process needs just to start: the loader, its
 /// libraries, name-service configuration, and the pseudo-filesystems most
@@ -1062,7 +1062,7 @@ fn landlock_disabled_by_env(value: Option<&str>) -> bool {
 /// Whether Landlock is the filesystem backend in force.
 ///
 /// It is the fallback used **when bubblewrap is not in force**: on a host
-/// without `bwrap`, or with `CODEREX_BWRAP=0`. `CODEREX_LANDLOCK=0` (or
+/// without `bwrap`, or with `CODAPE_BWRAP=0`. `CODAPE_LANDLOCK=0` (or
 /// `false`/`no`) turns it off as well, which restores the old
 /// seccomp-and-rlimits-only mode.
 #[must_use]
@@ -1170,7 +1170,7 @@ pub fn landlock_restrict(ruleset_fd: std::os::fd::RawFd) -> std::io::Result<()> 
 /// Creation is deliberately fallible. Most unprivileged sessions cannot create
 /// groups in the systemd-managed tree, and a read-only `/sys/fs/cgroup` cannot
 /// carry one at all. Callers **warn and fall back to `RLIMIT_AS`**, never
-/// pretend the cgroup limit is in force. `CODEREX_CGROUP_ROOT` names a
+/// pretend the cgroup limit is in force. `CODAPE_CGROUP_ROOT` names a
 /// writable delegated tree for containers and tests.
 #[cfg(target_os = "linux")]
 pub mod cgroup {
@@ -1179,7 +1179,7 @@ pub mod cgroup {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Environment override for the cgroup v2 tree to create groups under.
-    pub const CGROUP_ROOT_ENV: &str = "CODEREX_CGROUP_ROOT";
+    pub const CGROUP_ROOT_ENV: &str = "CODAPE_CGROUP_ROOT";
 
     /// Default process ceiling for a limited child. A shell command that
     /// forks without bound is a resource hazard even when its memory is
@@ -1347,7 +1347,7 @@ pub mod cgroup {
 
     /// A group name that cannot collide with a concurrent process or group.
     pub(crate) fn cgroup_name(pid: u32, id: u64) -> String {
-        format!("coderex-{pid}-{id}")
+        format!("codape-{pid}-{id}")
     }
 
     /// Candidate parent directories, most specific first.
@@ -1531,7 +1531,7 @@ impl SandboxHandle {
     ///   this method is for callers that want to stop the child now and keep
     ///   the handle.
     /// - **Other platforms**: a no-op. Unix callers that need a tree kill own
-    ///   the process group (`coderex_core::process_tree::ProcessTree`).
+    ///   the process group (`codape_core::process_tree::ProcessTree`).
     // `const` on Unix; Windows terminates a job, which is not a const call.
     #[allow(clippy::missing_const_for_fn)]
     pub fn terminate(&self) -> Result<(), SandboxError> {
@@ -2840,7 +2840,7 @@ mod macos_impl {
             let profile = sandbox.generate_profile();
             let thread_id = format!("{:?}", std::thread::current().id());
             let profile_path = std::env::temp_dir().join(format!(
-                "coderex_sandbox_{}_{}.sb",
+                "codape_sandbox_{}_{}.sb",
                 std::process::id(),
                 thread_id
             ));
@@ -3160,7 +3160,7 @@ mod windows_impl {
             temp_dir: Option<PathBuf>,
         ) -> Result<Self, SandboxError> {
             // One anonymous job per sandbox. It used to be the named
-            // `CodeRexSandboxJob`, which every handle in the process (and any
+            // `CodapeSandboxJob`, which every handle in the process (and any
             // other process on the machine) shared: the last `SetInformation`
             // won, and terminating one sandbox killed every other one's child.
             let job = ProcessTree::create(JobLimits {
@@ -3301,7 +3301,7 @@ mod windows_impl {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let base = std::env::var_os("LOCALAPPDATA")
             .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join("coderex")
+            .join("codape")
             .join("sandbox-tmp");
         let unique = format!(
             "{}-{}-{}",
@@ -3404,7 +3404,7 @@ mod tests {
     /// confinement tests green by skipping them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     fn require_app_container() -> bool {
-        std::env::var("CODEREX_REQUIRE_APP_CONTAINER").as_deref() == Ok("1")
+        std::env::var("CODAPE_REQUIRE_APP_CONTAINER").as_deref() == Ok("1")
     }
 
     #[test]
@@ -3571,13 +3571,13 @@ mod tests {
 
     #[test]
     fn program_in_cwd_is_refused() {
-        let dir = std::env::temp_dir().join(format!("coderex_spawn_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codape_spawn_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let planted = dir.join("coderex_shadow_prog");
+        let planted = dir.join("codape_shadow_prog");
         std::fs::write(&planted, b"#!/bin/sh\n").unwrap();
 
         // Named by path, relative to the working directory.
-        assert!(resolves_inside_cwd("./coderex_shadow_prog", &dir));
+        assert!(resolves_inside_cwd("./codape_shadow_prog", &dir));
         // Named absolutely, inside the working directory.
         assert!(resolves_inside_cwd(planted.to_str().unwrap(), &dir));
 
@@ -3596,7 +3596,7 @@ mod tests {
         // Nothing to refuse when nothing matches; the spawn reports its own
         // failure rather than this check guessing.
         assert!(!resolves_inside_cwd(
-            "coderex_no_such_program_zzz",
+            "codape_no_such_program_zzz",
             &std::env::temp_dir()
         ));
     }
@@ -3642,7 +3642,7 @@ mod tests {
     fn macos_sandbox_denies_read_outside_allowed_path() {
         // /private/tmp is the canonical form on macOS; the profile matches on
         // the resolved path.
-        let root = PathBuf::from(format!("/private/tmp/coderex_read_{}", std::process::id()));
+        let root = PathBuf::from(format!("/private/tmp/codape_read_{}", std::process::id()));
         let allowed = root.join("allowed");
         let secret = root.join("secret");
         let _ = std::fs::remove_dir_all(&root);
@@ -3682,7 +3682,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn macos_sandbox_allows_executing_a_tool_from_an_allowed_path() {
-        let dir = PathBuf::from(format!("/private/tmp/coderex_exec_{}", std::process::id()));
+        let dir = PathBuf::from(format!("/private/tmp/codape_exec_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -3852,8 +3852,8 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn cgroup_name_is_unique_per_pid_and_creation() {
-        assert_eq!(cgroup::cgroup_name(42, 0), "coderex-42-0");
-        assert_eq!(cgroup::cgroup_name(42, 1), "coderex-42-1");
+        assert_eq!(cgroup::cgroup_name(42, 0), "codape-42-0");
+        assert_eq!(cgroup::cgroup_name(42, 1), "codape-42-1");
         assert_ne!(cgroup::cgroup_name(42, 1), cgroup::cgroup_name(43, 1));
     }
 
@@ -3958,7 +3958,7 @@ mod tests {
 
     /// Bytes the re-executed helper allocates, read from the environment.
     #[cfg(target_os = "macos")]
-    const WATCHDOG_ALLOC_ENV: &str = "CODEREX_WATCHDOG_TEST_ALLOC";
+    const WATCHDOG_ALLOC_ENV: &str = "CODAPE_WATCHDOG_TEST_ALLOC";
 
     /// Re-executed helper: allocate and touch `WATCHDOG_ALLOC_ENV` bytes, then
     /// sleep. It is an ordinary test so `current_exe()` can run it by name;
@@ -4237,7 +4237,7 @@ mod tests {
             return;
         }
 
-        let dir = std::env::temp_dir().join(format!("coderex-bwrap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codape-bwrap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -4281,12 +4281,12 @@ mod tests {
         );
 
         // The root is read-only.
-        let out = run("touch /coderex-should-not-exist 2>&1 || echo blocked");
+        let out = run("touch /codape-should-not-exist 2>&1 || echo blocked");
         assert!(
             String::from_utf8_lossy(&out.stdout).contains("blocked"),
             "the read-only root let a write through"
         );
-        assert!(!std::path::Path::new("/coderex-should-not-exist").exists());
+        assert!(!std::path::Path::new("/codape-should-not-exist").exists());
 
         // Network is off by default, so the namespace has no interface but loopback.
         let out = run("cut -d: -f1 /proc/net/dev");
@@ -4305,14 +4305,14 @@ mod tests {
     /// sandbox is the mount namespace, and `prepare` deliberately skips the
     /// seccomp table (the wrapper itself needs the syscalls the table denies).
     /// So this is skipped when `bwrap` is in force; run it with
-    /// `CODEREX_BWRAP=0` to exercise the allowlist. A wrong table kills the
+    /// `CODAPE_BWRAP=0` to exercise the allowlist. A wrong table kills the
     /// child with SIGSYS, which is exactly what this asserts does not happen.
     #[test]
     #[cfg(target_os = "linux")]
     fn the_seccomp_allowlist_lets_a_real_process_run() {
         if bubblewrap_in_force() {
             eprintln!(
-                "skipping: bubblewrap is in force; set CODEREX_BWRAP=0 to test the syscall table"
+                "skipping: bubblewrap is in force; set CODAPE_BWRAP=0 to test the syscall table"
             );
             return;
         }
@@ -4425,19 +4425,19 @@ mod tests {
     ///
     /// Skipped when bubblewrap is in force (it is the better backend and
     /// Landlock is not applied then), when the kernel has no Landlock, or when
-    /// `CODEREX_LANDLOCK=0` switched it off.
+    /// `CODAPE_LANDLOCK=0` switched it off.
     #[test]
     #[cfg(target_os = "linux")]
     fn landlock_fallback_confines_a_real_process() {
         if !landlock_in_force() {
             eprintln!(
                 "skipping: Landlock is not in force (bwrap is in force, the kernel lacks \
-                 Landlock, or CODEREX_LANDLOCK=0)"
+                 Landlock, or CODAPE_LANDLOCK=0)"
             );
             return;
         }
 
-        let root = std::env::temp_dir().join(format!("coderex-landlock-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("codape-landlock-{}", std::process::id()));
         let allowed = root.join("allowed");
         let secret = root.join("secret");
         let _ = std::fs::remove_dir_all(&root);
@@ -4594,7 +4594,7 @@ mod tests {
             assert!(
                 !require_app_container(),
                 "AppContainer is unavailable on this runner but \
-                 CODEREX_REQUIRE_APP_CONTAINER=1"
+                 CODAPE_REQUIRE_APP_CONTAINER=1"
             );
             // The backend refuses to run unconfined; that refusal is the
             // contract, so assert it rather than skipping silently.
@@ -4609,7 +4609,7 @@ mod tests {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        let root = base.join(format!("coderex-sandbox-{}", std::process::id()));
+        let root = base.join(format!("codape-sandbox-{}", std::process::id()));
         let allowed = root.join("allowed");
         let denied = root.join("denied");
         let _ = std::fs::remove_dir_all(&root);
@@ -4720,7 +4720,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn output_bounded(mut command: std::process::Command, limit: std::time::Duration) -> String {
         let path = std::env::temp_dir().join(format!(
-            "coderex-diagnostic-{}-{}.txt",
+            "codape-diagnostic-{}-{}.txt",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4752,7 +4752,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn run_in_container(handle: &SandboxHandle, cwd: &std::path::Path, command: &str) -> String {
         let path = std::env::temp_dir().join(format!(
-            "coderex-whoami-{}-{}.txt",
+            "codape-whoami-{}-{}.txt",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -200,8 +200,8 @@ mod tests {
     #[test]
     fn notification_text_is_sanitized_and_truncated() {
         assert_eq!(
-            format_message("CodeRex", "Approval\nrequired"),
-            "CodeRex: Approval required"
+            format_message("Codape", "Approval\nrequired"),
+            "Codape: Approval required"
         );
         assert_eq!(format_message("", "body"), "body");
         assert_eq!(format_message("title", ""), "title");

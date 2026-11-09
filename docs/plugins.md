@@ -10,11 +10,11 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 
 - **`PluginState`** — Lifecycle enum: Discovered, Loading, Active, Error(String), Uninstalled, Installing.
 - **`PluginHandle`** — Runtime representation with name, version, state, path, commands, skills, retry_count, max_retries, **verified**.
-- **`PluginManifest`** — Deserialized from `plugin.json`. Identity/metadata (`name`, `displayName`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, `defaultEnabled`, `metadata`, `$schema`), CodeRex execution fields (`min_version`, `commands`, `skills`, `dependencies`, `signature`, `runtime`, `entrypoint`, `env`), `userConfig`, and the Claude component fields CodeRex acts on. See the field table below.
+- **`PluginManifest`** — Deserialized from `plugin.json`. Identity/metadata (`name`, `displayName`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, `defaultEnabled`, `metadata`, `$schema`), Codape execution fields (`min_version`, `commands`, `skills`, `dependencies`, `signature`, `runtime`, `entrypoint`, `env`), `userConfig`, and the Claude component fields Codape acts on. See the field table below.
 - **`PluginAuthor`** — `{name, email?}`; parses from either an object (Claude's shape) or a bare string.
 - **`UserConfigField`** — One `userConfig` entry: `type`, `title`, `description`, `required`, `default`, `sensitive`, `multiple`, plus `options`/`min`/`max`, all enforced against a supplied value at resolution time.
 - **`PluginSource`** — Install source: `Marketplace { name }`, `LocalDir(path)`, `Git { url, rev }`, `Github { repo, rev, sha }`, `GitSubdir { url, path, rev, sha }`, `Archive { url, sha256 }`, and `Unsupported { kind }`; `PluginSource::detect()` classifies a CLI argument.
-- **`PluginPin` / `PluginPinStore`** — Trust-on-first-use record of what was installed (archive SHA-256, git commit), read from `.coderex-pins.json` in the install directory.
+- **`PluginPin` / `PluginPinStore`** — Trust-on-first-use record of what was installed (archive SHA-256, git commit), read from `.codape-pins.json` in the install directory.
 - **`RuntimeType`** — Enum: `Process` (default), `Wasm`. Declares how the plugin executes.
 - **`MarketplacePlugin`** — Marketplace listing with download URL.
 - **`MarketplaceConnection`** — HTTP client + base URL + configurable endpoint paths per marketplace.
@@ -26,7 +26,7 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 
 ### Key Types (runtime.rs)
 
-- **`PluginProcess`** — JSON-RPC 2.0 stdio transport for external process plugins. Spawns a child process, performs `coderex/initialize` handshake, and exposes `list_commands`, `execute_command`, `list_skills`, `execute_skill`, `ping`.
+- **`PluginProcess`** — JSON-RPC 2.0 stdio transport for external process plugins. Spawns a child process, performs `codape/initialize` handshake, and exposes `list_commands`, `execute_command`, `list_skills`, `execute_skill`, `ping`.
 - **`PluginCommandInfo`** — Discovered command metadata (name, description, args).
 - **`PluginSkillInfo`** — Discovered skill metadata (name, description, hooks).
 - **`JsonRpcRequest` / `JsonRpcResponse`** — JSON-RPC 2.0 message types.
@@ -37,7 +37,7 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 
 ### Key Types (tool_executor.rs)
 
-- **`PluginToolExecutor`** — Implements `coderex_core::tool_executor::ToolExecutor`. Routes tool calls to plugin processes as a fallback layer behind the primary tool registry.
+- **`PluginToolExecutor`** — Implements `codape_core::tool_executor::ToolExecutor`. Routes tool calls to plugin processes as a fallback layer behind the primary tool registry.
 
 ### Key Types (skills.rs)
 
@@ -52,14 +52,14 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 - **DashMap** for concurrent plugin/marketplace registries and active process tracking.
 - **AtomicBool** for refresh flag.
 - **YAML frontmatter parsing** via `serde_yaml` with custom `deserialize_string_or_list` for scalar/array fields.
-- **Layered skill loading**: bundled -> user -> repo (`.coderex/skills`) with precedence-based conflict resolution.
+- **Layered skill loading**: bundled -> user -> repo (`.codape/skills`) with precedence-based conflict resolution.
 - **Atomic install staging**: temp directory + validation + atomic rename + cleanup on failure.
 - **Install locks**: `DashMap<String, Arc<tokio::sync::Mutex<()>>>` prevents concurrent installs.
 - **Version compatibility**: SemVer comparison of `min_version` against app version on load and install.
-- **Signature verification**: Ed25519 check of the downloaded archive against a **detached** signature fetched from `<archive-url>.sig` (hex), optional and configured via `CODEREX_PLUGIN_PUBLIC_KEY`. The signature cannot live inside the archive it signs. With a key configured, sources that cannot carry a detached signature (local directory, git, git-subdir) fail closed unless an existing TOFU pin matches; without a key they install as `Unverified` with a warning.
+- **Signature verification**: Ed25519 check of the downloaded archive against a **detached** signature fetched from `<archive-url>.sig` (hex), optional and configured via `CODAPE_PLUGIN_PUBLIC_KEY`. The signature cannot live inside the archive it signs. With a key configured, sources that cannot carry a detached signature (local directory, git, git-subdir) fail closed unless an existing TOFU pin matches; without a key they install as `Unverified` with a warning.
 - **Manifest strictness**: `deny_unknown_fields` on `PluginManifest` and `UserConfigField`, plus a warning for accepted-but-unimplemented fields.
 - **Environment injection**: `userConfig` values and static `env` are resolved and substituted before the child is spawned.
-- **Trust on first use**: archive SHA-256 / git commit recorded in `.coderex-pins.json` and checked on later installs.
+- **Trust on first use**: archive SHA-256 / git commit recorded in `.codape-pins.json` and checked on later installs.
 - **Dependency resolution**: Kahn's topological sort with cycle detection for plugin load ordering.
 - **Error recovery**: Exponential-backoff retry for Error-state plugins (re-reads manifest, re-validates). A successful retry reports `RestartRequired` (or invokes a registered restart handler); the CLI acts on that signal by calling `spawn_plugin` again, so recovery restores a runtime instead of only clearing the error state. Process exits are detected by `reap_dead_plugins()` — called before each retry pass and after a failed command/skill — so a plugin that dies while idle is moved to `Error` and retried rather than staying `Active` with a dead child.
 - **MCP skills bridge**: Discovered MCP tools converted to `SkillMetadata` and stored in `SessionContext.mcp_skills`.
@@ -82,14 +82,14 @@ Plugins declare their runtime in `plugin.json` via the `runtime` field (`"proces
 
 ### Process Plugins (Default Tier)
 
-External process plugins communicate via JSON-RPC 2.0 over stdio using the `coderex/` method namespace:
+External process plugins communicate via JSON-RPC 2.0 over stdio using the `codape/` method namespace:
 
-- `coderex/initialize` — Protocol version and capabilities exchange.
-- `coderex/commands/list` — Discover commands.
-- `coderex/commands/execute` — Execute a command by name with args.
-- `coderex/skills/list` — Discover skills.
-- `coderex/skills/execute` — Execute a skill by name with context.
-- `coderex/ping` — Health check.
+- `codape/initialize` — Protocol version and capabilities exchange.
+- `codape/commands/list` — Discover commands.
+- `codape/commands/execute` — Execute a command by name with args.
+- `codape/skills/list` — Discover skills.
+- `codape/skills/execute` — Execute a skill by name with context.
+- `codape/ping` — Health check.
 
 Process plugins declare an optional `entrypoint` (e.g., `"bin/plugin"`, `"node index.js"`) and custom `env` variables in their manifest. The orchestrator spawns them during `InitPlugins`, discovers commands/skills dynamically, and wires them into the REPL via `with_plugin_manager`.
 
@@ -101,7 +101,7 @@ The WASM runtime is enabled by default: `crates/plugins/Cargo.toml` has
 "WASM runtime not enabled" error instead of loading anything.
 
 `spawn_plugin` loads a `runtime: "wasm"` plugin from its `entrypoint` (default
-`plugin.wasm`) by compiling the module, running `coderex_initialize`, and
+`plugin.wasm`) by compiling the module, running `codape_initialize`, and
 discovering commands and skills, then keeps the instance in
 `active_wasm_instances`. `userConfig` is resolved by the same code path as for
 a process plugin and delivered through the host import described below. A WASM
@@ -121,7 +121,7 @@ The sandbox is enforced by the host, not by trusting the module:
   so a module cannot create a shared memory (which wasmtime's store limiter
   deliberately does not bound) or use atomics.
 - **Minimal host interface**: the only import the host provides is
-  `coderex.user_config`. WASI and everything else remain unlinked, so a module
+  `codape.user_config`. WASI and everything else remain unlinked, so a module
   importing them fails to instantiate. A module that imports nothing is still
   instantiated with an empty import set and runs unchanged.
 
@@ -130,7 +130,7 @@ The sandbox is enforced by the host, not by trusting the module:
 The host links one function:
 
 ```wat
-(import "coderex" "user_config"
+(import "codape" "user_config"
   (func $user_config (param i32 i32) (result i32)))
 ;; (ptr, capacity) -> required_len
 ```
@@ -138,7 +138,7 @@ The host links one function:
 It writes the resolved options into the plugin's exported linear `memory` at
 `ptr` and returns the **full** JSON length, not the number of bytes written.
 The JSON value is one object whose keys and values are exactly what a process
-plugin receives as `CODEREX_PLUGIN_OPTION_<KEY>` (and what `${user_config.KEY}`
+plugin receives as `CODAPE_PLUGIN_OPTION_<KEY>` (and what `${user_config.KEY}`
 substitutes). For example:
 
 ```json
@@ -201,13 +201,13 @@ compiler command from its host: a program plus leading arguments
 `std::env::current_exe() --internal-wasm-compile`, and handles that hidden
 argument *before* clap parsing. The runtime appends `<input> <output>` and runs
 the result as a child. Because the host re-executes itself, `cargo run`,
-packaged builds with only the `coderex` binary, and the separate
-`coderex-wasm-compile` helper all use the same path.
+packaged builds with only the `codape` binary, and the separate
+`codape-wasm-compile` helper all use the same path.
 
 The helper binary is **deliberately kept**, not a leftover. The production CLI
 path no longer needs it, but `crates/plugins/tests/wasm_compile_subprocess.rs`
-drives a real compiler subprocess through `CARGO_BIN_EXE_coderex-wasm-compile`,
-and `coderex-cli` depends on `coderex-plugins` — so the plugin crate cannot
+drives a real compiler subprocess through `CARGO_BIN_EXE_codape-wasm-compile`,
+and `codape-cli` depends on `codape-plugins` — so the plugin crate cannot
 dev-depend on the CLI to exercise its own `--internal-wasm-compile` path.
 Removing the `[[bin]]` would mean deleting the only test that runs the compiler
 as a separate process, so it stays and is built by default.
@@ -251,7 +251,7 @@ wrap the compiler as well as the process-group/job kill:
 
 | Platform | Applied to the compiler process | What it confines |
 |---|---|---|
-| macOS | `sandbox-exec(1)` profile from `coderex_core::sandbox` | reads to system roots plus the staging directory and compiler binary; writes to the staging directory only; network denied |
+| macOS | `sandbox-exec(1)` profile from `codape_core::sandbox` | reads to system roots plus the staging directory and compiler binary; writes to the staging directory only; network denied |
 | Linux with `bwrap` | bubblewrap mount/network namespace, plus the cgroup above | read-only root, staging directory the only writable path, network namespace unshared; memory ceiling and whole-group kill when a cgroup could be created |
 | Linux without `bwrap` | Landlock, the cgroup above when available, and a short seccomp deny-list | memory ceiling and whole-group kill; paths confined by Landlock instead of a mount namespace; network, ptrace, mount/namespace, bpf/perf/userfaultfd/io_uring and module/key syscalls refused with `EPERM` |
 | Windows | AppContainer + Job Object (`SandboxHandle`) | reads to system roots, the staging directory and the compiler directory; writes to the staging directory; execute of the compiler; network denied; CPU/memory and kill-on-close |
@@ -278,9 +278,9 @@ this document does not claim a sandbox that was not applied.
 **AOT cache.** A module is compiled under the helper on first load, and
 `Module::serialize` output is stored for later loads:
 
-- **Location**: `CODEREX_WASM_CACHE_DIR` if set, otherwise
-  `~/Library/Caches/coderex/wasm` (macOS), `$XDG_CACHE_HOME/coderex/wasm` or
-  `~/.cache/coderex/wasm` (Linux), `%LOCALAPPDATA%\coderex\wasm` (Windows).
+- **Location**: `CODAPE_WASM_CACHE_DIR` if set, otherwise
+  `~/Library/Caches/codape/wasm` (macOS), `$XDG_CACHE_HOME/codape/wasm` or
+  `~/.cache/codape/wasm` (Linux), `%LOCALAPPDATA%\codape\wasm` (Windows).
   Hosts can also call `set_cache_dir`.
 - **Key**: `<engine-config-hash>/<module-sha256>.cwasm`. The engine hash is
   SHA-256 over wasmtime's `precompile_compatibility_hash` (version plus every
@@ -312,7 +312,7 @@ this document does not claim a sandbox that was not applied.
   exceeds the limit, `SIGSTOP`s the group before `SIGKILL`ing it, so the
   process cannot keep allocating while the signal is delivered. Other Unix
   platforms use `RLIMIT_AS`, subject to the same best-effort handling.
-- The Windows compiler sandbox uses `coderex_core::sandbox`; its Win32 calls are
+- The Windows compiler sandbox uses `codape_core::sandbox`; its Win32 calls are
   exercised by the `test_windows` CI job (`wasm_compile_subprocess`), not by a
   macOS host.
 - The Linux cgroup limit exists only when the host delegates a writable cgroup
@@ -330,8 +330,8 @@ this document does not claim a sandbox that was not applied.
 - macOS `sandbox-exec` is deprecated by Apple. The runtime probes for it and
   falls back to rlimits + process-group kill when it is unavailable.
 - The helper path, timeout, and test hooks have debug-build-only environment
-  overrides (`CODEREX_WASM_COMPILE_HELPER`, `CODEREX_WASM_COMPILE_TIMEOUT_MS`,
-  and the `CODEREX_WASM_COMPILE_TEST_*` variables) used by the tests. Release
+  overrides (`CODAPE_WASM_COMPILE_HELPER`, `CODAPE_WASM_COMPILE_TIMEOUT_MS`,
+  and the `CODAPE_WASM_COMPILE_TEST_*` variables) used by the tests. Release
   builds neither read nor compile the test hooks.
 - wasmtime 20 has no compile-time fuel or epoch option;
   `parallel_compilation(false)` only chooses single-threaded compilation (it
@@ -345,7 +345,7 @@ The manifest is parsed with `deny_unknown_fields`: a field that is not in the ta
 | Field | Status | Notes |
 |---|---|---|
 | `$schema`, `name`, `displayName`, `version`, `description`, `homepage`, `repository`, `license`, `keywords`, `defaultEnabled`, `metadata` | ✅ parsed | Identity and metadata. `author` accepts a string or `{name, email}`; an object used to fail the whole manifest. |
-| `min_version`, `commands`, `skills`, `dependencies`, `signature`, `runtime`, `entrypoint`, `env` | ✅ acted on | CodeRex execution fields (pre-existing). |
+| `min_version`, `commands`, `skills`, `dependencies`, `signature`, `runtime`, `entrypoint`, `env` | ✅ acted on | Codape execution fields (pre-existing). |
 | `userConfig` | ✅ implemented | Values are validated against the declared schema (`type`, `options`, `min`, `max`, `required`, `default`) before they reach a plugin. See "userConfig injection". |
 | `hooks` | ✅ implemented | Active plugins contribute their hooks to the `Plugin` tier. The value may be a bare array or `{"hooks":[...]}`; `PluginManager::plugin_hooks()` merges them in plugin-name order and logs malformed values. |
 | `agents` | ✅ implemented | Active plugins contribute definitions through `PluginManager::plugin_agents()`; the REPL registers them as custom agents. |
@@ -356,8 +356,8 @@ The manifest is parsed with `deny_unknown_fields`: a field that is not in the ta
 | `mcpServers` | ✅ implemented | Active plugins contribute `{"mcpServers": {...}}` through `PluginManager::plugin_mcp_servers()`; the orchestrator loads them before `.mcp.json` (project file wins on name clashes). |
 | `lspServers` | ✅ implemented | The first configured server is the default for the `LSP` tool (the REPL fills the tool's shared default at startup). |
 | `channels` | ✅ implemented (delivery: webhook, MCP tool, or command) | A channel names a configured MCP server and routes that server's JSON-RPC notifications to subscribed sinks (`PluginManager::subscribe_channel` / `route_channel_notification`). `/plugin components` lists each channel with its live state — `subscribed`, `idle (no subscriber)`, or `server not configured`. See "Channels". |
-| `binaries` | ✅ implemented | SHA-256-pinned HTTPS fetch into `<plugin>/bin/` (`fetch_plugin_binaries`); `CODEREX_PLUGIN_NO_BINARIES=1` skips the fetch. |
-| `types` | ✅ implemented | Validated `.d.ts` files are exported at startup to `config_home()/plugin-types/<plugin>/` (`export_plugin_types`) so a plugin author has a stable include path, **and** read into a `PluginTypeRegistry` that `/plugin components` lists. The same export writes the host's generated surface — `coderex/`, `coderex-tools/`, `coderex-mcp/` and a `tsconfig.json` — from the registered tool schemas; `/plugin types [name]` lists or prints them. The exported tree is **type-checked** with a real `tsc` when one is available (startup, plus `coderex plugin-typecheck`); nothing is ever executed. See "Types". |
+| `binaries` | ✅ implemented | SHA-256-pinned HTTPS fetch into `<plugin>/bin/` (`fetch_plugin_binaries`); `CODAPE_PLUGIN_NO_BINARIES=1` skips the fetch. |
+| `types` | ✅ implemented | Validated `.d.ts` files are exported at startup to `config_home()/plugin-types/<plugin>/` (`export_plugin_types`) so a plugin author has a stable include path, **and** read into a `PluginTypeRegistry` that `/plugin components` lists. The same export writes the host's generated surface — `codape/`, `codape-tools/`, `codape-mcp/` and a `tsconfig.json` — from the registered tool schemas; `/plugin types [name]` lists or prints them. The exported tree is **type-checked** with a real `tsc` when one is available (startup, plus `codape plugin-typecheck`); nothing is ever executed. See "Types". |
 | `settings` | ✅ implemented (allowlisted) | A typed patch deep-merges into the resolved settings, by source: user/project values win over every plugin, and a plugin only fills a key the user left unset. `permission_mode`, `telemetry` and `max_budget_usd` are tighten-only; `hooks`, `mcpServers`, `api_key`, `provider` and `env` are never taken. Unknown keys warn and are ignored. See "Settings". |
 | `experimental` | ✅ implemented (raw) | Exposed per plugin; expansion (themes/monitors/outputStyles/…) is the caller's job. |
 
@@ -379,21 +379,21 @@ A manifest declares options, and `spawn_plugin` turns them into the child's envi
 }
 ```
 
-- Each resolved option becomes `CODEREX_PLUGIN_OPTION_<KEY>` in the plugin process (Claude's `CLAUDE_PLUGIN_OPTION_<KEY>`).
+- Each resolved option becomes `CODAPE_PLUGIN_OPTION_<KEY>` in the plugin process (Claude's `CLAUDE_PLUGIN_OPTION_<KEY>`).
 - `${user_config.KEY}` is substituted in the manifest's `env` values and in the `entrypoint`. An unresolved placeholder is left as written and logged, so an author can see what did not resolve.
-- Values are resolved in order: what the host supplied via `PluginManager::set_plugin_option`, then CodeRex's own `CODEREX_PLUGIN_OPTION_<KEY>`, then the manifest's `default`.
+- Values are resolved in order: what the host supplied via `PluginManager::set_plugin_option`, then Codape's own `CODAPE_PLUGIN_OPTION_<KEY>`, then the manifest's `default`.
 - A supplied value is checked against the declared schema before it is injected (`resolve_options` → `validate_option_value`):
   - `options` (an array, or `{ "value": ..., "label": ... }` objects) is an allowlist; a value outside it is refused.
   - `type: "number"` (or a declared `min`/`max`) requires a number, and `min`/`max` are enforced inclusively.
   - `type: "boolean"` requires exactly `true` or `false`.
   - Every rejection is an error naming the option, the value, and what was expected — the spawn stops rather than handing the plugin a value its own manifest rejects.
 - Option keys must be usable as environment variable names (`[A-Za-z_][A-Za-z0-9_]*`); anything else is refused, because a key with a dash or an `=` in it is a way to smuggle a second variable into the environment.
-- WASM plugins use the same resolution and the same validation errors, but the resolved values are encoded as one JSON object and served through the `coderex.user_config` import rather than an environment (see "`userConfig` ABI for WASM plugins"). A WASM plugin receives them only if it imports that function; a required option with no value still stops the spawn, even though there is no environment.
+- WASM plugins use the same resolution and the same validation errors, but the resolved values are encoded as one JSON object and served through the `codape.user_config` import rather than an environment (see "`userConfig` ABI for WASM plugins"). A WASM plugin receives them only if it imports that function; a required option with no value still stops the spawn, even though there is no environment.
 
-**Sensitive options.** There is no keychain dependency in this crate (the workspace's keychain access lives in `coderex-config`, behind its `keyring` feature), so the sensitive path is strict rather than quiet:
+**Sensitive options.** There is no keychain dependency in this crate (the workspace's keychain access lives in `codape-config`, behind its `keyring` feature), so the sensitive path is strict rather than quiet:
 
 - A `sensitive` option may **not** carry a plaintext `default` — a secret in `plugin.json` is a secret in a file that gets committed. That is a load-time error.
-- A sensitive value that is still an unresolved `keyring://item` reference is refused: injecting the literal reference would hand the plugin a string that is not the secret, and resolving it needs the keychain. The host is expected to resolve it first (`coderex_config::resolve_api_key` is the existing convention).
+- A sensitive value that is still an unresolved `keyring://item` reference is refused: injecting the literal reference would hand the plugin a string that is not the secret, and resolving it needs the keychain. The host is expected to resolve it first (`codape_config::resolve_api_key` is the existing convention).
 - A `required` option with no value stops the spawn with an error naming the variable to set. A plugin that silently runs without the secret it asked for is worse than one that does not run.
 - An optional option with no value is simply not injected (debug log).
 - Sensitive values travel by environment variable (process plugins) or through the resolved options object (WASM plugins). Either way they are visible to the plugin that asked for them; for process plugins they are also visible in the process table of the same user, which is Claude's design too.
@@ -455,7 +455,7 @@ in-process mods get those because they run inside its UI runtime.
 
 ## Types
 
-There are two halves to the type surface: the declarations a plugin ships, and the declarations CodeRex generates for its own builtin surface. Both are exported under `config_home()/plugin-types/`.
+There are two halves to the type surface: the declarations a plugin ships, and the declarations Codape generates for its own builtin surface. Both are exported under `config_home()/plugin-types/`.
 
 ### The plugin's own declarations
 
@@ -471,13 +471,13 @@ A plugin may export TypeScript declarations:
 
 ### The host's generated declarations
 
-At startup the same call writes CodeRex's own type surface, generated from the actual registered tool schemas. The root contains:
+At startup the same call writes Codape's own type surface, generated from the actual registered tool schemas. The root contains:
 
 | Artefact | Contents |
 |---|---|
-| `coderex/index.d.ts` | `declare module 'coderex'`: `EngineInterface`, `HookContext` (session id, cwd, model, permission mode, turn number), `Hook`, `HookResult`, `HookEvent`, and `PermissionMode`. |
-| `coderex-tools/index.d.ts` | `declare module 'coderex-tools'`: `interface BuiltinToolInputs { <ToolName>: <input schema> }` and `interface BuiltinToolResults { <ToolName>: <result schema> }`, one member per builtin tool. |
-| `coderex-mcp/index.d.ts` | `declare module 'coderex-mcp'`: `McpServer` with name, transport, `command`/`url`, headers/env, and `status`, plus the `McpTransport` and `McpServerStatus` unions. |
+| `codape/index.d.ts` | `declare module 'codape'`: `EngineInterface`, `HookContext` (session id, cwd, model, permission mode, turn number), `Hook`, `HookResult`, `HookEvent`, and `PermissionMode`. |
+| `codape-tools/index.d.ts` | `declare module 'codape-tools'`: `interface BuiltinToolInputs { <ToolName>: <input schema> }` and `interface BuiltinToolResults { <ToolName>: <result schema> }`, one member per builtin tool. |
+| `codape-mcp/index.d.ts` | `declare module 'codape-mcp'`: `McpServer` with name, transport, `command`/`url`, headers/env, and `status`, plus the `McpTransport` and `McpServerStatus` unions. |
 | `tsconfig.json` | `compilerOptions` with `strict` and `noEmit`, and an `include` array listing every emitted directory. A plugin can extend it. |
 | `<plugin>/` | Each active plugin's declared `.d.ts` files, as above. |
 
@@ -504,8 +504,8 @@ Property and tool names that are not TypeScript identifiers are quoted (`"run-in
 
 ### Reading the generated declarations
 
-- `/plugin types` lists every emitted declaration with its path: `coderex`, `coderex-tools`, `coderex-mcp`, `tsconfig`, and one entry per plugin directory.
-- `/plugin types <name>` prints one. The name is the listed name; a relative path such as `coderex-tools/index.d.ts` also works. A name that is not in the list is an error — the resolver only matches already-listed files, so it cannot read outside the type root.
+- `/plugin types` lists every emitted declaration with its path: `codape`, `codape-tools`, `codape-mcp`, `tsconfig`, and one entry per plugin directory.
+- `/plugin types <name>` prints one. The name is the listed name; a relative path such as `codape-tools/index.d.ts` also works. A name that is not in the list is an error — the resolver only matches already-listed files, so it cannot read outside the type root.
 
 ### Channel delivery
 
@@ -522,7 +522,7 @@ The first form is a webhook:
   "ops": {
     "server": "ops-server",
     "displayName": "Ops alerts",
-    "deliver": { "url": "https://hooks.example.com/coderex" }
+    "deliver": { "url": "https://hooks.example.com/codape" }
   }
 }
 ```
@@ -553,15 +553,15 @@ JSON on its stdin:
 
 `command` must be an absolute path, and it is executed directly — no shell —
 so neither `args` nor the event can be reinterpreted as code. The environment
-is cleared apart from `PATH` and three markers (`CODEREX_CHANNEL`,
-`CODEREX_CHANNEL_PLUGIN`, `CODEREX_CHANNEL_SERVER`), so the session's provider
+is cleared apart from `PATH` and three markers (`CODAPE_CHANNEL`,
+`CODAPE_CHANNEL_PLUGIN`, `CODAPE_CHANNEL_SERVER`), so the session's provider
 credentials do not reach the program. The program is **not** sandboxed: it
 runs with the user's privileges. That is not a new trust decision a manifest
 can make — `commands`, `monitors` and `mcpServers` already run code — but it
 does mean the program can read and write whatever the user can. Point it at a
 notification script the user wrote or reviewed. A non-zero exit counts as a
 failure, and its stderr (up to 200 characters) becomes the reported reason.
-The timeout kills the program CodeRex started; children it spawned itself are
+The timeout kills the program Codape started; children it spawned itself are
 not reaped.
 
 Delivery is **lossy on purpose** for all three: the sink enqueues (256 events)
@@ -582,7 +582,7 @@ manager to call, so a tool delivery is reported as unsubscribed rather than
 silently dropped. A command delivery needs no MCP manager, so it is
 subscribed even in a run with no servers.
 
-`CODEREX_PLUGIN_NO_TYPECHECK` does not affect delivery; there is no
+`CODAPE_PLUGIN_NO_TYPECHECK` does not affect delivery; there is no
 environment switch that turns delivery off — remove the `deliver` block.
 
 ### Type-checking the exported declarations
@@ -592,15 +592,15 @@ runs a real TypeScript compiler over `config_home()/plugin-types`:
 
 - at startup, after the export, best-effort (a warning names the first
   diagnostic; a missing compiler is logged at debug and nothing more);
-- on demand with `coderex plugin-typecheck [--dir DIR]`, which prints every
+- on demand with `codape plugin-typecheck [--dir DIR]`, which prints every
   diagnostic and exits `1` when the plugin's declarations have errors, `2` when
   the compiler timed out, and `0` when it passed **or when there was no compiler
   to check with** — "nothing checked" is not "failed".
 
-The compiler is found at `CODEREX_TSC` (when set), then
+The compiler is found at `CODAPE_TSC` (when set), then
 `<root>/node_modules/.bin/tsc`, then `tsc` on `PATH`. Nothing is bundled, so a
 machine without TypeScript reports that instead of pretending. The whole check
-can be turned off with `CODEREX_PLUGIN_NO_TYPECHECK=1`.
+can be turned off with `CODAPE_PLUGIN_NO_TYPECHECK=1`.
 
 The run is a real subprocess (`tsc --noEmit --pretty false -p tsconfig.json`)
 with a 20-second ceiling; it reads the exported files and writes nothing.
@@ -609,12 +609,12 @@ with a 20-second ceiling; it reads the exported files and writes nothing.
 ### Deliberately out of scope
 
 - **No TypeScript execution.** The Rust binary does not run a TypeScript compiler, type-check the generated output, or host a language server. "Generated" and "loaded" both mean text that is written, read into memory, and printed; it is never evaluated.
-- **No schema compilation for validation.** TypeScript types are for plugin authors' editors and builds; CodeRex's own runtime validation is unchanged.
+- **No schema compilation for validation.** TypeScript types are for plugin authors' editors and builds; Codape's own runtime validation is unchanged.
 - **No invented types.** A schema feature the converter does not understand is `unknown`, not a guess. In particular `$ref` is not resolved across documents.
 
 ## Install Sources
 
-`PluginSource` has seven kinds, and `PluginSource::detect()` classifies a CLI argument into one of them (a `github:`/`git-subdir:` prefix → that kind; an existing directory → `LocalDir`; a git remote → `Git`; an HTTPS `.tar.gz`/`.tgz` → `Archive`; anything else → a marketplace listing name, which is what `coderex plugin install <name>` has always meant). `install_plugin` routes a listing whose url is not a marketplace URL to `install_from_source`, so `coderex plugin install ./my-plugin` and `coderex plugin install https://github.com/acme/plugin.git` work without the CLI changing its argument shape.
+`PluginSource` has seven kinds, and `PluginSource::detect()` classifies a CLI argument into one of them (a `github:`/`git-subdir:` prefix → that kind; an existing directory → `LocalDir`; a git remote → `Git`; an HTTPS `.tar.gz`/`.tgz` → `Archive`; anything else → a marketplace listing name, which is what `codape plugin install <name>` has always meant). `install_plugin` routes a listing whose url is not a marketplace URL to `install_from_source`, so `codape plugin install ./my-plugin` and `codape plugin install https://github.com/acme/plugin.git` work without the CLI changing its argument shape.
 
 | Kind | Behaviour |
 |---|---|
@@ -624,7 +624,7 @@ with a 20-second ceiling; it reads the exported files and writes nothing.
 | `Github { repo, rev, sha }` | `owner/repo` is expanded to `https://github.com/<owner>/<repo>.git` and installed by the git path, so transport validation, `GIT_TERMINAL_PROMPT=0` and commit pinning all apply unchanged. `repo` must be exactly `owner/repo` — anything with extra segments, a leading `/`, or a `..` segment is refused before a URL is built. |
 | `GitSubdir { url, path, rev, sha }` | Clone, then install the named subdirectory as the plugin. `path` is resolved *inside* the clone: an absolute path or a `..` component is refused syntactically, and the joined path is then canonicalised and must still be under the clone root, so a committed symlink pointing outside the checkout is refused too (a committed symlink is the case the syntactic check alone misses). The clone's resolved commit is the pin, exactly as a plain git install. |
 | `Archive { url, sha256 }` | HTTPS only. Signature-checked like a marketplace archive, and the archive's SHA-256 is recorded as a pin. |
-| `Unsupported { kind }` | A source the reference defines but CodeRex does not implement. Recognised so the refusal is explicit (see "npm and command" below). |
+| `Unsupported { kind }` | A source the reference defines but Codape does not implement. Recognised so the refusal is explicit (see "npm and command" below). |
 
 Git transports that run commands are refused before `git` is spawned: `ext::` and any other `<name>::` transport is rejected, and only `https://`, `ssh://`, `git://`, `file://` and `user@host:path` are accepted. Credential prompts are disabled (`GIT_TERMINAL_PROMPT=0`) so an unauthenticated clone fails with a message instead of hanging, and `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` are not inherited from the caller.
 
@@ -632,7 +632,7 @@ A `rev` and a `sha` are both the same knob to `git`, but they are not interchang
 
 ### Source spec strings
 
-The reference's source union is structured JSON, but CodeRex's CLI takes one string. The two kinds a shape cannot express by inspection get a `scheme:` prefix; both accept an optional `@<rev>` suffix:
+The reference's source union is structured JSON, but Codape's CLI takes one string. The two kinds a shape cannot express by inspection get a `scheme:` prefix; both accept an optional `@<rev>` suffix:
 
 | Spec string | Detected as |
 |---|---|
@@ -648,18 +648,18 @@ For `git-subdir` the split is on the *first* `#` and then the *last* `@` after i
 
 ### Which of Claude's source kinds do not apply
 
-Claude's marketplace entry union has eight-ish kinds. CodeRex implements five of the shapes and deliberately not the rest:
+Claude's marketplace entry union has eight-ish kinds. Codape implements five of the shapes and deliberately not the rest:
 
-| Claude kind | CodeRex | Why |
+| Claude kind | Codape | Why |
 |---|---|---|
 | local path | ✅ `LocalDir` | Local-first tool; this is the primary source. |
 | `github` | ✅ `Github` | `owner/repo` shorthand plus an optional ref; resolved to a clone URL and handed to the git path. |
 | `git-subdir` | ✅ `GitSubdir` | A clone narrowed to a named subdirectory, with the git path's transport validation and commit pinning carried over. |
 | `url` | ✅ via `Git`/`Archive` | Not a separate kind: `{url, ref?, sha?}` is a clone (covered by `Git`) or, when the URL is an archive, a download (covered by `Archive`). `detect()` already picks between them from the URL itself, so adding a third spelling of the same two kinds would only be a way to get the same thing wrong twice. |
 | `archive` | ✅ `Archive` | Straightforward and gives the SHA-256 pin a home. |
-| `npm` | ⚪ not implemented | Needs a Node toolchain and registry resolution; CodeRex plugins are not npm packages, and there is no npm registry client anywhere in the workspace. The reference is in the same state — its own source throws `Error("NPM marketplace sources not yet implemented")` (`plugin.md:200`) — so this is recorded as a gap, not built. The spec string `npm:` is still recognised and refused with that same message, so it is never mistaken for a plugin by that name. |
+| `npm` | ⚪ not implemented | Needs a Node toolchain and registry resolution; Codape plugins are not npm packages, and there is no npm registry client anywhere in the workspace. The reference is in the same state — its own source throws `Error("NPM marketplace sources not yet implemented")` (`plugin.md:200`) — so this is recorded as a gap, not built. The spec string `npm:` is still recognised and refused with that same message, so it is never mistaken for a plugin by that name. |
 | `command` | ⚪ not implemented | **Decided against on purpose.** See below. |
-| `settings` | ⚪ not implemented | The reference's `settings` is a *marketplace* that lives inside settings. CodeRex registers marketplaces through `add_marketplace` (a base URL plus endpoint paths); its settings file has no plugin or marketplace table, so there is nothing to read and no local shape for the kind to take. Claude-internal, and local-first CodeRex has no equivalent container. |
+| `settings` | ⚪ not implemented | The reference's `settings` is a *marketplace* that lives inside settings. Codape registers marketplaces through `add_marketplace` (a base URL plus endpoint paths); its settings file has no plugin or marketplace table, so there is nothing to read and no local shape for the kind to take. Claude-internal, and local-first Codape has no equivalent container. |
 | `unsupported` | ⚪ | Claude's placeholder variant; nothing to implement. |
 
 ### Why `command` is not implemented
@@ -680,7 +680,7 @@ The decision is enforced by a test that asserts a `command:` spec does not becom
 
 ## Pinning (Trust on First Use)
 
-A configured signing key is the strong check, but a plugin installed with no key configured was previously `Unverified` with only a warning. CodeRex now also records what it installed, in `.coderex-pins.json` inside the install directory:
+A configured signing key is the strong check, but a plugin installed with no key configured was previously `Unverified` with only a warning. Codape now also records what it installed, in `.codape-pins.json` inside the install directory:
 
 - **Archive installs** record the archive's SHA-256.
 - **Git installs** record the resolved commit.
@@ -698,7 +698,7 @@ When a signing key **is** configured, an unverifiable source (directory/git/git-
 
 Claude's runtime mods export `register(on, options)` with `($, e, next)` hook callbacks — a JavaScript module loaded into the host's own runtime, sharing its event bus.
 
-CodeRex plugins are a JSON-RPC 2.0 protocol over stdio (`coderex/initialize`, `coderex/commands/list|execute`, `coderex/skills/list|execute`, `coderex/ping`, `coderex/shutdown`), spawned as separate processes. That is a deliberate, language-agnostic design: a plugin can be written in any language that can speak JSON on stdin/stdout, and it runs in its own process rather than in the host's.
+Codape plugins are a JSON-RPC 2.0 protocol over stdio (`codape/initialize`, `codape/commands/list|execute`, `codape/skills/list|execute`, `codape/ping`, `codape/shutdown`), spawned as separate processes. That is a deliberate, language-agnostic design: a plugin can be written in any language that can speak JSON on stdin/stdout, and it runs in its own process rather than in the host's.
 
 Adopting the JS callback shape would mean either embedding a JS runtime (a large dependency, and a whole engine's worth of sandbox surface) or inventing a lookalike API that is not actually Claude's. Neither buys a plugin author anything the JSON-RPC contract does not already give them. Recorded here as a legitimate difference, not a gap: the capability (a plugin that reacts to events and registers commands/skills) exists, in this protocol's form.
 
@@ -710,7 +710,7 @@ Adopting the JS callback shape would mean either embedding a JS runtime (a large
 ## Orchestrator Integration
 
 During startup (`phase_init_plugins`):
-1. Discover plugins from `.coderex/plugins/` and config home `plugins/`.
+1. Discover plugins from `.codape/plugins/` and config home `plugins/`.
 2. Load each `plugin.json` manifest into `PluginManager`.
 3. For process plugins: spawn, initialize, discover commands/skills dynamically.
 4. Store `PluginManager` in `SessionContext`.
@@ -741,25 +741,25 @@ During REPL construction:
 - Dependency resolution: topological sort with cycle detection via Kahn's algorithm.
 - Error recovery: `retry_failed_plugins()` attempts to re-read manifests for Error-state plugins up to `max_retries`.
 - Reconciliation: detect new, updated, removed plugins.
-- Auto-install new plugins from marketplace: opt-in with `CODEREX_PLUGIN_AUTO_INSTALL=1`; off by default (installing third-party code is a user decision). Signature/pin checks still apply.
+- Auto-install new plugins from marketplace: opt-in with `CODAPE_PLUGIN_AUTO_INSTALL=1`; off by default (installing third-party code is a user decision). Signature/pin checks still apply.
 - Skill loading from all 5 sources with conflict resolution.
 - Skill frontmatter parsing via `serde_yaml` with custom scalar/array deserializers.
-- Repo-specific skills from `.coderex/skills/`.
+- Repo-specific skills from `.codape/skills/`.
 - MCP skills bridge: `phase_init_mcp` converts discovered MCP tools to `SkillMetadata`.
-- **WASM runtime enabled by default**: `process-runtime` and `wasm-runtime` are both default Cargo features; WASM calls run under fuel (100M per call), a 64 MiB memory limiter, disabled threads, and one optional host import (`coderex.user_config`). Compilation is guarded by a `wasmparser` pre-scan (16 MiB file, 8 MiB code section, 50,000 functions, 1,000,000 operators, 256 nesting levels) and always runs out-of-process through a host-injected compiler command (the CLI re-executes itself with `--internal-wasm-compile`) with `RLIMIT_CPU` and a best-effort 2 GiB memory limit (`RLIMIT_AS`, `RLIMIT_DATA` on Darwin, plus a cgroup v2 `memory.max` on Linux when a delegated tree is available), a wall-clock timeout, and a process-group, cgroup or Job Object kill. There is no in-process fallback: a missing or failing compiler refuses the load. Successful compilations are cached as serialized modules keyed by engine-config and module SHA-256 (256 MiB bounded).
-- **WASM `userConfig` injection**: the same resolution and validation as process plugins, delivered to a module that imports `coderex.user_config(ptr, capacity) -> required_len` as one JSON object in its linear memory; modules that do not import it are unchanged.
-- **Full manifest field table** with `deny_unknown_fields`, `PluginAuthor` accepting a string or an object, and a load-time warning for fields CodeRex accepts but does not implement.
-- **`userConfig` injection**: `CODEREX_PLUGIN_OPTION_<KEY>` in the child's environment and `${user_config.KEY}` substitution in `env` and `entrypoint`; sensitive options refuse a plaintext default and refuse an unresolved `keyring://` reference; a required option with no value stops the spawn.
+- **WASM runtime enabled by default**: `process-runtime` and `wasm-runtime` are both default Cargo features; WASM calls run under fuel (100M per call), a 64 MiB memory limiter, disabled threads, and one optional host import (`codape.user_config`). Compilation is guarded by a `wasmparser` pre-scan (16 MiB file, 8 MiB code section, 50,000 functions, 1,000,000 operators, 256 nesting levels) and always runs out-of-process through a host-injected compiler command (the CLI re-executes itself with `--internal-wasm-compile`) with `RLIMIT_CPU` and a best-effort 2 GiB memory limit (`RLIMIT_AS`, `RLIMIT_DATA` on Darwin, plus a cgroup v2 `memory.max` on Linux when a delegated tree is available), a wall-clock timeout, and a process-group, cgroup or Job Object kill. There is no in-process fallback: a missing or failing compiler refuses the load. Successful compilations are cached as serialized modules keyed by engine-config and module SHA-256 (256 MiB bounded).
+- **WASM `userConfig` injection**: the same resolution and validation as process plugins, delivered to a module that imports `codape.user_config(ptr, capacity) -> required_len` as one JSON object in its linear memory; modules that do not import it are unchanged.
+- **Full manifest field table** with `deny_unknown_fields`, `PluginAuthor` accepting a string or an object, and a load-time warning for fields Codape accepts but does not implement.
+- **`userConfig` injection**: `CODAPE_PLUGIN_OPTION_<KEY>` in the child's environment and `${user_config.KEY}` substitution in `env` and `entrypoint`; sensitive options refuse a plaintext default and refuse an unresolved `keyring://` reference; a required option with no value stops the spawn.
 - **Install sources**: marketplace listing, local directory, git URL, GitHub `owner/repo` shorthand, a git subdirectory, and HTTPS archive — with `PluginSource::detect()` classifying a CLI argument, and the unimplemented `npm`/`command` kinds recognised and refused rather than silently reinterpreted.
-- **Pinning**: trust-on-first-use SHA-256 for archives and commit pinning for git, recorded in `.coderex-pins.json`.
+- **Pinning**: trust-on-first-use SHA-256 for archives and commit pinning for git, recorded in `.codape-pins.json`.
 
 ### Known Gaps
 
 - No keychain access in this crate, so sensitive options are host-supplied or environment-supplied; nothing prompts the user or writes answers back to settings (see "userConfig Injection").
 - ~~Plugin channels route notifications … but nothing drives `route_channel_notification` from a live stream yet~~ **已接线**:CLI 通过 `set_notification_router` 把每个 MCP 通知转给 `route_channel_notification`(`orchestrator.rs:2084`),再由渠道的 sink 投递(2026-10-31 起可 POST 到 webhook、调用 MCP 工具,或运行本地命令)。
 - Pin files are created by the first install; a user cannot pre-seed a pin before installing.
-- WASM plugins must import `coderex.user_config` to receive options; an existing module cannot be given `userConfig` without that ABI change.
-- WASM compilation always requires a host-injected compiler command (or a `coderex-wasm-compile` next to the executable); with neither, loads fail closed. On Darwin the memory bound is `RLIMIT_DATA`, which does not cap the full address space; the Windows Job Object path is untested, and the compiler sandbox degrades to rlimits plus process-group kill where `sandbox-exec`/`bwrap` cannot be applied (see "WASM Plugins").
+- WASM plugins must import `codape.user_config` to receive options; an existing module cannot be given `userConfig` without that ABI change.
+- WASM compilation always requires a host-injected compiler command (or a `codape-wasm-compile` next to the executable); with neither, loads fail closed. On Darwin the memory bound is `RLIMIT_DATA`, which does not cap the full address space; the Windows Job Object path is untested, and the compiler sandbox degrades to rlimits plus process-group kill where `sandbox-exec`/`bwrap` cannot be applied (see "WASM Plugins").
 - `npm` and `command` sources are not implemented (see above for why, and for the reference citation on `npm`).
 - `crates/cli/src/orchestrator.rs` parses `plugin.json` itself in `phase_init_plugins`; a parse error is now logged as a warning rather than silently ignored.
 
@@ -768,6 +768,6 @@ During REPL construction:
 - 169 tests in `plugins.rs` (manager ops, load/unload, marketplace, discovery, reconciler, URL validation, version checks, signature verification, dependency resolution, error recovery, custom endpoints, the manifest field table, `userConfig` resolution and injection end-to-end including the WASM required-option path, `userConfig` schema validation (`options`/`min`/`max`/`type`), plugin channels (live report states and notification routing), the plugin type registry, source detection and git URL validation, directory/git/git-subdir installs, structured source specs, the `npm`/`command` refusals, SHA-256 vectors and pin enforcement).
 - 14 tests in `skills.rs` (parsing, loader, plugin/MCP skills, repo dir, conflict resolution, precedence, quoted strings).
 - 7 tests in `runtime.rs` (spawn, initialize, terminate, invalid command).
-- 20 tests in `wasm_runtime.rs`, all run by the default `cargo test -p coderex-plugins`: 4 core/unit tests (the loader stub, the injected command's program/leading-argument shape, helper discovery, and the platform rlimit plan), 10 sandbox tests (fuel, memory growth, initial memory, shared memory, WASI import, the 3 size-cap cases, `userConfig` injection into an importing module, and an empty-import module still running), and 6 pre-scan tests (normal module, oversized code section, too many functions, too many operators, excessive nesting, nesting exactly at the cap).
+- 20 tests in `wasm_runtime.rs`, all run by the default `cargo test -p codape-plugins`: 4 core/unit tests (the loader stub, the injected command's program/leading-argument shape, helper discovery, and the platform rlimit plan), 10 sandbox tests (fuel, memory growth, initial memory, shared memory, WASI import, the 3 size-cap cases, `userConfig` injection into an importing module, and an empty-import module still running), and 6 pre-scan tests (normal module, oversized code section, too many functions, too many operators, excessive nesting, nesting exactly at the cap).
 - Integration tests in `tests/wasm_compile_subprocess.rs`: an injected command compiles, serializes, and deserializes; leading arguments are forwarded; the host-injected global command is used; a missing command fails closed with an actionable error and leaves no artifacts; a slow helper and its spawned descendant are killed at the wall-clock limit; a second load hits the AOT cache with exactly one compiler invocation; a pathological module is rejected by the pre-scan without starting the compiler; and, on Linux, the compiler is attached to a cgroup carrying the memory ceiling.
 - Tests use `tempfile` for filesystem operations. The git and git-subdir install tests create a throwaway repository inside a `tempfile::tempdir()` and pin every git command with `-C`, so they never touch the project's own repository. The subdirectory tests use `file://` clone URLs, so they need no network.

@@ -1,9 +1,9 @@
 # Terminal-Bench: what runs, and what it has found
 
-Terminal-Bench is the external agent benchmark CodeRex is measured against. The
+Terminal-Bench is the external agent benchmark Codape is measured against. The
 runner lives in [`scripts/external-benchmarks/terminal-bench/`](../scripts/external-benchmarks/terminal-bench/)
 and is described there; this file is the **record of results**, and it is the
-place to look before blaming a model for a result CodeRex caused, or vice
+place to look before blaming a model for a result Codape caused, or vice
 versa.
 
 The distinction that matters throughout: a benchmark score of 0 can mean the
@@ -19,10 +19,10 @@ Every trial writes these to
 | File | What it answers |
 |---|---|
 | `results.json` | `accuracy`, per-task `parser_results`, and `failure_mode` |
-| `<task>/*/sessions/agent.log` | the last lines of CodeRex's stream-json transcript |
+| `<task>/*/sessions/agent.log` | the last lines of Codape's stream-json transcript |
 | `<task>/*/sessions/tests.log` | the grading test's real output, including the assertion text |
 | `<task>/*/panes/post-agent.txt` | the terminal state when the agent stopped |
-| `/logs/coderex-stream.jsonl` (in-container) | the **full** transcript, copied there by the adapter |
+| `/logs/codape-stream.jsonl` (in-container) | the **full** transcript, copied there by the adapter |
 
 `failure_mode` is the first thing to check, because it says whether the agent
 ever got a fair test:
@@ -30,9 +30,9 @@ ever got a fair test:
 | `failure_mode` | Meaning |
 |---|---|
 | `unset` | the agent exited cleanly and the task's tests ran and scored it |
-| `unknown_agent_error` | CodeRex's `result` frame reported an error (see the subtype) |
+| `unknown_agent_error` | Codape's `result` frame reported an error (see the subtype) |
 | `test_timeout` | the grading test itself timed out — the run was not scored on merit |
-| `agent_timeout` | CodeRex exceeded its own timeout |
+| `agent_timeout` | Codape exceeded its own timeout |
 | `parse_error` | the harness found no pytest summary, so it never scored the run — usually the test script died during its own bootstrap (`apt-get update`, installing `uv`) |
 
 `parse_error` and `test_timeout` are both "the test never produced a verdict".
@@ -55,8 +55,8 @@ before blaming the agent.
 ## Environment on this machine
 
 - macOS on arm64; Docker runs `linux/arm64` task images.
-- There is no published aarch64 CodeRex release, so runs use
-  `--coderex-binary` with a locally cross-built **static musl** binary. A
+- There is no published aarch64 Codape release, so runs use
+  `--codape-binary` with a locally cross-built **static musl** binary. A
   glibc build against `rust:1.99.1` links against glibc 2.39, which the
   `bookworm` task images (2.36) cannot load — `GLIBC_2.39 not found` before
   the agent starts. Build static instead:
@@ -64,16 +64,16 @@ before blaming the agent.
   ```bash
   export http_proxy=http://127.0.0.1:1087 https_proxy=http://127.0.0.1:1087
   docker run --rm --platform linux/arm64 \
-    -v "$PWD":/src:ro -v /tmp/coderex-musl-target:/target \
-    -v /tmp/coderex-cargo-registry:/usr/local/cargo/registry \
+    -v "$PWD":/src:ro -v /tmp/codape-musl-target:/target \
+    -v /tmp/codape-cargo-registry:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/target -w /src rust:1.99.1 \
     bash -c 'rustup target add aarch64-unknown-linux-musl \
              && apt-get update -qq && apt-get install -y -qq musl-tools pkg-config libdbus-1-dev \
              && cargo build --release --locked --target aarch64-unknown-linux-musl \
-                  -p coderex-cli --bin coderex'
+                  -p codape-cli --bin codape'
   ```
 
-  The result is `/tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex`.
+  The result is `/tmp/codape-musl-target/aarch64-unknown-linux-musl/release/codape`.
   Two things to get right: `rustup target add` must run **in the same
   container invocation** every time (the target is not in the image), and the
   first build downloads the whole registry — it takes 20+ minutes on this
@@ -87,13 +87,13 @@ before blaming the agent.
   `https://api.kimi.com/coding`, context window 1 048 576. The key is read from
   that file at run time and exported into the runner's environment; it is never
   written to the dataset, the run directory, or a command line. The adapter's
-  `PASSTHROUGH_ENV` forwards `ANTHROPIC_*` and `CODEREX_*` into the container.
-  Give `CODEREX_CONTEXT_WINDOW` the real window — CodeRex assumes 32 000 for a
+  `PASSTHROUGH_ENV` forwards `ANTHROPIC_*` and `CODAPE_*` into the container.
+  Give `CODAPE_CONTEXT_WINDOW` the real window — Codape assumes 32 000 for a
   model it does not recognise. A trailing slash on the base URL is harmless:
   `request_url` trims it before appending `/v1/messages`
   (`crates/core/src/api_client.rs:1002`).
-- `--coderex-binary` requires the path **on the host**; the adapter copies it
-  into the container as `/tmp/coderex-local-binary`.
+- `--codape-binary` requires the path **on the host**; the adapter copies it
+  into the container as `/tmp/codape-local-binary`.
 
 ### Linux x86_64 host (from 2026-11-04)
 
@@ -105,12 +105,12 @@ the constraints above do not apply there:
 - No cross build and no proxy are needed. The native target works, and the
   provider, `huggingface.co`, `github.com` and `dl-cdn.alpinelinux.org` are
   reachable directly, so image builds use the unpatched network path.
-- The binary is `/tmp/coderex-0.1.3`, the published 0.1.3 release rebuilt as
+- The binary is `/tmp/codape-0.1.3`, the published 0.1.3 release rebuilt as
   `x86_64-unknown-linux-musl` (`static-pie linked`, stripped), run with
-  `--coderex-binary`.
+  `--codape-binary`.
 - The model endpoint is `https://opencode.ai/inference/go/anthropic` with
   model `deepseek-v4.1-flash` and the header `x-opencode-session` supplied
-  through `CODEREX_CUSTOM_HEADERS`; `CODEREX_CONTEXT_WINDOW=131072`. The key
+  through `CODAPE_CUSTOM_HEADERS`; `CODAPE_CONTEXT_WINDOW=131072`. The key
   and base URL are read from `~/.claude/settings.json` at run time, never
   written into the dataset or a command line.
 - The root filesystem is 50 GB. The docker build cache filled it during the
@@ -132,7 +132,7 @@ with a post-receive hook deploying to an nginx on `:8080`. Its test clones with
 
 | Run | `failure_mode` | Test verdict | Root cause |
 |---|---|---|---|
-| `tb-20261101-052106` | unset | HTTP 000 | CodeRex ended the turn early (see defect 1) |
+| `tb-20261101-052106` | unset | HTTP 000 | Codape ended the turn early (see defect 1) |
 | `tb-20261101-054858` | unset | HTTP 000 | same |
 | `tb-20261101-060424` | unset | HTTP 000 | same |
 | `tb-20261101-061448` | unset | HTTP 000 | same — 89 s, 1 turn, no work beyond installing git |
@@ -140,7 +140,7 @@ with a post-receive hook deploying to an nginx on `:8080`. Its test clones with
 | `tb-final-200330` | unset | HTTP 000 | ran the full 18 min; built a design the test does not accept |
 | `tb-accept-202553` | test_timeout | HTTP 404 | nginx up, file not in the web root; grading timed out |
 
-**Final verdict: model design substitution, not a CodeRex defect.** With the
+**Final verdict: model design substitution, not a Codape defect.** With the
 harness defects fixed the agent runs to completion, but it builds its own
 service rather than the one specified:
 
@@ -160,7 +160,7 @@ agent replaced it.
 ### 2026-11-01 — `hello-world`, 3 runs, **1 resolved**
 
 The simplest task in the dataset: write `/app/hello.txt` with exactly
-`Hello, world!\n` and create nothing else. It was chosen to separate "CodeRex
+`Hello, world!\n` and create nothing else. It was chosen to separate "Codape
 can finish a task at all" from the design-substitution problem above.
 
 | Run | `failure_mode` | Agent result | Root cause |
@@ -169,7 +169,7 @@ can finish a task at all" from the design-substitution problem above.
 | `tb-hello-musl-222541` | test_timeout | **correct, 26 s** | the grading script's `apt-get update` exceeded the 60 s test budget |
 | `tb-hello-graded-223630` | unset | **correct, 26 s** | **1/1 resolved** — both assertions passed |
 
-**This is the first task CodeRex has passed on Terminal-Bench**, and it is a
+**This is the first task Codape has passed on Terminal-Bench**, and it is a
 clean result: `failure_mode: unset` and `parser_results` =
 `{test_hello_file_exists: passed, test_hello_file_content: passed}`. The two
 earlier failures were both environment, not agent.
@@ -179,7 +179,7 @@ earlier failures were both environment, not agent.
 The gnu build was linked against the toolchain image's newer glibc:
 
 ```
-/usr/local/bin/coderex: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+/usr/local/bin/codape: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
 INSTALL_FAIL_STATUS
 ```
 
@@ -190,14 +190,14 @@ both, and on whatever base a later task uses:
 
 ```bash
 docker run --rm --platform linux/arm64 \
-  -v "$PWD":/src:ro -v /tmp/coderex-musl-target:/target \
-  -v /tmp/coderex-cargo-registry:/usr/local/cargo/registry \
+  -v "$PWD":/src:ro -v /tmp/codape-musl-target:/target \
+  -v /tmp/codape-cargo-registry:/usr/local/cargo/registry \
   -e CARGO_TARGET_DIR=/target -w /src rust:1.99.1 \
   bash -c 'apt-get update -qq && apt-get install -y -qq musl-tools libdbus-1-dev pkg-config \
            && rustup target add aarch64-unknown-linux-musl \
            && cargo build --release --locked --target aarch64-unknown-linux-musl \
-                -p coderex-cli --bin coderex'
-# /tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex
+                -p codape-cli --bin codape'
+# /tmp/codape-musl-target/aarch64-unknown-linux-musl/release/codape
 # -> "statically linked"; ~11 min cold
 ```
 
@@ -266,13 +266,13 @@ failed on `os.path.exists("/app/solution.txt")`.
 
 This is the same class as `configure-git-webserver`: the model satisfies its
 own idea of the task and drops a literal requirement ("write it to
-`/app/solution.txt`"). It is not a CodeRex defect — the stream ended cleanly
+`/app/solution.txt`"). It is not a Codape defect — the stream ended cleanly
 with `end_turn`.
 
 ### 2026-11-02 — the stdin truncation, and what it invalidated
 
-Every result above was measured with a CodeRex that **only read the first line
-of a piped prompt**. `coderex -p` used `read_line`, so a multi-line task
+Every result above was measured with a Codape that **only read the first line
+of a piped prompt**. `codape -p` used `read_line`, so a multi-line task
 description reached the model as its first line and nothing else. The model
 then answered what it could see, and the turn still ended as `success`, so no
 `failure_mode` revealed it.
@@ -349,7 +349,7 @@ build arg is not visible to `RUN`. With those in place the clone succeeds.
 `fix-git`'s setup clones `TheMikeMerrill/personal-site`, which now returns
 `Repository not found` from every path tried (direct, proxied). This is a stale
 dataset dependency, not a network or proxy failure, and it cannot be fixed
-from CodeRex's side.
+from Codape's side.
 
 `sanitize-git-repo` builds and starts. Its first attempt was refused by the
 local gateway (`kiwanod: unknown API key`), so it was re-run against the direct
@@ -362,7 +362,7 @@ extra file outside the allowed set
 (`exp_data/datasets/tokenized/rw_v2_fasttext_openhermes_vs_rw_v2_bigram_0.1_arcade100k.json`),
 because its broader sweep found a credential there too. The grader only
 permits changes to the contaminated paths, so the extra edit fails the run.
-That is over-scoping by the model, not a CodeRex defect.
+That is over-scoping by the model, not a Codape defect.
 
 Recorded failure signature for this task: `test_removal_of_secret_information`
 and `test_correct_replacement_of_secret_information` pass, while
@@ -399,7 +399,7 @@ checks read the main config. A correct conf.d-only setup therefore fails even
 though the site serves, logs, and rate-limits correctly (the other seven
 assertions pass).
 
-These two are recorded as **dataset problems**, not model or CodeRex problems.
+These two are recorded as **dataset problems**, not model or Codape problems.
 The remaining tasks pass end-to-end.
 
 ### 2026-11-02 — fourth batch, **3/5 resolved**
@@ -429,7 +429,7 @@ Whether `tar` records the parent path depends on how the command is written
 (`-C /opt sensitive_service_data` vs `-C /`), and the instruction does not say
 which. The archive itself is valid and encrypted with AES256 as required.
 
-Both failures are **underspecified requirements**, not CodeRex defects — and
+Both failures are **underspecified requirements**, not Codape defects — and
 unlike the earlier batches, the model's work is correct in every functional
 respect that the instruction states.
 
@@ -458,7 +458,7 @@ decommissioning-service-with-sensitive-data
 |---|---|---|
 | `prove-plus-comm` | ✅ resolved | scored by its tests |
 | `password-recovery` | ✅ resolved | scored by its tests |
-| `jupyter-notebook-server` | ❌ unresolved | **CodeRex defect** — `error_loop_detected`, now fixed |
+| `jupyter-notebook-server` | ❌ unresolved | **Codape defect** — `error_loop_detected`, now fixed |
 | `raman-fitting.easy` | ❌ unresolved | **dataset contradiction** — instruction says `amplitude`, test reads `["A"]` |
 | `tmux-advanced-workflow` | ⚪ not scored | `parse_error` — the test died in its own `apt-get update` |
 
@@ -509,7 +509,7 @@ printing `61% [4 Packages 5294 kB/8689 kB]` when the pane was captured; at the
 several minutes. This is the same starvation that hit `hello-world` and is why
 `--test-timeout 900` exists — but this trial was not launched with it. **That
 this batch got `parse_error` rather than `test_timeout` is a harness difference,
-not a CodeRex result.** Re-run with `--test-timeout 900` to score it.
+not a Codape result.** Re-run with `--test-timeout 900` to score it.
 
 There is a second, independent problem in this trial: the agent began with
 `tmux kill-server 2>/dev/null`, which destroys **every** tmux session on the
@@ -520,11 +520,11 @@ keystrokes and captures panes. `panes/post-agent.txt` is the whole failure:
 no server running on /tmp/tmux-0/default
 ```
 
-and `coderex-exit-code` is `137` (SIGKILL) rather than a clean exit. The
+and `codape-exit-code` is `137` (SIGKILL) rather than a clean exit. The
 harness created the `agent` session and, at 05:12:00, the `tests` session; the
 agent's `kill-server` took them both out and `tmux ls` afterwards showed only a
 `tests` session that had been re-created. This is **model behaviour conflicting
-with the harness's transport**, not a CodeRex bug — CodeRex ran the command the
+with the harness's transport**, not a Codape bug — Codape ran the command the
 model asked for — but it is worth knowing when scoring tmux tasks: a run that
 kills the server cannot be graded no matter how good the work was.
 
@@ -707,10 +707,10 @@ mid-run with a 401:
 API error (401): Authentication Fails, Your api key: ****7b81 is invalid
 ```
 
-The agent's last turn had already fixed the package, `coderex-exit-code` is
-`0`, and the test passed. This is a provider-key failure, not a CodeRex failure,
+The agent's last turn had already fixed the package, `codape-exit-code` is
+`0`, and the test passed. This is a provider-key failure, not a Codape failure,
 and it is the reason the switch to KIMI was made. Worth knowing when reading
-`unknown_agent_error` in these results: check `coderex-exit-code` and the last
+`unknown_agent_error` in these results: check `codape-exit-code` and the last
 `result` line before blaming the agent.
 
 **`git-multibranch` — a different failure from batch 7, see above.** The agent
@@ -768,7 +768,7 @@ reads a missing file and fails. Exit code 124 — the harness's 900 s timer. The
 stream also stopped on a tool result with no closing `result` frame, which is
 the defect fixed as #7 below.
 
-*The cwd was not stuck.* This was first written up here as a suspected CodeRex
+*The cwd was not stuck.* This was first written up here as a suspected Codape
 defect, on the evidence that every Bash call began with `cd /tmp`. The stream
 disproves it: the first `pwd`/`ls -la /app` runs in `/app`, and the `CurrentDir`
 tool returns `/app`. `cd /tmp` was the model's own choice, and
@@ -776,9 +776,9 @@ tool returns `/app`. `cd /tmp` was the model's own choice, and
 there is no persistent shell whose directory could drift. Recorded so the
 suspicion is not raised twice.
 
-Two CodeRex problems did fall out of this run: the single hard-coded WebSearch
+Two Codape problems did fall out of this run: the single hard-coded WebSearch
 backend and the missing closing event when a timeout ends a run. Both are now
-fixed — see defects 5 and 7 in [CodeRex defects the benchmark
+fixed — see defects 5 and 7 in [Codape defects the benchmark
 exposed](#coderx-defects-the-benchmark-exposed).
 
 ### 2026-11-02 — tenth batch, **2/5 resolved**
@@ -804,7 +804,7 @@ E: Failed to fetch http://deb.debian.org/debian-security/pool/updates/main/q/qem
 
 The pool now carries only 7.2 (bookworm) and 10.0 (trixie). This fails in
 `docker compose build`, before the agent container exists, so it is a dataset
-bit-rot failure and not a CodeRex result. It is listed as not measured rather
+bit-rot failure and not a Codape result. It is listed as not measured rather
 than as a failure — the harness itself records `unknown_agent_error`, but no
 agent ever ran.
 
@@ -846,13 +846,13 @@ Five tasks that had never been run, all on KIMI (`k3`).
 | Task | Result | Notes |
 |---|---|---|
 | `blind-maze-explorer-algorithm` | ✅ resolved | explored the maze and produced a map the test accepts |
-| `path-tracing` | ✅ resolved (4/4) | reconstructed the image at 0.996 similarity; recorded as a failure only because of a CodeRex shutdown defect, now fixed |
+| `path-tracing` | ✅ resolved (4/4) | reconstructed the image at 0.996 similarity; recorded as a failure only because of a Codape shutdown defect, now fixed |
 | `conda-env-conflict-resolution` | ❌ unresolved | 900 s timeout; `environment.yml` was fixed correctly, conda never finished |
 | `pytorch-model-cli` | ⚠️ not measured | test phase starved by `apt-get` at 49 kB/s; pytest never printed a summary |
 | `sanitize-git-repo.hard` | ⚠️ not measured | image build: `git clone dclm` died mid-transfer |
 
 **`path-tracing` — a run that passed every test was recorded as a failure, and
-the cause was CodeRex.** The four assertions all pass:
+the cause was Codape.** The four assertions all pass:
 
 ```
 PASSED test_image_c_exists  test_image_compiles
@@ -861,11 +861,11 @@ PASSED test_runs_and_produces_output  test_image_similarity
 
 The result frame says `subtype: success`, and the image it rendered scores
 0.9959 against the target. Yet the trial is still `unknown_agent_error`,
-because `coderex-exit-code` is `124`: the 900 s timer fired. The timeline
+because `codape-exit-code` is `124`: the 900 s timer fired. The timeline
 explains it — the `result` frame was written at 892.9 s, and the harness killed
 the process at 900 s, seven seconds later.
 
-Those seven seconds were not shutdown. With `CODEREX_LOG` on, the process
+Those seven seconds were not shutdown. With `CODAPE_LOG` on, the process
 issues **one more non-streaming, tool-less model request after the result
 frame** and waits 7.5 s for it:
 
@@ -911,7 +911,7 @@ fatal: early EOF
 
 The clone is 12+ minutes in and then drops, so the image never exists and no
 agent runs. As with `qemu-alpine-ssh` in the tenth batch, this is recorded as
-not measured rather than as a CodeRex failure.
+not measured rather than as a Codape failure.
 
 ### 2026-11-02 — twelfth batch, **4/5 resolved**
 
@@ -944,8 +944,8 @@ Two things are worth separating here:
 - **The budget question is a model question.** 2700 s is the full agent
   timeout. Whether Zork at 350 is reachable in that window is not something
   this run can answer; the run spent it exploring, not finishing.
-- **The defect is CodeRex's.** The stream ends on a `user` (tool-result) frame
-  and `coderex-exit-code` is 124 — exactly the shape recorded for
+- **The defect is Codape's.** The stream ends on a `user` (tool-result) frame
+  and `codape-exit-code` is 124 — exactly the shape recorded for
   `polyglot-rust-c` in the ninth batch. The last tool call before the timer
   is also instructive:
 
@@ -1018,7 +1018,7 @@ E: Failed to fetch http://deb.debian.org/debian-security/pool/updates/main/... 4
 
 That is the same failure recorded for `qemu-alpine-ssh` in the seventh batch,
 now confirmed on a second task from the same base image. It is a dataset
-problem, not a CodeRex one.
+problem, not a Codape one.
 
 ### 2026-11-02 — fourteenth batch, **2/3 resolved, and one pass after a timeout**
 
@@ -1138,7 +1138,7 @@ is narrow and reproducible from the transcript.
 (`ReadTimeoutError` from `files.pythonhosted.org`) with and without the proxy
 build args. `eval-mteb`'s apt stage stalls on `libx11-6` from
 `deb.debian.org`. Both stay in the never-run list; neither says anything
-about CodeRex.
+about Codape.
 
 ### 2026-11-03 — nineteenth batch, two fixtures that could not run
 
@@ -1302,7 +1302,7 @@ The test's `init` string is a full provisioning script: it re-runs
 takes far longer than the 1800 s test budget, so QEMU never ran and the trial
 is recorded as `test_timeout`. The reference task assumes a fast apt; here the
 same 25 minutes the agent already paid are paid again. That is a measurement
-artefact of the network, not a CodeRex result — the deliverable it grades was
+artefact of the network, not a Codape result — the deliverable it grades was
 present.
 
 The remedy is to pre-install the toolchain in the fixture image, so the test's
@@ -1338,7 +1338,7 @@ it the image builds (477 KB test split, 299 MB train split).
 | `build-linux-kernel-qemu` | ❌ unresolved | `test_timeout`; with the toolchain pre-installed the agent finished in 24 minutes and the test booted — but it booted a ramfs that never reaches a login prompt |
 
 With the toolchain in the image the test's apt-get became a no-op and QEMU
-finally ran. It still failed, for a reason that had nothing to do with CodeRex.
+finally ran. It still failed, for a reason that had nothing to do with Codape.
 The instruction says:
 
 > I've created an initial ramfs for you, so once its built, all you should have
@@ -1366,7 +1366,7 @@ budget expired — recorded as a test timeout with no output at all.
 Three fixture defects, all upstream of the agent: a promised file that never
 existed, a test script that silently reuses an agent's artifact, and an
 unbounded `set timeout -1` that turns any boot failure into silence. None of
-them is a CodeRex defect.
+them is a Codape defect.
 
 ### 2026-11-03 — fixing the kernel fixture's ramfs
 
@@ -1418,7 +1418,7 @@ cross build — then the provider stopped the run:
 API error (429): You've reached your weekly (7-day) usage limit.
 ```
 
-724 s of work, `is_error: true`, no kernel. Nothing in this trial is a CodeRex
+724 s of work, `is_error: true`, no kernel. Nothing in this trial is a Codape
 or fixture result.
 
 What it did prove is the diagnostic half of the fix. The old test would have
@@ -1455,7 +1455,7 @@ real `apt-get` work were paying that without noticing.
 
 The adapter now accepts `--task-proxy-direct-hosts`, a comma-separated list
 of hosts appended to `no_proxy` / `NO_PROXY` in both the agent's environment
-and `/etc/profile.d/99-coderex-proxy.sh`. With
+and `/etc/profile.d/99-codape-proxy.sh`. With
 `--task-proxy http://host.docker.internal:1087 --task-proxy-direct-hosts
 ports.ubuntu.com,deb.debian.org,pypi.org`, apt stays on the fast direct route
 while `huggingface.co` still goes through the proxy. The provider host and
@@ -1483,8 +1483,8 @@ This campaign replaced the machine and the endpoint. The host is Linux 6.8 on
 x86_64 (16 vCPU, 61 GB RAM, Docker Engine, a 50 GB root filesystem), the
 network is direct, and the model is `deepseek-v4.1-flash` behind
 `https://opencode.ai/inference/go/anthropic`, with
-`CODEREX_CONTEXT_WINDOW=131072` and the header `x-opencode-session`. The agent
-binary is CodeRex 0.1.3 built for `x86_64-unknown-linux-musl` — static-pie and
+`CODAPE_CONTEXT_WINDOW=131072` and the header `x-opencode-session`. The agent
+binary is Codape 0.1.3 built for `x86_64-unknown-linux-musl` — static-pie and
 stripped, so it runs in every task container without a libc. None of these runs
 used `--task-proxy`: the hosts that were only reachable through one on the Mac
 resolve directly here, which also removes the 20× apt slowdown the proxy
@@ -1605,14 +1605,14 @@ Agent budgets were 600 s for the short groups, 900 s for data/download tasks,
 1200–1800 s for builds and services, and 2400 s for training. `--max-turns` was
 200 everywhere; test budgets were 120–900 s; the context window was 131072.
 
-The per-request *output* ceiling is separate: CodeRex's
+The per-request *output* ceiling is separate: Codape's
 `DEFAULT_MAX_TOKENS = 32768`. The adapter has no `max_tokens` option, and the
 CLI has no flag — only an agent definition can set one (`set_max_tokens`), which
 these runs do not use. `gpt2-codegolf`'s first run is the case where this
 mattered: it ended after 202 s with `error_max_output_tokens`, one turn, zero
 tool calls, because reasoning consumed all 32 768 tokens before any text or
 tool use. Probing the provider directly with `max_tokens` 65 536 and 131 072
-returned HTTP 200 and `end_turn` for both, so 32 768 is CodeRex's default, not
+returned HTTP 200 and `end_turn` for both, so 32 768 is Codape's default, not
 a gateway cap. At 900 s the second run wrote `/app/gpt2.c` at 5156 bytes
 against the 5000-byte limit and was then cut off by the agent timeout.
 
@@ -1623,7 +1623,7 @@ stopped at 979 s with `{"subtype":"success","is_error":false,"result":""}`.
 That closing turn carried no text and no tool call; the transcript has no
 assistant text at all, and the last frame before the result is a tool result.
 The only response shape consistent with both facts is a thinking-only turn: a
-text delta or a tool call would have produced a frame. CodeRex reported it as a
+text delta or a tool call would have produced a frame. Codape reported it as a
 finished run, which is defect 12 below.
 
 A fourth run, with the empty-answer fix in place (1800 s), did not reproduce
@@ -1693,7 +1693,7 @@ its own output with `OSError: [Errno 28]`, `results.json` is 0 bytes, and
 rerun with a disk guard. The pre-fix pdp11 run remains the evidence for defect
 14.
 
-The 17 GB is a model artifact, not CodeRex: its last visible tool result shows
+The 17 GB is a model artifact, not Codape: its last visible tool result shows
 a Python PDP-11 emulator executing 5 669 instructions and printing the wrong
 sequence, and `/app/work` was still being rewritten as the disk filled. Container
 writable layers are on the host's root filesystem, so a long trial needs a
@@ -1701,7 +1701,7 @@ periodic `df`/`du` check as well as the preflight one.
 
 A second casualty of the same period was not a result at all:
 `playzork-budgetfix-600turns` started two minutes after the fasttext ENOSPC,
-ran its agent phase for 24 s, wrote no `coderex-stream.jsonl`, and its
+ran its agent phase for 24 s, wrote no `codape-stream.jsonl`, and its
 `post-agent.txt` is `can't find pane: agent`. It is recorded as invalid and
 says nothing about the budget fix.
 A fifth run, at 7200 s, was the first to reach the compaction defect: it died
@@ -1813,7 +1813,7 @@ playing; the test file is byte-identical in `0.1.1` and `0.1.1-analysis`, so
 this is upstream. The task is tagged `shortcut-solution`, and this is exactly
 what that tag buys: the only way to pass is to recite the author's paraphrase,
 while following the instruction — "write the ending message ... exactly as it
-appears on the screen" — guarantees a failure even at a perfect score. CodeRex
+appears on the screen" — guarantees a failure even at a perfect score. Codape
 solved the stated goal; the fixture, not the model, is what failed. Until the
 assertion is corrected to the string the game emits, a `play-zork` pass is
 evidence about memorised test data, not about play.
@@ -1837,7 +1837,7 @@ looking for `apout` when the run ended:
 
 A turn hit the 32 768-token output ceiling with no text and no tool call — the
 same thinking-only shape as `gpt2-codegolf`'s first run, now at the ceiling
-that was supposed to leave room for reasoning. CodeRex treats `max_tokens` as
+that was supposed to leave room for reasoning. Codape treats `max_tokens` as
 a terminal reason by design (retrying would double the cost), so the whole
 session ends. The adapter offers no `max_tokens` knob and the CLI has no flag;
 the provider accepted 65 536 and 131 072 in a direct probe. Nothing in this
@@ -1905,7 +1905,7 @@ short budget for installing `solana` and writing the server, and a server
 started without `setsid` does not survive an `agent_timeout`. The model result
 is real but the recorded one is a timeout, not a wrong implementation.
 
-### 2026-11-05 — what the two agents send, and what CodeRex never told the model
+### 2026-11-05 — what the two agents send, and what Codape never told the model
 
 `security-vulhub-minio` failed four times in a row (0/4, including the first
 run above) while Claude Code 2.1.318 passed it on the same provider endpoint.
@@ -1914,7 +1914,7 @@ endpoint in front of both agents and recorded the request bodies they send
 (`POST /v1/messages`, plus the `/count_tokens` probe). They share a model and a
 transport; the requests differed like this:
 
-| | CodeRex (before) | Claude Code 2.1.318 |
+| | Codape (before) | Claude Code 2.1.318 |
 |---|---|---|
 | System prompt | 887 characters, four sentences | ~6 200 characters: autonomy, a security-testing authorization paragraph, action bias |
 | Environment | — | a second, ~8 400-character environment description in the system role |
@@ -1932,7 +1932,7 @@ the disk guard at 3 GB free (container exit 137), also not a result. Its
 rerun, `cc-cmp-fasttext-2`, did pass; it is recorded in the 2026-11-06
 section.
 
-The description row was a CodeRex bug, not a design choice.
+The description row was a Codape bug, not a design choice.
 `ToolDescriptor` carries only a name, a tier and JSON schemas;
 `RegistryToolDispatcher::list_tools()` looked for a `description` key inside the
 tool's input schema and then fell back to `d.name`. None of the builtins put one
@@ -1954,7 +1954,7 @@ Two controls before concluding the framing was the cause:
   and the same wrong conclusion. Reading `build_headless_prompt` explained it:
   in `-p` mode the append is folded into the *user* prompt as
   `Additional system instructions: …`, and the system prompt stays the
-  887-character default. An operator cannot replace CodeRex's system prompt
+  887-character default. An operator cannot replace Codape's system prompt
   from the command line in headless mode — worth recording on its own.
 
 Three changes followed:
@@ -1976,7 +1976,7 @@ Three changes followed:
    `output_config`, same `max_tokens`. That is still the largest remaining
    difference from Claude Code and is unmeasured.
 
-Results on the dev binary (`target/x86_64-unknown-linux-musl/release/coderex`,
+Results on the dev binary (`target/x86_64-unknown-linux-musl/release/codape`,
 built 14:55):
 
 | Run | Result | Turns | Wall | Model | Tool calls | Notes |
@@ -2011,7 +2011,7 @@ and the same 360 s window (`cc-cmp-solana-1`) resolved all five parser tests in
 
 Three defects met in that one task:
 
-- **The command shared CodeRex's process group.** `sh -c` was spawned with no
+- **The command shared Codape's process group.** `sh -c` was spawned with no
   `setpgid`, so a signal aimed at the agent's group hit every service it had
   started. A foreground timeout or a harness deadline therefore killed the work
   as well as the waiter. (Verified separately: the harness TERMs the group; a
@@ -2044,7 +2044,7 @@ would keep answering with the first snapshot for the whole five minutes.
   termination goes through `taskkill /T`), `group_exists()` probes the group,
   `terminate_group()` sends SIGTERM, waits one second, then SIGKILL.
 - `BashTool` spawns into that group with stdout and stderr pointed straight at
-  `.coderex/jobs/<id>.out`, writes the record with the pid, and supervises the
+  `.codape/jobs/<id>.out`, writes the record with the pid, and supervises the
   child in a task. `run_in_background` returns `{job_id, pid, output_file,
   note}` at once and the file is readable while the command runs. A background
   command runs until it exits; only an explicit `timeout` or `JobKill` stops it.
@@ -2070,11 +2070,11 @@ would keep answering with the first snapshot for the whole five minutes.
   stop when the request's own acceptance checks pass.
 
 Tool tests: 347 unit tests and 40 integration tests pass; clippy is clean for
-`coderex-tools`. The new tests cover the process group and its tree, promotion
+`codape-tools`. The new tests cover the process group and its tree, promotion
 on a foreground timeout, output readable while a job runs, `cd` persistence,
 the job tools, the executor's two timeout paths, and the cache opt-out.
 
-**Results** (dev binary, `target/x86_64-unknown-linux-musl/release/coderex`,
+**Results** (dev binary, `target/x86_64-unknown-linux-musl/release/codape`,
 built 15:49):
 
 | Run | Result | Wall | Notes |
@@ -2190,11 +2190,11 @@ The honest limits:
   one step: the format sentence alone fixed the preprocessing and did not
   produce a deliverable.
 - **Extended budgets.** The task's own `max_agent_timeout_sec` is 600 s.
-  These runs lasted 1 800–3 600 s (CodeRex) and 4 020 s (Claude Code), so the
+  These runs lasted 1 800–3 600 s (Codape) and 4 020 s (Claude Code), so the
   pass is real on this harness but is not a pass at the task's designed
   budget.
 - **A pass is not a margin.** The test asserts `> 0.62` and reports nothing
-  else; the CodeRex model's private accuracy is not visible in
+  else; the Codape model's private accuracy is not visible in
   `results.json`. Claude's ablation shows the case fold is worth about 0.76
   points, and correcting it plus shipping was enough to pass, but the
   2.6-point swing from `dev-fasttext-1` is not attributable to case alone:
@@ -2269,10 +2269,10 @@ route, which varied between runs on the same image and provider. The task's
 own 360 s budget leaves no room for that lottery: run 9 spent its whole
 window probing and never saw a frame.
 
-### 2026-11-06 — CodeRex and Claude Code, same task and provider
+### 2026-11-06 — Codape and Claude Code, same task and provider
 
 Two Claude Code 2.1.318 runs on the same image, provider and model, and the two
-CodeRex runs with the new mechanisms:
+Codape runs with the new mechanisms:
 
 | Run | Budget | Tool calls | Tor installed at | First proxied fetch | Deliverable | Test | Stop |
 |---|---|---|---|---|---|---|---|
@@ -2282,7 +2282,7 @@ CodeRex runs with the new mechanisms:
 | `cc-cmp-extract-2` | 900 s | 52 (51 Bash) | call 34 of 52 | call 35 | none (no video) | both parsers failed | killed while testing public proxies |
 
 Both agents found the same route — a local Tor SOCKS port — and both paid for
-it. The difference is where in the run it happened. CodeRex reached the Tor
+it. The difference is where in the run it happened. Codape reached the Tor
 install at 25–36 % of its calls because the headless note says that a bot
 check from a reachable host is a reason to change the path, not the client,
 and to try a local anonymizing proxy before spending the budget on proxy
@@ -2293,7 +2293,7 @@ lists; it installed Tor at 65–78 % of its calls.
 What that cost shows up differently in the two Claude runs.
 `cc-cmp-extract-1` still got through: it downloaded the video, extracted 950
 frames at 5 fps and had tesseract running on them when the window closed —
-the same place CodeRex's `dev-extract-6` reached at 1 200 s — with no
+the same place Codape's `dev-extract-6` reached at 1 200 s — with no
 `/app/solution.txt`. `cc-cmp-extract-2` never got the video: its Tor install
 at call 34 was followed by a proxied attempt that failed, then by a sweep of
 8 910 public proxies; the last calls launched a proxied `yt-dlp` with
@@ -2301,7 +2301,7 @@ at call 34 was followed by a proxied attempt that failed, then by a sweep of
 says how much of the window is gone, so it could not know that the call was
 longer than the time it had.
 
-CodeRex's two runs both stopped themselves with a file on disk — 820 s of
+Codape's two runs both stopped themselves with a file on disk — 820 s of
 900, 1 093 s of 1 500 — and the 900 s run stopped ten seconds after its 90 %
 time check was due. The mechanism matters even when the work is not done: a
 clock is what turns "still working when the window closes" into "ship what
@@ -2309,7 +2309,7 @@ you have", and the artifact contract is what turns a turn that ended empty
 into one more decision about the file. Neither can help a run the harness
 kills mid-tool; that is the clock's job, not the contract's.
 
-The comparison does not show CodeRex solving the task: 52.22 % is still below
+The comparison does not show Codape solving the task: 52.22 % is still below
 90 %, and run 10's route failed outright where run 8's succeeded, on the same
 binary. n=1 per arm and a bot check that varies by exit IP mean the similarity
 numbers cannot be attributed to the agents; the call-position and
@@ -2328,7 +2328,7 @@ on the prompt/tool-description fix (3/3), `run-pdp11-code` by writing
 `/app/out.txt` inside a 9 000 s budget, `solana-data` once the shell's
 background jobs outlived the call (1 of 2 reruns, 5/5), and `train-fasttext`
 once the hold-out matched the test's format and the model was written before
-the timer (1 of 3 CodeRex attempts since 2026-11-05; Claude Code also passed
+the timer (1 of 3 Codape attempts since 2026-11-05; Claude Code also passed
 it). The three that still do not:
 
 | Task | Why it still fails |
@@ -2376,7 +2376,7 @@ provider errors and harness plumbing. The three tasks above are what remains of
 those classes. The fixture defects the campaign did repair — 26 files across 22
 tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
-## CodeRex defects the benchmark exposed
+## Codape defects the benchmark exposed
 
 All sixteen were real, and all are fixed:
 
@@ -2443,8 +2443,8 @@ All sixteen were real, and all are fixed:
      arguments". The model then reasoned the polyglot trick out from memory
      instead of retrying something else.
 
-   The fix makes the backend list configurable and ordered. `CODEREX_SEARCH_BACKENDS`
-   is a comma-separated chain (`CODEREX_SEARCH_BACKEND` for a single entry),
+   The fix makes the backend list configurable and ordered. `CODAPE_SEARCH_BACKENDS`
+   is a comma-separated chain (`CODAPE_SEARCH_BACKEND` for a single entry),
    each entry `kind` or `kind:endpoint`, tried in order; the run only fails
    once every entry has. Endpoints may be `$VAR` references, so a token URL can
    live in the environment rather than a settings file. A JSON backend
@@ -2466,7 +2466,7 @@ All sixteen were real, and all are fixed:
 6. **A headless run spent its last seconds asking for a title nobody reads.**
    `path-tracing` passed all four tests and was still recorded as a failed run.
    The `result` frame was written at 892.9 s, the harness killed the process at
-   900 s, and `coderex-exit-code` is `124` — the timer, not the tests.
+   900 s, and `codape-exit-code` is `124` — the timer, not the tests.
 
    The seven seconds in between were one more synchronous, non-streaming,
    tool-less model request:
@@ -2496,7 +2496,7 @@ All sixteen were real, and all are fixed:
    the code that writes the closing `result` frame never runs and the stream
    stops on a `user` (tool-result) event. `polyglot-rust-c` in the ninth batch
    and `play-zork` in the twelfth are both that shape: last event a tool
-   result, `coderex-exit-code: 124`, no `result` line. The harness therefore
+   result, `codape-exit-code: 124`, no `result` line. The harness therefore
    reports `unknown_agent_error`, which is what a crash looks like — a reader
    cannot tell "ran out of time" from "broke".
 
@@ -2507,7 +2507,7 @@ All sixteen were real, and all are fixed:
       that into 124. Anything reading the exit code saw a timeout, anything
       reading the log line saw a clean shutdown.
    2. **The reason was only logged, never emitted.** `tracing` defaults to
-      `CODEREX_LOG=off` and writes to stderr, so even that one line was
+      `CODAPE_LOG=off` and writes to stderr, so even that one line was
       invisible unless the run opted into logging. There was no `interrupted`
       subtype either.
    3. **The handler could not emit one anyway.** It runs in a detached
@@ -2598,7 +2598,7 @@ All sixteen were real, and all are fixed:
      enforced on a window nobody had stated. `CompactThresholds` now carries a
      `ContextWindowSource`, and only a known window enforces it; a provider's
      "prompt is too long" reply is parsed
-     (`coderex_core::context_overflow`) and teaches the session the real
+     (`codape_core::context_overflow`) and teaches the session the real
      window, after which it compacts and re-sends.
 
    Covered by eleven new tests (`compaction_keeps_the_system_prompt`,
@@ -2802,7 +2802,7 @@ All sixteen were real, and all are fixed:
     "retry budget is spent" anywhere in 239 turns.
 
 15. **The model was told nothing about its tools, or about its job.** Found by
-    recording the requests CodeRex and Claude Code 2.1.318 send to the same
+    recording the requests Codape and Claude Code 2.1.318 send to the same
     endpoint, 2026-11-05, after `security-vulhub-minio` failed four times
     while Claude Code passed it.
 
@@ -2843,7 +2843,7 @@ All sixteen were real, and all are fixed:
     model's context said how much of the harness budget had already gone.
 
     **The completion contract.** `--require-artifact PATH` (repeatable;
-    `CODEREX_REQUIRE_ARTIFACTS` takes a colon-separated list) names the
+    `CODAPE_REQUIRE_ARTIFACTS` takes a colon-separated list) names the
     deliverable. In headless mode the instruction is also read for output
     paths (`crates/cli/src/artifacts.rs`): a path counts when an output verb
     (`create`, `write`, `save`, `produce`, …) introduces it and no input verb
@@ -2857,7 +2857,7 @@ All sixteen were real, and all are fixed:
     best version from what the run already has, not to start over: the point
     is to ship, not to retry.
 
-    **The wall clock.** `--time-budget SECS` (`CODEREX_TIME_BUDGET`) starts
+    **The wall clock.** `--time-budget SECS` (`CODAPE_TIME_BUDGET`) starts
     when the headless turn starts, not at process start — setup the model
     cannot influence should not count against it. The engine injects a time
     check at 25 %, 50 %, 75 % and 90 % of the budget: seconds used, seconds
@@ -2902,14 +2902,14 @@ All sixteen were real, and all are fixed:
   `error_max_output_tokens` having done nothing. Both `gpt2-codegolf` (first
   run) and `run-pdp11-code` (2026-11-05) hit it. The provider accepted
   `max_tokens` 65 536 and 131 072 in a direct probe, so the ceiling is
-  CodeRex's, not the gateway's — but only an agent definition can raise it
+  Codape's, not the gateway's — but only an agent definition can raise it
   today, and a benchmark adapter has no way to pass one.
-- **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model CodeRex does not
+- **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model Codape does not
   recognise, it compacts against a 32 K guess. This is now only a *hint*: the
   guess drives when compaction starts but can never refuse a request, and the
   first provider "prompt too long" error teaches the session the real window
   (see [Learning the window from the provider](compact.md#learning-the-window-from-the-provider)).
-  The benchmark runs still set `CODEREX_CONTEXT_WINDOW=131072` so they compact
+  The benchmark runs still set `CODAPE_CONTEXT_WINDOW=131072` so they compact
   on the right line from the start rather than after one rejected request.
 - **Compaction can burn its retry budget on a no-op.** Fixed: a pass counts as
   progress only when it reaches the `auto` line or removes a tenth of the
@@ -3135,15 +3135,15 @@ so the runner passes exactly one.
 ## Reproducing a run
 
 ```bash
-export ANTHROPIC_API_KEY=...            # or CODEREX_API_KEY
+export ANTHROPIC_API_KEY=...            # or CODAPE_API_KEY
 export ANTHROPIC_BASE_URL=http://host.docker.internal:8317
 export ANTHROPIC_MODEL=...
-export CODEREX_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
+export CODAPE_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
 
 scripts/external-benchmarks/terminal-bench/run.sh \
   --task <task-id> \
   --dataset-path ~/.cache/terminal-bench/terminal-bench-core/0.1.1 \
-  --coderex-binary /tmp/coderex-musl-target/aarch64-unknown-linux-musl/release/coderex \
+  --codape-binary /tmp/codape-musl-target/aarch64-unknown-linux-musl/release/codape \
   --timeout 2700 --max-turns 200 --test-timeout 900 \
   --run-id <run-id>
 ```

@@ -131,7 +131,7 @@ async fn run_case(window: Option<&str>, prompt: &str) -> (bool, String, Vec<Stri
     let _ = server.await;
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let bodies = systems.lock().unwrap().clone();
@@ -158,7 +158,7 @@ fn run(
     window: Option<&str>,
     prompt: &str,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(cwd)
@@ -166,19 +166,19 @@ fn run(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     match window {
         Some(window) => {
-            command.env("CODEREX_CONTEXT_WINDOW", window);
+            command.env("CODAPE_CONTEXT_WINDOW", window);
         }
         None => {
-            command.env_remove("CODEREX_CONTEXT_WINDOW");
+            command.env_remove("CODAPE_CONTEXT_WINDOW");
         }
     }
-    let mut child = command.spawn().expect("spawn coderex");
+    let mut child = command.spawn().expect("spawn codape");
     child
         .stdin
         .take()

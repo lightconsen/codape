@@ -1,7 +1,7 @@
 //! Message export — export selected messages in various formats.
 
 use crate::selector::MessageSelector;
-use coderex_core::types::Message;
+use codape_core::types::Message;
 use std::fmt::Write as _;
 
 /// Export format for messages.
@@ -34,8 +34,8 @@ pub fn export_messages(
     }
 }
 
-const fn role_label(role: coderex_core::types::Role) -> &'static str {
-    use coderex_core::types::Role;
+const fn role_label(role: codape_core::types::Role) -> &'static str {
+    use codape_core::types::Role;
     match role {
         Role::User => "User",
         Role::Assistant => "Assistant",
@@ -45,8 +45,8 @@ const fn role_label(role: coderex_core::types::Role) -> &'static str {
     }
 }
 
-const fn role_json(role: coderex_core::types::Role) -> &'static str {
-    use coderex_core::types::Role;
+const fn role_json(role: codape_core::types::Role) -> &'static str {
+    use codape_core::types::Role;
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -56,8 +56,8 @@ const fn role_json(role: coderex_core::types::Role) -> &'static str {
     }
 }
 
-fn content_text(content: &coderex_core::types::MessageContent) -> String {
-    use coderex_core::types::MessageContent;
+fn content_text(content: &codape_core::types::MessageContent) -> String {
+    use codape_core::types::MessageContent;
     match content {
         MessageContent::Text(text) => text.clone(),
         MessageContent::ToolCall(tc) => format!("[tool_call: {}]", tc.name),
@@ -70,10 +70,7 @@ fn content_text(content: &coderex_core::types::MessageContent) -> String {
 
 /// Whether an exported transcript should show this message at all.
 const fn is_displayable(msg: &Message) -> bool {
-    !matches!(
-        msg.content,
-        coderex_core::types::MessageContent::Thinking(_)
-    )
+    !matches!(msg.content, codape_core::types::MessageContent::Thinking(_))
 }
 
 fn format_messages(messages: &[&Message], format: ExportFormat) -> String {
@@ -99,24 +96,24 @@ fn format_markdown(messages: &[&Message]) -> String {
     for msg in messages.iter().filter(|m| is_displayable(m)) {
         let _ = write!(out, "\n### {}\n\n", role_label(msg.role));
         match &msg.content {
-            coderex_core::types::MessageContent::Text(text) => {
+            codape_core::types::MessageContent::Text(text) => {
                 out.push_str(text);
                 out.push('\n');
             }
-            coderex_core::types::MessageContent::ToolCall(tc) => {
+            codape_core::types::MessageContent::ToolCall(tc) => {
                 // Serialize rather than interpolate: a tool name or id with a
                 // quote or newline must not produce invalid JSON in the fence.
                 let payload = serde_json::json!({"tool": tc.name, "id": tc.id});
                 let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
                 let _ = writeln!(out, "```json\n{json}\n```");
             }
-            coderex_core::types::MessageContent::ToolResult(tr) => {
+            codape_core::types::MessageContent::ToolResult(tr) => {
                 let payload = serde_json::json!({"result": tr.output, "id": tr.tool_call_id});
                 let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
                 let _ = writeln!(out, "```json\n{json}\n```");
             }
             // Provider state, not conversation.
-            coderex_core::types::MessageContent::Thinking(_) => {}
+            codape_core::types::MessageContent::Thinking(_) => {}
             _ => out.push_str("[unknown]\n"),
         }
     }
@@ -289,7 +286,7 @@ mod tests {
     /// kimi-code's export-markdown contract cases.
     #[test]
     fn markdown_tool_fences_are_valid_json() {
-        use coderex_core::types::{MessageContent, Role, ToolCall, ToolResult};
+        use codape_core::types::{MessageContent, Role, ToolCall, ToolResult};
 
         let output = "first\nsecond \"quoted\" \\ backslash";
         let msgs = vec![

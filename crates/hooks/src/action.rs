@@ -2,7 +2,7 @@
 //!
 //! These three kinds need something this crate deliberately does not have: a
 //! model client (`prompt` and `agent`) or the MCP server registry (`mcp_tool`).
-//! Neither belongs here — `coderex-core`'s API client and `coderex-mcp` are the
+//! Neither belongs here — `codape-core`'s API client and `codape-mcp` are the
 //! session's, not the hook system's — so the session that owns them injects one
 //! [`HookActionRunner`] with
 //! [`HookRegistry::set_action_runner`](crate::HookRegistry::set_action_runner).
@@ -21,7 +21,7 @@ use crate::events::{HookError, HookResult};
 ///
 /// Deliberately the cheap model: an `agent` hook is a verifier that runs on
 /// every matching event, and the reference defaults it the same way.
-/// (`ModelId::haiku()` in `coderex-core` resolves to this same id.)
+/// (`ModelId::haiku()` in `codape-core` resolves to this same id.)
 pub const AGENT_DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// The timeout an `agent` hook uses when the configuration names none (60 s).
@@ -42,7 +42,7 @@ const TOOL_INPUT_PREFIX: &str = "${tool_input.";
 /// The hooks crate cannot reach a model client or the MCP registry, so the
 /// session installs one implementation of this on its
 /// [`HookRegistry`](crate::HookRegistry) — the same shape as the rule-exemption
-/// resolver `coderex_tools::install_rule_exemptions` installs on the permission
+/// resolver `codape_tools::install_rule_exemptions` installs on the permission
 /// engine.
 #[async_trait]
 pub trait HookActionRunner: Send + Sync {

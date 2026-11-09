@@ -71,19 +71,19 @@ fn config_home(permissions: Option<serde_json::Value>) -> tempfile::TempDir {
 /// Run one headless turn in Default mode. Stdin is closed after the prompt, so
 /// an unanswered ask resolves as "no confirmation channel" instead of hanging.
 fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--output-format", "stream-json"])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -95,7 +95,7 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "coderex failed: {stderr}\nstdout:\n{stdout}"
+        "codape failed: {stderr}\nstdout:\n{stdout}"
     );
     stdout.into_owned()
 }
@@ -108,19 +108,19 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
 /// stdin free for `control_response` lines, and a prompt read to EOF leaves it
 /// closed — the reader then ends before the request it should answer exists.
 fn run_denying(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> (String, bool) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--output-format", "stream-json", prompt])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     let mut stdin = Some(child.stdin.take().expect("stdin"));
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel();
@@ -187,7 +187,7 @@ fn run_denying(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> (String
         finished,
         "no result frame; stdout:\n{collected}\nstderr:\n{stderr}"
     );
-    assert!(status.success(), "coderex failed: {stderr}");
+    assert!(status.success(), "codape failed: {stderr}");
     (collected, saw_control)
 }
 
@@ -206,7 +206,7 @@ fn workspace() -> tempfile::TempDir {
 fn a_project_allow_rule_lets_a_command_run_without_a_prompt() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"allow": ["Bash(echo:*)"]}}),
     );
     let home = config_home(None);
@@ -244,11 +244,11 @@ fn without_the_rule_the_same_command_asks() {
 fn a_deny_rule_blocks_a_command_before_it_runs() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"deny": ["Bash(rm:*)"]}}),
     );
     let sentinel = std::env::temp_dir().join(format!(
-        "coderex-rule-sentinel-{}-{}",
+        "codape-rule-sentinel-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -281,7 +281,7 @@ fn a_deny_rule_blocks_a_command_before_it_runs() {
 fn an_ask_rule_beats_an_allow_rule() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({
             "permissions": {
                 "allow": ["Bash(echo:*)"],
@@ -310,7 +310,7 @@ fn an_ask_rule_beats_an_allow_rule() {
 fn a_malformed_project_rule_is_skipped_and_user_rules_still_apply() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"deny": ["Bash("]}}),
     );
     let home = config_home(Some(serde_json::json!({"allow": ["Bash(echo:*)"]})));
@@ -330,7 +330,7 @@ fn a_malformed_project_rule_is_skipped_and_user_rules_still_apply() {
 fn a_path_deny_rule_blocks_a_read() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"deny": ["Read(./src/lib.rs)"]}}),
     );
     let home = config_home(None);
@@ -355,7 +355,7 @@ fn a_path_deny_rule_blocks_a_read() {
 fn a_compound_command_needs_an_allow_rule_for_every_segment() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"allow": ["Bash(cd:*)"]}}),
     );
     let home = config_home(None);
@@ -369,7 +369,7 @@ fn a_compound_command_needs_an_allow_rule_for_every_segment() {
     // Covering both segments lets the compound command run.
     let covered = workspace();
     write_json(
-        &covered.path().join(".coderex/settings.json"),
+        &covered.path().join(".codape/settings.json"),
         serde_json::json!({
             "permissions": {"allow": ["Bash(cd:*)", "Bash(echo:*)"]}
         }),
@@ -399,7 +399,7 @@ fn a_symlinked_path_cannot_bypass_a_path_deny() {
     std::fs::write(protected.join("secret.txt"), "hidden-secret").unwrap();
     std::os::unix::fs::symlink(&protected, dir.path().join("link")).unwrap();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"deny": ["Read(./protected/**)"]}}),
     );
     let home = config_home(None);
@@ -428,7 +428,7 @@ fn a_symlinked_path_cannot_bypass_a_path_deny() {
 fn an_opaque_wrapped_command_is_not_auto_approved_by_an_allow_rule() {
     let dir = workspace();
     write_json(
-        &dir.path().join(".coderex/settings.json"),
+        &dir.path().join(".codape/settings.json"),
         serde_json::json!({"permissions": {"allow": ["Bash(sudo:*)"]}}),
     );
     let home = config_home(None);

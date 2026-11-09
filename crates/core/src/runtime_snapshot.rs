@@ -20,7 +20,7 @@ pub fn capture() -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "# CodeRex runtime snapshot (process facts, not a heap profile)"
+        "# Codape runtime snapshot (process facts, not a heap profile)"
     );
     let _ = writeln!(out, "version: {}", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(
@@ -101,7 +101,7 @@ mod tests {
     fn a_snapshot_names_the_process_and_its_kind() {
         let snapshot = capture();
         assert!(
-            snapshot.starts_with("# CodeRex runtime snapshot (process facts, not a heap profile)"),
+            snapshot.starts_with("# Codape runtime snapshot (process facts, not a heap profile)"),
             "{snapshot}"
         );
         assert!(

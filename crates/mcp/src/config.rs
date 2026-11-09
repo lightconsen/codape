@@ -58,7 +58,7 @@ pub struct McpServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpSandboxConfig {
-    /// Whether to confine the server. `CODEREX_MCP_SANDBOX=0` also disables it.
+    /// Whether to confine the server. `CODAPE_MCP_SANDBOX=0` also disables it.
     pub enabled: bool,
     /// Whether the server may open network connections.
     pub allow_network: bool,
@@ -175,7 +175,7 @@ impl McpConfig {
     /// every request the server receives and are stored verbatim, so a caller
     /// can pass an `Authorization` value straight through.
     ///
-    /// This is the constructor behind `coderex mcp add --url … --transport …`;
+    /// This is the constructor behind `codape mcp add --url … --transport …`;
     /// unlike [`Self::add_server`] it validates the input and reports a message
     /// suitable for the CLI.
     pub fn add_remote_server(
@@ -226,7 +226,7 @@ impl McpConfig {
     ///
     /// The command is split on whitespace: the first token is the executable
     /// and the rest become arguments. An empty (or all-whitespace) command is
-    /// rejected. This is the constructor behind `coderex mcp add` without
+    /// rejected. This is the constructor behind `codape mcp add` without
     /// `--url`.
     pub fn add_stdio_server(
         &mut self,

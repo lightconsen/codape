@@ -37,9 +37,9 @@ pub fn register(registry: &mut CommandRegistry) {
 
     // /heapdump — memory snapshot (feature-gated)
     //
-    // There is no in-process heap profiler: CodeRex is a Rust binary and a
+    // There is no in-process heap profiler: Codape is a Rust binary and a
     // useful dump needs jemalloc/DHAT or an external profiler attached. The
-    // command used to claim it had written `/tmp/coderex-heap.prof`, which no
+    // command used to claim it had written `/tmp/codape-heap.prof`, which no
     // file ever appeared at. It now writes a small, real runtime snapshot
     // (process facts from /proc or `ps`) so the output names a file that
     // exists, and says what it is not.
@@ -53,8 +53,8 @@ pub fn register(registry: &mut CommandRegistry) {
             if !ctx.is_feature_enabled("heapdump") {
                 return CommandResult::error("heapdump feature is not enabled.");
             }
-            let path = std::path::PathBuf::from("/tmp/coderex-heap.prof");
-            let snapshot = coderex_core::runtime_snapshot::capture();
+            let path = std::path::PathBuf::from("/tmp/codape-heap.prof");
+            let snapshot = codape_core::runtime_snapshot::capture();
             match std::fs::write(&path, &snapshot) {
                 Ok(()) => CommandResult::success(format!(
                     "Runtime snapshot written to {}\n\
@@ -198,8 +198,8 @@ pub fn register(registry: &mut CommandRegistry) {
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             let mut discovered = 0;
             let plugin_dirs = [
-                std::path::Path::new(&ctx.cwd).join(".coderex/plugins"),
-                coderex_config::settings::config_home().join("plugins"),
+                std::path::Path::new(&ctx.cwd).join(".codape/plugins"),
+                codape_config::settings::config_home().join("plugins"),
             ];
             for dir in &plugin_dirs {
                 if !dir.exists() {
@@ -225,7 +225,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn heapdump_enabled_writes_a_real_file() {
-        let path = std::path::PathBuf::from("/tmp/coderex-heap.prof");
+        let path = std::path::PathBuf::from("/tmp/codape-heap.prof");
         let _ = std::fs::remove_file(&path);
         let mut flags = std::collections::HashMap::new();
         flags.insert("heapdump".into(), true);

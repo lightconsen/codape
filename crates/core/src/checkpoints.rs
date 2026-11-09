@@ -1,7 +1,7 @@
 //! File checkpoints for rewinding a session.
 //!
 //! Claude's `/rewind` restores the files a session edited, not just the
-//! conversation. CodeRex's `/rewind` used to truncate the message history
+//! conversation. Codape's `/rewind` used to truncate the message history
 //! only; this store gives it the file half.
 //!
 //! Every mutating edit tool snapshots the target file *before* it writes,

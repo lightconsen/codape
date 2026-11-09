@@ -1,7 +1,7 @@
 //! Installing settings-defined permission rules into a checker.
 
 use crate::settings::{ConfigError, PermissionsSettings};
-use coderex_core::permissions::{
+use codape_core::permissions::{
     PermissionAction, PermissionChecker, PermissionRuleSpec, RuleCompileContext,
 };
 use std::path::Path;

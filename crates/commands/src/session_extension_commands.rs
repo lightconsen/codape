@@ -67,7 +67,7 @@ fn save_session_meta(
 
 /// Get the default session base path.
 fn default_session_base() -> std::path::PathBuf {
-    coderex_config::settings::config_home().join("sessions")
+    codape_config::settings::config_home().join("sessions")
 }
 
 /// Register session extension commands.
@@ -92,7 +92,7 @@ pub fn register(registry: &mut CommandRegistry) {
                         .with_state_change(true)
                     }
                     Ok(None) => {
-                        CommandResult::success("No previous sessions found. Sessions are stored in ~/.coderex/sessions/")
+                        CommandResult::success("No previous sessions found. Sessions are stored in ~/.codape/sessions/")
                     }
                     Err(e) => CommandResult::error(format!("Failed to search sessions: {e}")),
                 }
@@ -119,7 +119,7 @@ pub fn register(registry: &mut CommandRegistry) {
                                 ));
                             }
                         }
-                        CommandResult::error(format!("Session '{session_id}' not found. Sessions are stored in ~/.coderex/sessions/"))
+                        CommandResult::error(format!("Session '{session_id}' not found. Sessions are stored in ~/.codape/sessions/"))
                     },
                     |dir| {
                         CommandResult::success(format!(
@@ -221,7 +221,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext {
@@ -302,7 +302,7 @@ mod tests {
                 ModelId::sonnet(),
             )
         };
-        // The command will try to write to ~/.coderex/sessions/test-rename/meta.json
+        // The command will try to write to ~/.codape/sessions/test-rename/meta.json
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);

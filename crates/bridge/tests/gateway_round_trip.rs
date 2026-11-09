@@ -8,10 +8,10 @@
 
 use std::collections::HashMap;
 
-use coderex_bridge::http_transport::{HttpPollTransport, Role};
-use coderex_bridge::poller::{ControlPlaneClient, HttpControlPlaneClient};
-use coderex_bridge::transport::{Transport, TransportMessage};
-use coderex_server::gateway::GatewayServer;
+use codape_bridge::http_transport::{HttpPollTransport, Role};
+use codape_bridge::poller::{ControlPlaneClient, HttpControlPlaneClient};
+use codape_bridge::transport::{Transport, TransportMessage};
+use codape_server::gateway::GatewayServer;
 
 /// Start the gateway on a free loopback port and return its base URL.
 async fn start_gateway() -> String {
@@ -77,7 +77,7 @@ async fn a_worker_registers_claims_submitted_work_and_reports_capacity() {
             .claim_assignment("env-a", "a1")
             .await
             .expect("claim"),
-        coderex_bridge::poller::ClaimOutcome::Claimed
+        codape_bridge::poller::ClaimOutcome::Claimed
     );
     // A second claim from another worker loses.
     assert_eq!(
@@ -85,7 +85,7 @@ async fn a_worker_registers_claims_submitted_work_and_reports_capacity() {
             .claim_assignment("env-a", "a1")
             .await
             .expect("second claim"),
-        coderex_bridge::poller::ClaimOutcome::Lost
+        codape_bridge::poller::ClaimOutcome::Lost
     );
 
     // The assignment is now claimed, so it is not handed out again.
@@ -214,7 +214,7 @@ async fn a_transient_claim_failure_is_retried() {
         .claim_assignment("env-a", "a1")
         .await
         .expect("the third attempt succeeds");
-    assert_eq!(outcome, coderex_bridge::poller::ClaimOutcome::Claimed);
+    assert_eq!(outcome, codape_bridge::poller::ClaimOutcome::Claimed);
     assert_eq!(
         seen.load(Ordering::SeqCst),
         3,

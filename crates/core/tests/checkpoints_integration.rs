@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use coderex_core::checkpoints::CheckpointStore;
+use codape_core::checkpoints::CheckpointStore;
 
 fn ids(values: &[&str]) -> HashSet<String> {
     values

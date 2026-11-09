@@ -100,7 +100,7 @@ fn mock_server() -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let path = std::env::temp_dir().join(format!(
-        "coderex_sampling_server_{}_{}.py",
+        "codape_sampling_server_{}_{}.py",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -139,7 +139,7 @@ fn sampling_runs_when_the_host_opts_in() {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -151,13 +151,13 @@ fn sampling_runs_when_the_host_opts_in() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_MCP_SAMPLING", "allow")
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_MCP_SAMPLING", "allow")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -170,7 +170,7 @@ fn sampling_runs_when_the_host_opts_in() {
     let _ = std::fs::remove_file(&script);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -190,7 +190,7 @@ fn sampling_without_the_opt_in_is_refused_with_the_variable_name() {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -202,12 +202,12 @@ fn sampling_without_the_opt_in_is_refused_with_the_variable_name() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -220,12 +220,12 @@ fn sampling_without_the_opt_in_is_refused_with_the_variable_name() {
     let _ = std::fs::remove_file(&script);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("refused:") && stdout.contains("CODEREX_MCP_SAMPLING"),
+        stdout.contains("refused:") && stdout.contains("CODAPE_MCP_SAMPLING"),
         "the refusal does not name the opt-in:\n{stdout}"
     );
 }

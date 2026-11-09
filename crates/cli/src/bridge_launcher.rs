@@ -1,23 +1,23 @@
 //! Production entry point for the bridge worker.
 //!
-//! `coderex bridge` resolves a [`BridgeLaunchConfig`] from CLI flags and
+//! `codape bridge` resolves a [`BridgeLaunchConfig`] from CLI flags and
 //! environment variables, builds the configured transport through
-//! `coderex_bridge::transport::default_factory()`, constructs a [`Bridge`],
+//! `codape_bridge::transport::default_factory()`, constructs a [`Bridge`],
 //! and runs [`Bridge::serve_transport`] until Ctrl+C or SIGTERM.
 //!
 //! The transport is injectable ([`run_with_transport`]) so tests can drive a
 //! real bridge over an in-process transport without a network.
 
 use anyhow::{Context, Result};
-use coderex_bridge::archive::{ProcessRegistry, UsageStats};
-use coderex_bridge::heartbeat::HeartbeatConfig;
-use coderex_bridge::orchestrator::{Bridge, BridgeConfig, BridgeEvent, BridgeStopHandle};
-use coderex_bridge::permission::PermissionResponse;
-use coderex_bridge::poller::{
+use codape_bridge::archive::{ProcessRegistry, UsageStats};
+use codape_bridge::heartbeat::HeartbeatConfig;
+use codape_bridge::orchestrator::{Bridge, BridgeConfig, BridgeEvent, BridgeStopHandle};
+use codape_bridge::permission::PermissionResponse;
+use codape_bridge::poller::{
     ClaimOutcome, ControlPlaneClient, DEFAULT_CLAIM_PATH_TEMPLATE, HttpControlPlaneClient,
 };
-use coderex_bridge::transport::{Transport, TransportConfig, default_factory};
-use coderex_core::process_tree::{JobLimits, ProcessTree};
+use codape_bridge::transport::{Transport, TransportConfig, default_factory};
+use codape_core::process_tree::{JobLimits, ProcessTree};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
@@ -32,34 +32,34 @@ use tokio::process::{Child, Command};
 use crate::cli::BridgeArgs;
 
 /// Environment variable naming the control-plane HTTP API.
-pub const ENV_CONTROL_PLANE_URL: &str = "CODEREX_BRIDGE_CONTROL_PLANE_URL";
+pub const ENV_CONTROL_PLANE_URL: &str = "CODAPE_BRIDGE_CONTROL_PLANE_URL";
 /// Environment variable naming this environment.
-pub const ENV_ENV_ID: &str = "CODEREX_BRIDGE_ENV_ID";
+pub const ENV_ENV_ID: &str = "CODAPE_BRIDGE_ENV_ID";
 /// Environment variable naming the repository root.
-pub const ENV_REPO_ROOT: &str = "CODEREX_BRIDGE_REPO_ROOT";
+pub const ENV_REPO_ROOT: &str = "CODAPE_BRIDGE_REPO_ROOT";
 /// Environment variable naming the worktree base directory.
-pub const ENV_WORKTREE_BASE: &str = "CODEREX_BRIDGE_WORKTREE_BASE";
+pub const ENV_WORKTREE_BASE: &str = "CODAPE_BRIDGE_WORKTREE_BASE";
 /// Environment variable naming the session base directory.
-pub const ENV_SESSION_BASE: &str = "CODEREX_BRIDGE_SESSION_BASE";
+pub const ENV_SESSION_BASE: &str = "CODAPE_BRIDGE_SESSION_BASE";
 /// Environment variable naming the archive base directory.
-pub const ENV_ARCHIVE_BASE: &str = "CODEREX_BRIDGE_ARCHIVE_BASE";
+pub const ENV_ARCHIVE_BASE: &str = "CODAPE_BRIDGE_ARCHIVE_BASE";
 /// Environment variable selecting the transport kind.
-pub const ENV_TRANSPORT: &str = "CODEREX_BRIDGE_TRANSPORT";
+pub const ENV_TRANSPORT: &str = "CODAPE_BRIDGE_TRANSPORT";
 /// Environment variable naming the transport endpoint. The historical spelling
 /// is a `ws://host:port` URL.
-pub const ENV_TRANSPORT_URL: &str = "CODEREX_BRIDGE_URL";
+pub const ENV_TRANSPORT_URL: &str = "CODAPE_BRIDGE_URL";
 /// Environment variable overriding the transport connection ID.
-pub const ENV_CONNECTION_ID: &str = "CODEREX_BRIDGE_CONNECTION_ID";
+pub const ENV_CONNECTION_ID: &str = "CODAPE_BRIDGE_CONNECTION_ID";
 /// Environment variable carrying the bearer token. Prefer a flag or an
 /// inherited environment over a shell history entry.
-pub const ENV_AUTH_TOKEN: &str = "CODEREX_BRIDGE_TOKEN";
+pub const ENV_AUTH_TOKEN: &str = "CODAPE_BRIDGE_TOKEN";
 /// Environment variable setting the assignment poll interval, in seconds.
-pub const ENV_POLL_INTERVAL_SECS: &str = "CODEREX_BRIDGE_POLL_INTERVAL_SECS";
+pub const ENV_POLL_INTERVAL_SECS: &str = "CODAPE_BRIDGE_POLL_INTERVAL_SECS";
 /// Environment variable overriding the assignment claim path template.
-pub const ENV_CLAIM_PATH: &str = "CODEREX_BRIDGE_CLAIM_PATH";
+pub const ENV_CLAIM_PATH: &str = "CODAPE_BRIDGE_CLAIM_PATH";
 /// Environment variable bounding how long a child's permission request may
 /// wait for an answer, in seconds. `0` disables the bound.
-pub const ENV_APPROVAL_TIMEOUT_SECS: &str = "CODEREX_BRIDGE_APPROVAL_TIMEOUT_SECS";
+pub const ENV_APPROVAL_TIMEOUT_SECS: &str = "CODAPE_BRIDGE_APPROVAL_TIMEOUT_SECS";
 
 /// Default transport kind: the real gateway transport.
 pub const DEFAULT_TRANSPORT: &str = "websocket";
@@ -283,7 +283,7 @@ impl ProcessSessionRunner {
 /// no shell ever sees it.
 fn session_command(prompt: &str, work_dir: &Path) -> Result<Command, String> {
     let executable = std::env::current_exe()
-        .map_err(|err| format!("cannot locate the coderex executable: {err}"))?;
+        .map_err(|err| format!("cannot locate the codape executable: {err}"))?;
     let mut command = Command::new(executable);
     command
         .arg("--print")
@@ -352,7 +352,7 @@ impl SessionRunner for ProcessSessionRunner {
 /// The tree is created and armed before the spawn, so on Windows the child is
 /// created suspended and joined to the Job Object before it runs. When a
 /// registry is supplied the tree is registered under `session_id`, which is
-/// what lets [`coderex_bridge::orchestrator::Bridge::complete_session`]'s
+/// what lets [`codape_bridge::orchestrator::Bridge::complete_session`]'s
 /// cleanup terminate the whole tree. Without a registry (a standalone runner)
 /// the child is spawned normally.
 fn spawn_registered_child(
@@ -405,13 +405,13 @@ struct StreamCapture {
 
 /// How long a stopped session gets before it is killed.
 ///
-/// `CODEREX_BRIDGE_SHUTDOWN_GRACE_SECS` overrides the default; a session whose
+/// `CODAPE_BRIDGE_SHUTDOWN_GRACE_SECS` overrides the default; a session whose
 /// child has real cleanup to do (writing a transcript, stopping a database)
 /// needs more than five seconds, and the right value depends on that child.
 #[must_use]
 fn shutdown_grace() -> Duration {
     shutdown_grace_from(
-        std::env::var("CODEREX_BRIDGE_SHUTDOWN_GRACE_SECS")
+        std::env::var("CODAPE_BRIDGE_SHUTDOWN_GRACE_SECS")
             .ok()
             .as_deref(),
     )
@@ -551,7 +551,7 @@ async fn write_child_decision(
     };
 
     let frame = if decision.allow {
-        let mut frame = coderex_events::protocol::ControlResponseFrame::allow(
+        let mut frame = codape_events::protocol::ControlResponseFrame::allow(
             &decision.request_id,
             &decision.message,
         );
@@ -560,10 +560,7 @@ async fn write_child_decision(
         }
         frame
     } else {
-        coderex_events::protocol::ControlResponseFrame::deny(
-            &decision.request_id,
-            &decision.message,
-        )
+        codape_events::protocol::ControlResponseFrame::deny(&decision.request_id, &decision.message)
     };
     let line = frame.to_line();
 
@@ -616,7 +613,7 @@ where
         };
         match frame.get("type").and_then(Value::as_str) {
             Some("control_request") => {
-                match coderex_events::protocol::ControlRequestFrame::parse_line(&line) {
+                match codape_events::protocol::ControlRequestFrame::parse_line(&line) {
                     Ok(request) => {
                         if let Some(sender) = permission_requests.as_ref() {
                             let _ = sender.send(ChildPermissionRequest {
@@ -1288,7 +1285,7 @@ pub struct BridgeLaunchConfig {
     ///
     /// `None` means no bound: the request waits until it is answered or the
     /// child exits, which is the historical behaviour selected explicitly
-    /// with `CODEREX_BRIDGE_APPROVAL_TIMEOUT_SECS=0`.
+    /// with `CODAPE_BRIDGE_APPROVAL_TIMEOUT_SECS=0`.
     pub approval_timeout: Option<Duration>,
 }
 
@@ -1337,11 +1334,11 @@ impl BridgeLaunchConfig {
         }
 
         let worktree_base = optional_path(args.worktree_base.clone(), env(ENV_WORKTREE_BASE))
-            .unwrap_or_else(|| repo_root.join(".coderex/worktrees"));
+            .unwrap_or_else(|| repo_root.join(".codape/worktrees"));
         let session_base = optional_path(args.session_base.clone(), env(ENV_SESSION_BASE))
-            .unwrap_or_else(|| repo_root.join(".coderex/sessions"));
+            .unwrap_or_else(|| repo_root.join(".codape/sessions"));
         let archive_base = optional_path(args.archive_base.clone(), env(ENV_ARCHIVE_BASE))
-            .unwrap_or_else(|| repo_root.join(".coderex/archives"));
+            .unwrap_or_else(|| repo_root.join(".codape/archives"));
 
         if args.max_concurrent == 0 {
             return Err(BridgeConfigError::Invalid(
@@ -2118,9 +2115,9 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use clap::Parser;
-    use coderex_bridge::poller::{CapacityReport, SpawnMode, WorkAssignment};
-    use coderex_bridge::state::BridgeSessionState;
-    use coderex_bridge::transport::{InProcessTransport, TransportMessage};
+    use codape_bridge::poller::{CapacityReport, SpawnMode, WorkAssignment};
+    use codape_bridge::state::BridgeSessionState;
+    use codape_bridge::transport::{InProcessTransport, TransportMessage};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::oneshot;
@@ -2394,7 +2391,7 @@ mod tests {
     #[test]
     fn parse_defaults_apply() {
         let parsed = Cli::try_parse_from([
-            "coderex",
+            "codape",
             "bridge",
             "--control-plane-url",
             "http://127.0.0.1:3000/",
@@ -2417,9 +2414,9 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let config = BridgeLaunchConfig::resolve(&args, &cwd, |_| None).unwrap();
         assert_eq!(config.repo_root, cwd);
-        assert_eq!(config.worktree_base, cwd.join(".coderex/worktrees"));
-        assert_eq!(config.session_base, cwd.join(".coderex/sessions"));
-        assert_eq!(config.archive_base, cwd.join(".coderex/archives"));
+        assert_eq!(config.worktree_base, cwd.join(".codape/worktrees"));
+        assert_eq!(config.session_base, cwd.join(".codape/sessions"));
+        assert_eq!(config.archive_base, cwd.join(".codape/archives"));
         // The trailing slash is trimmed and the scheme is rewritten.
         assert_eq!(config.control_plane_url, "http://127.0.0.1:3000");
         assert_eq!(config.transport_url, "ws://127.0.0.1:3000");
@@ -2504,7 +2501,7 @@ mod tests {
 
     #[test]
     fn clap_rejects_a_bridge_command_without_required_values() {
-        let result = Cli::try_parse_from(["coderex", "bridge"]);
+        let result = Cli::try_parse_from(["codape", "bridge"]);
         let error = result.unwrap_err();
         assert_eq!(
             error.kind(),
@@ -2517,7 +2514,7 @@ mod tests {
 
     #[test]
     fn bridge_help_is_available() {
-        let error = Cli::try_parse_from(["coderex", "bridge", "--help"]).unwrap_err();
+        let error = Cli::try_parse_from(["codape", "bridge", "--help"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
         let help = error.to_string();
         assert!(help.contains("--control-plane-url"), "{help}");
@@ -2601,7 +2598,7 @@ mod tests {
 
     #[tokio::test]
     async fn launcher_receives_a_frame_and_shuts_down() {
-        use coderex_bridge::transport::{Transport, TransportMessage};
+        use codape_bridge::transport::{Transport, TransportMessage};
 
         let tmp = tempfile::tempdir().unwrap();
         let mut args = args_with("http://cp.example.test", "env-test");
@@ -3363,7 +3360,7 @@ printf 'ECHO:%s\n' "$line""#;
         // The child parses the prompt as one positional argument, even when it
         // looks like a flag or spans lines, and asks for the streaming protocol.
         let parsed = Cli::try_parse_from([
-            "coderex",
+            "codape",
             "--print",
             "--output-format",
             "stream-json",
@@ -3915,7 +3912,7 @@ printf 'ECHO:%s\n' "$line""#;
     #[tokio::test]
     async fn launcher_reports_a_connect_failure() {
         use async_trait::async_trait;
-        use coderex_bridge::transport::{TransportError, TransportMessage};
+        use codape_bridge::transport::{TransportError, TransportMessage};
 
         #[derive(Debug)]
         struct RefusingTransport;

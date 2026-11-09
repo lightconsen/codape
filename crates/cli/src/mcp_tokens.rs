@@ -2,7 +2,7 @@
 //!
 //! A headless host that cannot run a browser can be signed in by exporting the
 //! token from a machine that can, then importing it here. The store is the one
-//! `coderex_mcp::oauth` reads (`~/.coderex/mcp_tokens.json`, or the OS
+//! `codape_mcp::oauth` reads (`~/.codape/mcp_tokens.json`, or the OS
 //! keychain), so no second credential format exists.
 //!
 //! The exported document is a **credential**: the entry carries the access and
@@ -17,12 +17,12 @@
 use std::io::Read as _;
 use std::path::Path;
 
-use coderex_config::secret_store::TokenPersistence;
+use codape_config::secret_store::TokenPersistence;
 use serde_json::Value;
 
 /// The token store the MCP client reads.
 fn token_store_path() -> std::path::PathBuf {
-    coderex_mcp::oauth::OAuthManager::token_path()
+    codape_mcp::oauth::OAuthManager::token_path()
 }
 
 /// Print (or write to `output`) the stored entry for `server`.

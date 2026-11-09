@@ -1,13 +1,13 @@
 //! End-to-end checks for remote MCP HTTP/SSE transport.
 
-use coderex_mcp::channel::{
+use codape_mcp::channel::{
     InboundRequestHandler, JsonRpcChannel, JsonRpcError, ServerNotificationHandler,
 };
-use coderex_mcp::config::{McpConfig, McpServerConfig, McpTransport};
-use coderex_mcp::manager::McpManager;
-use coderex_mcp::oauth::{McpOAuthState, OAuthManager, OAuthTokenProvider, ReauthHandler};
-use coderex_mcp::server::{McpServer, ServerStatus};
-use coderex_mcp::{EventStreamRetryPolicy, EventStreamState, TokenProvider};
+use codape_mcp::config::{McpConfig, McpServerConfig, McpTransport};
+use codape_mcp::manager::McpManager;
+use codape_mcp::oauth::{McpOAuthState, OAuthManager, OAuthTokenProvider, ReauthHandler};
+use codape_mcp::server::{McpServer, ServerStatus};
+use codape_mcp::{EventStreamRetryPolicy, EventStreamState, TokenProvider};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use coderex_tools::{
+use codape_tools::{
     InterruptBehavior, Tool, ToolContext, ToolDescriptor, ToolError, ToolInput, ToolOutput,
     ToolTier,
 };
@@ -27,10 +27,10 @@ pub const WORKFLOW_TOOL: &str = "Workflow";
 pub const ENABLE_FLAG: &str = "workflow_scripts";
 
 /// The environment variable that overrides the concurrency gate.
-pub const MAX_CONCURRENT_ENV: &str = "CODEREX_WORKFLOW_MAX_CONCURRENT_AGENTS";
+pub const MAX_CONCURRENT_ENV: &str = "CODAPE_WORKFLOW_MAX_CONCURRENT_AGENTS";
 
 /// Environment variable holding the run's output-token budget.
-pub const TOKEN_BUDGET_ENV: &str = "CODEREX_WORKFLOW_TOKEN_BUDGET";
+pub const TOKEN_BUDGET_ENV: &str = "CODAPE_WORKFLOW_TOKEN_BUDGET";
 
 /// Longest a run's result is reported at, in characters.
 pub const MAX_RESULT_CHARS: usize = 16_000;
@@ -43,7 +43,7 @@ const MAX_RUN_ID_CHARS: usize = 64;
 pub fn default_root() -> PathBuf {
     home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coderex")
+        .join(".codape")
         .join("workflows")
 }
 
@@ -363,7 +363,7 @@ impl Tool for WorkflowTool {
             return Err(ToolError::InvalidInput {
                 message: format!(
                     "workflow scripts are not enabled in this session — set \
-                     CODEREX_FEATURE_FLAGS=+{ENABLE_FLAG} to turn them on"
+                     CODAPE_FEATURE_FLAGS=+{ENABLE_FLAG} to turn them on"
                 ),
             });
         }
@@ -527,7 +527,7 @@ mod tests {
                 name: WORKFLOW_TOOL.into(),
                 arguments,
             },
-            ToolContext::new(coderex_tools::ExecutionContext::Normal, Path::new("/tmp")),
+            ToolContext::new(codape_tools::ExecutionContext::Normal, Path::new("/tmp")),
         )
         .await
         .map(|output| output.output)

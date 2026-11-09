@@ -1,0 +1,32 @@
+{
+  "key": "7a75a96fead9c93c",
+  "responses": [
+    {
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"id\":\"f32c4084-32e9-4203-9848-007bb0122f67\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"We need answer security advisor. Need explain risks of tool call. Tool Bash command: cd to temp dir path then ls -laR .codape/. Need assess risks. It's read-only ls recursive on hidden directory inside temp. Potential risks: cd could fail if path missing? command chained && so ls not run. If path exists, ls -laR .codape/ lists all files recursively including hidden, permissions, timestamps, sizes, symlink targets? ls -laR follows? ls -l on symlinks shows link target, not dereference; -R recurses directories but does not follow symlinks by default (unless -L). It could expose sensitive file names/metadata in .codape within temp. Also if .codape contains symlinks? -R won't follow symlink dirs by default, but will list symlink itself. Could be large directory causing output volume/DoS? Recursive listing could be huge, output flood, slow, but limited to temp dir. Path is temp cache likely safe. The cd path is attacker-controlled? It's fixed temp. Potential TOCTOU if temp dir can be manipulated by other user? On macOS /private/var/folders user-specific temp; directory\",\"signature\":\"f32c4084-32e9-4203-9848-007bb0122f67\"}],\"stop_reason\":\"max_tokens\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":153,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":256,\"service_tier\":\"standard\"}}"
+    }
+  ],
+  "request": {
+    "model": "<model>",
+    "system": "<system>",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Explain the potential risks of this tool call:\n\n**Tool:** Bash\n**Input:**\n```\n{\"command\":\"cd <tmp> && ls -laR .codape/\"}\n```\n\nWhat could go wrong if this executes?"
+          }
+        ]
+      }
+    ],
+    "max_tokens": 256
+  },
+  "metadata": {
+    "recorded_at": "2026-10-26T00:00:00Z",
+    "suite": "e2e_equivalence",
+    "backfilled": true,
+    "system_sha256": "853d548acc3e6b21cecd0b5c52f6844d92d7d51f707b19602d689e7ebcbcf677"
+  }
+}

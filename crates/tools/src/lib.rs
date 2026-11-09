@@ -29,7 +29,7 @@ pub use builtins::{
     cache_discovery_at, default_token_path, persist_token_at, persist_token_with_endpoints_at,
     platform_shell_is_powershell, platform_shell_tool, register_builtin_tools, register_shell_tool,
 };
-pub use coderex_core::permissions::ToolRuleExemptions;
+pub use codape_core::permissions::ToolRuleExemptions;
 pub use context::{ExecutionContext, ToolError, ToolOutput};
 pub use cron_scheduler::{CRON_SCHEDULER_KEY, CronJob, CronScheduler};
 pub use dispatcher::RegistryToolDispatcher;

@@ -1,13 +1,13 @@
 //! Tool executor trait — abstract tool dispatch for `QueryEngine`.
 //!
-//! This trait lives in `coderex-core` to avoid a circular dependency with
-//! `coderex-tools`. Concrete implementations (backed by `ToolRegistry`)
-//! live in `coderex-tools`.
+//! This trait lives in `codape-core` to avoid a circular dependency with
+//! `codape-tools`. Concrete implementations (backed by `ToolRegistry`)
+//! live in `codape-tools`.
 //!
 //! The engine delegates tool dispatch through this trait rather than
 //! embedding registry knowledge directly, so test code can substitute a
 //! simple in-memory executor and production code can wire the full
-//! registry from `coderex-tools`.
+//! registry from `codape-tools`.
 
 use crate::permissions::RuleSubject;
 use crate::types::ToolResult;
@@ -41,7 +41,7 @@ pub struct ToolInfo {
     pub input_schema: Value,
 }
 
-/// Abstract tool dispatcher — implemented by `coderex-tools::RegistryToolExecutor`.
+/// Abstract tool dispatcher — implemented by `codape-tools::RegistryToolExecutor`.
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
     /// List available tools with metadata for LLM advertisement.

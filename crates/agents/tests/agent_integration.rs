@@ -10,15 +10,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use coderex_agents::{
+use codape_agents::{
     AgentError, AgentManager, AgentResult, AgentStatus, AgentType, SpawnOptions, TeammateEvent,
     Thoroughness,
 };
-use coderex_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
-use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
-use coderex_core::task::now_ms;
-use coderex_core::tool_executor::ToolInfo;
-use coderex_core::types::{ModelId, UsageSummary};
+use codape_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
+use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
+use codape_core::task::now_ms;
+use codape_core::tool_executor::ToolInfo;
+use codape_core::types::{ModelId, UsageSummary};
 use futures::Stream;
 use tokio::sync::Notify;
 
@@ -759,7 +759,7 @@ async fn fresh_session_adopts_background_agent_as_interrupted() {
 
     // A fresh store, exactly as the CLI builds one at startup.
     let fresh = JobStore::new(tmp.path());
-    let adopted = coderex_core::job_record::adopt_for_session(&fresh, now_ms(), "sess_job")
+    let adopted = codape_core::job_record::adopt_for_session(&fresh, now_ms(), "sess_job")
         .expect("adoption succeeds");
 
     assert!(

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use coderex_config::ConfigService;
+use codape_config::ConfigService;
 
 #[test]
 fn plugin_options_are_read_from_the_user_settings_file() {
@@ -61,7 +61,7 @@ fn migration_keeps_keys_the_settings_struct_does_not_model() {
     let value: serde_json::Value = serde_json::from_str(&migrated).unwrap();
     assert_eq!(
         value["config_version"].as_u64(),
-        Some(u64::from(coderex_config::CURRENT_SCHEMA_VERSION))
+        Some(u64::from(codape_config::CURRENT_SCHEMA_VERSION))
     );
     assert_eq!(
         value["plugins"]["p"]["options"]["K"], "v",

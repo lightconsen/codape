@@ -62,19 +62,19 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn run(cwd: &Path, home: &Path, base_url: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -111,7 +111,7 @@ fn an_isolated_agent_edits_its_worktree_not_the_checkout() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
@@ -119,7 +119,7 @@ fn an_isolated_agent_edits_its_worktree_not_the_checkout() {
         "the isolated agent wrote into the caller's checkout"
     );
 
-    let worktrees = dir.path().join(".coderex/worktrees");
+    let worktrees = dir.path().join(".codape/worktrees");
     let mut found = Vec::new();
     let mut stack = vec![worktrees];
     while let Some(path) = stack.pop() {

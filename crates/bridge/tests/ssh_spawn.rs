@@ -2,41 +2,41 @@
 //!
 //! The spawner's unit tests cover the mapping and the command list; this test
 //! covers what only a live server can: the connection, the identity file, the
-//! remote `mkdir -p`, and the remote `which coderex`.
+//! remote `mkdir -p`, and the remote `which codape`.
 //!
-//! It runs when `CODEREX_SSH_TEST_HOST` names a reachable host. CI's
+//! It runs when `CODAPE_SSH_TEST_HOST` names a reachable host. CI's
 //! `ssh-integration` job starts a throwaway `sshd` on localhost and sets the
 //! three variables; without them the test skips, because a developer machine
 //! is not expected to have an SSH server running for a unit test.
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `CODEREX_SSH_TEST_HOST` | `user@host:port` to connect to |
-//! | `CODEREX_SSH_TEST_KEY` | private key file (optional; defaults to the agent) |
-//! | `CODEREX_SSH_TEST_PATH` | remote directory to create the session under (default `/tmp/coderex-ssh-test`) |
+//! | `CODAPE_SSH_TEST_HOST` | `user@host:port` to connect to |
+//! | `CODAPE_SSH_TEST_KEY` | private key file (optional; defaults to the agent) |
+//! | `CODAPE_SSH_TEST_PATH` | remote directory to create the session under (default `/tmp/codape-ssh-test`) |
 
 #![cfg(unix)]
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use coderex_bridge::poller::SpawnMode;
-use coderex_bridge::spawner::{BridgeSessionSpawner, SpawnConfig};
+use codape_bridge::poller::SpawnMode;
+use codape_bridge::spawner::{BridgeSessionSpawner, SpawnConfig};
 
 #[tokio::test]
 async fn a_session_is_spawned_on_a_real_ssh_host() {
-    let Some(host) = std::env::var("CODEREX_SSH_TEST_HOST")
+    let Some(host) = std::env::var("CODAPE_SSH_TEST_HOST")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
-        eprintln!("skipping: CODEREX_SSH_TEST_HOST is not set");
+        eprintln!("skipping: CODAPE_SSH_TEST_HOST is not set");
         return;
     };
-    let identity = std::env::var("CODEREX_SSH_TEST_KEY")
+    let identity = std::env::var("CODAPE_SSH_TEST_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let remote_path = std::env::var("CODEREX_SSH_TEST_PATH")
-        .unwrap_or_else(|_| "/tmp/coderex-ssh-test".to_string());
+    let remote_path = std::env::var("CODAPE_SSH_TEST_PATH")
+        .unwrap_or_else(|_| "/tmp/codape-ssh-test".to_string());
 
     let spawner = BridgeSessionSpawner::new(
         PathBuf::from("/nonexistent/repo"),

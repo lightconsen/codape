@@ -92,7 +92,7 @@ impl Tool for PowerShellTool {
 
         // The shell is not a provider client, so it is given no way to read
         // this session's credentials out of the environment it inherits.
-        for key in coderex_core::sandbox::credential_scrub_keys() {
+        for key in codape_core::sandbox::credential_scrub_keys() {
             cmd.env_remove(key);
         }
         crate::sandbox_shell::sanitize_shell_env(&mut cmd, ctx.cwd);

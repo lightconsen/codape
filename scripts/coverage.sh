@@ -44,8 +44,8 @@ if [[ "$summary_only" == false ]]; then
     # call's profiles and the second would overwrite the first.
     if cargo nextest --version >/dev/null 2>&1; then
         cargo llvm-cov nextest --workspace --no-fail-fast --locked --no-report \
-            -E 'not package(coderex-cli)'
-        cargo llvm-cov nextest -p coderex-cli --no-fail-fast --locked --no-report
+            -E 'not package(codape-cli)'
+        cargo llvm-cov nextest -p codape-cli --no-fail-fast --locked --no-report
         cargo llvm-cov report --lcov --output-path "$out/lcov.info"
     else
         echo "cargo-nextest is not installed; falling back to 'cargo test'," >&2

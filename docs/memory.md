@@ -16,7 +16,7 @@ concurrency and a classifier gate in front of anything that leaves the machine.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                        coderex-memory                            │
+│                        codape-memory                            │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌─────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
@@ -48,40 +48,40 @@ concurrency and a classifier gate in front of anything that leaves the machine.
 
 ## Where Data Lives
 
-Everything lives under the workspace's own `.coderex/` directory. This is a local-first
+Everything lives under the workspace's own `.codape/` directory. This is a local-first
 tool: a transcript or a memory belongs to the workspace it came from, and it stays
-next to it — nothing is hidden in `~/.coderex`, and nothing is written outside the
+next to it — nothing is hidden in `~/.codape`, and nothing is written outside the
 directory the user opened.
 
 | Store | Format | Path |
 |-------|--------|------|
-| Transcripts | JSONL files | `<cwd>/.coderex/transcripts/{session_id}.jsonl` |
-| Encrypted transcripts | JSONL + AES-256-GCM | `<cwd>/.coderex/transcripts/{session_id}.jsonl.enc` |
-| Long-term memories | JSON files | `<cwd>/.coderex/memory/long_term/{topic}.json` or `{key/path}.json` |
-| Session facts | JSON files | `<cwd>/.coderex/memory/session/{session_uuid}/facts.json` |
-| Team memories | JSON files | `<cwd>/.coderex/memory/team/{topic}.json`, or `{org}/{topic}.json` when org-scoped |
-| Dream state | JSON | `<cwd>/.coderex/memory/.dream_state.json` |
-| Dream artifacts | Markdown | `<cwd>/.coderex/memory/dreams/{timestamp}.md` |
-| Session index | SQLite + FTS5 + TF-IDF | `<cwd>/.coderex/sessions.db`; `session_resume::index_saved_session` writes it after transcript/snapshot persistence, and `search_sessions`/`list_recent_sessions` read it (with a transcript fallback). The exact `repl.rs` call sites are documented in `session_resume.rs`. |
+| Transcripts | JSONL files | `<cwd>/.codape/transcripts/{session_id}.jsonl` |
+| Encrypted transcripts | JSONL + AES-256-GCM | `<cwd>/.codape/transcripts/{session_id}.jsonl.enc` |
+| Long-term memories | JSON files | `<cwd>/.codape/memory/long_term/{topic}.json` or `{key/path}.json` |
+| Session facts | JSON files | `<cwd>/.codape/memory/session/{session_uuid}/facts.json` |
+| Team memories | JSON files | `<cwd>/.codape/memory/team/{topic}.json`, or `{org}/{topic}.json` when org-scoped |
+| Dream state | JSON | `<cwd>/.codape/memory/.dream_state.json` |
+| Dream artifacts | Markdown | `<cwd>/.codape/memory/dreams/{timestamp}.md` |
+| Session index | SQLite + FTS5 + TF-IDF | `<cwd>/.codape/sessions.db`; `session_resume::index_saved_session` writes it after transcript/snapshot persistence, and `search_sessions`/`list_recent_sessions` read it (with a transcript fallback). The exact `repl.rs` call sites are documented in `session_resume.rs`. |
 
 The store roots are assembled in `crates/cli/src/repl.rs` (`memory_base` =
-`<cwd>/.coderex/memory`, then `session/`, `long_term/`, `team/`); the transcript
+`<cwd>/.codape/memory`, then `session/`, `long_term/`, `team/`); the transcript
 directory comes from `crates/cli/src/session_resume.rs::transcript_dir`.
 
 ### The transcript path scheme, and why it is not Claude's
 
 Claude Code writes `~/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl`: every
 project's transcripts are collected in one global directory, one subdirectory per
-working directory. CodeRex writes `<cwd>/.coderex/transcripts/<sessionId>.jsonl`
+working directory. Codape writes `<cwd>/.codape/transcripts/<sessionId>.jsonl`
 instead, and that is deliberate rather than an oversight:
 
 - **The workspace is the unit.** A transcript records what happened in this
   repository. Keeping it inside the repository means `rm -rf` on a checkout takes its
   transcripts with it, and a transcript cannot outlive the code it describes in a
   hidden directory nobody looks in.
-- **No global state to clean up.** There is no accumulating `~/.coderex/projects/`
+- **No global state to clean up.** There is no accumulating `~/.codape/projects/`
   tree to prune, and no hash-to-path mapping to maintain or explain.
-- **`coderex-config` already has the other shape** — `DataDirectories::project_dir`
+- **`codape-config` already has the other shape** — `DataDirectories::project_dir`
   returns `<base>/projects/<hash>` — and it is unused. Moving transcripts there would
   be a migration of user data for no gain, so it is left unused rather than
   half-adopted.
@@ -123,7 +123,7 @@ A transcript line is a `TranscriptEntry`:
   unchanged.
 - **`TranscriptEntry::CompactBoundary(CompactBoundary)`** — where context was
   compacted. The engine emits this today as a system message carrying
-  `<coderex_compact_boundary>`; here it is a type instead of a magic string.
+  `<codape_compact_boundary>`; here it is a type instead of a magic string.
 - **`TranscriptEntry::SessionMeta(SessionMeta)`** — a header naming the session id,
   working directory, model and start time, so a transcript can be understood after the
   file is moved.
@@ -140,18 +140,18 @@ right variant and `to_message` turns it back, so the two forms round-trip:
 - `SessionMeta` is metadata, not a message, so `to_message` returns `None` for it and
   `read_all` does not hand it to a message-only reader.
 
-`EntryKind` names what an entry is at the granularity CodeRex actually produces:
+`EntryKind` names what an entry is at the granularity Codape actually produces:
 `UserText`, `AssistantText`, `AssistantToolCall`, `ToolResult`, `SystemText`,
 `CompactBoundary`, `SessionMeta`. `is_visible` says whether a person replaying the
 session would see it (everything but the session header).
 
 **Deliberately left out.** Claude's transcript format has three much larger tables:
 nine visible message types, twenty-one system subtypes, and twenty-odd attachment
-types. CodeRex writes none of the system subtypes — there are no hook-result records,
+types. Codape writes none of the system subtypes — there are no hook-result records,
 turn-duration records or API-error records in a transcript — and has no attachment
 concept at all: a file the model read arrives as the output of a `Read` tool call
 inside a `MessageContent::ToolResult`, not as a separate attachment entry. Modelling
-those would describe a format CodeRex does not write. They earn a variant when CodeRex
+those would describe a format Codape does not write. They earn a variant when Codape
 grows the record that needs one.
 
 **What the store writes.** `append`, `rewrite` and `truncate_before` write bare
@@ -159,7 +159,7 @@ messages, so the on-disk format is byte-for-byte what it was; `read_entries` cla
 on the way in, which is why a boundary written as a plain system message reads back as
 a boundary. The tagged form is opt-in through `append_entry` (and
 `write_compact_boundary`, which uses it). That keeps every reader that parses a line as
-a bare `Message` — `coderex-insights`'s fact extraction, for one — working unchanged.
+a bare `Message` — `codape-insights`'s fact extraction, for one — working unchanged.
 
 ### Transcript Store (`transcript.rs`)
 
@@ -193,15 +193,15 @@ FTS content), `update_last_active`, `update_cost_and_tokens`, `list_recent`,
 `search_semantic` (TF-IDF cosine similarity).
 
 **CLI wiring surface.** `crates/cli/src/session_resume.rs` opens the workspace
-index via `DataDirectories::new(<cwd>/.coderex).sessions_db_path()` and exposes
+index via `DataDirectories::new(<cwd>/.codape).sessions_db_path()` and exposes
 (the REPL call sites are documented in the module header):
 
 - `index_saved_session(cwd, session_id, title, messages)` — called after
   transcript and interactive-snapshot persistence; delegates to
-  `coderex_memory::session_backfill::index_transcript`, so re-indexing updates
+  `codape_memory::session_backfill::index_transcript`, so re-indexing updates
   rather than duplicates and the backfill writes identical rows.
 - `search_sessions(cwd, query, limit)` — FTS first, then a case-insensitive
-  substring scan of `<cwd>/.coderex/transcripts/*.jsonl` for sessions the index
+  substring scan of `<cwd>/.codape/transcripts/*.jsonl` for sessions the index
   does not know about.
 - `list_recent_sessions(cwd, limit)` — merges index rows with transcript-only
   sessions, newest first.
@@ -261,7 +261,7 @@ Key methods: `upsert`, `read`, `delete` (local tombstone), `list`, `compute_sync
 
 Claude exposes `memory_list` / `memory_read` / `memory_write` over several stores, with
 `if_version` optimistic concurrency, and requires a classifier to pass before a shared
-store is written. This is CodeRex's equivalent. It owns no storage of its own: it
+store is written. This is Codape's equivalent. It owns no storage of its own: it
 routes to the stores that already exist and adds the three things they lack — a store
 name a model can say, a version to pin, and a gate for writes that leave the machine.
 
@@ -274,7 +274,7 @@ name a model can say, a version to pin, and a gate for writes that leave the mac
 
 `personal` and `project` share one `LongTermStore` and are told apart by a key
 namespace. That follows from the local-first layout above: there is no hidden
-`~/.coderex` memory directory, so a "personal" memory is still written next to the
+`~/.codape` memory directory, so a "personal" memory is still written next to the
 workspace it belongs to. The two namespaces keep the two scopes from colliding; they do
 not promise a global one.
 
@@ -309,49 +309,49 @@ the version it expects (`if_version`); if the entry has moved on, the write is r
 and reports the version that is there now, so a caller re-reads instead of clobbering a
 change it never saw. `memory_read` reports the version in its header, which is what a
 later `memory_write` pins. This is the same convention the artifact database uses
-(`coderex-artifacts`'s `db::Write`), reused rather than reinvented.
+(`codape-artifacts`'s `db::Write`), reused rather than reinvented.
 
 **The classifier gate.** A write to `shared` or `org` leaves the machine, so it must
 pass a `MemoryWriteClassifier` first. When no classifier is configured the write is
 **refused**, not waved through: a shared write that nobody classified is exactly the
 write the gate exists to stop. A caller that really wants the gate open says so with
 `AllowAllClassifier` — a named, greppable choice rather than a silent skip. The hook
-shape is the permission engine's (`AutoClassifierHook` in `coderex-core`).
+shape is the permission engine's (`AutoClassifierHook` in `codape-core`).
 
-**Why the tools are not `impl coderex_tools::Tool`.** They cannot be. `coderex-tools`
-depends on `coderex-memory` (its `BriefTool` reads transcripts), so the reverse
+**Why the tools are not `impl codape_tools::Tool`.** They cannot be. `codape-tools`
+depends on `codape-memory` (its `BriefTool` reads transcripts), so the reverse
 dependency would close a cycle, and Cargo rejects a cycle even when the dependency is
 optional. The family is therefore written against plain JSON — the shape the `Tool`
 trait passes around, with no reference to it — and a crate that depends on both wraps
 it:
 
 ```rust
-// In a crate that depends on both coderex-memory and coderex-tools.
-impl coderex_tools::Tool for MemoryToolAdapter {
-    fn descriptor(&self) -> coderex_tools::ToolDescriptor {
-        coderex_tools::ToolDescriptor {
+// In a crate that depends on both codape-memory and codape-tools.
+impl codape_tools::Tool for MemoryToolAdapter {
+    fn descriptor(&self) -> codape_tools::ToolDescriptor {
+        codape_tools::ToolDescriptor {
             name: self.tool.name().to_string(),
-            tier: coderex_tools::ToolTier::Baseline,
+            tier: codape_tools::ToolTier::Baseline,
             input_schema: self.tool.input_schema(),
             output_schema: self.tool.output_schema(),
             requires_approval: false,
             is_enabled: true,
             is_read_only: self.tool.is_read_only(),
             is_concurrency_safe: self.tool.is_read_only(),
-            interrupt_behavior: coderex_tools::InterruptBehavior::RunToCompletion,
+            interrupt_behavior: codape_tools::InterruptBehavior::RunToCompletion,
         }
     }
 
     async fn execute(
         &self,
-        input: coderex_tools::ToolInput,
-        _ctx: coderex_tools::ToolContext<'_>,
-    ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+        input: codape_tools::ToolInput,
+        _ctx: codape_tools::ToolContext<'_>,
+    ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
         self.tool
             .call(&input.arguments)
             .await
-            .map(|output| coderex_tools::ToolOutput { output, is_display: true })
-            .map_err(|error| coderex_tools::ToolError::InvalidInput {
+            .map(|output| codape_tools::ToolOutput { output, is_display: true })
+            .map_err(|error| codape_tools::ToolError::InvalidInput {
                 message: error.to_string(),
             })
     }
@@ -361,7 +361,7 @@ impl coderex_tools::Tool for MemoryToolAdapter {
 Registering the family is then the same shape the artifact family uses:
 
 ```rust
-for tool in coderex_memory::tools::MemoryTools::new(memory_service).all() {
+for tool in codape_memory::tools::MemoryTools::new(memory_service).all() {
     dispatcher
         .registry()
         .register_dynamic(std::sync::Arc::new(MemoryToolAdapter::new(tool)));
@@ -417,10 +417,10 @@ Thread-safety (concurrent stores) and TF-IDF semantic search are always enabled 
 ## Architecture Patterns
 
 - **JSONL append-only** — Each message is a JSON line; `sync_all()` after each write for durability.
-- **Local-first paths** — transcripts and memories live under the workspace's `.coderex/`, never in a home-directory tree.
+- **Local-first paths** — transcripts and memories live under the workspace's `.codape/`, never in a home-directory tree.
 - **Sanitized session ids** — the one externally-supplied path component is checked, not escaped.
 - **Classified entries** — a bare message line is read as the entry it is, so the type and the marker string cannot disagree.
-- **Compact boundary markers** — `<coderex_compact_boundary>` messages mark where context was compressed; they are `CompactBoundary` entries on the way in and out.
+- **Compact boundary markers** — `<codape_compact_boundary>` messages mark where context was compressed; they are `CompactBoundary` entries on the way in and out.
 - **Optimistic concurrency** — `version` + `if_version` on long-term and team entries; a stale pin is refused with the version that is there now.
 - **Fail-closed shared writes** — a write that leaves the machine without a classifier is refused, not allowed.
 - **SQLite FTS5 + TF-IDF** — Full-text search over session metadata, TF-IDF cosine similarity over indexed content.
@@ -452,10 +452,10 @@ Thread-safety (concurrent stores) and TF-IDF semantic search are always enabled 
 ### What Is Not Wired
 
 - **The memory tools are registered.** `crates/cli/src/memory_tools.rs` adapts
-  the family to `coderex_tools::Tool`, and `crates/cli/src/repl.rs` registers it,
+  the family to `codape_tools::Tool`, and `crates/cli/src/repl.rs` registers it,
   so `memory_list`, `memory_read` and `memory_write` are visible to the model.
   The `org` store is only enabled when an org id is configured
-  (`CODEREX_ORG_ID`, else `org_id` in the orchestrator's
+  (`CODAPE_ORG_ID`, else `org_id` in the orchestrator's
   `remote_settings_cache.json`); without one, `org` reports `StoreUnavailable`
   instead of silently resolving to another store.
 - **`SessionIndex` is exposed as an accelerator, not a source of truth.**
@@ -469,7 +469,7 @@ Thread-safety (concurrent stores) and TF-IDF semantic search are always enabled 
   transcripts.
   Exact-id resume still reads the transcript, and every index read tolerates a
   corrupt or locked database by warning and scanning transcripts.
-- **`DataDirectories` (`coderex-config`) is only partly adopted.**
-  `sessions_db_path` is used for the workspace-local `<cwd>/.coderex/sessions.db`
-  by rooting a `DataDirectories` at `<cwd>/.coderex`; `project_dir` and
+- **`DataDirectories` (`codape-config`) is only partly adopted.**
+  `sessions_db_path` is used for the workspace-local `<cwd>/.codape/sessions.db`
+  by rooting a `DataDirectories` at `<cwd>/.codape`; `project_dir` and
   `ensure_all` still describe a home-directory layout that nothing uses.

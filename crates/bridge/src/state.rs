@@ -11,7 +11,7 @@ pub enum BridgeSessionState {
     Preparing,
     /// Creating a git worktree for the session.
     CreatingWorktree,
-    /// Spawning the CodeRex process.
+    /// Spawning the Codape process.
     Spawning,
     /// Session is actively running.
     Running,

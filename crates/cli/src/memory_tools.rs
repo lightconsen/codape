@@ -1,6 +1,6 @@
 //! The memory tool family, adapted to the `Tool` trait.
 //!
-//! `coderex-memory` cannot implement `coderex_tools::Tool` itself: `coderex-tools`
+//! `codape-memory` cannot implement `codape_tools::Tool` itself: `codape-tools`
 //! already depends on it (`BriefTool` reads transcripts), so the reverse
 //! dependency would close a cycle and Cargo rejects that even for an optional
 //! dependency. The family is therefore written against plain JSON — the same
@@ -15,10 +15,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use coderex_core::api_client::ApiClient;
-use coderex_memory::service::{MemoryService, MemoryStore, MemoryWriteClassifier};
-use coderex_memory::tools::{MemoryTool, MemoryTools};
-use coderex_tools::{
+use codape_core::api_client::ApiClient;
+use codape_memory::service::{MemoryService, MemoryStore, MemoryWriteClassifier};
+use codape_memory::tools::{MemoryTool, MemoryTools};
+use codape_tools::{
     InterruptBehavior, Tool, ToolContext, ToolDescriptor, ToolError, ToolInput, ToolOutput,
     ToolTier,
 };
@@ -145,7 +145,7 @@ impl MemoryWriteClassifier for ModelMemoryClassifier {
             store.as_str()
         );
 
-        let result = coderex_core::orchestrator::run_lightweight_query(
+        let result = codape_core::orchestrator::run_lightweight_query(
             self.api_client.as_ref(),
             SHARE_CLASSIFIER_SYSTEM,
             &prompt,
@@ -175,9 +175,9 @@ impl MemoryWriteClassifier for ModelMemoryClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::api_client::{ApiError, ApiResponse, StreamEvent};
-    use coderex_core::tool_executor::ToolInfo;
-    use coderex_core::types::{ModelId, UsageSummary};
+    use codape_core::api_client::{ApiError, ApiResponse, StreamEvent};
+    use codape_core::tool_executor::ToolInfo;
+    use codape_core::types::{ModelId, UsageSummary};
 
     /// Answers every side query with a fixed sentence.
     struct FixedApi {
@@ -244,8 +244,8 @@ mod tests {
             _tools: &[ToolInfo],
         ) -> Result<ApiResponse, ApiError> {
             Err(ApiError::Transport {
-                kind: coderex_core::api_client::TransportError::Other,
-                class: coderex_core::api_client::ErrorClass::Unknown,
+                kind: codape_core::api_client::TransportError::Other,
+                class: codape_core::api_client::ErrorClass::Unknown,
                 message: "no route to host".into(),
             })
         }
@@ -317,8 +317,8 @@ mod tests {
     }
 
     fn service_in(dir: &std::path::Path) -> Arc<MemoryService> {
-        use coderex_memory::long_term::LongTermStore;
-        use coderex_memory::team_memory::TeamMemorySyncService;
+        use codape_memory::long_term::LongTermStore;
+        use codape_memory::team_memory::TeamMemorySyncService;
 
         Arc::new(MemoryService::new(
             Arc::new(LongTermStore::new(dir.join("long_term"))),
@@ -342,7 +342,7 @@ mod tests {
             .find(|tool| tool.descriptor().name == "memory_write")
             .expect("memory_write is registered");
         let ctx =
-            coderex_tools::ToolContext::new(coderex_tools::ExecutionContext::Normal, temp.path());
+            codape_tools::ToolContext::new(codape_tools::ExecutionContext::Normal, temp.path());
         let arguments = serde_json::json!({
             "store": "project",
             "key": "k",

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use coderex_tools::{
+use codape_tools::{
     InterruptBehavior, Tool, ToolContext, ToolDescriptor, ToolError, ToolInput, ToolOutput,
     ToolRuleExemptions, ToolTier,
 };
@@ -940,7 +940,7 @@ mod tests {
     }
 
     fn ctx(cwd: &Path) -> ToolContext<'_> {
-        ToolContext::new(coderex_tools::ExecutionContext::Normal, cwd)
+        ToolContext::new(codape_tools::ExecutionContext::Normal, cwd)
     }
 
     async fn call(tool: &ArtifactTool, arguments: Value, cwd: &Path) -> Result<String, ToolError> {
@@ -1688,7 +1688,7 @@ mod tests {
     #[test]
     fn the_registry_answers_the_familys_exemptions_per_action() {
         let (service, _dir) = tools();
-        let mut registry = coderex_tools::ToolRegistry::new();
+        let mut registry = codape_tools::ToolRegistry::new();
         for tool in ArtifactTools::new(Arc::clone(&service)).all() {
             registry.register(tool);
         }

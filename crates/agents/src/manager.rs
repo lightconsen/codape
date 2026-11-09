@@ -3,29 +3,29 @@
 //! Phase 10.3 + 10.5: Provides agent spawning with context inheritance,
 //! tool whitelisting, messaging, worktree isolation, and teammate events.
 
-use coderex_core::api_client::ApiClient;
-use coderex_core::confirmation_bus::ConfirmationBus;
-use coderex_core::elicitation::SdkElicitationHandler;
-use coderex_core::engine::{
+use codape_core::api_client::ApiClient;
+use codape_core::confirmation_bus::ConfirmationBus;
+use codape_core::elicitation::SdkElicitationHandler;
+use codape_core::engine::{
     QueryEngine, StructuredOutputValidator, SubmitOptions, ValidationResult,
 };
-use coderex_core::hook_executor::HookExecutor;
-use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
-use coderex_core::orchestrator::{BackgroundFeatureRequest, QueryResult, run_background_feature};
-use coderex_core::permission_engine::{BackgroundAgentDenyHook, PermissionEngine};
-use coderex_core::permissions::{
+use codape_core::hook_executor::HookExecutor;
+use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
+use codape_core::orchestrator::{BackgroundFeatureRequest, QueryResult, run_background_feature};
+use codape_core::permission_engine::{BackgroundAgentDenyHook, PermissionEngine};
+use codape_core::permissions::{
     PermissionChecker, PermissionMode, PermissionRuleSpec, RuleCompileContext,
 };
-use coderex_core::sandbox::SandboxConfig;
-use coderex_core::state::SessionState;
-use coderex_core::task::{TaskHandle, TaskKind, TaskManager, now_ms};
-use coderex_core::tool_executor::ToolExecutor;
-use coderex_core::types::{
+use codape_core::sandbox::SandboxConfig;
+use codape_core::state::SessionState;
+use codape_core::task::{TaskHandle, TaskKind, TaskManager, now_ms};
+use codape_core::tool_executor::ToolExecutor;
+use codape_core::types::{
     AgentLifecycleEvent, EngineEvent, Message, MessageContent, ModelId, Role, ToolCall, ToolResult,
 };
-use coderex_core::wire_adapter::engine_event_to_wire;
-use coderex_core::wire_protocol::{WireEvent, decode_event};
-use coderex_core::worktree::{WorktreeConfig, WorktreeManager};
+use codape_core::wire_adapter::engine_event_to_wire;
+use codape_core::wire_protocol::{WireEvent, decode_event};
+use codape_core::worktree::{WorktreeConfig, WorktreeManager};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -77,7 +77,7 @@ pub enum AgentError {
 /// Describe the available custom agent names for an error message.
 fn available_agents_description(names: &[String]) -> String {
     if names.is_empty() {
-        "none configured (add JSON definitions under ~/.coderex/agents/)".to_string()
+        "none configured (add JSON definitions under ~/.codape/agents/)".to_string()
     } else {
         names.join(", ")
     }
@@ -171,7 +171,7 @@ pub struct SpawnOptions {
     /// Retry policy on failure.
     pub retry_policy: Option<RetryPolicy>,
     /// Sandbox configuration override (None = use default sandbox).
-    pub sandbox: Option<coderex_core::sandbox::SandboxConfig>,
+    pub sandbox: Option<codape_core::sandbox::SandboxConfig>,
     /// Parent conversation messages the fork should reuse verbatim so the
     /// provider's prefix cache is hit instead of a fresh prefix being paid
     /// for. Empty means "start a fresh prefix".
@@ -304,7 +304,7 @@ impl CacheSafeParams {
 /// everything up to and including that index is the parent's, and the
 /// sub-agent's own task is appended after it.
 ///
-/// CodeRex messages carry no stable uuid, so the fork point is an index into
+/// Codape messages carry no stable uuid, so the fork point is an index into
 /// the prefix rather than an id; `prefix_fingerprint` gives the same
 /// drift-detection a uuid would, by hashing the exact bytes of the prefix.
 #[derive(Debug, Clone, Serialize)]
@@ -397,7 +397,7 @@ impl ForkedContext {
     /// A stable fingerprint of the exact prefix bytes.
     ///
     /// Two forks with the same fingerprint will present the same cacheable
-    /// prefix; a change in any message changes it. This is the CodeRex
+    /// prefix; a change in any message changes it. This is the Codape
     /// stand-in for a fork-point uuid.
     #[must_use]
     pub fn prefix_fingerprint(&self) -> String {
@@ -777,7 +777,7 @@ impl AgentManager {
 
     /// Set the tool executor factory for spawned agents.
     ///
-    /// Since `coderex-agents` cannot depend on `coderex-tools`, the caller
+    /// Since `codape-agents` cannot depend on `codape-tools`, the caller
     /// (e.g. the CLI or REPL) must provide a factory that creates a concrete
     /// `ToolExecutor` implementation such as `RegistryToolDispatcher`.
     pub fn set_tool_executor_factory<F>(&mut self, factory: F)
@@ -1007,7 +1007,7 @@ impl AgentManager {
         let output_file = match (&worktree_path, &options.cwd) {
             (None, Some(dir)) => dir.join(format!("agent-{task_id}-output.txt")),
             _ => std::env::temp_dir()
-                .join("coderex-agents")
+                .join("codape-agents")
                 .join(std::process::id().to_string())
                 .join(self.artifact_namespace.to_string())
                 .join(format!("agent-{task_id}-output.txt")),
@@ -1401,7 +1401,7 @@ impl AgentManager {
 
     /// Replace the loaded custom agent definitions.
     ///
-    /// Production managers load `~/.coderex/agents/*.json` in
+    /// Production managers load `~/.codape/agents/*.json` in
     /// [`AgentManager::new`]. Tests and embedders use this to install a
     /// known set without touching the user's home directory.
     pub fn set_custom_agents(&mut self, agents: HashMap<String, CustomAgentDef>) {
@@ -1562,7 +1562,7 @@ const ISOLATION_WORKTREE: &str = "worktree";
 pub fn agent_log_dir() -> PathBuf {
     home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coderex")
+        .join(".codape")
         .join("agent_logs")
 }
 
@@ -1670,12 +1670,12 @@ fn validate_spawn_options(options: &SpawnOptions) -> Result<(), AgentError> {
 /// removed should do so explicitly.
 fn create_isolation_worktree(repo: &Path, agent_id: &str) -> Result<PathBuf, AgentError> {
     let config = WorktreeConfig {
-        base_dir: repo.join(".coderex").join("worktrees"),
-        branch_prefix: "coderex".to_string(),
+        base_dir: repo.join(".codape").join("worktrees"),
+        branch_prefix: "codape".to_string(),
         auto_cleanup: true,
     };
     let mut manager = WorktreeManager::new(config);
-    let branch = format!("coderex-agent-{agent_id}");
+    let branch = format!("codape-agent-{agent_id}");
     let repo_path = repo.to_path_buf();
 
     manager
@@ -2477,13 +2477,13 @@ mod tests {
             event_name: &str,
             input: &str,
             context: &std::collections::HashMap<String, String>,
-        ) -> coderex_core::hook_executor::HookFireResult {
+        ) -> codape_core::hook_executor::HookFireResult {
             self.fired.lock().unwrap().push((
                 event_name.to_string(),
                 input.to_string(),
                 context.clone(),
             ));
-            coderex_core::hook_executor::HookFireResult::default()
+            codape_core::hook_executor::HookFireResult::default()
         }
     }
 
@@ -2599,8 +2599,8 @@ mod tests {
         let second = WireEvent::Notification {
             message: "two".to_string(),
         };
-        let mut body = coderex_core::wire_protocol::encode_event(&first);
-        body.push_str(&coderex_core::wire_protocol::encode_event(&second));
+        let mut body = codape_core::wire_protocol::encode_event(&first);
+        body.push_str(&codape_core::wire_protocol::encode_event(&second));
         std::fs::write(&path, body).unwrap();
 
         let events = read_agent_log_at(&path).unwrap();
@@ -2623,7 +2623,7 @@ mod tests {
         };
         let body = format!(
             "\n{}\n\n",
-            coderex_core::wire_protocol::encode_event(&event).trim_end()
+            codape_core::wire_protocol::encode_event(&event).trim_end()
         );
         std::fs::write(&path, body).unwrap();
 
@@ -2634,7 +2634,7 @@ mod tests {
     fn read_agent_log_rejects_a_corrupt_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent-3.jsonl");
-        let good = coderex_core::wire_protocol::encode_event(&WireEvent::TextDelta {
+        let good = codape_core::wire_protocol::encode_event(&WireEvent::TextDelta {
             delta: "ok".to_string(),
         });
         std::fs::write(&path, format!("{good}{{not json}}\n")).unwrap();
@@ -2999,7 +2999,7 @@ mod tests {
     /// Create a git repository with one commit so `git worktree add` can run.
     fn init_git_repo(dir: &std::path::Path) {
         let run = |args: &[&str]| {
-            let status = coderex_core::git_hardening::git_command()
+            let status = codape_core::git_hardening::git_command()
                 .args(args)
                 .current_dir(dir)
                 .env("GIT_AUTHOR_NAME", "test")
@@ -3393,11 +3393,11 @@ mod tests {
             _messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
-        ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError>
+            _tools: &[codape_core::tool_executor::ToolInfo],
+        ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError>
         {
-            use coderex_core::api_client::ApiResponse;
-            use coderex_core::types::UsageSummary;
+            use codape_core::api_client::ApiResponse;
+            use codape_core::types::UsageSummary;
 
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let usage = UsageSummary {
@@ -3409,7 +3409,7 @@ mod tests {
             if call == 0 {
                 Ok(ApiResponse {
                     content: String::new(),
-                    tool_calls: vec![coderex_core::types::ToolCall {
+                    tool_calls: vec![codape_core::types::ToolCall {
                         id: "call_1".into(),
                         name: "Read".into(),
                         input: serde_json::json!({"file_path": "note.txt"}),
@@ -3435,12 +3435,12 @@ mod tests {
             _messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
+            _tools: &[codape_core::tool_executor::ToolInfo],
         ) -> std::pin::Pin<
-            Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+            Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
         > {
             Box::pin(futures::stream::iter([
-                coderex_core::api_client::StreamEvent::StreamEnd,
+                codape_core::api_client::StreamEvent::StreamEnd,
             ]))
         }
     }
@@ -3464,15 +3464,15 @@ mod tests {
             messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
-        ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError>
+            _tools: &[codape_core::tool_executor::ToolInfo],
+        ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError>
         {
             self.requests.lock().unwrap().push(messages.to_vec());
-            Ok(coderex_core::api_client::ApiResponse {
+            Ok(codape_core::api_client::ApiResponse {
                 content: "done".into(),
                 tool_calls: Vec::new(),
                 thinking: None,
-                usage: coderex_core::types::UsageSummary {
+                usage: codape_core::types::UsageSummary {
                     input_tokens: 1,
                     output_tokens: 1,
                     cache_read_tokens: 0,
@@ -3488,12 +3488,12 @@ mod tests {
             _messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
+            _tools: &[codape_core::tool_executor::ToolInfo],
         ) -> std::pin::Pin<
-            Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+            Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
         > {
             Box::pin(futures::stream::iter([
-                coderex_core::api_client::StreamEvent::StreamEnd,
+                codape_core::api_client::StreamEvent::StreamEnd,
             ]))
         }
     }
@@ -3517,11 +3517,11 @@ mod tests {
             _messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
-        ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError>
+            _tools: &[codape_core::tool_executor::ToolInfo],
+        ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError>
         {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(coderex_core::api_client::ApiError::Auth(
+            Err(codape_core::api_client::ApiError::Auth(
                 "no credentials".into(),
             ))
         }
@@ -3532,9 +3532,9 @@ mod tests {
             _messages: &[serde_json::Value],
             _model: &ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
+            _tools: &[codape_core::tool_executor::ToolInfo],
         ) -> std::pin::Pin<
-            Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+            Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
         > {
             Box::pin(futures::stream::empty())
         }
@@ -3873,9 +3873,9 @@ mod tests {
             tool_call_id: &str,
             _tool_name: &str,
             _input: &serde_json::Value,
-        ) -> coderex_core::tool_executor::ToolDispatchOutcome {
-            coderex_core::tool_executor::ToolDispatchOutcome {
-                result: coderex_core::types::ToolResult {
+        ) -> codape_core::tool_executor::ToolDispatchOutcome {
+            codape_core::tool_executor::ToolDispatchOutcome {
+                result: codape_core::types::ToolResult {
                     tool_call_id: tool_call_id.to_string(),
                     output: "read the note".into(),
                     is_error: false,
@@ -3888,8 +3888,8 @@ mod tests {
             &self,
             _tool_name: &str,
             _input: &serde_json::Value,
-        ) -> Vec<coderex_core::permissions::RuleSubject> {
-            vec![coderex_core::permissions::RuleSubject::new(vec![
+        ) -> Vec<codape_core::permissions::RuleSubject> {
+            vec![codape_core::permissions::RuleSubject::new(vec![
                 "note.txt".into(),
                 "/tmp/note.txt".into(),
             ])]
@@ -3900,7 +3900,7 @@ mod tests {
     /// its own working directory.
     #[tokio::test]
     async fn a_subagent_inherits_the_parents_permission_rules() {
-        use coderex_core::permissions::{PermissionRuleSpec, RuleCompileContext};
+        use codape_core::permissions::{PermissionRuleSpec, RuleCompileContext};
 
         let mut mgr = make_manager();
         mgr.set_api_client(Box::new(ScriptedApi {
@@ -3917,7 +3917,7 @@ mod tests {
             .add_specs(
                 &[PermissionRuleSpec::parse(
                     "Read(./note.txt)",
-                    coderex_core::permissions::PermissionAction::Deny,
+                    codape_core::permissions::PermissionAction::Deny,
                 )
                 .unwrap()],
                 &RuleCompileContext {

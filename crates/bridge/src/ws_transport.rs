@@ -265,7 +265,7 @@ impl Transport for WebSocketTransport {
 
 /// Store and manage bridge authentication tokens.
 ///
-/// Tokens are stored in `~/.coderex/bridge_tokens.json` as a list of
+/// Tokens are stored in `~/.codape/bridge_tokens.json` as a list of
 /// named token entries. Provides CRUD operations for token management.
 #[derive(Debug, Default, Clone)]
 pub struct BridgeTokenStore {
@@ -276,7 +276,7 @@ impl BridgeTokenStore {
     /// Default path for the token store.
     pub fn default_path() -> std::path::PathBuf {
         let mut path = home::home_dir().unwrap_or_default();
-        path.push(".coderex/bridge_tokens.json");
+        path.push(".codape/bridge_tokens.json");
         path
     }
 

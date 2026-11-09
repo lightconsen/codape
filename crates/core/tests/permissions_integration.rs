@@ -8,10 +8,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use coderex_core::permission_engine::{
+use codape_core::permission_engine::{
     AutoApproveHook, BackgroundAgentDenyHook, NoOpPermissionHook, PermissionEngine,
 };
-use coderex_core::permissions::{
+use codape_core::permissions::{
     PermissionAction, PermissionChecker, PermissionMode, PermissionResult, PermissionRule,
 };
 
@@ -469,7 +469,7 @@ async fn auto_mode_dangerous_tools_require_approval() {
 //  Settings-style rules — parsed specs and explicit subjects
 // ═══════════════════════════════════════════════════════════════════════════
 
-use coderex_core::permissions::{PermissionRuleSpec, RuleCompileContext};
+use codape_core::permissions::{PermissionRuleSpec, RuleCompileContext};
 
 fn rule(raw: &str, action: PermissionAction) -> PermissionRuleSpec {
     PermissionRuleSpec::parse(raw, action).unwrap_or_else(|error| panic!("{raw}: {error}"))

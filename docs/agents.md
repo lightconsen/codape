@@ -8,7 +8,7 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      coderex-agents                              │
+│                      codape-agents                              │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  AgentManager                                                     │
@@ -18,7 +18,7 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 │  │  ▼                                                       │  │  │
 │  │  ┌──────────┐  ┌──────────────┐  ┌───────────────────┐  │  │  │
 │  │  │ForkedCtx │  │ToolExecutor  │  │  QueryEngine      │  │  │  │
-│  │  │(context  │  │Factory       │  │  (coderex-core)   │  │  │  │
+│  │  │(context  │  │Factory       │  │  (codape-core)   │  │  │  │
 │  │  │ inherit) │  │(sandbox,     │  │                   │  │  │  │
 │  │  │          │  │ whitelist)   │  │  Full LLM loop    │  │  │  │
 │  │  └──────────┘  └──────────────┘  └───────────────────┘  │  │  │
@@ -36,7 +36,7 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 │  │                                                          │  │  │
 │  │  Observability Pipeline:                                 │  │  │
 │  │   engine events ──► broadcast<AgentObservableEvent>      │  │  │
-│  │                   ──► NDJSON log (~/.coderex/agent_logs) │  │  │
+│  │                   ──► NDJSON log (~/.codape/agent_logs) │  │  │
 │  │                   ──► parent EngineEvent channel         │  │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
@@ -57,8 +57,8 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 
 ### Custom Agents (`custom_agents.rs`)
 
-- **`CustomAgentDef`** — User-defined agent loaded from `~/.coderex/agents/*.json` with fields: `name`, `system_prompt`, `allowed_tools`, `model`, `max_tokens`, `output_schema`.
-- **`load_custom_agents()`** — Scans `~/.coderex/agents/` and returns a name-to-definition map. Files that fail to read, parse, or validate are skipped with a warning naming the path and error; valid files still load.
+- **`CustomAgentDef`** — User-defined agent loaded from `~/.codape/agents/*.json` with fields: `name`, `system_prompt`, `allowed_tools`, `model`, `max_tokens`, `output_schema`.
+- **`load_custom_agents()`** — Scans `~/.codape/agents/` and returns a name-to-definition map. Files that fail to read, parse, or validate are skipped with a warning naming the path and error; valid files still load.
 - **`load_custom_agents_from_dir(dir)`** — The same scan against an explicit directory, used by tests and embedders that keep definitions elsewhere.
 - **`get_custom_agent()`** — Lookup helper for a named custom agent.
 - Definitions are loaded when `AgentManager::standalone()` is created and can be replaced with `set_custom_agents()` / extended with `register_custom_agent()`. `custom_agent_names()` returns the sorted names used in unknown-name errors.
@@ -126,16 +126,16 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 
 ## Architecture Patterns
 
-- **Real `QueryEngine` execution** — Spawned agents run a full `QueryEngine` from `coderex-core` with tool whitelisting and read-only enforcement.
+- **Real `QueryEngine` execution** — Spawned agents run a full `QueryEngine` from `codape-core` with tool whitelisting and read-only enforcement.
 - **Channel-based messaging** — Parent and child agents communicate via `mpsc::UnboundedChannel`; messages are drained and appended to the prompt before each engine submission.
 - **Context forking** — Parent snapshots its state (session ID, cwd, tool list, env vars) for the child to work from.
-- **Cache-aware forking** — When the caller supplies `parent_prefix`, the fork reuses the parent's conversation messages *verbatim* (cloned, not re-derived, so the bytes match what the parent sent) and appends its own task after `fork_point`. `prefix_fingerprint()` gives a stable hash of the prefix for drift detection, and `is_cache_safe()` reports whether a given model/system-prompt/tool set would still hit the parent's prefix cache. A fork with no prefix starts a fresh one. CodeRex messages carry no stable uuid, so the fork point is an index, not an id.
-- **Tool executor factory** — Since `coderex-agents` cannot depend on `coderex-tools`, the caller provides a factory closure that creates concrete `ToolExecutor` implementations.
+- **Cache-aware forking** — When the caller supplies `parent_prefix`, the fork reuses the parent's conversation messages *verbatim* (cloned, not re-derived, so the bytes match what the parent sent) and appends its own task after `fork_point`. `prefix_fingerprint()` gives a stable hash of the prefix for drift detection, and `is_cache_safe()` reports whether a given model/system-prompt/tool set would still hit the parent's prefix cache. A fork with no prefix starts a fresh one. Codape messages carry no stable uuid, so the fork point is an index, not an id.
+- **Tool executor factory** — Since `codape-agents` cannot depend on `codape-tools`, the caller provides a factory closure that creates concrete `ToolExecutor` implementations.
 - **Retry with escalation** — Failed agents retry up to `max_retries` times with error context and optional escalation prompt appended to the prompt.
 - **Schema validation** — Agent outputs validated against JSON schema via `StructuredOutputValidator` with automatic retry on validation failure.
 - **Observability pipeline** — Agent events flow to three destinations simultaneously:
   1. Broadcast channel (`subscribe_to_agent()`) for real-time streaming
-  2. NDJSON log files at `~/.coderex/agent_logs/{agent_id}.jsonl`
+  2. NDJSON log files at `~/.codape/agent_logs/{agent_id}.jsonl`
   3. Parent engine event bus (`EngineEvent::AgentEvent`)
 - **Reading the logs back** — `read_agent_log(agent_id)` / `read_agent_log_at(path)`
   parse a log into `WireEvent`s (blank lines are skipped, a malformed line is an
@@ -146,11 +146,11 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
   test-only one; `subscribe_all()` / `"all"` keeps the unfiltered view.
 - **Sandbox override** — Per-agent `SandboxConfig` injected into the tool executor factory.
 - **Token tracking** — `QueryEngine.total_usage()` captured after each attempt, persisted to companion `.meta.json` file alongside the output file.
-- **Custom agent definitions** — Users define agents in `~/.coderex/agents/{name}.json`; `spawn_named_agent(name, ...)` resolves the definition and delegates to `AgentType::Custom`, which merges the system prompt, tool whitelist, model, token limit and output schema into the spawn.
-- **Named agents from the CLI** — `coderex --agent <name>` resolves the same definitions at session start. The definition's system prompt replaces the default session prompt, its `allowed_tools` narrows the session, and its `model` / `max_tokens` are installed on the session `QueryEngine`. An explicit `--system-prompt`, `--allowed-tools` or `--model` wins (there is no CLI max-token flag, so the definition's limit always applies), and an unknown name fails before the REPL starts with the list of configured names. The `coderex agents` subcommand lists built-in and custom agents.
+- **Custom agent definitions** — Users define agents in `~/.codape/agents/{name}.json`; `spawn_named_agent(name, ...)` resolves the definition and delegates to `AgentType::Custom`, which merges the system prompt, tool whitelist, model, token limit and output schema into the spawn.
+- **Named agents from the CLI** — `codape --agent <name>` resolves the same definitions at session start. The definition's system prompt replaces the default session prompt, its `allowed_tools` narrows the session, and its `model` / `max_tokens` are installed on the session `QueryEngine`. An explicit `--system-prompt`, `--allowed-tools` or `--model` wins (there is no CLI max-token flag, so the definition's limit always applies), and an unknown name fails before the REPL starts with the list of configured names. The `codape agents` subcommand lists built-in and custom agents.
 - **Parent prefix wiring** — The REPL refreshes a [`ParentContextSnapshot`] immediately before each turn and the Agent tool's parent-context provider reads it when spawning. When the snapshot has messages, the tool sets `SpawnOptions::parent_prefix` and `parent_cache_safe_params` (derived from the same model/system-prompt/tool list) and reports `message_count = prefix.len()`, so `ForkedContext` knows where the parent prefix ends. Without a provider (managers used directly, tests) a spawn still works but starts a fresh prefix.
 - **Lifecycle producers** — `run_agent_task()` emits `AgentLifecycleEvent::Started`, `TextDelta` for each streamed text delta, `ToolCall { name, args }` for each tool invocation (the engine exposes the call summary, so `args` currently carries `{"summary": ...}` rather than the parsed arguments), `Idle { reason: "turn complete" }` after the event stream drains, and finally `Completed` or `Failed`. They travel as `EngineEvent::AgentEvent`, which the TUI already renders.
-- **External subscriptions** — `subscribe_to_agent(id)` returns an `AgentSubscription`, a wrapper over the manager-wide `tokio::sync::broadcast` channel that yields only events tagged with that agent id; `subscribe_all()` (and the `"all"` alias) keeps the unfiltered view. The REPL creates an unfiltered subscription in `with_engine` and drains it on the TUI tick and in headless event draining (debug logs); `/agents follow <id|all>` installs either a filtered or an unfiltered subscription as the session's observable, so per-agent filtering is a production path rather than a test-only capability. The UI itself uses `EngineEvent::AgentEvent`, so the broadcast is the external-observer surface, not a second rendering path. `register_agent()` was removed: there is no transport for an externally managed agent in CodeRex (sub-agents are in-process `tokio` tasks), so it could only ever record a dangling id.
+- **External subscriptions** — `subscribe_to_agent(id)` returns an `AgentSubscription`, a wrapper over the manager-wide `tokio::sync::broadcast` channel that yields only events tagged with that agent id; `subscribe_all()` (and the `"all"` alias) keeps the unfiltered view. The REPL creates an unfiltered subscription in `with_engine` and drains it on the TUI tick and in headless event draining (debug logs); `/agents follow <id|all>` installs either a filtered or an unfiltered subscription as the session's observable, so per-agent filtering is a production path rather than a test-only capability. The UI itself uses `EngineEvent::AgentEvent`, so the broadcast is the external-observer surface, not a second rendering path. `register_agent()` was removed: there is no transport for an externally managed agent in Codape (sub-agents are in-process `tokio` tasks), so it could only ever record a dangling id.
 
 ## Permission inheritance
 
@@ -173,7 +173,7 @@ custom agent definitions (`agents`), which the REPL registers at startup.
 ### What Works
 
 - **Agent type definitions** — All 7 built-in types plus custom agents.
-- **Custom agent loading** — Scans `~/.coderex/agents/*.json` on manager creation; merged options override spawn defaults.
+- **Custom agent loading** — Scans `~/.codape/agents/*.json` on manager creation; merged options override spawn defaults.
 - **AgentManager** — Full lifecycle: spawn (built-in or named custom), send_message, complete, stop, list, running_count.
 - **Real engine execution** — `spawn_agent()` creates a `tokio::spawn` task running `run_agent_task()` with a full `QueryEngine`.
 - **Context forking** — `ForkedContext` with session ID, cwd, message count, tool whitelist, environment snapshot, and — for cache-aware forks — the parent conversation prefix, fork point and cache-safe params.
@@ -188,12 +188,12 @@ custom agent definitions (`agents`), which the REPL registers at startup.
 - **Teammate events** — `TaskCompleted` and `Idle` events emitted through the manager callback. The REPL is a production caller: it forwards them to `EngineEvent::AgentEvent` and logs each one, so they reach the UI and headless logs.
 - **Sub-agent lifecycle events** — `Started`, `TextDelta`, `ToolCall`, `Idle` and terminal `Completed`/`Failed` are emitted to the parent engine (see the lifecycle pattern above).
 - **Cache-aware forking** — `ForkedContext` reuses the parent's conversation prefix verbatim (`fork_messages()`, `prefix_fingerprint()`, `is_cache_safe()`), so a fork can hit the provider's prefix cache instead of paying for a fresh prefix. The REPL supplies the production prefix/cache-safe params through `ParentContextSnapshot`.
-- **Forked/background delegation** — `run_forked_agent()` and `run_background_feature()` via `coderex-core` orchestrator.
+- **Forked/background delegation** — `run_forked_agent()` and `run_background_feature()` via `codape-core` orchestrator.
 - **Custom agent resolution** — `spawn_named_agent()` resolves named custom agents from loaded definitions, merging allowed_tools, model, max_tokens, and output_schema. `--agent` resolves the same definition for the session and applies its model and max_tokens to the session engine, unless `--model` was explicit.
 - **Agent tool spawn options** — The Agent tool exposes `agent` (custom name, takes precedence over `subagent_type`), `writable` / `read_only`, and `retry_policy` / `max_retries`, and passes them into `SpawnOptions`. `writable: false` enforces the Read/Grep/Glob whitelist.
 - **Removed registration API** — `register_agent()` and `is_registered()` no longer exist: there is no external-agent transport, so they were dangling. See the pattern note above.
 
-## Background Job Records and Adoption (`coderex-core::job_record`)
+## Background Job Records and Adoption (`codape-core::job_record`)
 
 Background agents are **in-process `tokio` tasks**, and background shell
 commands are child processes owned by this process. When the process exits, the
@@ -222,7 +222,7 @@ late completion cannot overwrite an `Interrupted` written by cancellation or
 adoption.
 
 **The record.** `JobStore` writes one JSON file per job under
-`<cwd>/.coderex/jobs/<id>.json`, atomically (a sibling temp file renamed over
+`<cwd>/.codape/jobs/<id>.json`, atomically (a sibling temp file renamed over
 the target, so concurrent readers never see a partial record). A `JobRecord`
 carries `id`, `kind` (`Agent` / `Shell` / `Workflow` / `Cron`), `description`,
 `cwd`, `session_id`, `pid`, `started_at_ms`, `updated_at_ms`, `state`
@@ -232,7 +232,7 @@ with `serde(default)` so older records still decode — `ended_at_ms`,
 
 **No roster index.** The reference keeps a `roster.json` index beside its
 per-job `state.json` files because its daemon rescans a job tree of unknown
-size on every restart. CodeRex's job directory is written by one session and
+size on every restart. Codape's job directory is written by one session and
 holds a handful of files, so `JobStore::list()` just reads the directory. A
 second copy of the same facts is a second thing that can be wrong.
 
@@ -259,7 +259,7 @@ agent is surfaced into the conversation once — never left as a phantom
 `running`, and never re-reported on every subsequent start.
 
 **Cron is already durable.** `CronScheduler` (`crates/tools`) persists
-`durable` definitions to `~/.coderex/scheduled_tasks.json` and reloads them at
+`durable` definitions to `~/.codape/scheduled_tasks.json` and reloads them at
 session start (`repl.rs` calls `load()` then `spawn_runner()`), which is what
 the reference's cron adoption does — dedupe against the session store and
 re-schedule. When the scheduler is constructed with a cwd and session id
@@ -270,7 +270,7 @@ a `delete()` settles it `Done`. Adoption therefore classifies cron records as
 `resumable` for disclosure but does not re-register them, and there is no
 second cron store.
 
-**Kill switch.** `CODEREX_DISABLE_ADOPT` (non-empty, not `0`/`false`/`no`)
+**Kill switch.** `CODAPE_DISABLE_ADOPT` (non-empty, not `0`/`false`/`no`)
 makes `adopt_for_session()` a no-op. As in the reference, there is **no
 adopt-time consent prompt** — consent is carried, and adoption *discloses*
 rather than asks — so this is a switch, not a dialog.
@@ -279,10 +279,10 @@ rather than asks — so this is a switch, not a dialog.
 the existing `TaskStore` / `CronScheduler` wiring):
 
 ```rust
-let store = coderex_core::job_record::JobStore::new(&cwd);
-let adopted = coderex_core::job_record::adopt_for_session(
+let store = codape_core::job_record::JobStore::new(&cwd);
+let adopted = codape_core::job_record::adopt_for_session(
     &store,
-    coderex_core::task::now_ms(),
+    codape_core::task::now_ms(),
     &session_id,
 )
 .unwrap_or_default();
@@ -373,7 +373,7 @@ filtered or unfiltered receiver, and `/agents logs <id> [count]` replays the
 stored NDJSON log through `read_agent_log`. The TUI reads the same lifecycle
 through `EngineEvent::AgentEvent`.
 
-### Custom Agent Config (`~/.coderex/agents/my_agent.json`)
+### Custom Agent Config (`~/.codape/agents/my_agent.json`)
 
 ```json
 {
@@ -405,7 +405,7 @@ An unknown name returns `AgentError::UnknownCustomAgent`, whose message lists
 the configured names (or explains where to add a definition when none are
 configured) instead of silently falling back to a general-purpose agent.
 
-When a definition is used for the **session** (`coderex --agent <name>`), its
+When a definition is used for the **session** (`codape --agent <name>`), its
 `system_prompt`, `allowed_tools`, `model` and `max_tokens` are applied to the
 session (the model and token limit via `QueryEngine::set_model` /
 `set_max_tokens`). Explicit `--system-prompt` or `--allowed-tools` win, and an

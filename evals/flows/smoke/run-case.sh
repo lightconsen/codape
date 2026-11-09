@@ -10,14 +10,14 @@ PROMPT="${1:-hello}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-CODEREX_BIN="${CODEREX_BIN:-$TARGET_DIR/debug/coderex}"
+CODAPE_BIN="${CODAPE_BIN:-$TARGET_DIR/debug/codape}"
 SERVER_BIN="${STATIC_ANTHROPIC_SERVER_BIN:-$TARGET_DIR/debug/static-anthropic-server}"
-RESPONSES="${CODEREX_EVAL_RESPONSES:-$REPO_ROOT/tests/responses.json}"
+RESPONSES="${CODAPE_EVAL_RESPONSES:-$REPO_ROOT/tests/responses.json}"
 
-if [[ ! -x "$CODEREX_BIN" || ! -x "$SERVER_BIN" ]]; then
+if [[ ! -x "$CODAPE_BIN" || ! -x "$SERVER_BIN" ]]; then
     cargo build --quiet \
         --manifest-path "$REPO_ROOT/Cargo.toml" \
-        -p coderex-cli --bin coderex --bin static-anthropic-server
+        -p codape-cli --bin codape --bin static-anthropic-server
 fi
 
 log=$(mktemp)
@@ -58,5 +58,5 @@ fi
 # same binary a person runs. Only the provider endpoint is redirected.
 ANTHROPIC_API_KEY=mock \
 ANTHROPIC_BASE_URL="http://$origin" \
-CODEREX_SKIP_ENV_SOURCE=1 \
-"$CODEREX_BIN" --print --brief "$PROMPT"
+CODAPE_SKIP_ENV_SOURCE=1 \
+"$CODAPE_BIN" --print --brief "$PROMPT"

@@ -21,19 +21,19 @@ USAGE
 }
 
 run_matrix() {
-    cargo test -p coderex-cli --test interactive_tui sequence_matrix -- --nocapture
+    cargo test -p codape-cli --test interactive_tui sequence_matrix -- --nocapture
 }
 
 run_reported() {
-    cargo test -p coderex-cli --test interactive_tui reported_skills_tools_sequence_stays_usable -- --nocapture
+    cargo test -p codape-cli --test interactive_tui reported_skills_tools_sequence_stays_usable -- --nocapture
 }
 
 run_permissions() {
-    cargo test -p coderex-cli --test interactive_tui permission_mode_sequence_matrix_enforces_expected_policy -- --nocapture
+    cargo test -p codape-cli --test interactive_tui permission_mode_sequence_matrix_enforces_expected_policy -- --nocapture
 }
 
 run_e2e() {
-    cargo test -p coderex-cli --test interactive_e2e_tool -- --nocapture
+    cargo test -p codape-cli --test interactive_e2e_tool -- --nocapture
 }
 
 cd "$REPO_ROOT"
@@ -44,12 +44,12 @@ case "$mode" in
         run_matrix
         run_reported
         run_e2e
-        cargo check -p coderex-cli
+        cargo check -p codape-cli
         ;;
     full)
-        cargo test -p coderex-cli --test interactive_tui -- --nocapture
+        cargo test -p codape-cli --test interactive_tui -- --nocapture
         run_e2e
-        cargo check -p coderex-cli
+        cargo check -p codape-cli
         ;;
     matrix)
         run_matrix

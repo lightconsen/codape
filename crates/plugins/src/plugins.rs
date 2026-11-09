@@ -151,7 +151,7 @@ impl std::fmt::Display for RuntimeType {
 /// A plugin author, as declared in `plugin.json`.
 ///
 /// Claude's manifest writes this as an object (`{"name": ..., "email": ...}`)
-/// and CodeRex manifests in the wild write it as a bare string. Both parse:
+/// and Codape manifests in the wild write it as a bare string. Both parse:
 /// an object used to fail the whole manifest, which took the plugin with it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PluginAuthor {
@@ -211,7 +211,7 @@ impl<'de> Deserialize<'de> for PluginAuthor {
 /// One entry of a manifest's `userConfig` block.
 ///
 /// The keys of the map are the option names, which become
-/// `CODEREX_PLUGIN_OPTION_<KEY>` environment variables in the plugin process.
+/// `CODAPE_PLUGIN_OPTION_<KEY>` environment variables in the plugin process.
 /// [`PluginManifest::resolve_options`] enforces the declaration: a supplied
 /// value is checked against `type`, `options`, `min` and `max`, and a value
 /// that does not fit is refused by name.
@@ -252,14 +252,14 @@ pub struct UserConfigField {
 }
 
 /// Environment variable prefix for plugin options: `<PREFIX><KEY>`.
-pub const PLUGIN_OPTION_ENV_PREFIX: &str = "CODEREX_PLUGIN_OPTION_";
+pub const PLUGIN_OPTION_ENV_PREFIX: &str = "CODAPE_PLUGIN_OPTION_";
 
 /// A plugin manifest — parsed from plugin.json.
 ///
 /// Unknown fields are a hard parse error (`deny_unknown_fields`): a field a
 /// plugin author invents, or misspells, is reported by name instead of being
 /// silently dropped on the floor. Fields that belong to Claude's documented
-/// manifest but that CodeRex does not act on yet are declared here anyway and
+/// manifest but that Codape does not act on yet are declared here anyway and
 /// reported by [`PluginManifest::unimplemented_fields`], which is logged when
 /// the plugin is loaded.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -308,7 +308,7 @@ pub struct PluginManifest {
     /// Free-form metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
-    /// Minimum CodeRex version required.
+    /// Minimum Codape version required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_version: Option<String>,
     /// Commands this plugin provides.
@@ -337,7 +337,7 @@ pub struct PluginManifest {
     /// Environment variables for the plugin process.
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Options the user configures, injected as `CODEREX_PLUGIN_OPTION_<KEY>`.
+    /// Options the user configures, injected as `CODAPE_PLUGIN_OPTION_<KEY>`.
     #[serde(rename = "userConfig", default)]
     pub user_config: HashMap<String, UserConfigField>,
     /// Hooks this plugin contributes to the Plugin hook tier.
@@ -413,7 +413,7 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
-    /// Fields this manifest declares that CodeRex accepts but does not act on.
+    /// Fields this manifest declares that Codape accepts but does not act on.
     ///
     /// Every documented Claude component is now a real, validated component
     /// source, so this is empty. The method is kept because callers log the
@@ -432,7 +432,7 @@ impl PluginManifest {
             tracing::warn!(
                 plugin = %self.name,
                 fields = ?fields,
-                "plugin.json declares fields CodeRex does not implement; they have no effect"
+                "plugin.json declares fields Codape does not implement; they have no effect"
             );
         }
     }
@@ -441,10 +441,10 @@ impl PluginManifest {
     ///
     /// Resolution order for each declared option:
     /// 1. `provided` — a value the host has already resolved (from its own
-    ///    configuration, or from the OS keychain: CodeRex's `keyring://`
-    ///    convention lives in `coderex-config`).
-    /// 2. `lookup` — normally CodeRex's own environment, for
-    ///    `CODEREX_PLUGIN_OPTION_<KEY>`.
+    ///    configuration, or from the OS keychain: Codape's `keyring://`
+    ///    convention lives in `codape-config`).
+    /// 2. `lookup` — normally Codape's own environment, for
+    ///    `CODAPE_PLUGIN_OPTION_<KEY>`.
     /// 3. The manifest's `default`, which a `sensitive` option may not have.
     ///
     /// Errors are deliberate and loud, because every one of them is a way for a
@@ -507,7 +507,7 @@ impl PluginManifest {
                 return Err(format!(
                     "userConfig option '{key}' is sensitive and its value is still the \
                      keyring reference '{value}'; resolve it before handing it to a plugin \
-                     (keychain access lives in coderex-config, behind its `keyring` feature)"
+                     (keychain access lives in codape-config, behind its `keyring` feature)"
                 ));
             }
 
@@ -522,7 +522,7 @@ impl PluginManifest {
     /// Build the environment a plugin process is spawned with.
     ///
     /// The manifest's static `env` is carried over, with `${user_config.KEY}`
-    /// substitution applied, and one `CODEREX_PLUGIN_OPTION_<KEY>` variable is
+    /// substitution applied, and one `CODAPE_PLUGIN_OPTION_<KEY>` variable is
     /// added per resolved option. Sensitive values travel the same way, which
     /// is Claude's design too — they are in the child's environment, visible to
     /// the plugin and to the process table of the same user.
@@ -591,7 +591,7 @@ fn value_to_env_string(value: &Value) -> Option<String> {
 /// the plugin fail on a value it never expected.
 ///
 /// `type` is treated as advisory only in the sense that an unknown type
-/// (`directory`, `file`, or a value CodeRex does not know) is accepted as a
+/// (`directory`, `file`, or a value Codape does not know) is accepted as a
 /// string: the declaration still has to be a string to reach a plugin's
 /// environment. A `min`/`max` pair implies a numeric option even when `type`
 /// is absent, matching Claude's manifests, where `min`/`max` carry the numeric
@@ -678,7 +678,7 @@ pub fn substitute_user_config<S: std::hash::BuildHasher>(
 }
 
 /// Environment variable carrying the plugin signing key.
-pub const PLUGIN_PUBLIC_KEY_ENV: &str = "CODEREX_PLUGIN_PUBLIC_KEY";
+pub const PLUGIN_PUBLIC_KEY_ENV: &str = "CODAPE_PLUGIN_PUBLIC_KEY";
 
 /// What a signature check against the configured key concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -779,7 +779,7 @@ pub struct MarketplaceConnection {
 
 /// Where a plugin is installed from.
 ///
-/// CodeRex is local-first, so the source kinds that earn their place are the
+/// Codape is local-first, so the source kinds that earn their place are the
 /// ones that work without a package registry behind them: a directory on this
 /// machine, a git repository, and a plain HTTPS archive. Marketplace listings
 /// stay where they were, behind [`PluginManager::install_plugin`].
@@ -836,7 +836,7 @@ pub enum PluginSource {
         /// Expected SHA-256 of the archive, if the caller pinned one.
         sha256: Option<String>,
     },
-    /// A source kind the reference defines but CodeRex does not implement.
+    /// A source kind the reference defines but Codape does not implement.
     ///
     /// Recognised so the refusal is explicit rather than a fall-through to "a
     /// marketplace listing that could not be downloaded": `install_plugin`
@@ -912,7 +912,7 @@ pub fn unsupported_source_reason(kind: &str) -> String {
         // The reference's own message for this branch, quoted so the gap is
         // attributed rather than invented.
         "npm" => "NPM marketplace sources not yet implemented".to_string(),
-        "command" => "a command source runs a command named by a marketplace entry; CodeRex \
+        "command" => "a command source runs a command named by a marketplace entry; Codape \
                       has no sandbox for that and no consent step, so it is not implemented"
             .to_string(),
         other => format!("source kind '{other}' is not implemented"),
@@ -925,11 +925,11 @@ impl PluginSource {
     /// An existing directory is a local source; something that looks like a git
     /// remote is cloned; an HTTPS URL ending in `.tar.gz`/`.tgz` is downloaded.
     /// Anything else is treated as a marketplace listing name, which is what
-    /// `coderex plugin install <name>` has always meant.
+    /// `codape plugin install <name>` has always meant.
     ///
     /// The reference's structured sources that a string cannot express by shape
     /// alone get a `scheme:` prefix: `github:owner/repo[@rev]` and
-    /// `git-subdir:<url>#<path>[@rev]`. The schemes CodeRex deliberately does not
+    /// `git-subdir:<url>#<path>[@rev]`. The schemes Codape deliberately does not
     /// implement (`npm:`, `command:`) are recognised so they refuse out loud
     /// instead of being mistaken for a marketplace plugin by that name.
     #[must_use]
@@ -1155,7 +1155,7 @@ impl PluginPinStore {
 }
 
 /// The pin file name inside an install directory.
-pub const PIN_FILE_NAME: &str = ".coderex-pins.json";
+pub const PIN_FILE_NAME: &str = ".codape-pins.json";
 
 /// SHA-256, hex-encoded.
 ///
@@ -1313,7 +1313,7 @@ fn is_full_commit_sha(rev: &str) -> bool {
 /// Credential prompts are turned off: a plugin install that cannot authenticate
 /// fails with a message instead of hanging on a prompt nobody sees.
 async fn run_git(args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::from(coderex_core::git_hardening::git_command())
+    let output = tokio::process::Command::from(codape_core::git_hardening::git_command())
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Never inherit a repository selection from the caller: an install must
@@ -2268,7 +2268,7 @@ pub struct PluginChannelEvent {
 ///
 /// ```json
 /// "channels": {
-///   "ops":  { "server": "ops-server", "deliver": { "url": "https://hooks.example.com/coderex" } },
+///   "ops":  { "server": "ops-server", "deliver": { "url": "https://hooks.example.com/codape" } },
 ///   "page": { "server": "ops-server", "deliver": { "server": "pager", "tool": "raise" } },
 ///   "mail": { "server": "ops-server", "deliver": { "command": "/home/me/notify.sh", "args": ["--ops"] } }
 /// }
@@ -2468,7 +2468,7 @@ pub enum ChannelStatus {
     /// notification would arrive and be dropped.
     Idle,
     /// The channel names an MCP server that is not configured. No notification
-    /// can arrive, and CodeRex says so instead of pretending the channel works.
+    /// can arrive, and Codape says so instead of pretending the channel works.
     ServerNotConfigured,
     /// The channel declares a `deliver` block that was refused (a bad scheme,
     /// a plain-http remote URL, a missing url). Nothing is delivered until the
@@ -2521,11 +2521,11 @@ impl PluginChannelReport {
 
 /// One `.d.ts` declaration made available to the session.
 ///
-/// `source` is the file text. CodeRex has no TypeScript runtime, so "loaded"
+/// `source` is the file text. Codape has no TypeScript runtime, so "loaded"
 /// here means exactly this: the declaration is read into memory and exposed
 /// through [`PluginTypeRegistry`] so `/plugin components` can list it and
 /// [`PluginManager::export_plugin_types`] can write it to a stable directory.
-/// There is no LSP or tool that consumes the declaration at runtime — CodeRex
+/// There is no LSP or tool that consumes the declaration at runtime — Codape
 /// does not run a TypeScript language server against it — and it is never
 /// executed, type-checked, or compiled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2757,7 +2757,7 @@ impl PluginManager {
     /// to re-spawn a plugin.
     ///
     /// A retry that only marks a plugin `Active` without spawning it is a
-    /// plugin CodeRex reports as loaded but cannot run. With a handler set, the
+    /// plugin Codape reports as loaded but cannot run. With a handler set, the
     /// plugin becomes `Active` only after the handler returns `Ok(())`.
     pub fn set_restart_handler(
         &mut self,
@@ -2832,7 +2832,7 @@ impl PluginManager {
                 name: manifest.name.clone(),
                 version: manifest.version.clone(),
                 state: PluginState::Error(format!(
-                    "requires CodeRex >= {} (current: {})",
+                    "requires Codape >= {} (current: {})",
                     manifest.min_version.as_deref().unwrap_or("unknown"),
                     self.app_version
                 )),
@@ -2974,7 +2974,7 @@ impl PluginManager {
 
         if manifest.runtime == RuntimeType::Wasm {
             // Resolve `userConfig` exactly as for a process plugin. The
-            // values are handed to the module through the `coderex.user_config`
+            // values are handed to the module through the `codape.user_config`
             // import rather than an environment, because a WASM module has no
             // environment. Errors (a missing required option, a plaintext
             // default for a secret, an unresolved `keyring://` reference) stop
@@ -4102,17 +4102,17 @@ impl PluginManager {
     ///
     /// Under `root` this writes:
     ///
-    /// - `coderex/index.d.ts` — engine and hook declarations.
-    /// - `coderex-tools/index.d.ts` — the builtin tool inputs and results,
+    /// - `codape/index.d.ts` — engine and hook declarations.
+    /// - `codape-tools/index.d.ts` — the builtin tool inputs and results,
     ///   generated from `tools`.
-    /// - `coderex-mcp/index.d.ts` — configured MCP server declarations.
+    /// - `codape-mcp/index.d.ts` — configured MCP server declarations.
     /// - `<plugin>/<file>` — each active plugin's declared `.d.ts` files.
     /// - `tsconfig.json` — a config whose `include` lists every emitted
     ///   directory.
     ///
     /// The generated declarations are the host's own type surface. The
     /// plugin-declared files are copied so a TypeScript author has one stable
-    /// include root; CodeRex itself never executes or type-checks them.
+    /// include root; Codape itself never executes or type-checks them.
     /// Missing or unreadable plugin files are warnings; a failure to create
     /// the root directory is an error.
     ///
@@ -4144,12 +4144,12 @@ impl PluginManager {
             .collect();
 
         let generated: [(&str, String); 3] = [
-            ("coderex", engine_declaration()),
+            ("codape", engine_declaration()),
             (
-                "coderex-tools",
+                "codape-tools",
                 builtin_tools_declaration_with_results(&inputs, &results),
             ),
-            ("coderex-mcp", mcp_declaration()),
+            ("codape-mcp", mcp_declaration()),
         ];
         for (directory, declaration) in generated {
             let destination = root.join(directory).join("index.d.ts");
@@ -4442,13 +4442,13 @@ impl PluginManager {
         Ok(())
     }
 
-    /// Refuse an install whose `min_version` the running CodeRex does not meet.
+    /// Refuse an install whose `min_version` the running Codape does not meet.
     fn check_install_compatible(&self, manifest: &PluginManifest) -> Result<(), String> {
         if self.is_version_compatible(manifest.min_version.as_deref()) {
             return Ok(());
         }
         Err(format!(
-            "plugin '{}' requires CodeRex >= {} (current: {})",
+            "plugin '{}' requires Codape >= {} (current: {})",
             manifest.name,
             manifest.min_version.as_deref().unwrap_or("unknown"),
             self.app_version
@@ -5156,7 +5156,7 @@ impl PluginManager {
         plugin: &MarketplacePlugin,
         install_dir: &Path,
     ) -> Result<PathBuf, String> {
-        // `coderex plugin install <source>` passes its argument through both
+        // `codape plugin install <source>` passes its argument through both
         // the name and the url. When that argument names a directory, a git
         // remote or an archive, install from there rather than looking it up in
         // a marketplace. A real listing's url never looks like either.
@@ -5313,7 +5313,7 @@ impl PluginManager {
         if !self.is_version_compatible(manifest.min_version.as_deref()) {
             let _ = std::fs::remove_dir_all(&temp_dir);
             let msg = format!(
-                "plugin '{plugin_name}' requires CodeRex >= {} (current: {})",
+                "plugin '{plugin_name}' requires Codape >= {} (current: {})",
                 manifest.min_version.as_deref().unwrap_or("unknown"),
                 self.app_version
             );
@@ -5429,7 +5429,7 @@ impl PluginManager {
 
     /// Install a plugin by its name in a registered marketplace.
     ///
-    /// This is the production entry point for `coderex plugin install <name>`:
+    /// This is the production entry point for `codape plugin install <name>`:
     /// register the marketplace once (see [`Self::register_marketplace`]), then
     /// call this with the name the marketplace lists. It fails with a clear
     /// error if no marketplace is registered, instead of silently reporting a
@@ -5748,7 +5748,7 @@ impl PluginManager {
 
     /// Set the Ed25519 public key for signature verification (hex-encoded).
     ///
-    /// This is the trust anchor: it has to come from whoever runs CodeRex
+    /// This is the trust anchor: it has to come from whoever runs Codape
     /// (see [`Self::set_public_key_from_env`]), never from the package being
     /// checked. With a key set, an archive that does not match it is refused.
     pub fn set_public_key(&mut self, key_hex: impl Into<String>) {
@@ -5965,8 +5965,8 @@ impl MarketplaceReconciler {
     /// the public field:
     ///
     /// ```
-    /// # use coderex_plugins::plugins::MarketplaceReconciler;
-    /// let enabled_by_user = std::env::var("CODEREX_PLUGIN_AUTO_INSTALL").is_ok();
+    /// # use codape_plugins::plugins::MarketplaceReconciler;
+    /// let enabled_by_user = std::env::var("CODAPE_PLUGIN_AUTO_INSTALL").is_ok();
     /// let reconciler =
     ///     MarketplaceReconciler::with_auto_install_enabled(300, enabled_by_user);
     /// assert_eq!(reconciler.auto_install_enabled(), enabled_by_user);
@@ -6784,7 +6784,7 @@ mod tests {
 
     // ── plugin.json field table ──────────────────────────────────────────
 
-    /// A manifest shaped like Claude's parses, including the fields CodeRex
+    /// A manifest shaped like Claude's parses, including the fields Codape
     /// does not act on yet.
     #[test]
     fn a_claude_shaped_manifest_parses() {
@@ -6828,7 +6828,7 @@ mod tests {
     }
 
     /// The published Claude sample writes `author` as an object. A bare string
-    /// is what CodeRex manifests use. Both have to parse: an object used to
+    /// is what Codape manifests use. Both have to parse: an object used to
     /// fail the whole manifest, which took the plugin with it, in silence.
     #[test]
     fn an_author_object_does_not_take_the_plugin_with_it() {
@@ -7913,7 +7913,7 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("types")).unwrap();
         std::fs::write(
             plugin_root.join("types/index.d.ts"),
-            "declare module 'coderex' { export const x: number }",
+            "declare module 'codape' { export const x: number }",
         )
         .unwrap();
 
@@ -7934,7 +7934,7 @@ mod tests {
         assert_eq!(file.path, "types/index.d.ts");
         assert_eq!(
             registry.render("main").unwrap(),
-            "declare module 'coderex' { export const x: number }"
+            "declare module 'codape' { export const x: number }"
         );
         assert_eq!(registry.list().len(), 1);
     }
@@ -7991,7 +7991,7 @@ mod tests {
         std::fs::create_dir_all(plugin_root.join("types")).unwrap();
         std::fs::write(
             plugin_root.join("types/index.d.ts"),
-            "declare module 'coderex' { export const x: number }",
+            "declare module 'codape' { export const x: number }",
         )
         .unwrap();
 
@@ -8030,9 +8030,9 @@ mod tests {
         let exported = mgr.export_plugin_types(out.path(), &tools).unwrap();
         assert_eq!(exported.len(), 5, "{exported:?}");
 
-        let engine = out.path().join("coderex/index.d.ts");
-        let builtins = out.path().join("coderex-tools/index.d.ts");
-        let mcp = out.path().join("coderex-mcp/index.d.ts");
+        let engine = out.path().join("codape/index.d.ts");
+        let builtins = out.path().join("codape-tools/index.d.ts");
+        let mcp = out.path().join("codape-mcp/index.d.ts");
         let plugin_file = out.path().join("typed/index.d.ts");
         let tsconfig = out.path().join("tsconfig.json");
         for path in [&engine, &builtins, &mcp, &plugin_file, &tsconfig] {
@@ -8052,14 +8052,14 @@ mod tests {
 
         assert_eq!(
             std::fs::read_to_string(&plugin_file).unwrap(),
-            "declare module 'coderex' { export const x: number }"
+            "declare module 'codape' { export const x: number }"
         );
 
         let config: Value = serde_json::from_str(&std::fs::read_to_string(&tsconfig).unwrap())
             .expect("tsconfig is valid JSON");
         assert_eq!(
             config["include"],
-            serde_json::json!(["coderex", "coderex-mcp", "coderex-tools", "typed"])
+            serde_json::json!(["codape", "codape-mcp", "codape-tools", "typed"])
         );
     }
 
@@ -8317,7 +8317,7 @@ mod tests {
         let manifest = manifest_with_options();
         let values = manifest
             .resolve_options(&HashMap::new(), |key| {
-                (key == "CODEREX_PLUGIN_OPTION_TOKEN").then(|| "from-env".to_string())
+                (key == "CODAPE_PLUGIN_OPTION_TOKEN").then(|| "from-env".to_string())
             })
             .unwrap();
 
@@ -8325,8 +8325,8 @@ mod tests {
         assert_eq!(values["REGION"], "eu");
 
         let env = manifest.build_env(&values);
-        assert_eq!(env["CODEREX_PLUGIN_OPTION_TOKEN"], "from-env");
-        assert_eq!(env["CODEREX_PLUGIN_OPTION_REGION"], "eu");
+        assert_eq!(env["CODAPE_PLUGIN_OPTION_TOKEN"], "from-env");
+        assert_eq!(env["CODAPE_PLUGIN_OPTION_REGION"], "eu");
         assert_eq!(env["ENDPOINT"], "https://eu.example.com");
     }
 
@@ -8335,7 +8335,7 @@ mod tests {
         let manifest = manifest_with_options();
         let values = manifest
             .resolve_options(&HashMap::new(), |key| {
-                (key == "CODEREX_PLUGIN_OPTION_TOKEN").then(|| "value".to_string())
+                (key == "CODAPE_PLUGIN_OPTION_TOKEN").then(|| "value".to_string())
             })
             .unwrap();
         let entrypoint =
@@ -8370,10 +8370,9 @@ mod tests {
         let manifest: PluginManifest =
             serde_json::from_str(r#"{"name":"n","userConfig":{"API_KEY":{"sensitive":true}}}"#)
                 .unwrap();
-        let provided =
-            HashMap::from([("API_KEY".to_string(), "keyring://coderex/api".to_string())]);
+        let provided = HashMap::from([("API_KEY".to_string(), "keyring://codape/api".to_string())]);
         let err = manifest.resolve_options(&provided, |_| None).unwrap_err();
-        assert!(err.contains("keyring://coderex/api"), "{err}");
+        assert!(err.contains("keyring://codape/api"), "{err}");
     }
 
     #[test]
@@ -8383,7 +8382,7 @@ mod tests {
             .resolve_options(&HashMap::new(), |_| None)
             .unwrap_err();
         assert!(err.contains("required"), "{err}");
-        assert!(err.contains("CODEREX_PLUGIN_OPTION_TOKEN"), "{err}");
+        assert!(err.contains("CODAPE_PLUGIN_OPTION_TOKEN"), "{err}");
     }
 
     #[test]
@@ -8555,7 +8554,7 @@ done
 
         let environment = std::fs::read_to_string(&dumped).unwrap();
         assert!(
-            environment.contains("CODEREX_PLUGIN_OPTION_TOKEN=s3cret"),
+            environment.contains("CODAPE_PLUGIN_OPTION_TOKEN=s3cret"),
             "the option never reached the child: {environment}"
         );
     }
@@ -8686,7 +8685,7 @@ done
         assert!(err.contains("already installed"), "{err}");
     }
 
-    /// What `coderex plugin install <source>` does: the argument is passed
+    /// What `codape plugin install <source>` does: the argument is passed
     /// through as both the name and the url of a listing, and a listing whose
     /// url names a directory installs from that directory.
     #[tokio::test]
@@ -8763,9 +8762,9 @@ done
             "-C",
             path,
             "-c",
-            "user.name=coderex",
+            "user.name=codape",
             "-c",
-            "user.email=coderex@example.invalid",
+            "user.email=codape@example.invalid",
         ];
         full.extend_from_slice(args);
         run_git(&full).await
@@ -8899,7 +8898,7 @@ done
             }
         );
 
-        // The two kinds the reference defines but CodeRex does not implement are
+        // The two kinds the reference defines but Codape does not implement are
         // recognised, so they are never mistaken for a plugin name.
         assert_eq!(
             PluginSource::detect("npm:@acme/plugin"),
@@ -9181,7 +9180,7 @@ done
         assert!(err.contains("empty path"), "{err}");
     }
 
-    /// The `command` source runs a command named by a marketplace entry. CodeRex
+    /// The `command` source runs a command named by a marketplace entry. Codape
     /// has no sandbox for that, so the kind is refused and nothing runs.
     #[tokio::test]
     async fn a_command_source_is_refused_and_never_executed() {
@@ -9568,7 +9567,7 @@ done
     #[tokio::test]
     async fn a_spawn_failure_is_recorded_as_an_error_state() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest_json = r#"{"name":"unspawnable","entrypoint":"coderex-no-such-binary-9d8f"}"#;
+        let manifest_json = r#"{"name":"unspawnable","entrypoint":"codape-no-such-binary-9d8f"}"#;
         std::fs::write(dir.path().join("plugin.json"), manifest_json).unwrap();
         let manifest: PluginManifest = serde_json::from_str(manifest_json).unwrap();
 

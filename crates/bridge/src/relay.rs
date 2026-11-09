@@ -31,10 +31,10 @@
 //! sees, and then spends a confirmation or refuses. A refusal comes back as
 //! [`RelayDecision::Refuse`] carrying the gateway's status, code, and message.
 //!
-//! # What is CodeRex's own here
+//! # What is Codape's own here
 //!
 //! The reference binds an artifact *share*: its snapshot holds `mode`,
-//! `access`, and `user_uuids`. CodeRex has no artifact sharing, so the snapshot
+//! `access`, and `user_uuids`. Codape has no artifact sharing, so the snapshot
 //! here is the confirmed tool call — session, tool, and a digest of the
 //! arguments. The binding rules, the wire format, and the refusal are the same;
 //! the payload is what this codebase actually approves.

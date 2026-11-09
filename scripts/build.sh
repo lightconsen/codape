@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build CodeRex locally.
+# Build Codape locally.
 #
 # Usage:
 #   scripts/build.sh                       # clean, then release build
@@ -10,7 +10,7 @@
 #
 # Options:
 #   -d, --debug       use the dev profile (fast to compile, slow to run)
-#   -w, --workspace   build the whole workspace instead of just the coderex bin
+#   -w, --workspace   build the whole workspace instead of just the codape bin
 #       --no-clean    skip the `cargo clean` that runs before every build
 #   -j, --jobs N      parallel build jobs (passed to cargo)
 #       --run         run the built binary; arguments after `--` go to it
@@ -119,7 +119,7 @@ fi
 if [ "$workspace" = 1 ]; then
   :
 else
-  cargo_args+=(-p coderex-cli --bin coderex)
+  cargo_args+=(-p codape-cli --bin codape)
 fi
 if [ -n "$jobs" ]; then
   cargo_args+=(-j "$jobs")
@@ -128,14 +128,14 @@ fi
 if [ "$workspace" = 1 ]; then
   note "building the workspace ($profile)..."
 else
-  note "building the coderex binary ($profile)..."
+  note "building the codape binary ($profile)..."
 fi
 note "the first build compiles QuickJS, wasmtime and the workspace; expect it to take several minutes"
 
 cargo build "${cargo_args[@]}"
 
 target_dir=${CARGO_TARGET_DIR:-$root/target}
-binary="$target_dir/$profile/coderex"
+binary="$target_dir/$profile/codape"
 if [ ! -x "$binary" ]; then
   if [ -x "$binary.exe" ]; then
     binary="$binary.exe"

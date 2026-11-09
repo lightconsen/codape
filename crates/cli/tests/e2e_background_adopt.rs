@@ -56,9 +56,9 @@ fn now_ms() -> i64 {
         .expect("fits")
 }
 
-/// A record written by an older CodeRex: no session id, still `running`.
+/// A record written by an older Codape: no session id, still `running`.
 fn seed_stale_record(cwd: &Path) {
-    let jobs = cwd.join(".coderex").join("jobs");
+    let jobs = cwd.join(".codape").join("jobs");
     std::fs::create_dir_all(&jobs).unwrap();
     let now = now_ms();
     std::fs::write(
@@ -83,7 +83,7 @@ fn run(
     base_url: &str,
     extra_env: &[(&str, &str)],
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(cwd)
@@ -91,14 +91,14 @@ fn run(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command.spawn().expect("spawn coderex");
+    let mut child = command.spawn().expect("spawn codape");
     child
         .stdin
         .take()
@@ -131,7 +131,7 @@ fn a_stale_running_record_is_reported_and_marked_interrupted() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -140,7 +140,7 @@ fn a_stale_running_record_is_reported_and_marked_interrupted() {
         "the interrupted job was not reported:\n{stderr}"
     );
     let record: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join(".coderex/jobs/legacy1.json")).unwrap(),
+        &std::fs::read_to_string(dir.path().join(".codape/jobs/legacy1.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -160,7 +160,7 @@ fn the_kill_switch_leaves_records_alone() {
         dir.path(),
         home.path(),
         &base_url,
-        &[("CODEREX_DISABLE_ADOPT", "1")],
+        &[("CODAPE_DISABLE_ADOPT", "1")],
     );
 
     let _ = provider.kill();
@@ -171,7 +171,7 @@ fn the_kill_switch_leaves_records_alone() {
         "adoption ran despite the kill switch"
     );
     let record: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join(".coderex/jobs/legacy1.json")).unwrap(),
+        &std::fs::read_to_string(dir.path().join(".codape/jobs/legacy1.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(record["state"], "running", "{record}");

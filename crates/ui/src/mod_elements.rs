@@ -10,7 +10,7 @@
 //! every other button keeps the plain form. The renderer still keeps no state:
 //! focus is an argument, not something cached here.
 
-use coderex_core::ui_protocol::{UiElement, UiStyle};
+use codape_core::ui_protocol::{UiElement, UiStyle};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

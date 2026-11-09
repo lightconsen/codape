@@ -1,6 +1,6 @@
 //! Headless output fidelity through the real binary.
 //!
-//! `coderex -p` is piped and parsed, so stdout must be the model's answer and
+//! `codape -p` is piped and parsed, so stdout must be the model's answer and
 //! nothing else: no session-title banner, and no content read from a file the
 //! prompt merely names.
 
@@ -61,19 +61,19 @@ fn run_headless(cwd: &Path, base_url: &str, prompt: &str) -> String {
     )
     .expect("seed config");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
 
     child
         .stdin
@@ -84,7 +84,7 @@ fn run_headless(cwd: &Path, base_url: &str, prompt: &str) -> String {
     let output = child.wait_with_output().expect("wait");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -137,7 +137,7 @@ fn a_read_only_transcript_directory_does_not_fail_the_turn() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().expect("workspace");
-    let transcripts = dir.path().join(".coderex/transcripts");
+    let transcripts = dir.path().join(".codape/transcripts");
     std::fs::create_dir_all(&transcripts).unwrap();
     let mut permissions = std::fs::metadata(&transcripts).unwrap().permissions();
     permissions.set_mode(0o555);

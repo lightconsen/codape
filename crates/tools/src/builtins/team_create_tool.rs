@@ -10,7 +10,7 @@ use async_trait::async_trait;
 pub const TEAM_MANAGER_KEY: &str = "team_manager";
 
 /// A callable team-manager facade that this tool can drive without
-/// pulling `coderex-core` as a dependency (to avoid cycles).
+/// pulling `codape-core` as a dependency (to avoid cycles).
 pub trait TeamManagerHandle: Send + Sync {
     /// Create a team with the given name. Returns the new team id.
     fn create_team(&self, name: &str) -> Result<String, String>;

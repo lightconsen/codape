@@ -21,7 +21,7 @@ Terminal user interface via ratatui. Renders messages, statusline, input line, c
 - **`OverlayStack`** (`overlay.rs`) — Modal dialog stack: PermissionDialog, Notification, CommandPalette, Confirm.
 - **`VimState`** (`vim.rs`) — Vim mode state machine: Normal, Insert, Visual (`v`) and Visual-line (`V`). Selection anchors and the selected text live in `InputBuffer` (`input.rs`), which is the layer that knows the buffer contents.
 - **`Theme`** (`themes.rs`) — Color scheme definitions.
-- **`mod_elements`** (`mod_elements.rs`) — Pure renderer for the UI tree a mod contributes (`UiElement` from `coderex_core::ui_protocol`). `render_mod_ui` returns styled `Line`s and `render_mod_ui_text` returns the plain block used by the transcript and headless output. Boxes nest with box-drawing borders and titles, `UiStyle` maps to the existing modifiers/colors, and buttons render as `[label]`. `render_mod_ui_with_focus` / `render_mod_ui_text_with_focus` mark one button as `> [label] <` with reversed emphasis. The renderer keeps no TUI state: focus is an argument, so a tree can be rendered after the mod runtime is gone. `render_mod_ui_with_hits` / `render_mod_ui_with_focus_and_hits` return the same lines plus `ButtonHit { id, row, col_start, col_end }` positions relative to the block; `button_at(rect, scroll_offset, column, row, hits)` is the pure click mapping (the focus marker is included in the rendered width, so it cannot shift a hit). Interactive key routing (Tab/Shift+Tab, Enter, Esc) and click routing live in `repl.rs`; headless output is not interactive.
+- **`mod_elements`** (`mod_elements.rs`) — Pure renderer for the UI tree a mod contributes (`UiElement` from `codape_core::ui_protocol`). `render_mod_ui` returns styled `Line`s and `render_mod_ui_text` returns the plain block used by the transcript and headless output. Boxes nest with box-drawing borders and titles, `UiStyle` maps to the existing modifiers/colors, and buttons render as `[label]`. `render_mod_ui_with_focus` / `render_mod_ui_text_with_focus` mark one button as `> [label] <` with reversed emphasis. The renderer keeps no TUI state: focus is an argument, so a tree can be rendered after the mod runtime is gone. `render_mod_ui_with_hits` / `render_mod_ui_with_focus_and_hits` return the same lines plus `ButtonHit { id, row, col_start, col_end }` positions relative to the block; `button_at(rect, scroll_offset, column, row, hits)` is the pure click mapping (the focus marker is included in the rendered width, so it cannot shift a hit). Interactive key routing (Tab/Shift+Tab, Enter, Esc) and click routing live in `repl.rs`; headless output is not interactive.
 
 ### Layout (bottom-up)
 
@@ -59,13 +59,13 @@ Identification reads the environment through a caller-supplied lookup (`Terminal
 
 Under the legacy encoding `Ctrl+I` and `Tab`, `Ctrl+M` and `Enter`, and `Ctrl+[` and `Esc` are the same bytes on the wire; no decoder can separate them. The kitty keyboard protocol's `DISAMBIGUATE_ESCAPE_CODES` (`CSI > 1 u`) makes them distinct events, and crossterm decodes the resulting CSI-u sequences.
 
-`TerminalUi::enter()` pushes the flag and `exit()` pops it (`terminal.rs`, `enter_commands` / `exit_commands`). The pop is conditional on the push having happened — popping a level that was never pushed would corrupt the stack for whatever runs after CodeRex.
+`TerminalUi::enter()` pushes the flag and `exit()` pops it (`terminal.rs`, `enter_commands` / `exit_commands`). The pop is conditional on the push having happened — popping a level that was never pushed would corrupt the stack for whatever runs after Codape.
 
 The push is emitted **only** for kitty, WezTerm and Ghostty. VS Code, Cursor, iTerm2 and Windows Terminal are identified but deliberately left on the legacy encoding: their support for the protocol could not be verified from here, and guessing is worse than the status quo. Users on those terminals can opt in:
 
 ```
-CODEREX_KEYBOARD_PROTOCOL=disambiguate   # force the kitty keyboard protocol
-CODEREX_KEYBOARD_PROTOCOL=legacy         # force the terminal default
+CODAPE_KEYBOARD_PROTOCOL=disambiguate   # force the kitty keyboard protocol
+CODAPE_KEYBOARD_PROTOCOL=legacy         # force the terminal default
 ```
 
 ### Decoding is robust either way
@@ -104,13 +104,13 @@ events.
 
 ### Not handled
 
-- **VS Code GPU acceleration.** Claude Code disables VS Code's GPU acceleration; CodeRex does not. There is no way to do it from inside the process — `terminal.integrated.gpuAcceleration` is a VS Code setting that requires editing `settings.json` and reloading the window. Shipping a flag that only pretends to change it would be worse than not shipping one, so VS Code is detected and nothing further is claimed.
+- **VS Code GPU acceleration.** Claude Code disables VS Code's GPU acceleration; Codape does not. There is no way to do it from inside the process — `terminal.integrated.gpuAcceleration` is a VS Code setting that requires editing `settings.json` and reloading the window. Shipping a flag that only pretends to change it would be worse than not shipping one, so VS Code is detected and nothing further is claimed.
 - **`modifyOtherKeys`.** crossterm 0.28 does not decode xterm's `CSI 27 ; modifier ; code ~` form. We avoid the situation rather than mis-decode it: nothing here asks a terminal to enable modifyOtherKeys.
 - **Terminals not in the table above** are `Unknown` and get the legacy encoding.
 
 ### Graphics protocol
 
-**Not implemented — ⚪, deliberately.** The Kitty graphics protocol (with its image ids) is the one item in the UI checklist CodeRex does not take.
+**Not implemented — ⚪, deliberately.** The Kitty graphics protocol (with its image ids) is the one item in the UI checklist Codape does not take.
 
 Reasoning: tool results can now carry `ImageBlock`s (MCP images, image reads), but the message list and its renderer are still text-only, so there is no place to draw them. Rendering inline images would mean a new dependency (`ratatui-image` plus an image decoder), a message/render variant, a capability handshake, and a fallback for every terminal that does not speak the protocol. The image data exists; the UI consumer does not. If images are ever needed, the honest path is `ratatui-image` gated on `TerminalProfile::kind` (kitty / WezTerm / Ghostty for Kitty graphics, iTerm2 for its own inline-image protocol, sixel elsewhere), degrading to the existing ASCII art.
 
@@ -132,8 +132,8 @@ No image capability detection was added either: a detection method with nothing 
 
 ## Current Status
 
-The `coderex-ui` crate has no stubs. The integration gap below is real, and the Vim/Kittty boundaries in the checklist apply.
+The `codape-ui` crate has no stubs. The integration gap below is real, and the Vim/Kittty boundaries in the checklist apply.
 
 Known integration gap (owned by `crates/cli/src/repl.rs`, not this crate): the REPL matches key events inline rather than routing every key through `input::key_event_to_action`. The two safety properties that matter are nevertheless applied at the boundary: `repl.rs` calls `input::key_press` on every incoming event (release events are dropped), and `InputBuffer::apply(InsertChar)` rejects control characters, as does the REPL's Vim-insert path. `TerminalUi::profile()` is still not surfaced in the UI.
 
-Tests: `cargo test -p coderex-ui` (248 passing).
+Tests: `cargo test -p codape-ui` (248 passing).

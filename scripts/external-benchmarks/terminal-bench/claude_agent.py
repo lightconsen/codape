@@ -1,9 +1,9 @@
-"""Terminal-Bench adapter that drives Claude Code against the same model as CodeRex.
+"""Terminal-Bench adapter that drives Claude Code against the same model as Codape.
 
-This exists to answer one question: when a task fails under CodeRex, is the
-model the limit, or is CodeRex's scaffold the limit? Claude Code is pointed at
+This exists to answer one question: when a task fails under Codape, is the
+model the limit, or is Codape's scaffold the limit? Claude Code is pointed at
 the same provider endpoint and the same model, so a task that passes here and
-fails under CodeRex points at the scaffold; one that fails both ways points at
+fails under Codape points at the scaffold; one that fails both ways points at
 the model (or the task).
 
 The built-in ``terminal_bench`` Claude Code agent is reused for installation and
@@ -42,7 +42,7 @@ class ClaudeAgent(ClaudeCodeAgent):
     ):
         super().__init__(model_name=model_name, version=version, **kwargs)
         self._max_turns = int(max_turns) if max_turns else None
-        # Accepted for symmetry with the CodeRex adapter; the harness enforces
+        # Accepted for symmetry with the Codape adapter; the harness enforces
         # the wall clock with --global-agent-timeout-sec.
         self._timeout_sec = float(timeout_sec) if timeout_sec else None
 
@@ -50,19 +50,19 @@ class ClaudeAgent(ClaudeCodeAgent):
     def _env(self) -> dict[str, str]:
         env = dict(super()._env)
         base_url = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get(
-            "CODEREX_BASE_URL"
+            "CODAPE_BASE_URL"
         )
         if base_url:
             env["ANTHROPIC_BASE_URL"] = base_url
         # Claude Code reads the bearer token from ANTHROPIC_AUTH_TOKEN; the
-        # provider key is the same value the CodeRex runs used.
+        # provider key is the same value the Codape runs used.
         token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get(
-            "CODEREX_API_KEY"
+            "CODAPE_API_KEY"
         )
         if token:
             env["ANTHROPIC_AUTH_TOKEN"] = token
         headers = os.environ.get("ANTHROPIC_CUSTOM_HEADERS") or os.environ.get(
-            "CODEREX_CUSTOM_HEADERS"
+            "CODAPE_CUSTOM_HEADERS"
         )
         if headers:
             env["ANTHROPIC_CUSTOM_HEADERS"] = headers

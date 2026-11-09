@@ -69,9 +69,9 @@ pub struct WorktreeState {
 ///
 /// Concrete subsystem state (settings, tasks, MCP, plugins, agents, UI,
 /// todos, notifications, coordinator, bridge) lives in dedicated crates
-/// (`coderex-config`, `coderex-agents`, `coderex-mcp`, `coderex-plugins`,
-/// `coderex-bridge`, etc.). Those subsystems are held by the CLI/REPL
-/// runtime, not here, to keep `coderex-core` free of circular dependencies.
+/// (`codape-config`, `codape-agents`, `codape-mcp`, `codape-plugins`,
+/// `codape-bridge`, etc.). Those subsystems are held by the CLI/REPL
+/// runtime, not here, to keep `codape-core` free of circular dependencies.
 /// This struct only tracks engine-level global state that is independent
 /// of any subsystem crate.
 #[derive(Debug)]

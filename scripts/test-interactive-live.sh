@@ -18,7 +18,7 @@ Modes:
   all       Run smoke + reported + permissions + read.
 
 By default this script sources export_env.<provider>.sh. Set
-CODEREX_SKIP_ENV_SOURCE=1 to use environment variables already exported by
+CODAPE_SKIP_ENV_SOURCE=1 to use environment variables already exported by
 the current shell.
 USAGE
 }
@@ -39,7 +39,7 @@ case "$provider" in
 esac
 
 require_live_env() {
-    if [[ "${CODEREX_SKIP_ENV_SOURCE:-0}" != "1" ]]; then
+    if [[ "${CODAPE_SKIP_ENV_SOURCE:-0}" != "1" ]]; then
         env_file="$REPO_ROOT/export_env.$provider.sh"
         if [[ ! -f "$env_file" ]]; then
             echo "Missing provider env file: $env_file" >&2
@@ -59,12 +59,12 @@ cd "$REPO_ROOT"
 
 run_smoke() {
     # Replays tests/cassettes/interactive_tui_live; no provider needed.
-    cargo test -p coderex-cli --test interactive_tui interactive_live -- --nocapture
+    cargo test -p codape-cli --test interactive_tui interactive_live -- --nocapture
 }
 
 run_read() {
     # Replays tests/cassettes/e2e_equivalence.
-    cargo test -p coderex-cli --test e2e_equivalence tool_read_file -- --nocapture
+    cargo test -p codape-cli --test e2e_equivalence tool_read_file -- --nocapture
 }
 
 run_reported_sequence() {
@@ -90,7 +90,7 @@ RS
   "rows": 40,
   "cols": 120,
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "hi" },
     { "action": "wait_for_any_text", "texts": ["Hello", "Hi"], "timeout_ms": 90000 },
     { "action": "wait_for_text", "text": "Completed in", "timeout_ms": 90000 },
@@ -143,7 +143,7 @@ RS
   "cols": 120,
   "args": ["--permissions", "default"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_text", "text": "Permission Request", "timeout_ms": 90000 },
     { "action": "send_text", "text": "d" },
@@ -170,7 +170,7 @@ JSON
   "cols": 120,
   "args": ["--permissions", "plan"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_raw_text", "text": "Error:tool'Write'denied", "timeout_ms": 90000 },
     { "action": "ctrl_c" },
@@ -196,7 +196,7 @@ JSON
   "cols": 120,
   "args": ["--permissions", "dont-ask"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_raw_text", "text": "Error:tool'Write'denied", "timeout_ms": 90000 },
     { "action": "ctrl_c" },
@@ -222,7 +222,7 @@ JSON
   "cols": 120,
   "args": ["--permissions", "accept-edits"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_any_text", "texts": ["Wrote", "fibonacci", "Completed in"], "timeout_ms": 90000 },
     { "action": "wait_for_text", "text": "Completed in", "timeout_ms": 90000 },
@@ -247,7 +247,7 @@ JSON
   "cols": 120,
   "args": ["--permissions", "accept-edits"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Bash tool now. Do not answer in prose. Run pwd." },
     { "action": "wait_for_text", "text": "Permission Request", "timeout_ms": 90000 },
     { "action": "send_text", "text": "d" },
@@ -276,7 +276,7 @@ RS
   "cols": 120,
   "args": ["--permissions", "bypass-permissions"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_any_text", "texts": ["Wrote", "fibonacci", "Completed in"], "timeout_ms": 90000 },
     { "action": "wait_for_text", "text": "Completed in", "timeout_ms": 90000 },
@@ -307,7 +307,7 @@ RS
   "cols": 120,
   "args": ["--dangerously-skip-permissions"],
   "steps": [
-    { "action": "wait_for_text", "text": "CodeRex v", "timeout_ms": 90000 },
+    { "action": "wait_for_text", "text": "Codape v", "timeout_ms": 90000 },
     { "action": "send_line", "text": "Use the Write tool now. Do not answer in prose. Overwrite src/lib.rs with a Rust fibonacci function." },
     { "action": "wait_for_any_text", "texts": ["Wrote", "fibonacci", "Completed in"], "timeout_ms": 90000 },
     { "action": "wait_for_text", "text": "Completed in", "timeout_ms": 90000 },

@@ -7,8 +7,8 @@ copied the wrong path — would otherwise be published as a working release.
 
 Usage: scripts/check-release-archives.py [directory]
 
-The directory defaults to `artifacts`. Archives are `coderex-<target>.tar.gz`
-or `coderex-<target>.zip`, and must contain `coderex-<target>` (`.exe` on
+The directory defaults to `artifacts`. Archives are `codape-<target>.tar.gz`
+or `codape-<target>.zip`, and must contain `codape-<target>` (`.exe` on
 Windows). Anything else in the directory is ignored.
 """
 
@@ -32,8 +32,8 @@ def archive_names(path: pathlib.Path) -> list[str]:
 
 def expected_member(name: str) -> str:
     stem = name.removesuffix(".tar.gz").removesuffix(".zip")
-    target = stem.removeprefix("coderex-")
-    member = f"coderex-{target}"
+    target = stem.removeprefix("codape-")
+    member = f"codape-{target}"
     return member + ".exe" if name.endswith(".zip") else member
 
 
@@ -46,7 +46,7 @@ def main(argv: list[str]) -> int:
     checked = 0
     failures = 0
     for path in sorted(directory.iterdir()):
-        if not path.name.startswith("coderex-"):
+        if not path.name.startswith("codape-"):
             continue
         if not (path.name.endswith(".tar.gz") or path.name.endswith(".zip")):
             continue

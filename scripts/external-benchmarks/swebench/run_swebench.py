@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Run CodeRex on a subset of SWE-bench and grade it with the official harness.
+"""Run Codape on a subset of SWE-bench and grade it with the official harness.
 
 The runner has two phases:
 
 1. Generation. For each selected instance it pulls the instance's official
    SWE-bench image, starts a throwaway container with the repository checked out
-   at ``base_commit`` in ``/testbed``, installs CodeRex, and runs the headless
+   at ``base_commit`` in ``/testbed``, installs Codape, and runs the headless
    agent on the issue text. The working-tree diff is captured as a prediction.
 2. Evaluation. The official ``swebench`` harness applies each prediction to a
    fresh copy of the image, runs the dataset's tests, and writes a report.
 
 Everything the benchmark needs is pinned in this file. Keys are never written to
-disk: CodeRex receives them through the environment of the ``docker exec``
+disk: Codape receives them through the environment of the ``docker exec``
 client, and ``--dry-run`` prints variable names only.
 
 This is deliberately *not* part of normal CI. It needs Docker, network, tens of
@@ -60,36 +60,36 @@ DATASETS = {
     },
 }
 
-# CodeRex release installed inside the container when no --coderex-binary is
+# Codape release installed inside the container when no --codape-binary is
 # given. v0.1.3 is the newest release that publishes a Linux x86_64 musl build.
-CODEREX_RELEASE_VERSION = "v0.1.3"
-CODEREX_TARGET = "x86_64-unknown-linux-musl"
+CODAPE_RELEASE_VERSION = "v0.1.3"
+CODAPE_TARGET = "x86_64-unknown-linux-musl"
 
-# Variables forwarded from the host into CodeRex inside the container. The
+# Variables forwarded from the host into Codape inside the container. The
 # values are taken from the host environment; no key ever appears in a tracked
 # file or in a process argument (only the variable *name* is passed to docker).
 PASSTHROUGH_ENV = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
-    "CODEREX_API_KEY",
-    "CODEREX_BASE_URL",
-    "CODEREX_MODEL",
+    "CODAPE_API_KEY",
+    "CODAPE_BASE_URL",
+    "CODAPE_MODEL",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
-    "CODEREX_CUSTOM_HEADERS",
+    "CODAPE_CUSTOM_HEADERS",
 )
 
-API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODEREX_API_KEY", "OPENAI_API_KEY")
-MODEL_ENV = ("ANTHROPIC_MODEL", "CODEREX_MODEL", "OPENAI_MODEL")
+API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODAPE_API_KEY", "OPENAI_API_KEY")
+MODEL_ENV = ("ANTHROPIC_MODEL", "CODAPE_MODEL", "OPENAI_MODEL")
 
 DEFAULT_AGENT_TIMEOUT = 1800
 DEFAULT_EVAL_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 200
 
 CONTAINER_WORKDIR = "/testbed"
-CONTAINER_CONFIG_DIR = "/tmp/coderex-config"
+CONTAINER_CONFIG_DIR = "/tmp/codape-config"
 
 # The exact patch-extraction script. It is also exercised by the local
 # patch-format test: `git add -A` makes untracked files appear as additions,
@@ -97,7 +97,7 @@ CONTAINER_CONFIG_DIR = "/tmp/coderex-config"
 # instance's base commit also captures changes even if the agent commits.
 PATCH_SCRIPT = r"""set -eu
 cd /testbed
-rm -rf .coderex
+rm -rf .codape
 git add -A -- . 2>/dev/null || git add -A
 git -c core.fileMode=false -c core.quotepath=false diff --cached --no-ext-diff --binary __BASE__
 """
@@ -108,13 +108,13 @@ git -c core.fileMode=false -c core.quotepath=false diff --cached --no-ext-diff -
 INSTALL_SCRIPT = r"""set -eu
 VERSION="__VERSION__"
 TARGET="__TARGET__"
-BIN="/usr/local/bin/coderex"
+BIN="/usr/local/bin/codape"
 if [ -x "$BIN" ]; then
     "$BIN" --version
     exit 0
 fi
-BASE="https://github.com/lightconsen/coderex/releases/download/$VERSION"
-ARCHIVE="coderex-$TARGET.tar.gz"
+BASE="https://github.com/lightconsen/codape/releases/download/$VERSION"
+ARCHIVE="codape-$TARGET.tar.gz"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -126,7 +126,7 @@ fetch() {
     elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$1" "$2"
     else
-        echo "no curl, wget, or python3 available to download CodeRex" >&2
+        echo "no curl, wget, or python3 available to download Codape" >&2
         exit 1
     fi
 }
@@ -145,7 +145,7 @@ elif command -v shasum >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1; then
     ACTUAL="$(python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$TMP/$ARCHIVE")"
 else
-    echo "no sha256 tool available to verify the CodeRex release" >&2
+    echo "no sha256 tool available to verify the Codape release" >&2
     exit 1
 fi
 if [ "$ACTUAL" != "$EXPECTED" ]; then
@@ -153,7 +153,7 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
     exit 1
 fi
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
-cp "$TMP/coderex-$TARGET" "$BIN"
+cp "$TMP/codape-$TARGET" "$BIN"
 chmod 0755 "$BIN"
 "$BIN" --version
 """
@@ -176,10 +176,10 @@ def utc_stamp() -> str:
 def resolve_cache_dir(explicit: str | None) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
-    env = os.environ.get("CODEREX_BENCH_CACHE")
+    env = os.environ.get("CODAPE_BENCH_CACHE")
     if env:
         return Path(env).expanduser().resolve()
-    return Path.home() / ".cache" / "coderex-external-benchmarks"
+    return Path.home() / ".cache" / "codape-external-benchmarks"
 
 
 def dataset_spec(alias: str, revision: str | None) -> dict[str, str]:
@@ -244,9 +244,9 @@ commits. Do not try to look up the issue or its reference patch online.
 
 
 def parse_stream_json_usage(text: str) -> dict[str, Any] | None:
-    """Extract cumulative usage/cost from CodeRex stream-json output, if any.
+    """Extract cumulative usage/cost from Codape stream-json output, if any.
 
-    CodeRex 0.1.3 does not currently put ``usage`` or ``total_cost_usd`` in
+    Codape 0.1.3 does not currently put ``usage`` or ``total_cost_usd`` in
     its result frame, so the normal answer is ``None``. The parser is
     forward-compatible: it reads the result frame rather than inventing data.
     """
@@ -298,7 +298,7 @@ def looks_like_linux_elf(path: Path) -> bool:
 
 def safe_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-")
-    return cleaned or "coderex"
+    return cleaned or "codape"
 
 
 def model_label() -> str:
@@ -312,7 +312,7 @@ def model_label() -> str:
 def prediction_model_name(explicit: str | None) -> str:
     if explicit:
         return explicit
-    return f"coderex-{model_label()}"
+    return f"codape-{model_label()}"
 
 
 def read_predictions(path: Path) -> dict[str, dict[str, Any]]:
@@ -425,12 +425,12 @@ def reexec_in_venv(cache_dir: Path) -> None:
     official harness; --help and --dry-run never get here.
     """
     target = venv_python(cache_dir)
-    if os.environ.get("CODEREX_BENCH_VENV") == str(target):
+    if os.environ.get("CODAPE_BENCH_VENV") == str(target):
         return
     if Path(sys.executable).resolve() == target.resolve():
         return
     env = os.environ.copy()
-    env["CODEREX_BENCH_VENV"] = str(target)
+    env["CODAPE_BENCH_VENV"] = str(target)
     os.execve(str(target), [str(target), str(Path(__file__).resolve()), *sys.argv[1:]], env)
 
 
@@ -506,26 +506,26 @@ def ensure_image(image: str) -> None:
     run_checked(command, what=f"pulling {image}")
 
 
-def install_coderex(container: str, binary: Path | None) -> None:
+def install_codape(container: str, binary: Path | None) -> None:
     run_checked(["docker", "exec", container, "mkdir", "-p", "/usr/local/bin"], what="preparing /usr/local/bin")
     if binary is not None:
         if not binary.exists():
-            raise BenchError(f"--coderex-binary does not exist: {binary}")
+            raise BenchError(f"--codape-binary does not exist: {binary}")
         if not looks_like_linux_elf(binary):
             raise BenchError(
-                f"--coderex-binary must be a Linux ELF binary (got {binary}). "
+                f"--codape-binary must be a Linux ELF binary (got {binary}). "
                 "On macOS, omit the flag and let the runner install the pinned Linux release."
             )
-        run_checked(["docker", "cp", str(binary), f"{container}:/usr/local/bin/coderex"], what="copying CodeRex into the container")
-        run_checked(["docker", "exec", container, "chmod", "0755", "/usr/local/bin/coderex"], what="making CodeRex executable")
+        run_checked(["docker", "cp", str(binary), f"{container}:/usr/local/bin/codape"], what="copying Codape into the container")
+        run_checked(["docker", "exec", container, "chmod", "0755", "/usr/local/bin/codape"], what="making Codape executable")
     else:
-        script = INSTALL_SCRIPT.replace("__VERSION__", CODEREX_RELEASE_VERSION).replace("__TARGET__", CODEREX_TARGET)
+        script = INSTALL_SCRIPT.replace("__VERSION__", CODAPE_RELEASE_VERSION).replace("__TARGET__", CODAPE_TARGET)
         run_checked(
             ["docker", "exec", container, "sh", "-c", script],
-            what="installing the pinned CodeRex release in the container",
-            display=f"docker exec {container} sh -c '<install CodeRex {CODEREX_RELEASE_VERSION} with SHA256 verification>'",
+            what="installing the pinned Codape release in the container",
+            display=f"docker exec {container} sh -c '<install Codape {CODAPE_RELEASE_VERSION} with SHA256 verification>'",
         )
-    run_checked(["docker", "exec", container, "/usr/local/bin/coderex", "--version"], what="checking the container CodeRex binary")
+    run_checked(["docker", "exec", container, "/usr/local/bin/codape", "--version"], what="checking the container Codape binary")
 
 
 def seed_config(container: str) -> None:
@@ -534,7 +534,7 @@ def seed_config(container: str) -> None:
         f"mkdir -p {CONTAINER_CONFIG_DIR} && "
         f"printf '%s\\n' {shlex_quote(settings)} > {CONTAINER_CONFIG_DIR}/settings.json"
     )
-    run_checked(["docker", "exec", container, "sh", "-c", script], what="seeding an isolated CodeRex config home")
+    run_checked(["docker", "exec", container, "sh", "-c", script], what="seeding an isolated Codape config home")
 
 
 def shlex_quote(value: str) -> str:
@@ -553,19 +553,19 @@ def agent_command(container: str, timeout: int, max_turns: int, extra_args: list
         "-e",
         f"CLAUDE_CONFIG_DIR={CONTAINER_CONFIG_DIR}",
         "-e",
-        "CODEREX_LOG=off",
+        "CODAPE_LOG=off",
         "-e",
         "NO_COLOR=1",
         # The instance container is the isolation boundary; the shell sandbox
         # would block the network and privilege-drop syscalls tests need.
         "-e",
-        "CODEREX_SANDBOX=off",
+        "CODAPE_SANDBOX=off",
         container,
         "timeout",
         "--signal=TERM",
         "--kill-after=30",
         str(timeout),
-        "coderex",
+        "codape",
         "-p",
         "--dangerously-skip-permissions",
         "--no-session-persistence",
@@ -663,7 +663,7 @@ def run_one_instance(
     print(f"image: {image}", flush=True)
 
     ensure_image(image)
-    container = f"coderex-swebench-{args.run_id}-{safe_name(instance_id)}"[:120]
+    container = f"codape-swebench-{args.run_id}-{safe_name(instance_id)}"[:120]
     subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     # Match the official harness: root and SYS_ADMIN, because some repository
     # test suites need an unprivileged user namespace.
@@ -674,7 +674,7 @@ def run_one_instance(
         "--name",
         container,
         "--label",
-        "coderex-external-benchmark=1",
+        "codape-external-benchmark=1",
         "--user",
         "root",
         "--cap-add",
@@ -687,9 +687,9 @@ def run_one_instance(
     started = time.monotonic()
     try:
         run_checked(run_command, what=f"starting a container for {instance_id}")
-        install_coderex(container, args.coderex_binary)
+        install_codape(container, args.codape_binary)
         seed_config(container)
-        agent = run_agent(container, prompt, args.timeout, args.max_turns, args.coderex_arg, instance_dir)
+        agent = run_agent(container, prompt, args.timeout, args.max_turns, args.codape_arg, instance_dir)
         patch = extract_patch(container, base_commit, instance_dir)
     finally:
         if not args.keep_containers:
@@ -845,7 +845,7 @@ def summarize(args: argparse.Namespace, run_dir: Path, records: list[dict[str, A
         "predictions": str(predictions_path),
         "notes": [
             "pass@1 is resolved_instances / total_instances from the official report.",
-            "CodeRex 0.1.3 does not expose usage/total_cost_usd in headless stream-json; token_usage is null unless the binary emits it.",
+            "Codape 0.1.3 does not expose usage/total_cost_usd in headless stream-json; token_usage is null unless the binary emits it.",
         ],
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -871,7 +871,7 @@ def print_summary(summary: dict[str, Any]) -> None:
         print(f"evaluation  : {summary['evaluation']['elapsed_sec']:.1f}s")
     print(f"total       : {summary['total_elapsed_sec']:.1f}s")
     if summary["token_usage"] is None:
-        print("tokens/cost : unavailable (CodeRex did not emit usage in stream-json)")
+        print("tokens/cost : unavailable (Codape did not emit usage in stream-json)")
     else:
         print(f"tokens/cost : {json.dumps(summary['token_usage'])}")
     print(f"predictions : {summary['predictions']}")
@@ -913,10 +913,10 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
         print(f"docker         : NOT AVAILABLE ({message}) -- dry run continues; a real run needs Docker")
     env_names = selected_env_names()
     print("model env      : " + (", ".join(env_names) if env_names else "none set (a real run needs an API key)"))
-    if args.coderex_binary:
-        print(f"coderex binary : {args.coderex_binary}")
+    if args.codape_binary:
+        print(f"codape binary : {args.codape_binary}")
     else:
-        print(f"coderex binary : download {CODEREX_RELEASE_VERSION} ({CODEREX_TARGET}) inside each container")
+        print(f"codape binary : download {CODAPE_RELEASE_VERSION} ({CODAPE_TARGET}) inside each container")
     print()
 
     print("# 1. Prepare the isolated evaluation venv (only for a real run)")
@@ -942,16 +942,16 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
             limit = 1 if args.limit is None else args.limit
             instance_ids = ["<selected-instance-ids>"]
             print(f"# 3. Generation for the first {limit} instance(s), sorted by instance_id")
-        container = f"coderex-swebench-{args.run_id}-<instance>"
+        container = f"codape-swebench-{args.run_id}-<instance>"
         print(f"+ docker pull --platform linux/amd64 <image from dataset row>")
         print(f"+ docker run -d --name {container} --user root --cap-add SYS_ADMIN --platform linux/amd64 -w {CONTAINER_WORKDIR} <image> sleep infinity")
-        if args.coderex_binary:
-            print(f"+ docker cp {args.coderex_binary} {container}:/usr/local/bin/coderex")
-            print(f"+ docker exec {container} chmod 0755 /usr/local/bin/coderex")
+        if args.codape_binary:
+            print(f"+ docker cp {args.codape_binary} {container}:/usr/local/bin/codape")
+            print(f"+ docker exec {container} chmod 0755 /usr/local/bin/codape")
         else:
-            print(f"+ docker exec {container} sh -c '<pinned CodeRex {CODEREX_RELEASE_VERSION} download + SHA256SUMS verification>'")
+            print(f"+ docker exec {container} sh -c '<pinned Codape {CODAPE_RELEASE_VERSION} download + SHA256SUMS verification>'")
         print(f"+ docker exec {container} sh -c '<seed {CONTAINER_CONFIG_DIR}/settings.json with telemetry_enabled=false>'")
-        agent = agent_command(container, args.timeout, args.max_turns, args.coderex_arg)
+        agent = agent_command(container, args.timeout, args.max_turns, args.codape_arg)
         print("+ " + " ".join(agent) + "   (issue text on stdin)")
         print(f"+ docker exec -w {CONTAINER_WORKDIR} {container} sh -c '<git add -A; git diff --cached --binary INSTANCE_BASE_COMMIT>'")
         print(f"+ write one JSONL line to {predictions}: instance_id, model_name_or_path={args.model_name}, model_patch")
@@ -1004,7 +1004,7 @@ def positive_float(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run CodeRex on a reproducible SWE-bench Verified/Lite subset and grade with the official harness.",
+        description="Run Codape on a reproducible SWE-bench Verified/Lite subset and grade with the official harness.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   # Inspect every command without Docker, keys, or downloads
@@ -1019,8 +1019,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 Notes:
   * The subset is sorted by instance_id, so --limit N is reproducible.
-  * CodeRex is installed inside each official image from a pinned release; use
-    --coderex-binary to test a locally built Linux ELF binary instead.
+  * Codape is installed inside each official image from a pinned release; use
+    --codape-binary to test a locally built Linux ELF binary instead.
   * API keys are read from the environment and passed to docker by variable
     name only. They are never written to a repository file.
 """,
@@ -1031,16 +1031,16 @@ Notes:
     parser.add_argument("--limit", type=positive_int, help="Number of instances from the sorted dataset (default: 1)")
     parser.add_argument("--timeout", type=positive_int, default=DEFAULT_AGENT_TIMEOUT, help=f"Per-instance agent timeout in seconds (default: {DEFAULT_AGENT_TIMEOUT})")
     parser.add_argument("--eval-timeout", type=positive_int, default=DEFAULT_EVAL_TIMEOUT, help=f"Per-instance test timeout for the official harness (default: {DEFAULT_EVAL_TIMEOUT})")
-    parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"CodeRex --max-turns (default: {DEFAULT_MAX_TURNS})")
+    parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"Codape --max-turns (default: {DEFAULT_MAX_TURNS})")
     parser.add_argument("--predictions", help="Predictions JSONL path (default: <run-dir>/predictions.jsonl)")
     parser.add_argument("--eval-only", metavar="PATH", help="Skip generation and grade this predictions JSONL with the official harness")
-    parser.add_argument("--model-name", help="model_name_or_path written to predictions (default: coderex-<model>)")
-    parser.add_argument("--coderex-binary", type=Path, help="Linux x86_64 ELF CodeRex binary to copy into containers")
-    parser.add_argument("--coderex-arg", action="append", default=[], metavar="ARG", help="Extra argument passed to CodeRex; repeatable")
+    parser.add_argument("--model-name", help="model_name_or_path written to predictions (default: codape-<model>)")
+    parser.add_argument("--codape-binary", type=Path, help="Linux x86_64 ELF Codape binary to copy into containers")
+    parser.add_argument("--codape-arg", action="append", default=[], metavar="ARG", help="Extra argument passed to Codape; repeatable")
     parser.add_argument("--extra-instructions", help="Extra text appended to every issue prompt")
     parser.add_argument("--run-id", help="Run identifier (default: swebench-YYYYmmdd-HHMMSS)")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target" / "external-benchmarks" / "swebench", help="Root for run artifacts (default: target/external-benchmarks/swebench)")
-    parser.add_argument("--cache-dir", type=Path, help="Cache root for the venv and dataset (default: $CODEREX_BENCH_CACHE or ~/.cache/coderex-external-benchmarks)")
+    parser.add_argument("--cache-dir", type=Path, help="Cache root for the venv and dataset (default: $CODAPE_BENCH_CACHE or ~/.cache/codape-external-benchmarks)")
     parser.add_argument("--max-workers", type=positive_int, default=1, help="Official harness evaluation workers (default: 1)")
     parser.add_argument("--keep-containers", action="store_true", help="Leave per-instance agent containers running for debugging")
     parser.add_argument("--resume", action="store_true", help="Reuse existing predictions and skip completed instance IDs")
@@ -1055,10 +1055,10 @@ Notes:
         parser.error("--eval-only takes its instance size from the predictions file; do not pass --limit")
     if args.eval_only and not Path(args.eval_only).expanduser().exists():
         parser.error(f"--eval-only file does not exist: {args.eval_only}")
-    if args.coderex_binary and not args.coderex_binary.exists():
-        parser.error(f"--coderex-binary does not exist: {args.coderex_binary}")
-    if args.coderex_binary and not looks_like_linux_elf(args.coderex_binary):
-        parser.error(f"--coderex-binary must be a Linux ELF binary: {args.coderex_binary}")
+    if args.codape_binary and not args.codape_binary.exists():
+        parser.error(f"--codape-binary does not exist: {args.codape_binary}")
+    if args.codape_binary and not looks_like_linux_elf(args.codape_binary):
+        parser.error(f"--codape-binary must be a Linux ELF binary: {args.codape_binary}")
     if args.run_id is None:
         args.run_id = f"swebench-{utc_stamp()}"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):

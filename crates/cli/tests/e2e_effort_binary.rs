@@ -111,7 +111,7 @@ async fn effort_reaches_an_openai_shaped_provider() {
 
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let bodies = bodies.lock().unwrap().clone();
@@ -134,18 +134,18 @@ async fn effort_reaches_an_openai_shaped_provider() {
 #[tokio::test]
 async fn an_unsupported_effort_is_rejected_by_the_cli() {
     let dir = tempfile::tempdir().expect("workspace");
-    let output = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let output = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--effort", "extreme", "hello"])
         .current_dir(dir.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .output()
-        .expect("run coderex");
+        .expect("run codape");
     assert!(!output.status.success(), "an unknown effort must fail");
 }
 
 fn run(cwd: &Path, base_url: &str, config_home: &Path, effort: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--model", "gpt-4o", "--effort", effort])
         .current_dir(cwd)
         .env("OPENAI_API_KEY", "test-key")
@@ -154,7 +154,7 @@ fn run(cwd: &Path, base_url: &str, config_home: &Path, effort: &str) -> std::pro
         // The endpoint is a local capture server, so name the profile
         // explicitly: a localhost base URL otherwise resolves to "custom",
         // which correctly reports no reasoning-effort control.
-        .env("CODEREX_PROVIDER_PROFILE", "openai")
+        .env("CODAPE_PROVIDER_PROFILE", "openai")
         // The developer's shell may export an Anthropic endpoint; the test is
         // about the OpenAI-shaped provider.
         .env_remove("ANTHROPIC_API_KEY")
@@ -162,12 +162,12 @@ fn run(cwd: &Path, base_url: &str, config_home: &Path, effort: &str) -> std::pro
         .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("ANTHROPIC_MODEL")
         .env("CLAUDE_CONFIG_DIR", config_home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()

@@ -1,6 +1,6 @@
 #![no_main]
 
-use coderex_plugins::plugins::PluginManifest;
+use codape_plugins::plugins::PluginManifest;
 use libfuzzer_sys::fuzz_target;
 use std::str;
 

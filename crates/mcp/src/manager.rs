@@ -12,7 +12,7 @@ use crate::proxy::{McpToolInfo, McpToolProxy, McpToolRegistry};
 use crate::resources::{McpResource, McpResourceContent, McpResourceRegistry};
 use crate::server::{McpServer, ServerStatus};
 use crate::tool::McpTool;
-use coderex_tools::ToolRegistry;
+use codape_tools::ToolRegistry;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1295,7 +1295,7 @@ for line in sys.stdin:
         // The id counter restarts in every test process, so include the pid:
         // two nextest processes must not write and exec the same script.
         let path = std::env::temp_dir().join(format!(
-            "coderex_mock_prompts_{}_{id}.py",
+            "codape_mock_prompts_{}_{id}.py",
             std::process::id()
         ));
         std::fs::write(&path, MOCK_PROMPTS_SERVER).expect("write mock prompt server");

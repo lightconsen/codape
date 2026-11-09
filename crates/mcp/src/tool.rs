@@ -8,7 +8,7 @@
 use crate::manager::McpManager;
 use crate::proxy::McpToolInfo;
 use crate::result_adapter::McpResultAdapter;
-use coderex_tools::{
+use codape_tools::{
     InterruptBehavior, Tool, ToolContext, ToolDescriptor, ToolError, ToolInput, ToolOutput,
     ToolTier,
 };
@@ -133,7 +133,7 @@ mod tests {
                     arguments: serde_json::json!({}),
                 },
                 ToolContext::new(
-                    coderex_tools::ExecutionContext::Normal,
+                    codape_tools::ExecutionContext::Normal,
                     std::path::Path::new("/tmp"),
                 ),
             )

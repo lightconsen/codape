@@ -78,7 +78,7 @@ impl FromStr for MemoryKey {
     /// # Examples
     ///
     /// ```
-    /// use coderex_memory::long_term::MemoryKey;
+    /// use codape_memory::long_term::MemoryKey;
     /// let key = "project/backend/auth".parse::<MemoryKey>().unwrap();
     /// assert_eq!(key.segments(), vec!["project", "backend", "auth"]);
     /// ```

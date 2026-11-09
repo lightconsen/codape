@@ -12,7 +12,7 @@ export_env.*.sh
 !export_env.local.sh
 
 # Local configuration and generated docs
-.coderex/
+.codape/
 .claude/settings.json
 # Local working checklists (diff.local.md, 11.local.md, ...). They are not part
 # of the project and may hold internal notes; the developer's global ignore is

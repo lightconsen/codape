@@ -1,10 +1,11 @@
 [package]
-name = "coderex-events"
+name = "codape-events"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Line-delimited JSON wire protocol (stream-json), plus permission/elicitation session state"
 
@@ -12,7 +13,7 @@ description = "Line-delimited JSON wire protocol (stream-json), plus permission/
 workspace = true
 
 [dependencies]
-coderex-config = { path = "../config" }
+codape-config = { path = "../config" }
 
 serde.workspace = true
 serde_json.workspace = true

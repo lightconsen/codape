@@ -8,12 +8,12 @@
 //! according to [`HeadlessElicitation`] (cancel by default) instead of leaving
 //! the server waiting.
 
-use coderex_core::elicitation::{
+use codape_core::elicitation::{
     ElicitationHandler, ElicitationQuestion, ElicitationResponse, ElicitationResult,
     ReplElicitationHandler,
 };
-use coderex_mcp::channel::InboundRequestHandler;
-use coderex_mcp::elicitation::{
+use codape_mcp::channel::InboundRequestHandler;
+use codape_mcp::elicitation::{
     FormElicitationHandler, FormField, FormResult, FormSpec, McpElicitationHandler,
 };
 use serde_json::{Map, Value};
@@ -178,7 +178,7 @@ fn default_text(field: &FormField) -> String {
 
 /// How a session with no one at the terminal answers an MCP elicitation.
 ///
-/// Selected by the `CODEREX_HEADLESS_ELICITATION` environment variable. An
+/// Selected by the `CODAPE_HEADLESS_ELICITATION` environment variable. An
 /// unset or unrecognized value keeps the historical, safe behaviour: cancel.
 /// This only affects the non-interactive fallback — a running TUI or an
 /// interactive terminal always prompts the person.
@@ -194,7 +194,7 @@ pub enum HeadlessElicitation {
 }
 
 /// The environment variable that selects [`HeadlessElicitation`].
-pub const HEADLESS_ELICITATION_ENV: &str = "CODEREX_HEADLESS_ELICITATION";
+pub const HEADLESS_ELICITATION_ENV: &str = "CODAPE_HEADLESS_ELICITATION";
 
 /// The environment variable that supplies the answer to a headless free-text
 /// elicitation question.
@@ -203,7 +203,7 @@ pub const HEADLESS_ELICITATION_ENV: &str = "CODEREX_HEADLESS_ELICITATION";
 /// [`HeadlessElicitation::Allow`] and the value is non-empty. `Deny` and
 /// `Defaults` never answer a free-text question: there is no schema to take a
 /// default from, and neither policy invents an answer.
-pub const HEADLESS_ELICITATION_ANSWER_ENV: &str = "CODEREX_HEADLESS_ELICITATION_ANSWER";
+pub const HEADLESS_ELICITATION_ANSWER_ENV: &str = "CODAPE_HEADLESS_ELICITATION_ANSWER";
 
 impl HeadlessElicitation {
     /// Read the policy from the environment, defaulting to [`Self::Deny`].
@@ -305,7 +305,7 @@ impl SessionElicitationHandler {
     /// The configured answer to a free-text question, when one is allowed.
     ///
     /// Only [`HeadlessElicitation::Allow`] has a policy that can answer text,
-    /// and only when `CODEREX_HEADLESS_ELICITATION_ANSWER` is set and
+    /// and only when `CODAPE_HEADLESS_ELICITATION_ANSWER` is set and
     /// non-empty. An empty value is the same as unset: it would answer a
     /// question with nothing, which is not an answer.
     fn free_text_answer(&self) -> Option<String> {
@@ -569,7 +569,7 @@ mod tests {
         let answer = handler
             .inbound()
             .handle(
-                coderex_mcp::elicitation::ELICITATION_CREATE,
+                codape_mcp::elicitation::ELICITATION_CREATE,
                 Some(&serde_json::json!({
                     "message": "Which environment?",
                     "requestedSchema": {
@@ -608,7 +608,7 @@ mod tests {
         let answer = handler
             .inbound()
             .handle(
-                coderex_mcp::elicitation::ELICITATION_CREATE,
+                codape_mcp::elicitation::ELICITATION_CREATE,
                 Some(&serde_json::json!({
                     "message": "Configure the deployment",
                     "requestedSchema": {
@@ -648,7 +648,7 @@ mod tests {
         let answer = handler
             .inbound()
             .handle(
-                coderex_mcp::elicitation::ELICITATION_CREATE,
+                codape_mcp::elicitation::ELICITATION_CREATE,
                 Some(&serde_json::json!({
                     "message": "Port",
                     "requestedSchema": {
@@ -673,7 +673,7 @@ mod tests {
         let answer = handler
             .inbound()
             .handle(
-                coderex_mcp::elicitation::ELICITATION_CREATE,
+                codape_mcp::elicitation::ELICITATION_CREATE,
                 Some(&serde_json::json!({
                     "message": "Port",
                     "requestedSchema": {
@@ -840,7 +840,7 @@ mod tests {
         ));
     }
 
-    /// Run one free-text request with `CODEREX_HEADLESS_ELICITATION_ANSWER`
+    /// Run one free-text request with `CODAPE_HEADLESS_ELICITATION_ANSWER`
     /// set to `answer` (or unset), restoring the previous value afterwards.
     ///
     /// The handler reads the variable while the request is awaited, so the

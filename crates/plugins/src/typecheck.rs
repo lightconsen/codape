@@ -14,7 +14,7 @@
 //!
 //! The compiler is looked for, in order, at:
 //!
-//! 1. the path in `CODEREX_TSC`, when set (a host-provided compiler);
+//! 1. the path in `CODAPE_TSC`, when set (a host-provided compiler);
 //! 2. `<root>/node_modules/.bin/tsc`, which is where a project-local install
 //!    puts it;
 //! 3. `tsc` on `PATH`.
@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Environment variable naming a TypeScript compiler to use.
-pub const TSC_ENV: &str = "CODEREX_TSC";
+pub const TSC_ENV: &str = "CODAPE_TSC";
 
 /// How long a check may take before it is abandoned.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);

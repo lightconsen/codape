@@ -1,4 +1,4 @@
-//! `coderex serve` through the real binary: start the daemon subcommand, accept
+//! `codape serve` through the real binary: start the daemon subcommand, accept
 //! a WebSocket client, authenticate it, and answer a query with the configured
 //! provider.
 
@@ -98,21 +98,21 @@ async fn serve_authenticates_and_answers_a_query() {
     let workspace = tempfile::tempdir().expect("workspace");
     let port = free_port();
 
-    let mut server = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut server = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["serve", "--port", &port.to_string()])
         .current_dir(workspace.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_API_KEYS", "test-key")
-        .env("CODEREX_SERVER_NO_PERSIST", "1")
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_API_KEYS", "test-key")
+        .env("CODAPE_SERVER_NO_PERSIST", "1")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex serve");
+        .expect("spawn codape serve");
 
     let mut ws = connect(port).await;
 
@@ -196,21 +196,21 @@ fn spawn_serve(
     port: u16,
     persist_path: &std::path::Path,
 ) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["serve", "--port", &port.to_string()])
         .current_dir(workspace)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_API_KEYS", "test-key")
-        .env("CODEREX_SERVER_PERSIST_PATH", persist_path)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_API_KEYS", "test-key")
+        .env("CODAPE_SERVER_PERSIST_PATH", persist_path)
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex serve")
+        .expect("spawn codape serve")
 }
 
 async fn authenticate(

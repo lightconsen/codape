@@ -214,7 +214,7 @@ fn read_image(
         return Ok(ToolOutput {
             output: format!("[image: {mime}, {} bytes]", bytes.len()),
             is_display: true,
-            images: vec![coderex_core::types::ImageBlock {
+            images: vec![codape_core::types::ImageBlock {
                 media_type: mime.to_string(),
                 data: b64,
             }],

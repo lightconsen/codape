@@ -1,10 +1,11 @@
-# CodeRex
+# Codape
 
-**CodeRex** is an AI-powered coding assistant for the terminal. It connects to large language models (Claude, OpenAI-compatible APIs) and provides an interactive REPL for code generation, file editing, shell commands, code search, web research, and multi-turn conversation — all from your command line.
+**Codape** is an AI-powered coding assistant for the terminal. It connects to large language models (Claude, OpenAI-compatible APIs) and provides an interactive REPL for code generation, file editing, shell commands, code search, web research, and multi-turn conversation — all from your command line.
 
 Built in Rust for performance, reliability, and cross-platform support.
+Project homepage: [codape.com](https://codape.com).
 
-> CodeRex is an independent project. It is not affiliated with, endorsed by,
+> Codape is an independent project. It is not affiliated with, endorsed by,
 > or sponsored by Anthropic; "Claude" refers to the models it can connect to.
 
 ## Features
@@ -30,10 +31,10 @@ Built in Rust for performance, reliability, and cross-platform support.
 **From source:**
 
 ```bash
-git clone https://github.com/lightconsen/coderex.git
-cd coderex
+git clone https://github.com/lightconsen/codape.git
+cd codape
 cargo build --release
-./target/release/coderex
+./target/release/codape
 ```
 
 Or use the helper script, which checks the toolchain and the platform
@@ -46,7 +47,7 @@ scripts/build.sh
 ```
 
 **From GitHub Releases:** download the archive for your platform from
-[github.com/lightconsen/coderex/releases](https://github.com/lightconsen/coderex/releases)
+[github.com/lightconsen/codape/releases](https://github.com/lightconsen/codape/releases)
 (Linux x86_64 gnu/musl, macOS x86_64/aarch64, Windows x86_64).
 
 **With the install script** (Linux/macOS; installs to `~/.local/bin` or
@@ -55,11 +56,11 @@ scripts/build.sh
 match:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lightconsen/coderex/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lightconsen/codape/main/scripts/install.sh | sh
 ```
 
-**Keeping it current:** `coderex update --check` reports whether a newer
-release exists; `coderex update` downloads it, verifies it the same way, and
+**Keeping it current:** `codape update --check` reports whether a newer
+release exists; `codape update` downloads it, verifies it the same way, and
 replaces the binary atomically. Installations owned by Homebrew, Nix or
 `cargo install` are refused with the command that upgrades them instead. See
 [`docs/self-update.md`](docs/self-update.md).
@@ -67,34 +68,34 @@ replaces the binary atomically. Installations owned by Homebrew, Nix or
 **With Cargo:**
 
 ```bash
-cargo install --git https://github.com/lightconsen/coderex.git
+cargo install --git https://github.com/lightconsen/codape.git
 ```
 
 ### Usage
 
 ```bash
 # Start interactive REPL
-coderex
+codape
 
 # Single prompt (non-interactive)
-coderex "write a fibonacci function in Python"
+codape "write a fibonacci function in Python"
 
 # Continue last session
-coderex -c
+codape -c
 
 # Specify model
-coderex -m claude-sonnet-4-6
+codape -m claude-sonnet-4-6
 
 # Server/daemon mode
-coderex serve --port 8080
+codape serve --port 8080
 
 # With sub-agents
-coderex --agent explore "find all API route definitions"
+codape --agent explore "find all API route definitions"
 ```
 
 ## Architecture
 
-CodeRex is organized as a Rust workspace with 19 crates (plus the `evals` harness):
+Codape is organized as a Rust workspace with 19 crates (plus the `evals` harness):
 
 | Crate | Responsibility |
 |-------|--------------|
@@ -134,8 +135,8 @@ User Input → REPL/UI → QueryEngine → Provider API
 
 Settings are loaded from multiple sources (in order of precedence):
 1. CLI flags and environment variables
-2. Project-local `.coderex/settings.toml`
-3. User-level `~/.config/coderex/settings.toml`
+2. Project-local `.codape/settings.toml`
+3. User-level `~/.config/codape/settings.toml`
 4. Remote managed settings (enterprise)
 
 ## Development
@@ -170,10 +171,10 @@ cargo test --workspace --lib
 cargo test --workspace
 
 # Specific crate
-cargo test -p coderex-core
+cargo test -p codape-core
 
 # Provider-backed E2E tests (replay recorded LLM cassettes)
-cargo test -p coderex-cli --test e2e_code_agent
+cargo test -p codape-cli --test e2e_code_agent
 ```
 
 ### Lint

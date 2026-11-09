@@ -3,7 +3,7 @@
 
 use crate::context::ExecutionContext;
 use crate::tool::{BoxedTool, InterruptBehavior, Tool, ToolDescriptor, ToolTier};
-use coderex_core::permissions::ToolRuleExemptions;
+use codape_core::permissions::ToolRuleExemptions;
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -375,13 +375,13 @@ impl ToolRegistry {
 
 /// Install a registry-backed rule-exemption resolver on a permission engine.
 ///
-/// The checker lives in `coderex-core` and cannot see tools, and the flags are
+/// The checker lives in `codape-core` and cannot see tools, and the flags are
 /// a property of the *call* rather than the tool, so copying a tool's constant
 /// answer into a table is not enough: the engine has to be able to ask, per
 /// call, what this input makes of the tool. Without this call a tool's declared
 /// `ignores_whole_tool_allow_rule` / `suppresses_always_allow_rule` are inert.
 pub fn install_rule_exemptions(
-    engine: &mut coderex_core::permission_engine::PermissionEngine,
+    engine: &mut codape_core::permission_engine::PermissionEngine,
     registry: &Arc<ToolRegistry>,
 ) {
     let registry = Arc::clone(registry);
@@ -397,8 +397,8 @@ mod tests {
     use crate::context::{ToolError, ToolOutput};
     use crate::tool::{BoxedTool, InterruptBehavior, ToolContext, ToolInput};
     use async_trait::async_trait;
-    use coderex_core::permission_engine::PermissionEngine;
-    use coderex_core::permissions::{
+    use codape_core::permission_engine::PermissionEngine;
+    use codape_core::permissions::{
         PermissionAction, PermissionChecker, PermissionMode, PermissionResult, PermissionRule,
     };
     use std::collections::HashMap;

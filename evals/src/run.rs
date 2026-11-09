@@ -33,7 +33,7 @@ pub struct RunOptions {
     /// An explicit flow directory.
     ///
     /// When set it replaces the usual
-    /// `<repo>/.coderex/hillclimb/<flow>` resolution, so a flow can be
+    /// `<repo>/.codape/hillclimb/<flow>` resolution, so a flow can be
     /// checked in wherever it belongs (for example under `evals/`).
     pub flow_dir: Option<PathBuf>,
     /// Which variant this run is for.
@@ -400,14 +400,14 @@ async fn spawn(
     shell
         .arg(command)
         .current_dir(cwd)
-        .env("CODEREX_EVAL_RUN_DIR", cwd)
-        .env("CODEREX_EVAL_REPO", repo)
+        .env("CODAPE_EVAL_RUN_DIR", cwd)
+        .env("CODAPE_EVAL_REPO", repo)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    // The child keeps this process's environment: a case that runs `coderex`
+    // The child keeps this process's environment: a case that runs `codape`
     // needs the same keys and paths a person would have.
     let child = match shell.spawn() {
         Ok(child) => child,
@@ -561,7 +561,7 @@ mod tests {
     use super::*;
 
     /// A flow whose command is plain shell, so the harness itself is testable
-    /// without running CodeRex.
+    /// without running Codape.
     fn write_flow(dir: &Path, command: &str, cases: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(

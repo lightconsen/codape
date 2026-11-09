@@ -1,4 +1,4 @@
-//! CodeRex configuration system.
+//! Codape configuration system.
 
 #![warn(missing_docs)]
 

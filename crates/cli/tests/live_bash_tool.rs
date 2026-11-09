@@ -2,7 +2,7 @@
 
 mod live;
 
-use coderex_core::engine::TerminalReason;
+use codape_core::engine::TerminalReason;
 
 #[tokio::test]
 async fn bash_tool_lists_files() {

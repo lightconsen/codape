@@ -4,13 +4,13 @@
 //! plus whatever it started, and a command that timed out must take the whole
 //! tree with it or leave a test server holding a port. Two properties matter:
 //!
-//! * **Isolation.** CodeRex is itself run under a timeout by harnesses
-//!   (`timeout`, `tb`, CI). Those signal CodeRex's *process group*, which a
+//! * **Isolation.** Codape is itself run under a timeout by harnesses
+//!   (`timeout`, `tb`, CI). Those signal Codape's *process group*, which a
 //!   shell that stayed in that group shares — a `run_in_background` service
 //!   would die with the harness timeout even though it was supposed to outlive
 //!   the call. Spawning each command into its own group (`setpgid(0, 0)`)
-//!   keeps the command out of CodeRex's group, so a group signal aimed at
-//!   CodeRex does not reach it.
+//!   keeps the command out of Codape's group, so a group signal aimed at
+//!   Codape does not reach it.
 //! * **Termination.** The negated pid reaches every process in the group, so a
 //!   timeout stops the descendants too, not just the shell that was waiting
 //!   for them.
@@ -55,7 +55,7 @@ pub fn isolate(cmd: &mut tokio::process::Command) {
 ///   [`terminate_group`] would then SIGTERM and SIGKILL whoever called it.
 ///   Under `cargo test` the test binaries share the runner's group, so that
 ///   ends the whole CI job — observed as "The runner has received a shutdown
-///   signal" while the `coderex_cli` lib tests were starting. `cargo nextest`
+///   signal" while the `codape_cli` lib tests were starting. `cargo nextest`
 ///   puts each binary in its own group, which is why only the coverage job was
 ///   affected.
 /// * `1` — signalling pid 1 means "every process the caller may signal".
@@ -166,7 +166,7 @@ mod tests {
     /// group signal sent to the child reaches a grandchild that stayed in it.
     ///
     /// This is the property the benchmark failure depended on: the harness
-    /// timed out CodeRex's group and took the test server down with it.
+    /// timed out Codape's group and took the test server down with it.
     #[tokio::test]
     #[allow(unsafe_code)] // `getpgid` is the only way to read a process group.
     async fn isolated_child_is_in_its_own_group_and_is_killed_with_its_tree() {
@@ -188,7 +188,7 @@ mod tests {
         let own_group = unsafe { libc::getpgid(0) };
         assert_ne!(
             owner_group, own_group,
-            "the command must not share CodeRex's process group"
+            "the command must not share Codape's process group"
         );
 
         terminate_group(pid).await;

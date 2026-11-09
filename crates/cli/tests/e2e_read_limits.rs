@@ -60,7 +60,7 @@ fn a_large_read_is_truncated_with_a_marker() {
     .expect("settings");
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -72,12 +72,12 @@ fn a_large_read_is_truncated_with_a_marker() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -91,7 +91,7 @@ fn a_large_read_is_truncated_with_a_marker() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(

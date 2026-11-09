@@ -69,7 +69,7 @@ impl Tool for EditTool {
         if let Some(config) = ctx
             .extra
             .get("sandbox_config")
-            .and_then(|v| v.downcast_ref::<coderex_core::sandbox::SandboxConfig>())
+            .and_then(|v| v.downcast_ref::<codape_core::sandbox::SandboxConfig>())
         {
             let allowed_read = &config.allowed_read_paths;
             let allowed_write = &config.allowed_write_paths;
@@ -90,7 +90,7 @@ impl Tool for EditTool {
         if let Some(config) = ctx
             .extra
             .get("sandbox_config")
-            .and_then(|value| value.downcast_ref::<coderex_core::sandbox::SandboxConfig>())
+            .and_then(|value| value.downcast_ref::<codape_core::sandbox::SandboxConfig>())
             && (!crate::sandbox_policy::is_path_allowed(&actual, &config.allowed_read_paths)
                 || !crate::sandbox_policy::is_path_allowed(&actual, &config.allowed_write_paths))
         {

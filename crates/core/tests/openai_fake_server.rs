@@ -1,16 +1,16 @@
 //! OpenAI-compatible provider against a fake HTTP server.
 //!
 //! Ported from qwen-code's `fake-openai-server` suite, but scoped to the
-//! behaviors CodeRex's client must understand: non-streaming content and
+//! behaviors Codape's client must understand: non-streaming content and
 //! reasoning, streaming reasoning/content/tool-call deltas, and the in-band
 //! `error_finish` failure. The fake server writes one response and closes the
 //! connection, so no port needs to be guessed.
 
-use coderex_core::api_client::ApiError;
-use coderex_core::api_client::StreamEvent;
-use coderex_core::provider::Provider;
-use coderex_core::providers::OpenAiCompatibleProvider;
-use coderex_core::types::ModelId;
+use codape_core::api_client::ApiError;
+use codape_core::api_client::StreamEvent;
+use codape_core::provider::Provider;
+use codape_core::providers::OpenAiCompatibleProvider;
+use codape_core::types::ModelId;
 use futures::StreamExt;
 use serde_json::json;
 use std::sync::{Arc, Mutex};

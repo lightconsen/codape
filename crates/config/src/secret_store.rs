@@ -1,7 +1,7 @@
 //! Private persistence for small credential documents.
 //!
-//! Two crates persist the same MCP OAuth document — `coderex-mcp`'s
-//! `OAuthManager` and `coderex-tools`' `McpAuth` tool — and neither can depend
+//! Two crates persist the same MCP OAuth document — `codape-mcp`'s
+//! `OAuthManager` and `codape-tools`' `McpAuth` tool — and neither can depend
 //! on the other. This module is the shared persistence layer both use, so the
 //! file shape, file mode and keychain choice cannot drift apart.
 //!
@@ -33,7 +33,7 @@
 //! successful keychain read or write: it is removed, or tightened to `0600` if
 //! removal fails.
 //!
-//! Set `CODEREX_DISABLE_KEYCHAIN` (to anything) to force the private-file path.
+//! Set `CODAPE_DISABLE_KEYCHAIN` (to anything) to force the private-file path.
 //! That is useful in CI, where an interactive keychain may not be available.
 
 use std::fs::OpenOptions;
@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Service name used for keychain entries.
-pub const KEYCHAIN_SERVICE: &str = "coderex";
+pub const KEYCHAIN_SERVICE: &str = "codape";
 
 /// An error from an injectable secret backend.
 #[derive(Debug, thiserror::Error)]
@@ -163,7 +163,7 @@ impl std::fmt::Debug for TokenPersistence {
 impl TokenPersistence {
     /// Persist the `mcp_tokens` document at `path`, preferring the OS keychain.
     ///
-    /// When the `keyring` feature is disabled, or `CODEREX_DISABLE_KEYCHAIN` is
+    /// When the `keyring` feature is disabled, or `CODAPE_DISABLE_KEYCHAIN` is
     /// set, this behaves like [`Self::file_only`].
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -175,7 +175,7 @@ impl TokenPersistence {
     pub fn new_for(path: impl Into<PathBuf>, account: impl Into<String>) -> Self {
         let path = path.into();
         let account = account.into();
-        let backend = if std::env::var_os("CODEREX_DISABLE_KEYCHAIN").is_some() {
+        let backend = if std::env::var_os("CODAPE_DISABLE_KEYCHAIN").is_some() {
             Backend::FileOnly
         } else {
             default_backend()

@@ -1,7 +1,7 @@
 //! ListMcpPrompts / GetMcpPrompt baseline tools.
 //!
 //! Like the resource tools, these drive an injected `McpPromptHandle` that the
-//! runtime wires up from the `coderex-mcp` crate. The small trait keeps the
+//! runtime wires up from the `codape-mcp` crate. The small trait keeps the
 //! `tools` -> `mcp` dependency out of this crate.
 
 use crate::context::{ToolError, ToolOutput};

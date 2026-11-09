@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use coderex_core::hook_security::{SsrfGuard, UrlValidator};
+use codape_core::hook_security::{SsrfGuard, UrlValidator};
 use reqwest::header::{CONTENT_TYPE, LOCATION};
 use reqwest::redirect::Policy;
 
@@ -158,7 +158,7 @@ impl Tool for WebFetchTool {
             // A redirect would take the request somewhere the SSRF guard did
             // not check. Refuse it instead of following it.
             .redirect(Policy::none())
-            .user_agent(format!("CodeRex/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("Codape/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ToolError::Execution {
                 name: "WebFetch".into(),

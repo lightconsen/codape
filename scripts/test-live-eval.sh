@@ -5,7 +5,7 @@
 #   ANTHROPIC_API_KEY   required; the script refuses to run without it
 #   ANTHROPIC_BASE_URL  optional; an Anthropic-compatible endpoint
 #   ANTHROPIC_MODEL     optional; passed through to the CLI as --model
-#   CODEREX_BIN         optional; an already-built coderex binary
+#   CODAPE_BIN         optional; an already-built codape binary
 #
 # Outputs:
 #   evals/flows/live/baseline/results.jsonl
@@ -41,15 +41,15 @@ case "${1:-}" in
 esac
 
 # The provider may come from the environment or from the settings file the
-# rest of the tooling reads. `CODEREX_LIVE_EVAL_FROM_SETTINGS=1` forces the
+# rest of the tooling reads. `CODAPE_LIVE_EVAL_FROM_SETTINGS=1` forces the
 # settings: useful when the shell already exports another harness's
 # ANTHROPIC_* variables, since a base URL and a key from different providers
 # cannot be mixed.
-from_settings="${CODEREX_LIVE_EVAL_FROM_SETTINGS:-0}"
+from_settings="${CODAPE_LIVE_EVAL_FROM_SETTINGS:-0}"
 if [[ "$from_settings" != "0" || -z "${ANTHROPIC_API_KEY:-}" ]]; then
     provider_lines=""
     used_settings=""
-    for candidate in "${CODEREX_SETTINGS:-}" "$HOME/.coderex/settings.json" "$HOME/.claude/settings.ds.json"; do
+    for candidate in "${CODAPE_SETTINGS:-}" "$HOME/.codape/settings.json" "$HOME/.claude/settings.ds.json"; do
         [[ -n "$candidate" && -r "$candidate" ]] || continue
         provider_lines=$(python3 - "$candidate" <<'PY'
 import json, sys
@@ -114,14 +114,14 @@ fi
 
 cd "$REPO_ROOT"
 
-cargo build -p coderex-cli --bin coderex
+cargo build -p codape-cli --bin codape
 # Approve the harness only on the first run. After that the pinned hash is
 # enforced, so a changed flow is refused instead of silently re-approved.
 approve=()
 if [ ! -f "$REPO_ROOT/evals/flows/live/_state.json" ]; then
     approve=(--approve-harness)
 fi
-cargo run -p coderex-evals --bin run-eval -- \
+cargo run -p codape-evals --bin run-eval -- \
     --flow-dir "$REPO_ROOT/evals/flows/live" \
     --variant baseline \
     ${approve[@]+"${approve[@]}"} \

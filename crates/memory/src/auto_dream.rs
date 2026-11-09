@@ -275,7 +275,7 @@ impl AutoDream {
     ///
     /// Similar to [`spawn_watcher`](Self::spawn_watcher) but instead of
     /// generating a placeholder summary, it sends the dream prompt to an
-    /// [`ApiClient`](coderex_core::api_client::ApiClient) and uses the
+    /// [`ApiClient`](codape_core::api_client::ApiClient) and uses the
     /// LLM response as the dream summary.
     ///
     /// # Arguments
@@ -290,8 +290,8 @@ impl AutoDream {
         tx: tokio::sync::mpsc::Sender<DreamSession>,
         poll_interval: std::time::Duration,
         mut shutdown: tokio::sync::oneshot::Receiver<()>,
-        api_client: &dyn coderex_core::api_client::ApiClient,
-        model: &coderex_core::types::ModelId,
+        api_client: &dyn codape_core::api_client::ApiClient,
+        model: &codape_core::types::ModelId,
         recent_sessions: Vec<String>,
     ) {
         let mut interval = tokio::time::interval(poll_interval);
@@ -606,7 +606,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let api = MockApi::new("AI dream summary: found 3 patterns");
-        let model = coderex_core::types::ModelId::sonnet();
+        let model = codape_core::types::ModelId::sonnet();
         let sessions = vec!["Session 1: fixed auth".to_string()];
 
         let poll_interval = std::time::Duration::from_millis(50);

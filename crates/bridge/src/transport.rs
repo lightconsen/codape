@@ -317,10 +317,10 @@ pub fn default_factory() -> TransportFactory {
         Box::new(InProcessTransport::new(config.connection_id.clone()))
     });
     factory.register("websocket", websocket_transport);
-    // `ws` is the spelling the existing CODEREX_BRIDGE_URL examples use.
+    // `ws` is the spelling the existing CODAPE_BRIDGE_URL examples use.
     factory.register("ws", websocket_transport);
     // The gateway's per-environment frame mailbox
-    // (`coderex-server::gateway`). A worker that can only make outbound HTTP
+    // (`codape-server::gateway`). A worker that can only make outbound HTTP
     // requests — behind a restrictive proxy, or against a plain HTTP gateway —
     // uses this instead of a socket. The endpoint is the gateway base URL and
     // the connection id is the environment whose mailbox to read.
@@ -424,7 +424,7 @@ mod tests {
     }
 
     /// The in-repo gateway's polling client has to be selectable from the
-    /// factory, or `coderex bridge` cannot use the gateway it ships with.
+    /// factory, or `codape bridge` cannot use the gateway it ships with.
     #[test]
     fn default_factory_registers_the_http_poll_transport() {
         let factory = default_factory();

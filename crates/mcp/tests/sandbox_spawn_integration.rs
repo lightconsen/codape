@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use coderex_mcp::server::McpServer;
+use codape_mcp::server::McpServer;
 
 /// A server whose command does not exist must fail with the command error,
 /// not with a wrapper/protocol error that hides the real problem.
@@ -14,7 +14,7 @@ use coderex_mcp::server::McpServer;
 async fn a_missing_command_fails_before_the_sandbox_wrapper() {
     let mut server = McpServer::new(
         "missing",
-        "/nonexistent/coderex-mcp-binary",
+        "/nonexistent/codape-mcp-binary",
         vec![],
         HashMap::new(),
     );
@@ -40,7 +40,7 @@ async fn a_missing_command_fails_before_the_sandbox_wrapper() {
 async fn disabling_the_sandbox_does_not_change_the_missing_command_error() {
     let mut server = McpServer::new(
         "missing",
-        "/nonexistent/coderex-mcp-binary",
+        "/nonexistent/codape-mcp-binary",
         vec![],
         HashMap::new(),
     );
@@ -66,7 +66,7 @@ async fn a_command_inside_the_working_directory_is_refused() {
     let cwd = std::env::current_dir().expect("cwd");
     let path = cwd
         .join("target")
-        .join(format!("coderex-local-server-{}.sh", std::process::id()));
+        .join(format!("codape-local-server-{}.sh", std::process::id()));
     std::fs::create_dir_all(path.parent().unwrap()).expect("target dir");
     std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write local command");
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -98,7 +98,7 @@ async fn a_command_inside_the_working_directory_is_refused() {
 #[tokio::test]
 async fn an_explicitly_sandboxed_server_starts_and_lists_tools() {
     let script =
-        std::env::temp_dir().join(format!("coderex_sandbox_spawn_{}.py", std::process::id()));
+        std::env::temp_dir().join(format!("codape_sandbox_spawn_{}.py", std::process::id()));
     std::fs::write(
         &script,
         r#"#!/usr/bin/env python3

@@ -51,8 +51,8 @@ pub struct WorktreeConfig {
 impl Default for WorktreeConfig {
     fn default() -> Self {
         Self {
-            base_dir: PathBuf::from(".coderex/worktrees"),
-            branch_prefix: "coderex".to_string(),
+            base_dir: PathBuf::from(".codape/worktrees"),
+            branch_prefix: "codape".to_string(),
             auto_cleanup: true,
         }
     }
@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn worktree_config_defaults() {
         let config = WorktreeConfig::default();
-        assert_eq!(config.base_dir, PathBuf::from(".coderex/worktrees"));
-        assert_eq!(config.branch_prefix, "coderex");
+        assert_eq!(config.base_dir, PathBuf::from(".codape/worktrees"));
+        assert_eq!(config.branch_prefix, "codape");
         assert!(config.auto_cleanup);
     }
 
@@ -323,7 +323,7 @@ mod tests {
     fn worktree_result_clone() {
         let result = WorktreeResult {
             path: PathBuf::from("/tmp/wt1"),
-            branch: "coderex-1".into(),
+            branch: "codape-1".into(),
             base_branch: "main".into(),
         };
         let cloned = result.clone();
@@ -351,15 +351,15 @@ mod tests {
     #[test]
     fn next_branch_name_increments() {
         let mut mgr = WorktreeManager::default();
-        assert_eq!(mgr.next_branch_name(), "coderex-1");
+        assert_eq!(mgr.next_branch_name(), "codape-1");
 
         // Add a fake worktree
         mgr.worktrees.push(WorktreeResult {
             path: PathBuf::from("/tmp/a"),
-            branch: "coderex-1".into(),
+            branch: "codape-1".into(),
             base_branch: "main".into(),
         });
-        assert_eq!(mgr.next_branch_name(), "coderex-2");
+        assert_eq!(mgr.next_branch_name(), "codape-2");
     }
 
     #[test]

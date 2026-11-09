@@ -2,12 +2,12 @@
 
 ## Goal
 
-Remote session orchestration for connecting to remote CodeRex instances or managed environments. The bridge manages the full lifecycle of remote coding sessions: connecting via transport, receiving work assignments from a control plane, spawning sessions (locally via worktrees or remotely via SSH), routing tool-call permissions, synchronizing state via delta sync with conflict resolution, and archiving completed sessions with versioned transcripts.
+Remote session orchestration for connecting to remote Codape instances or managed environments. The bridge manages the full lifecycle of remote coding sessions: connecting via transport, receiving work assignments from a control plane, spawning sessions (locally via worktrees or remotely via SSH), routing tool-call permissions, synchronizing state via delta sync with conflict resolution, and archiving completed sessions with versioned transcripts.
 
 ## Architecture
 
 ```
-┌────────────────────────────── coderex-bridge ──────────────────────────────┐
+┌────────────────────────────── codape-bridge ──────────────────────────────┐
 │                                                                            │
 │  ┌──────────────┐  ┌────────────────┐  ┌────────────────────────────┐     │
 │  │ Transport    │  │   Heartbeat    │  │    State Machine           │     │
@@ -35,16 +35,16 @@ Remote session orchestration for connecting to remote CodeRex instances or manag
 │                                          │                                  │
 │  ┌──────────────────────────────────────┐  ┌───────────────────────────┐   │
 │  │ BridgeTokenStore                      │  │ WsReconnector             │   │
-│  │ ~/.coderex/bridge_tokens.json         │  │ exponential backoff       │   │
+│  │ ~/.codape/bridge_tokens.json         │  │ exponential backoff       │   │
 │  │ CRUD: upsert / remove / validate      │  │ 1s base → 30s max, 10x   │   │
 │  └──────────────────────────────────────┘  └───────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Control Plane Server (`coderex-server` crate)
+### Control Plane Server (`codape-server` crate)
 
 ```
-┌──────────────────── coderex-server ─────────────────────┐
+┌──────────────────── codape-server ─────────────────────┐
 │                                                         │
 │  WebSocket Server          Control Plane HTTP API       │
 │  • ws://host:port          • POST /api/environments/    │
@@ -88,7 +88,7 @@ Remote session orchestration for connecting to remote CodeRex instances or manag
 
 **`WsTransportConfig`** — Builder: `new(url)`, `with_auth(token)`.
 
-**`BridgeTokenStore`** — File-based token CRUD for `~/.coderex/bridge_tokens.json`: `upsert`, `remove`, `validate`, `load`/`save`.
+**`BridgeTokenStore`** — File-based token CRUD for `~/.codape/bridge_tokens.json`: `upsert`, `remove`, `validate`, `load`/`save`.
 
 ### Heartbeat System
 
@@ -122,7 +122,7 @@ Terminal states: `Completed`, `Failed`. All transitions validated with error typ
 - `take_assignment()` — Dequeues work only when `active_sessions < max_concurrent`.
 
 The claim route is a template (`{env_id}`, `{assignment_id}`), defaulting to the
-route above and overridable with `--claim-path` / `CODEREX_BRIDGE_CLAIM_PATH`.
+route above and overridable with `--claim-path` / `CODAPE_BRIDGE_CLAIM_PATH`.
 
 **`SpawnMode`** — Enum: `SingleSession`, `SameDir`, `Worktree`, `Ssh { host, remote_path, identity_file }`. With `as_str()` / `from_str()` for serialization.
 
@@ -131,8 +131,8 @@ route above and overridable with `--claim-path` / `CODEREX_BRIDGE_CLAIM_PATH`.
 **`BridgeSessionSpawner`** (`spawner.rs`) — Creates execution contexts per mode:
 
 - **`SingleSession`** / **`SameDir`** — Uses existing directory, prepares session data dir.
-- **`Worktree`** — `git worktree add` at `.coderex/worktrees/{session_id}`. Cleanup via `git worktree remove`.
-- **`Ssh`** — Connects to remote host via `openssh` crate, creates session directory, verifies `coderex` is available. Verifies host keys with `KnownHosts::Add`: unknown hosts are recorded on first contact and must match afterwards. The `openssh` crate is Unix-only, so the dependency is `cfg(unix)` and Windows builds refuse `SpawnMode::Ssh` with a clear error instead of failing to compile.
+- **`Worktree`** — `git worktree add` at `.codape/worktrees/{session_id}`. Cleanup via `git worktree remove`.
+- **`Ssh`** — Connects to remote host via `openssh` crate, creates session directory, verifies `codape` is available. Verifies host keys with `KnownHosts::Add`: unknown hosts are recorded on first contact and must match afterwards. The `openssh` crate is Unix-only, so the dependency is `cfg(unix)` and Windows builds refuse `SpawnMode::Ssh` with a clear error instead of failing to compile.
 
 ### Delta Sync & Conflict Resolution
 
@@ -304,13 +304,13 @@ frames, sequences them, routes each by type, and answers:
 The production entry point is the `bridge` subcommand:
 
 ```sh
-coderex bridge \
+codape bridge \
   --control-plane-url https://control.example.com \
   --env-id builder-01
 ```
 
 It resolves the configuration, builds the transport through
-`coderex_bridge::transport::default_factory()`, constructs a `Bridge`, connects
+`codape_bridge::transport::default_factory()`, constructs a `Bridge`, connects
 the transport, and registers the environment with the control plane
 (`POST /api/environments/register`) using bounded exponential backoff. It then
 runs two loops side by side until Ctrl+C (or SIGTERM on Unix):
@@ -337,40 +337,40 @@ ends the worker cleanly.
 
 | Flag | Environment | Default | Meaning |
 |------|-------------|---------|---------|
-| `--control-plane-url URL` | `CODEREX_BRIDGE_CONTROL_PLANE_URL` | required | Control-plane HTTP API base URL |
-| `--env-id ID` | `CODEREX_BRIDGE_ENV_ID` | required | Environment identifier registered with the control plane |
-| `--repo-root DIR` | `CODEREX_BRIDGE_REPO_ROOT` | current directory | Git repository the spawner works from |
-| `--worktree-base DIR` | `CODEREX_BRIDGE_WORKTREE_BASE` | `<repo>/.coderex/worktrees` | Where session worktrees are created |
-| `--session-base DIR` | `CODEREX_BRIDGE_SESSION_BASE` | `<repo>/.coderex/sessions` | Where session data is written |
-| `--archive-base DIR` | `CODEREX_BRIDGE_ARCHIVE_BASE` | `<repo>/.coderex/archives` | Where completed sessions are archived |
-| `--max-concurrent N` | `CODEREX_BRIDGE_MAX_CONCURRENT` | `5` | Maximum concurrent sessions |
-| `--transport KIND` | `CODEREX_BRIDGE_TRANSPORT` | `websocket` | `websocket`/`ws`, or `in-process` |
-| `--transport-url URL` | `CODEREX_BRIDGE_URL` | control-plane URL with `http`→`ws` / `https`→`wss` | Gateway WebSocket endpoint |
-| `--connection-id ID` | `CODEREX_BRIDGE_CONNECTION_ID` | environment ID | Connection label reported by the transport |
-| `--auth-token TOKEN` | `CODEREX_BRIDGE_TOKEN` | none | Bearer token for the transport `Authorization` header |
-| `--heartbeat-interval-secs N` | `CODEREX_BRIDGE_HEARTBEAT_INTERVAL_SECS` | `30` | Heartbeat interval |
-| `--heartbeat-timeout-secs N` | `CODEREX_BRIDGE_HEARTBEAT_TIMEOUT_SECS` | `10` | Per-heartbeat timeout |
-| `--heartbeat-degraded-threshold N` | `CODEREX_BRIDGE_HEARTBEAT_DEGRADED_THRESHOLD` | `2` | Missed beats before `Degraded` |
-| `--heartbeat-lost-threshold N` | `CODEREX_BRIDGE_HEARTBEAT_LOST_THRESHOLD` | `5` | Missed beats before `Lost` |
-| `--poll-interval-secs N` | `CODEREX_BRIDGE_POLL_INTERVAL_SECS` | `5` | Seconds between assignment fetches and capacity reports |
-| `--claim-path PATH` | `CODEREX_BRIDGE_CLAIM_PATH` | `/api/environments/{env_id}/assignments/{assignment_id}/claim` | Claim route template; must contain `{assignment_id}` |
+| `--control-plane-url URL` | `CODAPE_BRIDGE_CONTROL_PLANE_URL` | required | Control-plane HTTP API base URL |
+| `--env-id ID` | `CODAPE_BRIDGE_ENV_ID` | required | Environment identifier registered with the control plane |
+| `--repo-root DIR` | `CODAPE_BRIDGE_REPO_ROOT` | current directory | Git repository the spawner works from |
+| `--worktree-base DIR` | `CODAPE_BRIDGE_WORKTREE_BASE` | `<repo>/.codape/worktrees` | Where session worktrees are created |
+| `--session-base DIR` | `CODAPE_BRIDGE_SESSION_BASE` | `<repo>/.codape/sessions` | Where session data is written |
+| `--archive-base DIR` | `CODAPE_BRIDGE_ARCHIVE_BASE` | `<repo>/.codape/archives` | Where completed sessions are archived |
+| `--max-concurrent N` | `CODAPE_BRIDGE_MAX_CONCURRENT` | `5` | Maximum concurrent sessions |
+| `--transport KIND` | `CODAPE_BRIDGE_TRANSPORT` | `websocket` | `websocket`/`ws`, or `in-process` |
+| `--transport-url URL` | `CODAPE_BRIDGE_URL` | control-plane URL with `http`→`ws` / `https`→`wss` | Gateway WebSocket endpoint |
+| `--connection-id ID` | `CODAPE_BRIDGE_CONNECTION_ID` | environment ID | Connection label reported by the transport |
+| `--auth-token TOKEN` | `CODAPE_BRIDGE_TOKEN` | none | Bearer token for the transport `Authorization` header |
+| `--heartbeat-interval-secs N` | `CODAPE_BRIDGE_HEARTBEAT_INTERVAL_SECS` | `30` | Heartbeat interval |
+| `--heartbeat-timeout-secs N` | `CODAPE_BRIDGE_HEARTBEAT_TIMEOUT_SECS` | `10` | Per-heartbeat timeout |
+| `--heartbeat-degraded-threshold N` | `CODAPE_BRIDGE_HEARTBEAT_DEGRADED_THRESHOLD` | `2` | Missed beats before `Degraded` |
+| `--heartbeat-lost-threshold N` | `CODAPE_BRIDGE_HEARTBEAT_LOST_THRESHOLD` | `5` | Missed beats before `Lost` |
+| `--poll-interval-secs N` | `CODAPE_BRIDGE_POLL_INTERVAL_SECS` | `5` | Seconds between assignment fetches and capacity reports |
+| `--claim-path PATH` | `CODAPE_BRIDGE_CLAIM_PATH` | `/api/environments/{env_id}/assignments/{assignment_id}/claim` | Claim route template; must contain `{assignment_id}` |
 The worker retries a claim that the control plane answers with a 5xx or 429 (or
 that fails to connect) up to three times with a short backoff: the assignment is
 already off the queue, and a server error says nothing about whether it is ours.
 Any other 4xx is the server's answer about the assignment and is reported at
 once.
 
-| — (no flag) | `CODEREX_BRIDGE_SHUTDOWN_GRACE_SECS` | `5` | How long a stopped session gets before its child tree is killed. A child with real cleanup (flushing a transcript, closing a database) needs more; a non-numeric or zero value keeps the default. |
+| — (no flag) | `CODAPE_BRIDGE_SHUTDOWN_GRACE_SECS` | `5` | How long a stopped session gets before its child tree is killed. A child with real cleanup (flushing a transcript, closing a database) needs more; a non-numeric or zero value keeps the default. |
 
-The historical `CODEREX_BRIDGE_URL=ws://host:port` spelling is the transport
+The historical `CODAPE_BRIDGE_URL=ws://host:port` spelling is the transport
 URL, not the control-plane API URL. If the gateway does not share the control
-plane's host and path, set `--transport-url` (or `CODEREX_BRIDGE_URL`)
+plane's host and path, set `--transport-url` (or `CODAPE_BRIDGE_URL`)
 explicitly.
 
 ### Authentication
 
 The WebSocket transport sends `Authorization: Bearer <token>` when
-`--auth-token`/`CODEREX_BRIDGE_TOKEN` is set. The same token is sent by
+`--auth-token`/`CODAPE_BRIDGE_TOKEN` is set. The same token is sent by
 `HttpControlPlaneClient` on registration, assignment, and capacity requests.
 The control plane may also be left unauthenticated when no token is configured;
 in that case it is expected to be reachable from the worker's network position.
@@ -402,7 +402,7 @@ Spawned assignments run through `SessionRunner`. The default
 `ProcessSessionRunner` invokes the current executable as
 
 ```sh
-coderex --print --output-format stream-json -- <prompt>
+codape --print --output-format stream-json -- <prompt>
 ```
 
 with the prompt as one positional argument so no shell interprets it, and with
@@ -419,7 +419,7 @@ one to the worker loop, which registers it with the bridge as
 the transport immediately. When the gateway answers with `permission_response`,
 `BridgeEvent::PermissionResolved` tells the launcher to write a
 `control_response` line to the child's stdin; the turn then continues or
-records the denial. An unanswered request is denied after `CODEREX_BRIDGE_APPROVAL_TIMEOUT_SECS`
+records the denial. An unanswered request is denied after `CODAPE_BRIDGE_APPROVAL_TIMEOUT_SECS`
 (default 300; `0` disables the timeout) with a message saying the approval
 timed out — not that the user denied it. Shutdown drops the responders.
 
@@ -520,11 +520,11 @@ Control Plane                      Bridge                          Remote/Local
 - **Versioned archival** — `CURRENT_ARCHIVE_VERSION` constant guards deserialization; future versions rejected on load.
 - **Delta sync with conflict resolution** — SHA-256 revision hashing + Lamport timestamps for concurrent edit ordering. Last-writer-wins with origin ID tie-breaking.
 - **Event bus** — `tokio::sync::broadcast` channel (256 slots) for real-time event streaming to observers.
-- **Control plane HTTP API** — Raw HTTP/1.1 server in `coderex-server` serving register, assignments, claim, capacity, and list endpoints.
+- **Control plane HTTP API** — Raw HTTP/1.1 server in `codape-server` serving register, assignments, claim, capacity, and list endpoints.
 
 ## The gateway process
 
-`coderex gateway --port 8788` is the process a worker and an operator meet at.
+`codape gateway --port 8788` is the process a worker and an operator meet at.
 It serves two surfaces from one listener:
 
 | Surface | Endpoints |
@@ -563,10 +563,10 @@ deployment's TLS and authentication.
   was hung on the transport protocol the bridge already speaks. The binding
   rules, the wire format, and the refusal are unchanged; only the carrier is
   different.
-- **A relay endpoint on the `coderex-server` WebSocket protocol.** The server's
+- **A relay endpoint on the `codape-server` WebSocket protocol.** The server's
   WebSocket surface is a local SDK/daemon surface with its own API-key auth; it
   is not gateway-mediated, so there is nothing there for a relayed call to
-  arrive through. The relay lives in `coderex-bridge`, which is the component a
+  arrive through. The relay lives in `codape-bridge`, which is the component a
   gateway forwards to. The two crates are siblings with no dependency edge
   between them, so the endpoint could not be put on the server without either
   adding one or duplicating the gate.
@@ -580,7 +580,7 @@ deployment's TLS and authentication.
   this workspace and the transport is WebSocket, so the two spellings of the
   resume point are what the gateway is given.
 - **A separate control-plane credential.** The same `--auth-token` /
-  `CODEREX_BRIDGE_TOKEN` is used for the gateway transport and the control-plane
+  `CODAPE_BRIDGE_TOKEN` is used for the gateway transport and the control-plane
   HTTP API. There is no second credential setting, so a deployment that issues
   different tokens for the two must front the control plane to translate them.
 - **Live output over the bridge transport.** The default launcher forwards each
@@ -590,7 +590,7 @@ deployment's TLS and authentication.
   channel.
 - **A gateway path convention.** The default transport URL rewrites the
   control-plane scheme and keeps the same host and path. A gateway mounted on a
-  different path must be given `--transport-url` / `CODEREX_BRIDGE_URL`.
+  different path must be given `--transport-url` / `CODAPE_BRIDGE_URL`.
 
 ## Test Summary
 

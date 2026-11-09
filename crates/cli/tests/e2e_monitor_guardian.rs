@@ -20,10 +20,10 @@ fn the_guardian_kills_a_recorded_child_when_stdin_closes() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn the child to record");
-    let start = coderex_core::process_tree::process_start_time(child.id())
+    let start = codape_core::process_tree::process_start_time(child.id())
         .expect("the child has a start time");
 
-    let mut guardian = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut guardian = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("--internal-monitor-guardian")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

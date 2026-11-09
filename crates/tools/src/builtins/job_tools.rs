@@ -1,6 +1,6 @@
 //! Job tools — list, read, and stop the shell jobs the Bash tool started.
 //!
-//! The Bash tool records every command as a job under `.coderex/jobs/`. Those
+//! The Bash tool records every command as a job under `.codape/jobs/`. Those
 //! records used to be write-only: nothing let the model find the job it started
 //! a minute ago, read a server's log while the server ran, or stop it. Without
 //! that, the only tools left were `ps`, scanning `/proc`, and `pkill` —
@@ -17,7 +17,7 @@ use crate::tool::{
     MaxResultSizeChars, Tool, ToolCapabilities, ToolContext, ToolDescriptor, ToolInput, ToolTier,
 };
 use async_trait::async_trait;
-use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
+use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
 use std::fmt::Write as _;
 
 /// How much of a job's output one call returns.
@@ -30,7 +30,7 @@ fn job_store(ctx: &ToolContext<'_>) -> JobStore {
     JobStore::new(ctx.cwd)
 }
 
-fn list_error(error: coderex_core::job_record::JobStoreError) -> ToolError {
+fn list_error(error: codape_core::job_record::JobStoreError) -> ToolError {
     ToolError::Execution {
         name: "jobs".into(),
         message: error.to_string(),
@@ -356,7 +356,7 @@ impl Tool for JobKillTool {
             let _ = store.settle(
                 &job_id,
                 JobState::Failed,
-                coderex_core::task::now_ms(),
+                codape_core::task::now_ms(),
                 None,
                 Some("stopped by JobKill".to_string()),
             );
@@ -365,7 +365,7 @@ impl Tool for JobKillTool {
             let _ = store.settle(
                 &job_id,
                 JobState::Failed,
-                coderex_core::task::now_ms(),
+                codape_core::task::now_ms(),
                 None,
                 Some("the process was already gone".to_string()),
             );
@@ -393,7 +393,7 @@ fn extract_string(args: &serde_json::Value, key: &str) -> Result<String, ToolErr
 mod tests {
     use super::*;
     use crate::context::ExecutionContext;
-    use coderex_core::task::now_ms;
+    use codape_core::task::now_ms;
     use std::path::Path;
 
     fn ctx(cwd: &Path) -> ToolContext<'_> {

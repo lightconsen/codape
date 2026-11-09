@@ -186,7 +186,7 @@ impl SelectionInputs {
             }
         }
         Self {
-            gateway_configured: std::env::var("CODEREX_GATEWAY_URL").is_ok(),
+            gateway_configured: std::env::var("CODAPE_GATEWAY_URL").is_ok(),
             flags,
         }
     }

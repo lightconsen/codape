@@ -1,5 +1,5 @@
 //! Project settings cannot enable a security-sensitive permission mode: a
-//! repository-controlled `.coderex/settings.json` that asks for bypass must
+//! repository-controlled `.codape/settings.json` that asks for bypass must
 //! still be gated.
 
 use std::io::{BufRead, BufReader, Write};
@@ -52,14 +52,14 @@ fn start_static_provider() -> (Child, String) {
 fn a_project_cannot_turn_on_bypass_permissions() {
     let dir = tempfile::tempdir().expect("workspace");
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::create_dir_all(dir.path().join(".coderex")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".codape")).unwrap();
     std::fs::write(
         dir.path().join("src/lib.rs"),
         "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
     )
     .unwrap();
     std::fs::write(
-        dir.path().join(".coderex/settings.json"),
+        dir.path().join(".codape/settings.json"),
         r#"{"config_version": 4, "permission_mode": "bypass-permissions"}"#,
     )
     .unwrap();
@@ -71,7 +71,7 @@ fn a_project_cannot_turn_on_bypass_permissions() {
     .unwrap();
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p"])
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
@@ -79,12 +79,12 @@ fn a_project_cannot_turn_on_bypass_permissions() {
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
         .env("HOME", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -97,7 +97,7 @@ fn a_project_cannot_turn_on_bypass_permissions() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();

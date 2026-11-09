@@ -6,14 +6,14 @@
 //! 1.5 structured output, 1.6 termination conditions, 1.7 state machine
 
 use async_trait::async_trait;
-use coderex_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
-use coderex_core::engine::{QueryEngine, SubmitOptions, TerminalReason, TurnState};
-use coderex_core::permission_engine::PermissionEngine;
-use coderex_core::permissions::{PermissionChecker, PermissionMode};
-use coderex_core::state::SessionState;
-use coderex_core::tool_executor::ToolInfo;
-use coderex_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
-use coderex_core::types::{
+use codape_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
+use codape_core::engine::{QueryEngine, SubmitOptions, TerminalReason, TurnState};
+use codape_core::permission_engine::PermissionEngine;
+use codape_core::permissions::{PermissionChecker, PermissionMode};
+use codape_core::state::SessionState;
+use codape_core::tool_executor::ToolInfo;
+use codape_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
+use codape_core::types::{
     EngineEvent, MessageContent, ModelId, ThinkingBlock, ToolCall, ToolResult, UsageSummary,
 };
 use futures::Stream;
@@ -444,11 +444,11 @@ async fn multi_turn_context_accumulated() {
     assert_eq!(msgs.len(), 5);
 
     // Message roles: User, Assistant(text), Assistant(tool_call), Tool, Assistant
-    assert!(matches!(msgs[0].role, coderex_core::types::Role::User));
-    assert!(matches!(msgs[1].role, coderex_core::types::Role::Assistant));
-    assert!(matches!(msgs[2].role, coderex_core::types::Role::Assistant));
-    assert!(matches!(msgs[3].role, coderex_core::types::Role::Tool));
-    assert!(matches!(msgs[4].role, coderex_core::types::Role::Assistant));
+    assert!(matches!(msgs[0].role, codape_core::types::Role::User));
+    assert!(matches!(msgs[1].role, codape_core::types::Role::Assistant));
+    assert!(matches!(msgs[2].role, codape_core::types::Role::Assistant));
+    assert!(matches!(msgs[3].role, codape_core::types::Role::Tool));
+    assert!(matches!(msgs[4].role, codape_core::types::Role::Assistant));
 }
 
 /// The internal state graph has unit tests, but this asserts the sequence a
@@ -679,13 +679,13 @@ async fn streaming_tool_calls_persist_the_assistant_tool_use() {
     let call_index = msgs.iter().position(|m| {
         matches!(
             &m.content,
-            coderex_core::types::MessageContent::ToolCall(tc) if tc.id == "tc_stream"
+            codape_core::types::MessageContent::ToolCall(tc) if tc.id == "tc_stream"
         )
     });
     let result_index = msgs.iter().position(|m| {
         matches!(
             &m.content,
-            coderex_core::types::MessageContent::ToolResult(tr) if tr.tool_call_id == "tc_stream"
+            codape_core::types::MessageContent::ToolResult(tr) if tr.tool_call_id == "tc_stream"
         )
     });
 
@@ -738,7 +738,7 @@ async fn tool_call_loop_executes_and_continues() {
     let msgs = &engine.session().messages;
     let tool_msgs: Vec<_> = msgs
         .iter()
-        .filter(|m| matches!(m.role, coderex_core::types::Role::Tool))
+        .filter(|m| matches!(m.role, codape_core::types::Role::Tool))
         .collect();
     assert_eq!(tool_msgs.len(), 1);
     let tool_output = match &tool_msgs[0].content {
@@ -962,7 +962,7 @@ async fn tool_call_loop_multiple_tools_in_one_turn() {
         .session()
         .messages
         .iter()
-        .filter(|m| matches!(m.role, coderex_core::types::Role::Tool))
+        .filter(|m| matches!(m.role, codape_core::types::Role::Tool))
         .count();
     assert_eq!(tool_count, 2);
 
@@ -1007,7 +1007,7 @@ async fn structured_output_valid_json_passes() {
     let msgs = &engine.session().messages;
     let assistant_msg = msgs
         .iter()
-        .find(|m| matches!(m.role, coderex_core::types::Role::Assistant));
+        .find(|m| matches!(m.role, codape_core::types::Role::Assistant));
     assert!(assistant_msg.is_some());
     let content = match &assistant_msg.unwrap().content {
         MessageContent::Text(t) => t.as_str(),
@@ -1037,7 +1037,7 @@ async fn structured_output_invalid_json_gets_warning() {
     let msgs = &engine.session().messages;
     let assistant_msg = msgs
         .iter()
-        .find(|m| matches!(m.role, coderex_core::types::Role::Assistant));
+        .find(|m| matches!(m.role, codape_core::types::Role::Assistant));
     let content = match &assistant_msg.unwrap().content {
         MessageContent::Text(t) => t.as_str(),
         _ => panic!("expected text content"),
@@ -1367,8 +1367,8 @@ async fn engine_allowed_tools_override_blocks_unlisted() {
 //  1.8 Compaction + session memory
 // ═══════════════════════════════════════════════════════════════════════════
 
-use coderex_core::session_memory::SessionMemoryBackend;
-use coderex_core::types::Message;
+use codape_core::session_memory::SessionMemoryBackend;
+use codape_core::types::Message;
 
 /// Mock that replays responses and records every request (max_tokens +
 /// serialized messages) so tests can assert on the LLM call sequence.
@@ -1662,7 +1662,7 @@ async fn compact_recovery_no_extra_llm_call_without_backend() {
 //  1.9 Compaction backend abstraction (local/remote dual-track seam)
 // ═══════════════════════════════════════════════════════════════════════════
 
-use coderex_core::compaction_backend::{CompactionBackend, CompactionKind, CompactionRequest};
+use codape_core::compaction_backend::{CompactionBackend, CompactionKind, CompactionRequest};
 
 /// Stub compaction backend: records every request and serves a canned
 /// summary (or fails, to exercise the fallback path).
@@ -1836,7 +1836,7 @@ async fn a_failed_llm_summary_still_compacts_with_the_local_result() {
             assert!(
                 !matches!(
                     reported,
-                    coderex_core::types::CompactionEvent::CircuitBreakerOpen { .. }
+                    codape_core::types::CompactionEvent::CircuitBreakerOpen { .. }
                 ),
                 "a single failed summary tripped the circuit breaker"
             );

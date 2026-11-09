@@ -9,9 +9,9 @@
 //!
 //! Every command — foreground or background — is a job: it is spawned into a
 //! process group of its own, its output goes straight to a file under
-//! `.coderex/jobs/`, and its record is settled when it exits. That is what
+//! `.codape/jobs/`, and its record is settled when it exits. That is what
 //! makes a server started with `run_in_background` outlive the call (and a
-//! harness timeout aimed at CodeRex), and what lets a foreground command that
+//! harness timeout aimed at Codape), and what lets a foreground command that
 //! runs past its timeout be moved to the background instead of being orphaned.
 
 use std::path::{Path, PathBuf};
@@ -24,9 +24,9 @@ use crate::tool::{
     Backgrounding, JOB_SESSION_ID_KEY, Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier,
 };
 use async_trait::async_trait;
-use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
-use coderex_core::shell_security::BashAst;
-use coderex_core::task::now_ms;
+use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
+use codape_core::shell_security::BashAst;
+use codape_core::task::now_ms;
 use tokio::process::{Child, Command};
 
 /// Build the shell command under the session's sandbox policy.
@@ -37,7 +37,7 @@ use tokio::process::{Child, Command};
 fn build_sandboxed_command(
     ctx: &ToolContext<'_>,
     command: &str,
-) -> Result<(Command, Option<coderex_core::sandbox::SandboxHandle>), ToolError> {
+) -> Result<(Command, Option<codape_core::sandbox::SandboxHandle>), ToolError> {
     crate::sandbox_shell::sandboxed_shell(ctx, "sh", &["-c", command])
 }
 
@@ -138,12 +138,12 @@ impl BashTool {
         ctx: &ToolContext<'_>,
         command: &str,
         cmd: &mut Command,
-        sandbox_handle: Option<coderex_core::sandbox::SandboxHandle>,
+        sandbox_handle: Option<codape_core::sandbox::SandboxHandle>,
     ) -> Result<
         (
             JobHandle,
             Child,
-            Option<coderex_core::sandbox::SandboxHandle>,
+            Option<codape_core::sandbox::SandboxHandle>,
         ),
         ToolError,
     > {
@@ -165,7 +165,7 @@ impl BashTool {
             .stdout(std::process::Stdio::from(output))
             .stderr(std::process::Stdio::from(errors));
 
-        // A command that stayed in CodeRex's process group would be killed by
+        // A command that stayed in Codape's process group would be killed by
         // any harness that times out the run (`timeout`, a benchmark runner)
         // and signalled that group.
         job_control::isolate(cmd);
@@ -286,7 +286,7 @@ impl CwdTracker {
         static SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         Self {
-            path: std::env::temp_dir().join(format!("coderex-cwd-{}-{n}", std::process::id())),
+            path: std::env::temp_dir().join(format!("codape-cwd-{}-{n}", std::process::id())),
         }
     }
 
@@ -295,9 +295,9 @@ impl CwdTracker {
         let path = self.path.to_string_lossy().replace('\'', "'\\''");
         format!(
             "{command}\n\
-             __coderex_status=$?\n\
+             __codape_status=$?\n\
              pwd -P > '{path}' 2>/dev/null\n\
-             exit $__coderex_status"
+             exit $__codape_status"
         )
     }
 
@@ -462,7 +462,7 @@ impl Tool for BashTool {
 
         // The shell is not a provider client, so it is given no way to read
         // this session's credentials out of the environment it inherits.
-        for key in coderex_core::sandbox::credential_scrub_keys() {
+        for key in codape_core::sandbox::credential_scrub_keys() {
             cmd.env_remove(key);
         }
         crate::sandbox_shell::sanitize_shell_env(&mut cmd, &start);
@@ -653,7 +653,7 @@ mod tests {
         let done = wait_for_terminal(&JobStore::new(dir.path()), &id).await;
         assert_eq!(done.state, JobState::Done);
         let captured =
-            std::fs::read_to_string(dir.path().join(".coderex/jobs").join(format!("{id}.out")))
+            std::fs::read_to_string(dir.path().join(".codape/jobs").join(format!("{id}.out")))
                 .unwrap();
         assert!(
             captured.contains("late"),
@@ -730,7 +730,7 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert(
             "sandbox_config".to_string(),
-            Box::new(coderex_core::sandbox::SandboxConfig {
+            Box::new(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![PathBuf::from("/tmp")],
                 allowed_write_paths: vec![PathBuf::from("/tmp")],
                 allow_network: false,
@@ -770,12 +770,12 @@ mod tests {
         use std::collections::HashMap;
         use std::path::PathBuf;
 
-        if !coderex_core::sandbox::bubblewrap_in_force() {
+        if !codape_core::sandbox::bubblewrap_in_force() {
             eprintln!("skipping: bubblewrap is not in force");
             return;
         }
 
-        let dir = std::env::temp_dir().join(format!("coderex-bash-sandbox-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codape-bash-sandbox-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir_buf = PathBuf::from(&dir);
@@ -783,7 +783,7 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert(
             "sandbox_config".to_string(),
-            Box::new(coderex_core::sandbox::SandboxConfig {
+            Box::new(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![dir_buf.clone()],
                 allowed_write_paths: vec![dir_buf.clone()],
                 additional_working_dirs: vec![dir_buf],
@@ -828,12 +828,12 @@ mod tests {
         use std::collections::HashMap;
         use std::path::PathBuf;
 
-        if coderex_core::sandbox::bubblewrap_in_force() {
-            eprintln!("skipping: bubblewrap is in force; set CODEREX_BWRAP=0 for the syscall path");
+        if codape_core::sandbox::bubblewrap_in_force() {
+            eprintln!("skipping: bubblewrap is in force; set CODAPE_BWRAP=0 for the syscall path");
             return;
         }
 
-        let dir = std::env::temp_dir().join(format!("coderex-bash-seccomp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codape-bash-seccomp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir_buf = PathBuf::from(&dir);
@@ -841,7 +841,7 @@ mod tests {
         let mut extra = HashMap::new();
         extra.insert(
             "sandbox_config".to_string(),
-            Box::new(coderex_core::sandbox::SandboxConfig {
+            Box::new(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![dir_buf.clone()],
                 allowed_write_paths: vec![dir_buf.clone()],
                 additional_working_dirs: vec![dir_buf],
@@ -884,7 +884,7 @@ mod tests {
             // SAFETY: edition 2024 marks `set_var` unsafe because another
             // thread could read the environment concurrently. The only keys
             // touched are the three above, which no other test reads.
-            unsafe { std::env::set_var(key, "coderex-test-secret") };
+            unsafe { std::env::set_var(key, "codape-test-secret") };
         }
 
         let output = BashTool::new()
@@ -907,7 +907,7 @@ mod tests {
             "credentials reached the child: {}",
             output.output
         );
-        assert!(!output.output.contains("coderex-test-secret"));
+        assert!(!output.output.contains("codape-test-secret"));
     }
 
     /// Stripping credentials must not become clearing the environment.
@@ -931,13 +931,13 @@ mod tests {
 
     #[test]
     fn program_resolving_inside_cwd_is_refused() {
-        let dir = std::env::temp_dir().join(format!("coderex_bash_guard_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codape_bash_guard_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let planted = dir.join("coderex_planted_tool");
+        let planted = dir.join("codape_planted_tool");
         std::fs::write(&planted, b"#!/bin/sh\necho planted\n").unwrap();
 
         let error =
-            crate::sandbox_shell::guard_program_origin("./coderex_planted_tool", &dir).unwrap_err();
+            crate::sandbox_shell::guard_program_origin("./codape_planted_tool", &dir).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -966,7 +966,7 @@ mod tests {
         }
     }
 
-    async fn wait_for_terminal(store: &JobStore, id: &str) -> coderex_core::job_record::JobRecord {
+    async fn wait_for_terminal(store: &JobStore, id: &str) -> codape_core::job_record::JobRecord {
         for _ in 0..200 {
             if let Ok(Some(record)) = store.load(id)
                 && record.state != JobState::Running
@@ -1025,7 +1025,7 @@ mod tests {
         assert!(done.ended_at_ms.unwrap() >= done.started_at_ms);
 
         let captured =
-            std::fs::read_to_string(dir.path().join(".coderex/jobs").join(format!("{id}.out")))
+            std::fs::read_to_string(dir.path().join(".codape/jobs").join(format!("{id}.out")))
                 .unwrap();
         assert!(captured.contains("background-done"));
     }
@@ -1051,7 +1051,7 @@ mod tests {
         let handle: serde_json::Value = serde_json::from_str(&output.output).unwrap();
         let id = handle["job_id"].as_str().unwrap().to_string();
         let pid = u32::try_from(handle["pid"].as_u64().unwrap()).unwrap();
-        let path = dir.path().join(".coderex/jobs").join(format!("{id}.out"));
+        let path = dir.path().join(".codape/jobs").join(format!("{id}.out"));
 
         let mut seen = String::new();
         for _ in 0..100 {

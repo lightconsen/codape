@@ -5,7 +5,7 @@
 //! classification matrix lives next to the code in
 //! `crates/core/src/job_record.rs`; here we exercise the store itself.
 
-use coderex_core::job_record::{
+use codape_core::job_record::{
     JobKind, JobRecord, JobState, JobStore, STALE_THRESHOLD_MS, adopt_and_reconcile,
 };
 use std::sync::{Arc, Barrier};
@@ -32,11 +32,11 @@ fn json_files(dir: &std::path::Path) -> Vec<String> {
 // ─── Layout ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn store_root_is_dot_coderex_jobs_under_cwd() {
+fn store_root_is_dot_codape_jobs_under_cwd() {
     let store = JobStore::new("/some/project");
     assert_eq!(
         store.root(),
-        std::path::Path::new("/some/project/.coderex/jobs")
+        std::path::Path::new("/some/project/.codape/jobs")
     );
 }
 
@@ -431,7 +431,7 @@ fn adoption_of_a_written_running_record_marks_it_interrupted() {
     let running = record("shell-2", JobKind::Shell, JobState::Running, NOW - 10);
     store.write(&running).unwrap();
 
-    let adopted = coderex_core::job_record::adopt_for_session(&store, NOW, "sess_a")
+    let adopted = codape_core::job_record::adopt_for_session(&store, NOW, "sess_a")
         .expect("adoption succeeds");
     assert_eq!(adopted.outcome.interrupted, vec![running]);
     assert_eq!(adopted.notifications.len(), 1);

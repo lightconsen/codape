@@ -4,16 +4,16 @@
 use std::process::{Command, Stdio};
 
 fn run(home: &std::path::Path, flag: &str) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg(flag)
         .env("CLAUDE_CONFIG_DIR", home)
         .env("ANTHROPIC_API_KEY", "mock")
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn version_names_the_binary() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.to_lowercase().contains("coderex"),
+        stdout.to_lowercase().contains("codape"),
         "unexpected version output: {stdout}"
     );
 }

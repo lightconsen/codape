@@ -1583,9 +1583,9 @@ impl Default for BridgeConfig {
             max_concurrent: 5,
             control_plane_url: "http://localhost:3000".into(),
             repo_root: PathBuf::from("."),
-            worktree_base: PathBuf::from(".coderex/worktrees"),
-            session_base: PathBuf::from(".coderex/sessions"),
-            archive_base: PathBuf::from(".coderex/archives"),
+            worktree_base: PathBuf::from(".codape/worktrees"),
+            session_base: PathBuf::from(".codape/sessions"),
+            archive_base: PathBuf::from(".codape/archives"),
             heartbeat: HeartbeatConfig::default(),
         }
     }
@@ -2344,7 +2344,7 @@ mod tests {
 
     fn init_git_repo(path: &std::path::Path) {
         let git = |args: &[&str]| {
-            coderex_core::git_hardening::git_command()
+            codape_core::git_hardening::git_command()
                 .args(args)
                 .current_dir(path)
                 .output()
@@ -2353,7 +2353,7 @@ mod tests {
         git(&["init", "--quiet"]);
         std::fs::write(path.join("README"), "root").unwrap();
         git(&["add", "README"]);
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["commit", "--quiet", "-m", "init"])
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")

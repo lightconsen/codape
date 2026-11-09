@@ -2,7 +2,7 @@
 
 ## What this crate is (and is not)
 
-`coderex-events` (`crates/events`) is two things, and neither is an in-process
+`codape-events` (`crates/events`) is two things, and neither is an in-process
 event bus:
 
 1. **`protocol.rs` — a line-delimited wire protocol.** Exactly one JSON object
@@ -16,12 +16,12 @@ event bus:
    state. This bookkeeping is independent of how a session reports its events.
 
 It never opens a socket. The WebSocket JSON protocol an out-of-process client
-speaks to the daemon is `coderex-server` (`crates/server`) — see
+speaks to the daemon is `codape-server` (`crates/server`) — see
 `docs/server-protocol.md` for the wire format and `docs/server.md` for the
 daemon itself.
 
-> Note: the crate and its public types were previously named `coderex-sdk` /
-> `Sdk*`. The persisted directory `~/.coderex/sdk_sessions/` keeps its
+> Note: the crate and its public types were previously named `codape-sdk` /
+> `Sdk*`. The persisted directory `~/.codape/sdk_sessions/` keeps its
 > historical name to avoid orphaning existing state.
 
 ## There is no in-process bus — deliberately
@@ -41,7 +41,7 @@ and the reason matters:
 - **"Wire up a subscriber" was therefore the wrong repair.** The reference's
   producer is an async generator plus a single `onQueryEvent` callback — "one
   producer → one serialized output", not fan-out. Wiring a subscriber into the
-  CodeRex bus would have invented an architecture the reference does not have.
+  Codape bus would have invented an architecture the reference does not have.
   So the crate now models what the reference actually does: a **sink**.
 
 The reference *does* have a real in-process listener registry — the hook chain
@@ -125,7 +125,7 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
   `tool_use`, `thinking`, `image`, `document`, server-tool blocks, …) are a
   large union in the reference. This crate carries blocks as raw
   `serde_json::Value` and provides `text_block`, `tool_use_block` and
-  `tool_result_block` constructors for the three CodeRex emits. Anything else
+  `tool_result_block` constructors for the three Codape emits. Anything else
   round-trips untouched rather than being rejected.
 - **`result` subtype is a `String`, not a closed enum.** `result_subtype`
   names `success`, `error_max_turns`, `error_during_execution`,
@@ -170,7 +170,7 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
   preserved as JSON rather than dropped or re-modelled.
 - **Interior mutability** via `Arc<Mutex<..>>` for session trackers; **JSON
   persistence** via `SessionStore` to
-  `~/.coderex/sdk_sessions/{session_id}.json`.
+  `~/.codape/sdk_sessions/{session_id}.json`.
 - **Timeout auto-resolution.** `SessionState::check_timeouts()` resolves
   expired requests and returns their ids; it does not emit anything itself.
 
@@ -178,7 +178,7 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
 
 - **Deleted:** `BusEvent`, `EventBus`, `BusSubscriber`, `EventSession` (the bus
   field plus `emit` / `subscribe_events`), the `tokio::sync::broadcast` fan-out,
-  and the `coderex-core` dependency (its only use was the `BusEvent::Engine`
+  and the `codape-core` dependency (its only use was the `BusEvent::Engine`
   variant).
 - **Kept, and why:** the permission and elicitation trackers, `PermissionSchema`,
   and `store.rs` are genuine session bookkeeping with no dependency on the bus —
@@ -207,6 +207,6 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
 
 `format_headless_output` is skipped for `stream-json`; the final `result`
 frame is the answer, one JSON object per line. The CLI test
-`stream_json_writes_one_frame_per_line` drives the real `coderex` binary
+`stream_json_writes_one_frame_per_line` drives the real `codape` binary
 against the static mock provider and parses every line as JSON, asserting
 exactly one `result` frame.

@@ -4,7 +4,7 @@
 //!
 //! 1. **Identification** — which emulator we are attached to, read from the
 //!    environment rather than guessed from a rendered pixel. This is what lets
-//!    CodeRex behave differently on iTerm2, VS Code, Cursor, Windows Terminal
+//!    Codape behave differently on iTerm2, VS Code, Cursor, Windows Terminal
 //!    and friends without a pile of heuristics at the call site.
 //!
 //! 2. **Keyboard protocol** — whether to ask the terminal to report keys
@@ -25,9 +25,9 @@ use crossterm::event::KeyboardEnhancementFlags;
 /// `legacy` / `off` to force the terminal's default encoding. Anything else,
 /// including unset, falls back to detection. This exists because the allowlist
 /// below is deliberately conservative — see [`TerminalKind::supports_kitty_keyboard`].
-pub const KEYBOARD_PROTOCOL_ENV: &str = "CODEREX_KEYBOARD_PROTOCOL";
+pub const KEYBOARD_PROTOCOL_ENV: &str = "CODAPE_KEYBOARD_PROTOCOL";
 
-/// The terminal emulator CodeRex believes it is running inside.
+/// The terminal emulator Codape believes it is running inside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalKind {
     /// iTerm2 (`TERM_PROGRAM=iTerm.app`).
@@ -84,7 +84,7 @@ impl TerminalKind {
     }
 }
 
-/// What CodeRex asks the terminal to do about key encoding.
+/// What Codape asks the terminal to do about key encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardProtocol {
     /// Push `DISAMBIGUATE_ESCAPE_CODES` on startup, pop it on exit.
@@ -111,7 +111,7 @@ pub struct TerminalProfile {
     pub kind: TerminalKind,
     /// Raw `TERM_PROGRAM`, when the terminal sets it (used for display).
     pub program: Option<String>,
-    /// The key encoding CodeRex will ask for.
+    /// The key encoding Codape will ask for.
     pub keyboard_protocol: KeyboardProtocol,
 }
 

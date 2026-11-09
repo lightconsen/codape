@@ -59,7 +59,7 @@ fn run_command_with(
     name: &str,
     extra_env: &[(&str, &str)],
 ) -> (bool, String) {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command
         .args(["-p", &format!("/{name}")])
         .current_dir(cwd)
@@ -67,18 +67,18 @@ fn run_command_with(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
-        .env("CODEREX_DISABLE_ADOPT", "1")
+        .env("CODAPE_LOG", "off")
+        .env("CODAPE_DISABLE_ADOPT", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command.spawn().expect("spawn coderex");
+    let mut child = command.spawn().expect("spawn codape");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        match child.try_wait().expect("poll coderex") {
+        match child.try_wait().expect("poll codape") {
             Some(status) => {
                 let output = child.wait_with_output().expect("output");
                 let text = format!(
@@ -100,8 +100,8 @@ fn run_command_with(
 
 #[test]
 fn every_non_interactive_slash_command_runs() {
-    let mut registry = coderex_commands::registry::CommandRegistry::new();
-    coderex_commands::registry::register_all_commands(&mut registry);
+    let mut registry = codape_commands::registry::CommandRegistry::new();
+    codape_commands::registry::register_all_commands(&mut registry);
     let names: Vec<String> = registry
         .list()
         .iter()
@@ -165,7 +165,7 @@ fn the_interactive_only_commands_still_answer_in_a_headless_run() {
     .expect("settings");
     let (mut provider, base_url) = start_static_provider();
     let flags = [(
-        "CODEREX_FEATURE_FLAGS",
+        "CODAPE_FEATURE_FLAGS",
         "heapdump,mock_limits,stickers,voice_mode",
     )];
 

@@ -43,12 +43,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "macos")]
-use coderex_core::process_tree::tracked_descendants;
-use coderex_core::process_tree::{JobLimits, ProcessTree};
+use codape_core::process_tree::tracked_descendants;
+use codape_core::process_tree::{JobLimits, ProcessTree};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use coderex_core::process_tree::{TrackedProcess, kill_tracked_process, process_start_time};
+use codape_core::process_tree::{TrackedProcess, kill_tracked_process, process_start_time};
 #[cfg(target_os = "linux")]
-use coderex_core::sandbox::CgroupMemoryLimit;
+use codape_core::sandbox::CgroupMemoryLimit;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
@@ -870,7 +870,7 @@ fn track_descendants(
 fn scrub_credentials(command: &mut Command, explicit_env: &[(String, String)]) {
     let explicit: HashSet<&str> = explicit_env.iter().map(|(key, _)| key.as_str()).collect();
 
-    let mut keys = coderex_core::sandbox::credential_scrub_keys();
+    let mut keys = codape_core::sandbox::credential_scrub_keys();
     keys.extend(
         std::env::vars_os()
             .filter_map(|(key, _)| key.into_string().ok())
@@ -1209,7 +1209,7 @@ mod tests {
             ("CLAUDE_CODE_OAUTH_TOKEN", "test-claude-token"),
             ("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=test-otel"),
         ];
-        const KEPT: (&str, &str) = ("CODEREX_MONITOR_TEST_KEEP", "kept");
+        const KEPT: (&str, &str) = ("CODAPE_MONITOR_TEST_KEEP", "kept");
 
         let _guard = serial();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1246,7 +1246,7 @@ mod tests {
                     env_file.to_string_lossy()
                 ],
                 "env": {
-                    "CODEREX_MONITOR_TEST_EXPLICIT": "explicit",
+                    "CODAPE_MONITOR_TEST_EXPLICIT": "explicit",
                     "ANTHROPIC_EXPLICIT_OVERRIDE": "explicit"
                 }
             }
@@ -1270,7 +1270,7 @@ mod tests {
         // longer needed and must not be held across the waits below.
         drop(guard);
 
-        let contents = wait_for_contents(&env_file, "CODEREX_MONITOR_TEST_EXPLICIT=explicit").await;
+        let contents = wait_for_contents(&env_file, "CODAPE_MONITOR_TEST_EXPLICIT=explicit").await;
 
         for (key, _) in SCRUBBED {
             let leaked = contents
@@ -1279,7 +1279,7 @@ mod tests {
             assert!(!leaked, "{key} leaked into the monitor environment");
         }
         assert!(
-            contents.contains("CODEREX_MONITOR_TEST_KEEP=kept"),
+            contents.contains("CODAPE_MONITOR_TEST_KEEP=kept"),
             "non-credential variables must be inherited"
         );
         assert!(
@@ -1307,12 +1307,12 @@ mod tests {
         // parent/child chain still names the escaped child. The path reaches
         // the inner shell through the environment, so no shell quoting is
         // needed for it.
-        let script = "set -m\n/bin/sh -c 'echo $$ > \"$CODEREX_MONITOR_ESCAPE_PID\"; exec /bin/sleep 60' &\nwait\n";
+        let script = "set -m\n/bin/sh -c 'echo $$ > \"$CODAPE_MONITOR_ESCAPE_PID\"; exec /bin/sleep 60' &\nwait\n";
         let monitors = json!({
             "escapes": {
                 "command": "/bin/sh",
                 "args": ["-c", script],
-                "env": { "CODEREX_MONITOR_ESCAPE_PID": pid_file.to_string_lossy() }
+                "env": { "CODAPE_MONITOR_ESCAPE_PID": pid_file.to_string_lossy() }
             }
         });
 
@@ -1365,14 +1365,14 @@ mod tests {
         // re-parented to launchd before `stop()` runs; only the sampler can
         // still know its pid.
         let script = "set -m\n\
-             ( /bin/sh -c 'echo $$ > \"$CODEREX_MONITOR_ORPHAN_PID\"; exec /bin/sleep 60' & \
+             ( /bin/sh -c 'echo $$ > \"$CODAPE_MONITOR_ORPHAN_PID\"; exec /bin/sleep 60' & \
              sleep 1 )\n\
              sleep 60\n";
         let monitors = json!({
             "reparents": {
                 "command": "/bin/sh",
                 "args": ["-c", script],
-                "env": { "CODEREX_MONITOR_ORPHAN_PID": pid_file.to_string_lossy() }
+                "env": { "CODAPE_MONITOR_ORPHAN_PID": pid_file.to_string_lossy() }
             }
         });
 
@@ -1466,7 +1466,7 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("spawn sleep");
-        let start = coderex_core::process_tree::process_start_time(child.id())
+        let start = codape_core::process_tree::process_start_time(child.id())
             .expect("the child has a start time");
         let records = format!("pid {} {}\n", child.id(), start);
 
@@ -1486,7 +1486,7 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("spawn sleep");
-        let start = coderex_core::process_tree::process_start_time(child.id())
+        let start = codape_core::process_tree::process_start_time(child.id())
             .expect("the child has a start time");
         let records = format!("pid {} {}\n", child.id(), start.saturating_add(1));
 

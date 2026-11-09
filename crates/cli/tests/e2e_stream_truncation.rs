@@ -83,19 +83,19 @@ fn sse_text(text: &str) -> String {
 }
 
 fn run(cwd: &Path, home: &Path, base_url: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -171,7 +171,7 @@ async fn a_truncated_stream_is_retried_and_the_prefix_kept() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "coderex failed: {stderr}");
+    assert!(output.status.success(), "codape failed: {stderr}");
     assert!(
         requests.load(Ordering::SeqCst) >= 2,
         "the truncated stream was not retried (requests={}); stdout: {stdout}",

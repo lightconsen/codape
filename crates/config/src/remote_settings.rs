@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn disk_cache_roundtrip() {
         let tmp = std::env::temp_dir();
-        let cache_path = tmp.join("coderex_test_remote_cache.json");
+        let cache_path = tmp.join("codape_test_remote_cache.json");
 
         let cached = CachedSettings {
             settings: RemoteManagedSettings {

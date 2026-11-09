@@ -3,9 +3,9 @@
 //! Phase 12.1: Defines `CommandType`, `SlashCommand`, `CommandResult`,
 //! `CommandContext`, and `CommandRegistry` with availability matrix.
 
-use coderex_core::permissions::PermissionMode;
-use coderex_core::query_profiles::PromptProfile;
-use coderex_core::types::ModelId;
+use codape_core::permissions::PermissionMode;
+use codape_core::query_profiles::PromptProfile;
+use codape_core::types::ModelId;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! Full E2E code-agent tests using `coderex -p` (non-interactive / print mode).
+//! Full E2E code-agent tests using `codape -p` (non-interactive / print mode).
 //!
 //! The LLM answers are replayed from tests/cassettes/e2e_code_agent, so the
 //! suite runs offline and deterministically while still driving real tool
@@ -32,11 +32,11 @@ const fn skip_msg() -> &'static str {
 }
 
 fn binary_path() -> &'static Path {
-    Path::new(env!("CARGO_BIN_EXE_coderex"))
+    Path::new(env!("CARGO_BIN_EXE_codape"))
 }
 
 #[derive(Debug)]
-struct CoderexOutput {
+struct CodapeOutput {
     stdout: String,
     #[allow(dead_code)]
     stderr: String,
@@ -45,7 +45,7 @@ struct CoderexOutput {
     duration: Duration,
 }
 
-fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
+fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CodapeOutput {
     run_with_args(
         cwd,
         prompt,
@@ -54,12 +54,7 @@ fn run(cwd: &Path, prompt: &str, timeout_secs: u64) -> CoderexOutput {
     )
 }
 
-fn run_with_args(
-    cwd: &Path,
-    prompt: &str,
-    extra_args: &[&str],
-    timeout_secs: u64,
-) -> CoderexOutput {
+fn run_with_args(cwd: &Path, prompt: &str, extra_args: &[&str], timeout_secs: u64) -> CodapeOutput {
     let mut cmd = Command::new(binary_path());
     common::cassette("e2e_code_agent").configure_for(&mut cmd, cwd);
     cmd.arg("-p")
@@ -70,7 +65,7 @@ fn run_with_args(
         .stderr(Stdio::piped());
 
     let start = Instant::now();
-    let mut child = cmd.spawn().expect("spawn coderex");
+    let mut child = cmd.spawn().expect("spawn codape");
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).unwrap();
@@ -102,7 +97,7 @@ fn run_with_args(
             Ok(None) => {
                 if start.elapsed() > Duration::from_secs(timeout_secs) {
                     let _ = child.kill();
-                    panic!("coderex timed out after {timeout_secs}s");
+                    panic!("codape timed out after {timeout_secs}s");
                 }
                 thread::sleep(Duration::from_millis(200));
             }
@@ -113,7 +108,7 @@ fn run_with_args(
     let stdout = stdout_thread.join().unwrap();
     let stderr = stderr_thread.join().unwrap();
 
-    CoderexOutput {
+    CodapeOutput {
         stdout,
         stderr,
         exit_code: status.code(),

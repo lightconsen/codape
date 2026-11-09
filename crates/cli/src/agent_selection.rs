@@ -1,12 +1,12 @@
 //! Resolution of the `--agent <name>` flag against custom agent definitions.
 //!
-//! A named agent is a JSON file under `~/.coderex/agents/`. Selecting one for
+//! A named agent is a JSON file under `~/.codape/agents/`. Selecting one for
 //! the session applies its system prompt and, when the definition provides
 //! one, its tool whitelist. Names are resolved before the session starts so a
 //! typo fails with the list of configured names instead of silently running
 //! the default agent.
 
-use coderex_agents::custom_agents::{CustomAgentDef, load_custom_agents};
+use codape_agents::custom_agents::{CustomAgentDef, load_custom_agents};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -53,7 +53,7 @@ impl fmt::Display for UnknownAgent {
             write!(
                 f,
                 "unknown agent {:?}: no custom agents are configured; add a JSON definition \
-                 under ~/.coderex/agents/ (for example ~/.coderex/agents/{}.json)",
+                 under ~/.codape/agents/ (for example ~/.codape/agents/{}.json)",
                 self.name, self.name
             )
         } else {
@@ -69,7 +69,7 @@ impl fmt::Display for UnknownAgent {
 
 impl std::error::Error for UnknownAgent {}
 
-/// Resolve a custom agent name from `~/.coderex/agents/`.
+/// Resolve a custom agent name from `~/.codape/agents/`.
 ///
 /// # Errors
 /// Returns [`UnknownAgent`] when no definition matches. The error lists the
@@ -146,6 +146,6 @@ mod tests {
         let error = resolve_agent_in("missing", &HashMap::new()).unwrap_err();
         assert_eq!(error.available, [] as [std::string::String; 0]);
         let message = error.to_string();
-        assert!(message.contains("~/.coderex/agents/"), "{message}");
+        assert!(message.contains("~/.codape/agents/"), "{message}");
     }
 }

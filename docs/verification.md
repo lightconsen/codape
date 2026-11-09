@@ -21,9 +21,9 @@ scripts/verify.sh --lenient       # report clippy/rustdoc counts without failing
 Logs and a summary go to `target/verify/`. `scripts/nightly.sh` runs
 `verify` by default (`RUN_VERIFY=0` disables it).
 
-`cargo test -p coderex-cli --test real_session_corpus` replays real recorded
+`cargo test -p codape-cli --test real_session_corpus` replays real recorded
 sessions through compaction, loop detection and the transcript store when the
-machine has them (`~/.claude/projects`, or `CODEREX_REAL_SESSIONS_DIR`); without
+machine has them (`~/.claude/projects`, or `CODAPE_REAL_SESSIONS_DIR`); without
 a corpus it reports that and passes, which is what CI does. See
 `tests/README.md`.
 
@@ -38,7 +38,7 @@ this table is what they check):
 | `fmt` | `cargo fmt --all --check` |
 | `cassettes` | `python3 scripts/cassette_tool.py check --strict` (metadata, size, staleness, credentials; runs in seconds) |
 | `cross-check-musl` | `cargo check --workspace --target x86_64-unknown-linux-musl` — the release matrix's musl target, whose libc differs from glibc in ways a gnu build cannot see |
-| `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p coderex-bridge --test ssh_spawn` — the SSH spawn path against a real server |
+| `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p codape-bridge --test ssh_spawn` — the SSH spawn path against a real server |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (the backlog is zero, so a warning fails) |
 | `test` | `cargo nextest run --workspace --no-fail-fast` on Linux; the macOS plist carrier and the live benchmark replay run in `test-macos`, the Windows runtime sandbox tests in `test-windows`, and the SSH spawn path in `ssh-integration` |
 | `doctests` | `cargo test --doc --workspace` — `nextest` does not run doctests, so a doc example that stops compiling is caught here rather than by a reader |
@@ -116,7 +116,7 @@ same reviewed ignore list. Update both together.
 | RUSTSEC-2026-0372 | `zvariant_derive` | same stack |
 
 `zstd` (RUSTSEC-2026-0391/0398/0403/0410) was removed by disabling wasmtime's
-default `cache` feature: CodeRex never configures a wasmtime cache, so the
+default `cache` feature: Codape never configures a wasmtime cache, so the
 dependency was unnecessary.
 
 RUSTSEC-2026-0422/0423/0424 (`wasmtime`, published 2026-10-29) are fixed by

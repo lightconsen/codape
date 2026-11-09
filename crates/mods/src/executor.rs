@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use coderex_core::hook_executor::{HookExecutor, HookFireResult};
-use coderex_core::ui_protocol::UiElement;
+use codape_core::hook_executor::{HookExecutor, HookFireResult};
+use codape_core::ui_protocol::UiElement;
 
 use crate::runtime::{ModInfo, ModRuntime, ModSession, is_gating_event};
 
@@ -51,7 +51,7 @@ impl ModUiHandle {
 /// A [`HookExecutor`] that runs in-process JavaScript hooks with an optional
 /// downstream executor.
 ///
-/// The downstream executor is normally a `coderex_hooks::HookRegistry`. It is
+/// The downstream executor is normally a `codape_hooks::HookRegistry`. It is
 /// handed to every request so a JavaScript hook can call `next(e)` and receive
 /// the downstream result. When no hook calls `next`, the downstream executor
 /// runs after the JavaScript hooks with the possibly updated input, exactly as
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn the_ui_handle_activates_on_the_executors_runtime() {
-        use coderex_core::ui_protocol::{UiElement, UiStyle};
+        use codape_core::ui_protocol::{UiElement, UiStyle};
 
         let executor = JsHookExecutor::new(runtime_with(
             "function register(on) { \

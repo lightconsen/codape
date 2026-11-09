@@ -127,7 +127,7 @@ impl InsightsStore {
 pub fn default_root() -> PathBuf {
     home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coderex")
+        .join(".codape")
         .join(USAGE_DATA_DIR)
 }
 
@@ -216,6 +216,6 @@ mod tests {
     #[test]
     fn the_default_root_is_under_the_config_directory() {
         let root = default_root();
-        assert!(root.ends_with(".coderex/usage-data"), "{root:?}");
+        assert!(root.ends_with(".codape/usage-data"), "{root:?}");
     }
 }

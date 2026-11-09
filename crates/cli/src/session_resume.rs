@@ -22,16 +22,16 @@
 //!
 //! Every index operation is best-effort: a corrupt or locked database logs a
 //! warning and the caller falls back to scanning
-//! `<cwd>/.coderex/transcripts/*.jsonl`.
+//! `<cwd>/.codape/transcripts/*.jsonl`.
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
-use coderex_config::dirs::DataDirectories;
-use coderex_core::types::Message;
-use coderex_memory::concurrent::SharedSessionIndex;
-use coderex_memory::session_backfill::transcript_title;
-use coderex_memory::session_index::{SessionIndex, SessionMeta};
-use coderex_memory::transcript::TranscriptStore;
+use codape_config::dirs::DataDirectories;
+use codape_core::types::Message;
+use codape_memory::concurrent::SharedSessionIndex;
+use codape_memory::session_backfill::transcript_title;
+use codape_memory::session_index::{SessionIndex, SessionMeta};
+use codape_memory::transcript::TranscriptStore;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -117,7 +117,7 @@ impl InteractiveResumeSnapshot {
 /// Path to the transcript directory in the current workspace.
 #[must_use]
 pub fn transcript_dir(cwd: &str) -> PathBuf {
-    Path::new(cwd).join(".coderex/transcripts")
+    Path::new(cwd).join(".codape/transcripts")
 }
 
 /// Path to the persisted interactive snapshot for a session.
@@ -128,11 +128,11 @@ pub fn snapshot_path(cwd: &str, session_id: &str) -> PathBuf {
 
 /// Path to the workspace-local SQLite session index.
 ///
-/// `DataDirectories` owns the layout; rooted at `<cwd>/.coderex`, its
-/// `sessions_db_path` resolves to `<cwd>/.coderex/sessions.db`.
+/// `DataDirectories` owns the layout; rooted at `<cwd>/.codape`, its
+/// `sessions_db_path` resolves to `<cwd>/.codape/sessions.db`.
 #[must_use]
 pub fn sessions_db_path(cwd: &str) -> PathBuf {
-    DataDirectories::new(Path::new(cwd).join(".coderex")).sessions_db_path()
+    DataDirectories::new(Path::new(cwd).join(".codape")).sessions_db_path()
 }
 
 /// Create or update the index row for a saved session.
@@ -198,7 +198,7 @@ fn try_index_saved_session(
         )
     })?;
     let index = index.lock();
-    coderex_memory::session_backfill::index_transcript(&index, cwd, session_id, title, messages)
+    codape_memory::session_backfill::index_transcript(&index, cwd, session_id, title, messages)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     drop(index);
     Ok(())

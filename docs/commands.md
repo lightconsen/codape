@@ -14,8 +14,8 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`SlashCommand`** (`registry.rs`) — Metadata: name, description, kind (`Local`/`LocalUi`/`Prompt`/`Standalone`), `supports_non_interactive`, `remote_safe`, `bridge_safe`, `uses_agent_backend`, `destructive: bool`, `args: CommandArgs`, handler.
 - **`CommandResult`** (`registry.rs`) — Output, `state_changed`, `suppress_output`, `extra_context`, `append_system_prompt`, `override_system_prompt`, `prompt_profile`, `allowed_tools_override`, `scrollable: bool`.
 - **`CommandArgs`** (`registry.rs`) — Argument validation enum: `None` (no validation), `AtLeast(n)`, `AtMost(n)`, `Exactly(n)`. Validated pre-dispatch in `execute()`.
-- **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.coderex/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
-- **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.coderex/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
+- **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
+- **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
 ### Command Inventory (76 commands across 13 registered modules)
 
@@ -66,7 +66,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/style [name]` lists or applies a plugin output style as additional system instructions.
 - `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing.
 - Feature-gated commands (`/ultraplan`, `/thinkback`, `/thinkback-play`, `/voice`, `/ctx_viz`, `/heapdump`, `/mock-limits`, `/stickers`) check `CommandContext.feature_flags`, which the REPL now fills from the resolved `FeatureFlags` (env + `--betas`).
-- `/bridge` and `/bridge-kick` check `CODEREX_BRIDGE_URL` env var.
+- `/bridge` and `/bridge-kick` check `CODAPE_BRIDGE_URL` env var.
 - `/insights` aggregates project file counts, git info, and session token usage.
 - `/ultraplan` activates a session-scoped planning mode: it adds multi-phase planning
   instructions to the prompt and writes nothing to `settings.json` (`ultraplan` is not a
@@ -81,15 +81,15 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
   drives the STT state machine, and the terminal host does not. It used to answer
   "Toggled" while nothing listened.
 - `/desktop` and `/mobile` report the truth about surfaces and remote clients instead of
-  reading `CODEREX_DESKTOP`/`CODEREX_MOBILE` as if they were connections: there is no
-  desktop host, and remote clients attach through `coderex bridge`.
-- `/stickers` says it is not implemented — no CodeRex surface renders image messages.
+  reading `CODAPE_DESKTOP`/`CODAPE_MOBILE` as if they were connections: there is no
+  desktop host, and remote clients attach through `codape bridge`.
+- `/stickers` says it is not implemented — no Codape surface renders image messages.
 - `/heapdump` writes a process snapshot (version, OS, pid, RSS/VSZ/threads, open file
-  descriptors) to `/tmp/coderex-heap.prof` and reports the byte count. It is a process
+  descriptors) to `/tmp/codape-heap.prof` and reports the byte count. It is a process
   snapshot, not a heap profile, and the command says so in its output.
 - Command chaining via `|` operator (e.g., `/diff | /commit`) passes output between commands.
 - Command history is recorded for built-ins and registry commands alike (both REPL paths record before dispatch) and persisted; `/history` reads it, with `[n]` and `search <query>`.
-- `/macro define|list|run|delete` is a REPL built-in backed by `~/.coderex/macros.json`; macro names also expand directly.
+- `/macro define|list|run|delete` is a REPL built-in backed by `~/.codape/macros.json`; macro names also expand directly.
 - All commands have basic error handling with usage messages.
 
 ### Feature-Gated Commands
@@ -103,7 +103,7 @@ Several commands require feature flags to be enabled in `CommandContext`:
 - `/mock-limits` — needs `mock_limits`
 - `/stickers` — needs `stickers`
 
-These return an error message when the feature is not enabled. The flag names are accepted by `CODEREX_FEATURE_FLAGS` and `--betas`.
+These return an error message when the feature is not enabled. The flag names are accepted by `CODAPE_FEATURE_FLAGS` and `--betas`.
 
 ## Remaining Gaps
 

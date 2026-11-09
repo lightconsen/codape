@@ -75,7 +75,7 @@ async fn serve_until_idle(listener: tokio::net::TcpListener) -> Vec<serde_json::
 }
 
 fn seed_agent(home: &Path, name: &str, prompt: &str) {
-    let agents = home.join(".coderex").join("agents");
+    let agents = home.join(".codape").join("agents");
     std::fs::create_dir_all(&agents).expect("agents dir");
     std::fs::write(
         agents.join(format!("{name}.json")),
@@ -88,7 +88,7 @@ fn seed_agent(home: &Path, name: &str, prompt: &str) {
     )
     .expect("agent definition");
     std::fs::write(
-        home.join(".coderex").join("settings.json"),
+        home.join(".codape").join("settings.json"),
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
@@ -101,7 +101,7 @@ fn run(
     prompt: &str,
     args: &[&str],
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .args(args)
         .current_dir(cwd)
@@ -110,12 +110,12 @@ fn run(
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("HOME", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -160,7 +160,7 @@ async fn the_named_agent_sets_the_prompt_and_tool_whitelist() {
 
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let turn = bodies

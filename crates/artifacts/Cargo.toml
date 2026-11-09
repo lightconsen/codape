@@ -1,10 +1,11 @@
 [package]
-name = "coderex-artifacts"
+name = "codape-artifacts"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Artifact publishing — local store, page server, shared database, and the Artifact tool family"
 
@@ -12,7 +13,7 @@ description = "Artifact publishing — local store, page server, shared database
 workspace = true
 
 [dependencies]
-coderex-tools = { path = "../tools" }
+codape-tools = { path = "../tools" }
 
 thiserror.workspace = true
 async-trait.workspace = true

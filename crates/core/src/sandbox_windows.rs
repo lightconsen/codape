@@ -623,14 +623,13 @@ mod imp {
             let names = capability_names(config);
             let capabilities = CapabilitySids::from_names(&names)?;
             let profile = if config.allow_network {
-                "CodeRex.Sandbox.Network"
+                "Codape.Sandbox.Network"
             } else {
-                "CodeRex.Sandbox"
+                "Codape.Sandbox"
             };
             let profile_wide = wide(profile);
-            let display_wide = wide("CodeRex sandbox");
-            let description_wide =
-                wide("Filesystem and network isolation for CodeRex subprocesses");
+            let display_wide = wide("Codape sandbox");
+            let description_wide = wide("Filesystem and network isolation for Codape subprocesses");
 
             // Two builds in one process (the runtime tests, or a session that
             // allows the network for one server and not another) can ask for
@@ -665,7 +664,7 @@ mod imp {
                     )
                 };
                 if hr < 0 {
-                    // The profile from an earlier CodeRex process is reused,
+                    // The profile from an earlier Codape process is reused,
                     // which is exactly what the stable DACL design needs.
                     let derived = unsafe {
                         DeriveAppContainerSidFromAppContainerName(
@@ -1975,10 +1974,7 @@ mod tests {
             let base = std::env::var_os("LOCALAPPDATA")
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir);
-            base.join(format!(
-                "coderex-appcontainer-{}-{name}",
-                std::process::id()
-            ))
+            base.join(format!("codape-appcontainer-{}-{name}", std::process::id()))
         }
 
         /// The documented `STARTUPINFOEX` path, exercised on Windows.
@@ -1989,9 +1985,9 @@ mod tests {
         fn spawn_in_container_confines_a_real_process() {
             if !app_container_available() {
                 assert!(
-                    std::env::var("CODEREX_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
+                    std::env::var("CODAPE_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
                     "AppContainer is unavailable on this runner but \
-                     CODEREX_REQUIRE_APP_CONTAINER=1"
+                     CODAPE_REQUIRE_APP_CONTAINER=1"
                 );
                 eprintln!("skipping: AppContainer APIs are not available");
                 return;

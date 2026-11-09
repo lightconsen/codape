@@ -410,7 +410,7 @@ impl SessionState {
 
     /// Create state, hydrating from a persisted store if one exists.
     ///
-    /// If a store file exists at `.coderex/sdk_sessions/{id}.json`, the
+    /// If a store file exists at `.codape/sdk_sessions/{id}.json`, the
     /// permission and elicitation trackers are restored from it.
     pub async fn load_or_new(id: String) -> Self {
         let session = Self::new(id.clone());

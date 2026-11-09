@@ -1,6 +1,6 @@
-//! CodeRex core types, QueryEngine, state machines, and shared traits.
+//! Codape core types, QueryEngine, state machines, and shared traits.
 //!
-//! This crate contains the foundational types used throughout the CodeRex
+//! This crate contains the foundational types used throughout the Codape
 //! system, including message types, tool definitions, session state, and
 //! the QueryEngine state machine.
 

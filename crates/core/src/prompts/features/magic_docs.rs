@@ -212,8 +212,8 @@ mod tests {
 
     #[tokio::test]
     async fn generate_readme_returns_content() {
-        let api = MockApi::new("# coderex\n\nA Rust code agent.");
-        let readme = generate_readme(&api, "coderex", "A Rust code agent", "src/\n  main.rs").await;
+        let api = MockApi::new("# codape\n\nA Rust code agent.");
+        let readme = generate_readme(&api, "codape", "A Rust code agent", "src/\n  main.rs").await;
         assert!(readme.is_ok());
     }
 }

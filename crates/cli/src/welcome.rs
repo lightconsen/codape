@@ -27,7 +27,7 @@ pub fn print_welcome_screen<W: Write>(
 
     writeln!(out, "{T_REX}")?;
     writeln!(out)?;
-    writeln!(out, "  CodeRex  v{version}  |  model: {model}")?;
+    writeln!(out, "  Codape  v{version}  |  model: {model}")?;
     writeln!(out, "  cwd: {cwd}")?;
     writeln!(out, "  api: {api_status}")?;
     writeln!(out)?;
@@ -45,7 +45,7 @@ mod tests {
         let mut buf = Vec::new();
         print_welcome_screen(&mut buf, "0.1.0", "claude-sonnet-4-6", "/tmp/test", true).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("CodeRex"));
+        assert!(output.contains("Codape"));
         assert!(output.contains("0.1.0"));
         assert!(output.contains("claude-sonnet-4-6"));
         assert!(output.contains("/tmp/test"));

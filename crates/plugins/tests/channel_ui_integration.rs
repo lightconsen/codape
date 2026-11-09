@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use coderex_plugins::plugin_ui::render_plugin_response;
-use coderex_plugins::plugins::{ChannelSink, PluginChannelEvent, PluginManager, PluginManifest};
+use codape_plugins::plugin_ui::render_plugin_response;
+use codape_plugins::plugins::{ChannelSink, PluginChannelEvent, PluginManager, PluginManifest};
 
 #[derive(Debug, Default)]
 struct RecordingSink {
@@ -105,7 +105,7 @@ fn every_channel_bound_to_a_server_reaches_every_sink() {
         .unwrap();
     assert_eq!(
         missing.status,
-        coderex_plugins::plugins::ChannelStatus::ServerNotConfigured
+        codape_plugins::plugins::ChannelStatus::ServerNotConfigured
     );
 }
 

@@ -1,8 +1,8 @@
-# CodeRex AI Architecture
+# Codape AI Architecture
 
 ## Overview
 
-CodeRex is a Rust-native AI coding agent system built around a 4-layer architecture. This document describes the AI design and implementation across the `crates/` workspace.
+Codape is a Rust-native AI coding agent system built around a 4-layer architecture. This document describes the AI design and implementation across the `crates/` workspace.
 
 ## 1. Four-Layer Architecture
 
@@ -34,10 +34,10 @@ CodeRex is a Rust-native AI coding agent system built around a 4-layer architect
 
 | Layer | Crates |
 |-------|--------|
-| API Transport | `coderex-core` (`api_client.rs`, `types.rs`) |
-| Core Execution | `coderex-core` (`engine.rs`, `prompts/`, `permissions/`) |
-| AI Orchestration | `coderex-core` (`orchestrator.rs`, `query_profiles.rs`) |
-| Feature | `coderex-memory`, `coderex-tools`, `coderex-commands`, `coderex-cli` |
+| API Transport | `codape-core` (`api_client.rs`, `types.rs`) |
+| Core Execution | `codape-core` (`engine.rs`, `prompts/`, `permissions/`) |
+| AI Orchestration | `codape-core` (`orchestrator.rs`, `query_profiles.rs`) |
+| Feature | `codape-memory`, `codape-tools`, `codape-commands`, `codape-cli` |
 
 ---
 
@@ -272,7 +272,7 @@ pub struct PermissionEngine {
 
 ## 6. Tool System
 
-### 6.1 Tool Registry (`coderex-tools`)
+### 6.1 Tool Registry (`codape-tools`)
 
 Tools are registered in a tiered registry:
 
@@ -304,11 +304,11 @@ QueryEngine → ToolExecutor trait → RegistryToolDispatcher
                                       └── InnerExecutor::execute_single()
 ```
 
-The `ToolExecutor` trait in `coderex-core` decouples the engine from concrete tool implementations, allowing test doubles and MCP fallback.
+The `ToolExecutor` trait in `codape-core` decouples the engine from concrete tool implementations, allowing test doubles and MCP fallback.
 
 ### 6.3 MCP Integration
 
-`coderex-mcp` provides MCP server support:
+`codape-mcp` provides MCP server support:
 - `McpManager` — server lifecycle management
 - `McpToolExecutor` — routes tool calls to MCP servers
 - `CompositeToolExecutor` — tries primary registry first, falls back to MCP
@@ -317,7 +317,7 @@ The `ToolExecutor` trait in `coderex-core` decouples the engine from concrete to
 
 ## 7. Memory System
 
-### 7.1 Session Memory (`coderex-memory`)
+### 7.1 Session Memory (`codape-memory`)
 
 AI-driven session fact extraction:
 
@@ -353,7 +353,7 @@ pub async fn extract_long_term_memories_ai(
 
 ### 7.3 Auto-Dream
 
-`AutoDream` (`coderex-memory`) periodically consolidates session transcripts into long-term memory. Runs as a background task with configurable interval (default: every 10 turns or 30 minutes).
+`AutoDream` (`codape-memory`) periodically consolidates session transcripts into long-term memory. Runs as a background task with configurable interval (default: every 10 turns or 30 minutes).
 
 ---
 
@@ -436,8 +436,8 @@ The `ChromeClient` is injected into `ToolContext.extra` via `RegistryToolDispatc
 
 Session sharing and directory switching:
 
-- **Save/Load:** `TeleportSnapshot` serializes `SessionState` to `.coderex/teleport_state.json`
-- **Share:** Generate 8-character alphanumeric tokens stored in `~/.coderex/teleport/shared/`
+- **Save/Load:** `TeleportSnapshot` serializes `SessionState` to `.codape/teleport_state.json`
+- **Share:** Generate 8-character alphanumeric tokens stored in `~/.codape/teleport/shared/`
 - **Delta sync:** `StateDelta` computes HashMap diffs for bandwidth-optimized sync
 - **REPL commands:**
   - `/teleport <dir>` — Save current session, change CWD, load target session
@@ -489,7 +489,7 @@ Session sharing and directory switching:
 
 ## 14. Provider Interaction Architecture
 
-This section documents the provider/LLM interaction architecture that is implemented in CodeRex today.
+This section documents the provider/LLM interaction architecture that is implemented in Codape today.
 
 ### 14.1 Goals
 
@@ -552,21 +552,21 @@ The capability matrix is represented by `ProviderCapabilities` and is used to su
 
 ### 14.5 Identity and Session Signals
 
-For each main-thread request, CodeRex now standardizes:
+For each main-thread request, Codape now standardizes:
 
-- `User-Agent: CodeRex/<version> (<os>; <arch>)`
-- `X-CodeRex-Session-Id: <session_id>`
-- `X-CodeRex-Client: cli`
+- `User-Agent: Codape/<version> (<os>; <arch>)`
+- `X-Codape-Session-Id: <session_id>`
+- `X-Codape-Client: cli`
 - `metadata.user_id` (JSON string containing `device_id`, `session_id`, `turn_id`, `agent_id`, `client`, `request_id`)
 - `metadata.session_context` (`session_id`, `turn_id`, `agent_id`)
 
 Additional signals when available:
 
-- `X-CodeRex-Agent-Id`
-- `X-CodeRex-Request-Id` (local request correlation id)
+- `X-Codape-Agent-Id`
+- `X-Codape-Request-Id` (local request correlation id)
 - provider-specific headers from the selected profile
 
-DashScope-specific headers are injected for DashScope profiles. Both Anthropic-compatible and OpenAI-compatible paths now emit the same CodeRex identity/session shape.
+DashScope-specific headers are injected for DashScope profiles. Both Anthropic-compatible and OpenAI-compatible paths now emit the same Codape identity/session shape.
 
 ### 14.6 Tool Calling Path
 
@@ -606,7 +606,7 @@ request. Omitting it fails with HTTP 400:
 The `content[].thinking` in the thinking mode must be passed back to the API.
 ```
 
-CodeRex handles the block on both response paths:
+Codape handles the block on both response paths:
 
 - **Non-streaming** — `ApiResponse.thinking` captures `thinking` and `signature`
   from the content-block loop.
@@ -656,7 +656,7 @@ Returned provider error messages now include local and server request identifier
 
 ### 14.9 Observability
 
-Per request, CodeRex now logs/tracks:
+Per request, Codape now logs/tracks:
 
 - local `request_id` + provider `server_request_id` (if available)
 - provider/profile/model/base_url
@@ -679,21 +679,21 @@ Implemented configuration surface:
 
 Primary env sources today:
 
-- `CODEREX_PROVIDER_PROFILE`
-- `CODEREX_CUSTOM_HEADERS`
-- `CODEREX_FALLBACK_PROVIDERS`
-- `CODEREX_SESSION_ID`
-- `CODEREX_DEVICE_ID`
+- `CODAPE_PROVIDER_PROFILE`
+- `CODAPE_CUSTOM_HEADERS`
+- `CODAPE_FALLBACK_PROVIDERS`
+- `CODAPE_SESSION_ID`
+- `CODAPE_DEVICE_ID`
 
 Policy: safe defaults, explicit overrides, auditable behavior.
 
-### 14.11 Alignment with Current CodeRex
+### 14.11 Alignment with Current Codape
 
 Implemented:
 
 1. Explicit `ProviderRouter -> ModelRouter -> ProviderAdapter` layering
 2. Shared `RequestContext` propagation from engine to transport
-3. Standardized `X-CodeRex-Session-Id`, `X-CodeRex-Agent-Id`, and `metadata.user_id`
+3. Standardized `X-Codape-Session-Id`, `X-Codape-Agent-Id`, and `metadata.user_id`
 4. Provider capability matrix for structured tool use / streaming decisions
 5. Real `OpenAiResponses` request and stream handling
 6. Request/server request IDs surfaced in provider diagnostics

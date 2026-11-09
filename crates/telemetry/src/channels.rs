@@ -13,29 +13,29 @@
 //!
 //! | Channel | Environment variables |
 //! |---|---|
-//! | OTLP/HTTP logs | `CODEREX_OTLP_ENDPOINT`, `CODEREX_OTLP_HEADERS` |
-//! | Datadog Logs | `CODEREX_DATADOG_API_KEY` (or `DD_API_KEY`), `CODEREX_DATADOG_SITE`, `CODEREX_DATADOG_ENDPOINT` |
+//! | OTLP/HTTP logs | `CODAPE_OTLP_ENDPOINT`, `CODAPE_OTLP_HEADERS` |
+//! | Datadog Logs | `CODAPE_DATADOG_API_KEY` (or `DD_API_KEY`), `CODAPE_DATADOG_SITE`, `CODAPE_DATADOG_ENDPOINT` |
 
 use crate::{PendingEvent, Scrubber, TelemetryError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Environment variable holding the OTLP/HTTP endpoint.
-pub const OTLP_ENDPOINT_ENV: &str = "CODEREX_OTLP_ENDPOINT";
+pub const OTLP_ENDPOINT_ENV: &str = "CODAPE_OTLP_ENDPOINT";
 /// Optional OTLP request headers, as `key=value,key2=value2`.
-pub const OTLP_HEADERS_ENV: &str = "CODEREX_OTLP_HEADERS";
+pub const OTLP_HEADERS_ENV: &str = "CODAPE_OTLP_HEADERS";
 /// Datadog API key (preferred over the generic `DD_API_KEY`).
-pub const DATADOG_API_KEY_ENV: &str = "CODEREX_DATADOG_API_KEY";
+pub const DATADOG_API_KEY_ENV: &str = "CODAPE_DATADOG_API_KEY";
 /// Conventional Datadog API key variable, used as a fallback.
 pub const DD_API_KEY_ENV: &str = "DD_API_KEY";
 /// Datadog site (`datadoghq.com`, `datadoghq.eu`, `us3.datadoghq.com`, …).
-pub const DATADOG_SITE_ENV: &str = "CODEREX_DATADOG_SITE";
+pub const DATADOG_SITE_ENV: &str = "CODAPE_DATADOG_SITE";
 /// Full Datadog Logs intake URL, overriding the site-derived endpoint.
-pub const DATADOG_ENDPOINT_ENV: &str = "CODEREX_DATADOG_ENDPOINT";
+pub const DATADOG_ENDPOINT_ENV: &str = "CODAPE_DATADOG_ENDPOINT";
 
 /// Default Datadog site when none is configured.
 pub const DEFAULT_DATADOG_SITE: &str = "datadoghq.com";
 
-const SERVICE_NAME: &str = "coderex";
+const SERVICE_NAME: &str = "codape";
 const OTLP_LOGS_PATH: &str = "/v1/logs";
 const DATADOG_LOGS_PATH: &str = "/api/v2/logs";
 
@@ -180,7 +180,7 @@ impl ChannelConfig {
 
 /// Parse `key=value,key2=value2` OTLP headers, skipping malformed entries.
 ///
-/// This is the same syntax accepted by `CODEREX_OTLP_HEADERS`, exposed so a
+/// This is the same syntax accepted by `CODAPE_OTLP_HEADERS`, exposed so a
 /// host that carries the value in its own settings file can build a
 /// [`ChannelConfig`] without duplicating the parser.
 #[must_use]
@@ -361,13 +361,13 @@ fn build_otlp_payload(scrubber: &Scrubber, events: &[PendingEvent]) -> serde_jso
                 "attributes": [
                     otlp_string_attribute("service.name", SERVICE_NAME),
                     otlp_string_attribute("service.version", env!("CARGO_PKG_VERSION")),
-                    otlp_string_attribute("telemetry.sdk.name", "coderex-telemetry"),
+                    otlp_string_attribute("telemetry.sdk.name", "codape-telemetry"),
                     otlp_string_attribute("telemetry.sdk.language", "rust"),
                 ],
             },
             "scopeLogs": [{
                 "scope": {
-                    "name": "coderex.telemetry",
+                    "name": "codape.telemetry",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
                 "logRecords": log_records,
@@ -703,8 +703,8 @@ mod tests {
         let payload = build_datadog_logs(&Scrubber::new(), &sample_events());
         assert_eq!(payload.len(), 2);
 
-        assert_eq!(payload[0]["ddsource"], json!("coderex"));
-        assert_eq!(payload[0]["service"], json!("coderex"));
+        assert_eq!(payload[0]["ddsource"], json!("codape"));
+        assert_eq!(payload[0]["service"], json!("codape"));
         assert_eq!(payload[0]["status"], json!("info"));
         assert_eq!(payload[0]["timestamp"], json!(1_767_225_600_000_u128));
         assert!(
@@ -756,7 +756,7 @@ mod tests {
         let otlp_body: serde_json::Value = serde_json::from_slice(&otlp.body).unwrap();
         assert_eq!(
             otlp_body["resourceLogs"][0]["resource"]["attributes"][0]["value"]["stringValue"],
-            json!("coderex")
+            json!("codape")
         );
 
         let datadog = requests
@@ -769,7 +769,7 @@ mod tests {
         );
         let datadog_body: serde_json::Value = serde_json::from_slice(&datadog.body).unwrap();
         assert!(datadog_body.is_array());
-        assert_eq!(datadog_body[0]["ddsource"], json!("coderex"));
+        assert_eq!(datadog_body[0]["ddsource"], json!("codape"));
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 //! Detached WebSocket session management with authentication, rate limiting,
 //! and idle cleanup.
 
-use coderex_commands::registry::{CommandRegistry, register_all_commands};
-use coderex_core::engine::{QueryEngine, SubmitOptions};
-use coderex_core::types::EngineEvent;
+use codape_commands::registry::{CommandRegistry, register_all_commands};
+use codape_core::engine::{QueryEngine, SubmitOptions};
+use codape_core::types::EngineEvent;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -288,7 +288,7 @@ struct SessionEngine {
 #[derive(Clone)]
 struct SessionEngineSlot {
     engine: Arc<tokio::sync::Mutex<SessionEngine>>,
-    interrupt: coderex_core::engine::InterruptHandle,
+    interrupt: codape_core::engine::InterruptHandle,
 }
 
 impl std::fmt::Debug for SessionEngineSlot {
@@ -641,7 +641,7 @@ impl Connection {
         // The queries this connection has running, so Ctrl+C and a disconnect
         // can reach them. A session belongs to one connection, so this is
         // per-connection state rather than shared.
-        let mut running_queries: HashMap<String, coderex_core::engine::InterruptHandle> =
+        let mut running_queries: HashMap<String, codape_core::engine::InterruptHandle> =
             HashMap::new();
 
         loop {
@@ -735,7 +735,7 @@ impl Connection {
         session_id: &str,
         text: &str,
         out: &tokio::sync::mpsc::UnboundedSender<String>,
-        running_queries: &mut HashMap<String, coderex_core::engine::InterruptHandle>,
+        running_queries: &mut HashMap<String, codape_core::engine::InterruptHandle>,
     ) -> Option<WsResponse> {
         let req: WsRequest = match serde_json::from_str(text) {
             Ok(r) => r,
@@ -1177,8 +1177,8 @@ async fn handle_health_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_commands::CommandContext;
-    use coderex_commands::registry::{CommandResult, SlashCommand};
+    use codape_commands::CommandContext;
+    use codape_commands::registry::{CommandResult, SlashCommand};
 
     fn server_with_keys() -> DaemonServer {
         DaemonServer::with_config(ServerConfig {
@@ -1270,7 +1270,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "coderex_session_restore_{}_{nanos}.db",
+            "codape_session_restore_{}_{nanos}.db",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);

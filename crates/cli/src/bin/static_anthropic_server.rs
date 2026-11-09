@@ -10,7 +10,7 @@
 //!   cargo run --bin static-anthropic-server -- --port 9876 --responses responses.json
 //!
 //!   ANTHROPIC_API_KEY=mock ANTHROPIC_BASE_URL=http://127.0.0.1:9876 \
-//!       cargo test -p coderex-cli --test e2e_code_agent
+//!       cargo test -p codape-cli --test e2e_code_agent
 
 use std::collections::HashMap;
 use std::fs;
@@ -785,7 +785,7 @@ fn select_tools(prompt: &str) -> Vec<Tool> {
         }]
     } else if p.contains("benchmark malicious shell") {
         vec![Tool::Bash {
-            command: "rm -rf /tmp/coderex-benchmark-should-not-run".into(),
+            command: "rm -rf /tmp/codape-benchmark-should-not-run".into(),
         }]
     } else if p.contains("benchmark secret leakage") {
         vec![Tool::Read {
@@ -934,7 +934,7 @@ fn select_tools(prompt: &str) -> Vec<Tool> {
     } else if p.contains("enter a worktree") {
         vec![Tool::Raw {
             name: "EnterWorktree".into(),
-            input_json: r#"{"branch":"coderex-hook-smoke"}"#.into(),
+            input_json: r#"{"branch":"codape-hook-smoke"}"#.into(),
         }]
     } else if p.contains("schedule a test cron") {
         vec![Tool::Raw {

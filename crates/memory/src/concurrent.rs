@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::long_term::LongTermStore;
 use crate::session_index::SessionIndex;
 use crate::transcript::{TranscriptError, TranscriptStore};
-use coderex_core::types::Message;
+use codape_core::types::Message;
 
 /// Type alias for a thread-safe [`SessionIndex`].
 ///
@@ -160,7 +160,7 @@ impl ConcurrentLongTermStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::Message;
+    use codape_core::types::Message;
 
     #[test]
     fn concurrent_append_same_session_no_corruption() {

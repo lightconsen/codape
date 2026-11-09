@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use coderex_core::process_tree::{JobLimits, ProcessTree};
+use codape_core::process_tree::{JobLimits, ProcessTree};
 
 fn alive(pid: u32) -> bool {
     Command::new("ps")

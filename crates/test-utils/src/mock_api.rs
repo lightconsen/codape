@@ -3,9 +3,9 @@
 //! Provides [`MockApiClient`] — a test-double for [`ApiClient`] that
 //! returns pre-programmed responses instead of hitting a real API.
 
-use coderex_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
-use coderex_core::tool_executor::ToolInfo;
-use coderex_core::types::{ModelId, UsageSummary};
+use codape_core::api_client::{ApiClient, ApiError, ApiResponse, StreamEvent};
+use codape_core::tool_executor::ToolInfo;
+use codape_core::types::{ModelId, UsageSummary};
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -162,7 +162,7 @@ pub fn mock_response(content: impl Into<String>) -> ApiResponse {
 #[must_use]
 pub fn mock_response_with_tool_calls(
     content: impl Into<String>,
-    tool_calls: Vec<coderex_core::types::ToolCall>,
+    tool_calls: Vec<codape_core::types::ToolCall>,
 ) -> ApiResponse {
     ApiResponse {
         content: content.into(),

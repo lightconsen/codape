@@ -17,7 +17,7 @@
 //! URL when there is no one to prompt. With no handler installed the error is
 //! [`OAuthError::ReauthRequired`], which tells the user to run `McpAuth`.
 
-use coderex_config::secret_store::TokenPersistence;
+use codape_config::secret_store::TokenPersistence;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -106,13 +106,13 @@ pub enum OAuthError {
 ///
 /// This is the seam between this crate, which knows that a `401
 /// invalid_token` happened, and the part of the process that can actually
-/// sign in. `coderex-mcp` cannot run the authorization-code flow itself (the
-/// `McpAuth` tool lives in `coderex-tools`, and the CLI owns the interactive
+/// sign in. `codape-mcp` cannot run the authorization-code flow itself (the
+/// `McpAuth` tool lives in `codape-tools`, and the CLI owns the interactive
 /// session), so the CLI installs an implementation on the manager before the
 /// servers start.
 ///
 /// Implementations must write the new credential to the shared token store
-/// (the `coderex-config` secret store that [`OAuthManager`] reads) before
+/// (the `codape-config` secret store that [`OAuthManager`] reads) before
 /// returning `Ok(())`. The manager reloads that store and retries the rejected
 /// request with the stored access token. Returning an error means the flow
 /// could not complete; it is surfaced as [`OAuthError::ReauthRequired`].
@@ -395,7 +395,7 @@ impl McpOAuthState {
 
 /// Token store for persistence.
 ///
-/// The on-disk shape is `{"states": [...]}`. `coderex-tools` mirrors this
+/// The on-disk shape is `{"states": [...]}`. `codape-tools` mirrors this
 /// shape when the `McpAuth` tool writes a token (`persist_token_at`); there is
 /// no shared type because the dependency runs `tools <- mcp`, so this struct
 /// is the source of truth and any field change has to be made in both places.
@@ -1114,7 +1114,7 @@ impl OAuthManager {
     /// Create a new OAuth manager backed by the default token location.
     ///
     /// The default location prefers the OS keychain and falls back to
-    /// `~/.coderex/mcp_tokens.json` with mode `0600`.
+    /// `~/.codape/mcp_tokens.json` with mode `0600`.
     #[must_use]
     pub fn new() -> Self {
         let path = Self::token_path();
@@ -1241,16 +1241,16 @@ impl OAuthManager {
         Ok(())
     }
 
-    /// Default token file path: ~/.coderex/mcp_tokens.json
+    /// Default token file path: ~/.codape/mcp_tokens.json
     #[must_use]
     pub fn token_path() -> std::path::PathBuf {
         std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_or_else(
-                |_| std::path::PathBuf::from(".coderex/mcp_tokens.json"),
+                |_| std::path::PathBuf::from(".codape/mcp_tokens.json"),
                 |h| {
                     std::path::PathBuf::from(h)
-                        .join(".coderex")
+                        .join(".codape")
                         .join("mcp_tokens.json")
                 },
             )
@@ -1402,7 +1402,7 @@ impl OAuthManager {
         {
             // Preserve the historical default when the server offers no
             // registration endpoint at all.
-            state.client_id = "coderex-cli".to_string();
+            state.client_id = "codape-cli".to_string();
         }
 
         self.save_tokens().map_err(|source| OAuthError::Store {
@@ -1621,7 +1621,7 @@ impl OAuthManager {
         };
 
         let body = serde_json::json!({
-            "client_name": "CodeRex",
+            "client_name": "Codape",
             "redirect_uris": [DEFAULT_REDIRECT_URI],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -3176,7 +3176,7 @@ mod tests {
             requests[2]
         );
         for expected in [
-            r#""client_name":"CodeRex""#,
+            r#""client_name":"Codape""#,
             r#""redirect_uris":["http://localhost:8765/callback"]"#,
             r#""grant_types":["authorization_code","refresh_token"]"#,
             r#""response_types":["code"]"#,

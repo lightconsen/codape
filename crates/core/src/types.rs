@@ -1,4 +1,4 @@
-//! Public type definitions for CodeRex.
+//! Public type definitions for Codape.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -333,16 +333,16 @@ pub const CLAUDE_CONTEXT_WINDOW: usize = 200_000;
 pub const UNKNOWN_CONTEXT_WINDOW: usize = 32_000;
 
 /// Global environment variable overriding the context window for every model.
-pub const CONTEXT_WINDOW_ENV: &str = "CODEREX_CONTEXT_WINDOW";
+pub const CONTEXT_WINDOW_ENV: &str = "CODAPE_CONTEXT_WINDOW";
 
 /// Prefix for per-model context-window environment variables.
 ///
 /// The model name is upper-cased and every non-alphanumeric character is
 /// replaced with `_`, e.g. `claude-sonnet-4-6` becomes
-/// `CODEREX_CONTEXT_WINDOW_CLAUDE_SONNET_4_6`.
-pub const CONTEXT_WINDOW_MODEL_ENV_PREFIX: &str = "CODEREX_CONTEXT_WINDOW_";
+/// `CODAPE_CONTEXT_WINDOW_CLAUDE_SONNET_4_6`.
+pub const CONTEXT_WINDOW_MODEL_ENV_PREFIX: &str = "CODAPE_CONTEXT_WINDOW_";
 
-/// File name, relative to the CodeRex config home, for client-data overrides.
+/// File name, relative to the Codape config home, for client-data overrides.
 pub const CONTEXT_WINDOW_CLIENT_DATA_FILE: &str = "context_windows.json";
 
 /// Built-in per-model context windows, matched by exact name or family prefix.
@@ -403,7 +403,7 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
 /// Per-model context-window overrides with an optional fallback.
 ///
 /// The same shape is used by settings (`context_window`), client data
-/// (`~/.coderex/context_windows.json`), experiments, and the environment
+/// (`~/.codape/context_windows.json`), experiments, and the environment
 /// parser:
 ///
 /// ```json
@@ -448,7 +448,7 @@ impl ContextWindowOverrides {
     /// Parse overrides from the process environment.
     ///
     /// Reads [`CONTEXT_WINDOW_ENV`] as the global default and every
-    /// `CODEREX_CONTEXT_WINDOW_<SANITIZED_MODEL>` as a per-model override.
+    /// `CODAPE_CONTEXT_WINDOW_<SANITIZED_MODEL>` as a per-model override.
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_env_vars(std::env::vars())
@@ -539,11 +539,11 @@ impl ContextWindowOverrides {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextWindowSource {
-    /// `CODEREX_CONTEXT_WINDOW` or a per-model environment variable.
+    /// `CODAPE_CONTEXT_WINDOW` or a per-model environment variable.
     Env,
     /// The settings file's `context_window` block.
     Settings,
-    /// The client-data file (`~/.coderex/context_windows.json`).
+    /// The client-data file (`~/.codape/context_windows.json`).
     ClientData,
     /// An experiment / feature-flag override.
     Experiment,
@@ -704,8 +704,8 @@ impl ContextWindowResolver {
 
 /// Path to the client-data context-window file.
 ///
-/// Uses `CLAUDE_CONFIG_DIR` when set, otherwise `$HOME/.coderex`, matching
-/// [`crate`]'s config home convention. Falls back to `.coderex` when no home
+/// Uses `CLAUDE_CONFIG_DIR` when set, otherwise `$HOME/.codape`, matching
+/// [`crate`]'s config home convention. Falls back to `.codape` when no home
 /// directory can be determined.
 #[must_use]
 pub fn context_window_client_data_path() -> PathBuf {
@@ -714,10 +714,10 @@ pub fn context_window_client_data_path() -> PathBuf {
     }
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         return PathBuf::from(home)
-            .join(".coderex")
+            .join(".codape")
             .join(CONTEXT_WINDOW_CLIENT_DATA_FILE);
     }
-    PathBuf::from(".coderex").join(CONTEXT_WINDOW_CLIENT_DATA_FILE)
+    PathBuf::from(".codape").join(CONTEXT_WINDOW_CLIENT_DATA_FILE)
 }
 
 /// Normalize a model name for lookup and matching.
@@ -1211,9 +1211,9 @@ mod tests {
         assert_eq!(
             ToolCall::summarize_activity(
                 "Bash",
-                &serde_json::json!({"command":"cargo test -p coderex-cli"})
+                &serde_json::json!({"command":"cargo test -p codape-cli"})
             ),
-            "Running cargo test -p coderex-cli..."
+            "Running cargo test -p codape-cli..."
         );
         assert_eq!(
             ToolCall::summarize_activity("Write", &serde_json::json!({"file_path":"src/lib.rs"})),
@@ -1233,9 +1233,9 @@ mod tests {
     fn tool_call_activity_summary_truncates_long_inputs() {
         let summary = ToolCall::summarize_activity(
             "Bash",
-            &serde_json::json!({"command":"cargo test -p coderex-cli --test very_long_case_name -- --ignored --nocapture --exact"}),
+            &serde_json::json!({"command":"cargo test -p codape-cli --test very_long_case_name -- --ignored --nocapture --exact"}),
         );
-        assert!(summary.starts_with("Running cargo test -p coderex-cli"));
+        assert!(summary.starts_with("Running cargo test -p codape-cli"));
         assert!(summary.ends_with("..."));
         assert!(summary.chars().count() <= 71);
     }
@@ -1346,7 +1346,7 @@ mod context_window_tests {
     fn env_per_model_beats_env_global() {
         let env = ContextWindowOverrides::from_env_vars([
             (CONTEXT_WINDOW_ENV, "64000"),
-            ("CODEREX_CONTEXT_WINDOW_MY_GATEWAY", "128000"),
+            ("CODAPE_CONTEXT_WINDOW_MY_GATEWAY", "128000"),
         ]);
         let resolver = ContextWindowResolver::new(
             env,
@@ -1362,7 +1362,7 @@ mod context_window_tests {
     #[test]
     fn env_matches_provider_prefixed_and_case_variant_model_names() {
         let env = ContextWindowOverrides::from_env_vars([(
-            "CODEREX_CONTEXT_WINDOW_CLAUDE_SONNET_4_6",
+            "CODAPE_CONTEXT_WINDOW_CLAUDE_SONNET_4_6",
             "500000",
         )]);
         let resolver = ContextWindowResolver::new(
@@ -1460,7 +1460,7 @@ mod context_window_tests {
 
         let env = ContextWindowOverrides::from_env_vars([
             (CONTEXT_WINDOW_ENV, "not-a-number"),
-            ("CODEREX_CONTEXT_WINDOW_MY_GATEWAY", "0"),
+            ("CODAPE_CONTEXT_WINDOW_MY_GATEWAY", "0"),
         ]);
         assert!(env.is_empty());
 

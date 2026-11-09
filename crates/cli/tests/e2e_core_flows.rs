@@ -2,8 +2,8 @@
 
 mod e2e_harness;
 
-use coderex_commands::registry::{CommandContext, CommandRegistry};
-use coderex_core::types::ModelId;
+use codape_commands::registry::{CommandContext, CommandRegistry};
+use codape_core::types::ModelId;
 
 fn test_ctx(cwd: &str) -> CommandContext {
     CommandContext::new(
@@ -17,7 +17,7 @@ fn test_ctx(cwd: &str) -> CommandContext {
 // E2E: User asks question → fails fast without QueryEngine
 #[tokio::test]
 async fn e2e_user_query_gets_response() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("What is Rust?").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("QueryEngine"));
@@ -26,7 +26,7 @@ async fn e2e_user_query_gets_response() {
 // E2E: Slash command /clear → session cleared
 #[tokio::test]
 async fn e2e_slash_clear_resets_session() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     repl.run_headless("Hello")
         .await
         .expect_err("should fail without engine");
@@ -37,7 +37,7 @@ async fn e2e_slash_clear_resets_session() {
 // E2E: Slash command /help → shows available commands
 #[tokio::test]
 async fn e2e_slash_help_shows_commands() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("/help").await.unwrap();
     assert_ne!(result, "");
 }
@@ -45,17 +45,17 @@ async fn e2e_slash_help_shows_commands() {
 // E2E: Slash command /status → system status
 #[tokio::test]
 async fn e2e_slash_status_shows_info() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("/status").await.unwrap();
     assert!(
-        result.contains("System Status") || result.contains("coderex") || result.contains("Status")
+        result.contains("System Status") || result.contains("codape") || result.contains("Status")
     );
 }
 
 // E2E: Slash command /compact → compacts session
 #[tokio::test]
 async fn e2e_slash_compact() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("/compact").await.unwrap();
     assert_ne!(result, "");
 }
@@ -63,7 +63,7 @@ async fn e2e_slash_compact() {
 // E2E: Slash command /tokens → shows token usage
 #[tokio::test]
 async fn e2e_slash_tokens() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("/tokens").await.unwrap();
     assert_ne!(result, "");
 }
@@ -71,7 +71,7 @@ async fn e2e_slash_tokens() {
 // E2E: Model switching → /model sonnet → /model opus
 #[tokio::test]
 async fn e2e_model_switching() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
 
     let r1 = repl.run_headless("/model sonnet").await.unwrap();
     assert!(r1.contains("sonnet") || r1.contains("Model"));
@@ -84,7 +84,7 @@ async fn e2e_model_switching() {
 #[test]
 fn e2e_command_registry_not_empty() {
     let mut reg = CommandRegistry::new();
-    coderex_commands::registry::register_all_commands(&mut reg);
+    codape_commands::registry::register_all_commands(&mut reg);
     assert!(!reg.list().is_empty());
 }
 
@@ -93,7 +93,7 @@ fn e2e_command_registry_not_empty() {
 fn e2e_vim_toggle() {
     let reg = {
         let mut r = CommandRegistry::new();
-        coderex_commands::registry::register_all_commands(&mut r);
+        codape_commands::registry::register_all_commands(&mut r);
         r
     };
 
@@ -113,7 +113,7 @@ fn e2e_vim_toggle() {
 // E2E: /clear after multiple messages — fails fast without engine
 #[tokio::test]
 async fn e2e_clear_after_messages() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
 
     repl.run_headless("Message 1")
         .await
@@ -132,7 +132,7 @@ async fn e2e_clear_after_messages() {
 // E2E: Multi-turn conversation history — fails fast without engine
 #[tokio::test]
 async fn e2e_multi_turn_conversation() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
 
     let r1 = repl.run_headless("Hello").await;
     assert!(r1.is_err());
@@ -148,7 +148,7 @@ async fn e2e_multi_turn_conversation() {
 #[test]
 fn e2e_all_commands_registered() {
     let mut reg = CommandRegistry::new();
-    coderex_commands::registry::register_all_commands(&mut reg);
+    codape_commands::registry::register_all_commands(&mut reg);
 
     let names: Vec<&str> = reg.list().iter().map(|c| c.name).collect();
 
@@ -164,7 +164,7 @@ fn e2e_all_commands_registered() {
 // E2E: REPL headless with empty input — fails fast without QueryEngine
 #[tokio::test]
 async fn e2e_empty_headless_input() {
-    let mut repl = coderex_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
+    let mut repl = codape_cli::ReplLoop::new("/src".into(), ModelId::sonnet());
     let result = repl.run_headless("").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("QueryEngine"));
@@ -174,22 +174,22 @@ async fn e2e_empty_headless_input() {
 #[test]
 fn e2e_cli_args_version() {
     use assert_cmd::Command;
-    let mut cmd = Command::cargo_bin("coderex").unwrap();
+    let mut cmd = Command::cargo_bin("codape").unwrap();
     cmd.arg("--version");
     let assert = cmd.assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("coderex"));
+    assert!(stdout.contains("codape"));
 }
 
 // E2E: CLI binary argument parsing — help
 #[test]
 fn e2e_cli_args_help() {
     use assert_cmd::Command;
-    let mut cmd = Command::cargo_bin("coderex").unwrap();
+    let mut cmd = Command::cargo_bin("codape").unwrap();
     cmd.arg("--help");
     let assert = cmd.assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("CodeRex"));
+    assert!(stdout.contains("Codape"));
 }
 
 // E2E: Mock server enqueue and respond

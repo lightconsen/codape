@@ -5,8 +5,8 @@
 //! 7.1 micro compact, 7.2 auto compact, 7.3 reactive compact,
 //! 7.4 snip compact, 7.5 compact boundary, 7.6 dead loop protection
 
-use coderex_core::CompactConfig;
-use coderex_core::compact::{
+use codape_core::CompactConfig;
+use codape_core::compact::{
     CompactStrategy, MicroCompactParams, auto_compact, compact_boundary_message,
     insert_compact_boundary, micro_compact, reactive_compact, select_compact_strategy,
     should_auto_compact, should_reactive_compact, snip_compact,
@@ -17,10 +17,10 @@ use coderex_core::compact::{
 fn cfg() -> CompactConfig {
     CompactConfig::default()
 }
-use coderex_core::stop_hook::{
+use codape_core::stop_hook::{
     StopHookContext, StopHookDecision, evaluate_stop_hook, should_proceed_with_compact,
 };
-use coderex_core::types::{Message, MessageContent, ModelId, Role, ToolCall, ToolResult};
+use codape_core::types::{Message, MessageContent, ModelId, Role, ToolCall, ToolResult};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -230,7 +230,7 @@ fn should_auto_compact_returns_true_above_threshold() {
     assert!(should_auto_compact(
         1000,
         500,
-        &coderex_core::budget::TokenBudget::with_defaults()
+        &codape_core::budget::TokenBudget::with_defaults()
     ));
 }
 
@@ -239,7 +239,7 @@ fn should_auto_compact_returns_false_below_threshold() {
     assert!(!should_auto_compact(
         100,
         500,
-        &coderex_core::budget::TokenBudget::with_defaults()
+        &codape_core::budget::TokenBudget::with_defaults()
     ));
 }
 
@@ -378,7 +378,7 @@ fn snip_compact_boundary_inserted_when_gap_exists() {
     let boundary_idx = result.boundary_index.unwrap();
     let boundary_msg = &result.messages[boundary_idx];
     if let MessageContent::Text(s) = &boundary_msg.content {
-        assert!(s.contains("<coderex_compact_boundary>"));
+        assert!(s.contains("<codape_compact_boundary>"));
     } else {
         panic!("expected text boundary message");
     }
@@ -409,8 +409,8 @@ fn compact_boundary_message_format() {
     let msg = compact_boundary_message();
     assert!(matches!(msg.role, Role::System));
     if let MessageContent::Text(s) = &msg.content {
-        assert!(s.contains("<coderex_compact_boundary>"));
-        assert!(s.contains("</coderex_compact_boundary>"));
+        assert!(s.contains("<codape_compact_boundary>"));
+        assert!(s.contains("</codape_compact_boundary>"));
         assert!(s.contains("truncated"));
     } else {
         panic!("expected text content");
@@ -430,7 +430,7 @@ fn insert_compact_boundary_at_index() {
     assert_eq!(messages.len(), 4);
     assert!(matches!(messages[1].role, Role::System));
     if let MessageContent::Text(s) = &messages[1].content {
-        assert!(s.contains("<coderex_compact_boundary>"));
+        assert!(s.contains("<codape_compact_boundary>"));
     }
 }
 

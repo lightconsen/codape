@@ -1,4 +1,4 @@
-//! Crash recovery — session state snapshot/restore via `.coderex/recovery.json`.
+//! Crash recovery — session state snapshot/restore via `.codape/recovery.json`.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,11 +16,11 @@ pub struct RecoveryState {
     pub saved_at: u64,
 }
 
-/// Path to the recovery file in `.coderex/`.
+/// Path to the recovery file in `.codape/`.
 #[must_use]
 pub fn recovery_file_path(cwd: &str) -> PathBuf {
     let mut path = PathBuf::from(cwd);
-    path.push(".coderex/recovery.json");
+    path.push(".codape/recovery.json");
     path
 }
 

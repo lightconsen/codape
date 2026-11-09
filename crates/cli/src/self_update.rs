@@ -1,6 +1,6 @@
 //! Self-update: replace this binary with the latest release.
 //!
-//! `coderex update` used to print "a newer version exists". This module does
+//! `codape update` used to print "a newer version exists". This module does
 //! the rest: ask GitHub for the latest release, download the archive for this
 //! platform, check it against the release's `SHA256SUMS`, and swap it in with
 //! a rename (the running process keeps the old inode).
@@ -24,14 +24,14 @@ use std::time::Duration;
 use sha2::Digest as _;
 
 /// Where the GitHub API lives. Overridden by the e2e test and by mirrors.
-pub const API_BASE_ENV: &str = "CODEREX_API_BASE_URL";
+pub const API_BASE_ENV: &str = "CODAPE_API_BASE_URL";
 /// Where release assets are downloaded from, when the caller wants a mirror.
-pub const RELEASE_BASE_ENV: &str = "CODEREX_RELEASE_BASE_URL";
+pub const RELEASE_BASE_ENV: &str = "CODAPE_RELEASE_BASE_URL";
 /// The checksum asset every release must carry.
 pub const CHECKSUM_ASSET: &str = "SHA256SUMS";
 
-const DEFAULT_API_BASE: &str = "https://api.github.com/repos/lightconsen/coderex";
-const DEFAULT_RELEASE_BASE: &str = "https://github.com/lightconsen/coderex/releases/download";
+const DEFAULT_API_BASE: &str = "https://api.github.com/repos/lightconsen/codape";
+const DEFAULT_RELEASE_BASE: &str = "https://github.com/lightconsen/codape/releases/download";
 
 /// Refuse an asset larger than this: a corrupt or hostile response must not
 /// fill the disk before the checksum gets a chance to fail.
@@ -154,9 +154,9 @@ pub const fn release_target() -> Option<&'static str> {
 #[must_use]
 pub fn asset_name(target: &str) -> String {
     if target.contains("windows") {
-        format!("coderex-{target}.exe")
+        format!("codape-{target}.exe")
     } else {
-        format!("coderex-{target}.tar.gz")
+        format!("codape-{target}.tar.gz")
     }
 }
 
@@ -169,12 +169,12 @@ pub fn is_windows_target(target: &str) -> bool {
 
 /// The file inside a target's `.tar.gz`.
 ///
-/// The archive is named `coderex-<target>.tar.gz` and holds `coderex-<target>`
+/// The archive is named `codape-<target>.tar.gz` and holds `codape-<target>`
 /// — the extension is on the archive, not on the binary. Using the asset name
 /// as the member name makes extraction fail with "holds X, not X.tar.gz".
 #[must_use]
 pub fn archive_member(target: &str) -> String {
-    format!("coderex-{target}")
+    format!("codape-{target}")
 }
 
 /// Parse a GitHub release body into the parts the updater needs.
@@ -216,7 +216,7 @@ pub async fn fetch_release(client: &reqwest::Client, api_base: &str) -> Result<R
     let url = format!("{}/releases/latest", api_base.trim_end_matches('/'));
     let response = client
         .get(&url)
-        .header("User-Agent", "coderex-cli")
+        .header("User-Agent", "codape-cli")
         .header("Accept", "application/vnd.github.v3+json")
         .send()
         .await
@@ -353,7 +353,7 @@ pub async fn download(
 ) -> Result<String, String> {
     let mut response = client
         .get(url)
-        .header("User-Agent", "coderex-cli")
+        .header("User-Agent", "codape-cli")
         .send()
         .await
         .map_err(|error| format!("could not download {url}: {error}"))?;
@@ -476,7 +476,7 @@ pub fn replace_binary(current: &Path, replacement: &Path) -> Result<(), String> 
         let _ = std::fs::remove_file(&old);
         std::fs::rename(current, &old).map_err(|error| {
             format!(
-                "could not move {} aside (is another coderex running?): {error}",
+                "could not move {} aside (is another codape running?): {error}",
                 current.display()
             )
         })?;
@@ -555,7 +555,7 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
     let Some(target) = release_target() else {
         return Err(format!(
             "there is no prebuilt archive for this platform; build from source: \
-             cargo install --git https://github.com/lightconsen/coderex.git --tag {}",
+             cargo install --git https://github.com/lightconsen/codape.git --tag {}",
             release.tag
         ));
     };
@@ -599,7 +599,7 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", current_exe.display()))?;
     let staging = tempfile::Builder::new()
-        .prefix(".coderex-update-")
+        .prefix(".codape-update-")
         .tempdir_in(target_dir)
         .map_err(|error| {
             format!(
@@ -658,7 +658,7 @@ mod tests {
         let body = serde_json::json!({
             "tag_name": "v0.2.0",
             "assets": [
-                {"name": "coderex-x86_64-unknown-linux-gnu.tar.gz",
+                {"name": "codape-x86_64-unknown-linux-gnu.tar.gz",
                  "browser_download_url": "https://example.invalid/a.tar.gz"},
                 {"name": "SHA256SUMS",
                  "browser_download_url": "https://example.invalid/SHA256SUMS"},
@@ -681,11 +681,11 @@ mod tests {
     fn asset_names_follow_the_release_matrix() {
         assert_eq!(
             asset_name("x86_64-unknown-linux-gnu"),
-            "coderex-x86_64-unknown-linux-gnu.tar.gz"
+            "codape-x86_64-unknown-linux-gnu.tar.gz"
         );
         assert_eq!(
             asset_name("x86_64-pc-windows-msvc"),
-            "coderex-x86_64-pc-windows-msvc.exe"
+            "codape-x86_64-pc-windows-msvc.exe"
         );
         assert!(!is_windows_target("aarch64-apple-darwin"));
     }
@@ -694,17 +694,14 @@ mod tests {
     #[test]
     fn the_archive_member_drops_the_extension() {
         let target = "x86_64-unknown-linux-gnu";
-        assert_eq!(
-            asset_name(target),
-            "coderex-x86_64-unknown-linux-gnu.tar.gz"
-        );
-        assert_eq!(archive_member(target), "coderex-x86_64-unknown-linux-gnu");
+        assert_eq!(asset_name(target), "codape-x86_64-unknown-linux-gnu.tar.gz");
+        assert_eq!(archive_member(target), "codape-x86_64-unknown-linux-gnu");
     }
 
     #[test]
     fn a_mirror_base_builds_the_same_layout_github_uses() {
         let asset = ReleaseAsset {
-            name: "coderex-x.tar.gz".into(),
+            name: "codape-x.tar.gz".into(),
             url: "https://example.invalid/original".into(),
         };
         assert_eq!(
@@ -713,7 +710,7 @@ mod tests {
                 "v1.0.0",
                 Some("http://127.0.0.1:9/releases/download/")
             ),
-            "http://127.0.0.1:9/releases/download/v1.0.0/coderex-x.tar.gz"
+            "http://127.0.0.1:9/releases/download/v1.0.0/codape-x.tar.gz"
         );
         assert_eq!(
             asset_url(&asset, "v1.0.0", None),
@@ -725,17 +722,17 @@ mod tests {
     fn parse_sha256sums_accepts_the_standard_format() {
         let digest = "a".repeat(64);
         let sums = parse_sha256sums(&format!(
-            "{digest}  coderex-x.tar.gz\n{} *coderex-y.exe\n",
+            "{digest}  codape-x.tar.gz\n{} *codape-y.exe\n",
             "b".repeat(64)
         ))
         .unwrap();
-        assert_eq!(sums.get("coderex-x.tar.gz"), Some(&digest));
-        assert_eq!(sums.get("coderex-y.exe"), Some(&"b".repeat(64)));
+        assert_eq!(sums.get("codape-x.tar.gz"), Some(&digest));
+        assert_eq!(sums.get("codape-y.exe"), Some(&"b".repeat(64)));
     }
 
     #[test]
     fn parse_sha256sums_rejects_a_malformed_digest() {
-        assert!(parse_sha256sums("notahash  coderex-x.tar.gz").is_err());
+        assert!(parse_sha256sums("notahash  codape-x.tar.gz").is_err());
     }
 
     #[test]
@@ -743,7 +740,7 @@ mod tests {
         let digest = "c".repeat(64);
         assert!(
             parse_sha256sums(&format!(
-                "{digest}  coderex-x.tar.gz\n{digest}  coderex-x.tar.gz"
+                "{digest}  codape-x.tar.gz\n{digest}  codape-x.tar.gz"
             ))
             .is_err()
         );
@@ -768,17 +765,17 @@ mod tests {
         let home = Path::new("/home/someone");
         assert_eq!(
             classify_install_path(
-                Path::new("/opt/homebrew/Cellar/coderex/1.0/bin/coderex"),
+                Path::new("/opt/homebrew/Cellar/codape/1.0/bin/codape"),
                 Some(home)
             ),
             InstallOrigin::PackageManager("Homebrew")
         );
         assert_eq!(
-            classify_install_path(Path::new("/nix/store/abc-coderex/bin/coderex"), Some(home)),
+            classify_install_path(Path::new("/nix/store/abc-codape/bin/codape"), Some(home)),
             InstallOrigin::PackageManager("Nix")
         );
         assert_eq!(
-            classify_install_path(Path::new("/home/someone/.cargo/bin/coderex"), Some(home)),
+            classify_install_path(Path::new("/home/someone/.cargo/bin/codape"), Some(home)),
             InstallOrigin::PackageManager("cargo install")
         );
     }
@@ -786,7 +783,7 @@ mod tests {
     #[test]
     fn a_writable_plain_directory_is_self_managed() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("coderex");
+        let exe = dir.path().join("codape");
         std::fs::write(&exe, b"binary").unwrap();
         assert_eq!(
             classify_install_path(&exe, None),
@@ -798,7 +795,7 @@ mod tests {
     fn tar_extraction_rejects_a_path_traversal_member_name() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("good.tar.gz");
-        write_tarball(&archive, &[("coderex-x", "payload")]);
+        write_tarball(&archive, &[("codape-x", "payload")]);
         for member in ["../escape", "a/b", "..", ""] {
             let error = extract_tarball(&archive, member, dir.path()).unwrap_err();
             assert!(
@@ -812,17 +809,17 @@ mod tests {
     fn tar_extraction_rejects_an_archive_naming_a_different_file() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("other.tar.gz");
-        write_tarball(&archive, &[("not-coderex", "payload")]);
-        let error = extract_tarball(&archive, "coderex-x", dir.path()).unwrap_err();
-        assert!(error.contains("holds not-coderex"), "{error}");
+        write_tarball(&archive, &[("not-codape", "payload")]);
+        let error = extract_tarball(&archive, "codape-x", dir.path()).unwrap_err();
+        assert!(error.contains("holds not-codape"), "{error}");
     }
 
     #[test]
     fn tar_extraction_rejects_an_archive_with_extra_members() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("extra.tar.gz");
-        write_tarball(&archive, &[("coderex-x", "one"), ("other", "two")]);
-        let error = extract_tarball(&archive, "coderex-x", dir.path()).unwrap_err();
+        write_tarball(&archive, &[("codape-x", "one"), ("other", "two")]);
+        let error = extract_tarball(&archive, "codape-x", dir.path()).unwrap_err();
         assert!(error.contains("more than one file"), "{error}");
     }
 
@@ -830,16 +827,16 @@ mod tests {
     fn tar_extraction_writes_the_named_member() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("good.tar.gz");
-        write_tarball(&archive, &[("coderex-x", "payload")]);
-        let out = extract_tarball(&archive, "coderex-x", dir.path()).unwrap();
+        write_tarball(&archive, &[("codape-x", "payload")]);
+        let out = extract_tarball(&archive, "codape-x", dir.path()).unwrap();
         assert_eq!(std::fs::read_to_string(out).unwrap(), "payload");
     }
 
     #[test]
     fn replace_binary_swaps_the_file_and_preserves_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let current = dir.path().join("coderex");
-        let replacement = dir.path().join("coderex.new");
+        let current = dir.path().join("codape");
+        let replacement = dir.path().join("codape.new");
         std::fs::write(&current, b"old").unwrap();
         std::fs::write(&replacement, b"new").unwrap();
         replace_binary(&current, &replacement).unwrap();

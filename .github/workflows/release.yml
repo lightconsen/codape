@@ -53,35 +53,35 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build release binary
-        run: cargo build --package coderex-cli --release --locked --target ${{ matrix.target }}
+        run: cargo build --package codape-cli --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/coderex dist/coderex-${{ matrix.target }}
-          tar czvf coderex-${{ matrix.target }}.tar.gz -C dist coderex-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/codape dist/codape-${{ matrix.target }}
+          tar czvf codape-${{ matrix.target }}.tar.gz -C dist codape-${{ matrix.target }}
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item target/${{ matrix.target }}/release/coderex.exe dist/coderex-${{ matrix.target }}.exe
-          Compress-Archive -Path dist/coderex-${{ matrix.target }}.exe -DestinationPath coderex-${{ matrix.target }}.zip
-          # The zip is for people installing by hand; `coderex update` downloads
+          Copy-Item target/${{ matrix.target }}/release/codape.exe dist/codape-${{ matrix.target }}.exe
+          Compress-Archive -Path dist/codape-${{ matrix.target }}.exe -DestinationPath codape-${{ matrix.target }}.zip
+          # The zip is for people installing by hand; `codape update` downloads
           # the bare executable so it does not need a zip decoder.
-          Copy-Item dist/coderex-${{ matrix.target }}.exe coderex-${{ matrix.target }}.exe
+          Copy-Item dist/codape-${{ matrix.target }}.exe codape-${{ matrix.target }}.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: coderex-${{ matrix.target }}
+          name: codape-${{ matrix.target }}
           path: |
-            coderex-*.tar.gz
-            coderex-*.zip
-            coderex-*.exe
+            codape-*.tar.gz
+            codape-*.zip
+            codape-*.exe
 
-  # One `SHA256SUMS` for the whole release: `install.sh`, `coderex update`
+  # One `SHA256SUMS` for the whole release: `install.sh`, `codape update`
   # and anyone running `sha256sum -c` all check the same file.
   checksums:
     name: Publish checksums
@@ -105,13 +105,13 @@ jobs:
                         x86_64-apple-darwin aarch64-apple-darwin \
                         x86_64-pc-windows-msvc; do
             if [[ "$target" == *windows* ]]; then
-              test -f "coderex-${target}.zip"
-              test -f "coderex-${target}.exe"
+              test -f "codape-${target}.zip"
+              test -f "codape-${target}.exe"
             else
-              test -f "coderex-${target}.tar.gz"
+              test -f "codape-${target}.tar.gz"
             fi
           done
-          sha256sum coderex-*.tar.gz coderex-*.zip coderex-*.exe | LC_ALL=C sort -k2 > SHA256SUMS
+          sha256sum codape-*.tar.gz codape-*.zip codape-*.exe | LC_ALL=C sort -k2 > SHA256SUMS
           cat SHA256SUMS
           sha256sum --check SHA256SUMS
 
@@ -140,12 +140,12 @@ jobs:
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
-            archive="artifacts/coderex-${target}.tar.gz"
+            archive="artifacts/codape-${target}.tar.gz"
             test -f "$archive"
-            tar tzf "$archive" | grep -qx "coderex-${target}"
+            tar tzf "$archive" | grep -qx "codape-${target}"
             mkdir -p "unpacked/${target}"
             tar xzf "$archive" -C "unpacked/${target}"
-            "unpacked/${target}/coderex-${target}" --version
+            "unpacked/${target}/codape-${target}" --version
           done
 
       - name: Every archive contains its binary

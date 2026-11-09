@@ -54,7 +54,7 @@ fn spawn(cwd: &Path, base_url: &str, prompt: &str, args: &[&str]) -> (Child, tem
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("seed config");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("-p")
         .args(args)
         .current_dir(cwd)
@@ -62,12 +62,12 @@ fn spawn(cwd: &Path, base_url: &str, prompt: &str, args: &[&str]) -> (Child, tem
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -138,7 +138,7 @@ fn a_safe_shell_command_runs_without_a_control_request() {
 #[test]
 fn a_destructive_shell_command_is_blocked_in_auto_mode() {
     let dir = tempfile::tempdir().expect("workspace");
-    let victim = std::path::PathBuf::from("/tmp/coderex-benchmark-should-not-run");
+    let victim = std::path::PathBuf::from("/tmp/codape-benchmark-should-not-run");
     std::fs::create_dir_all(&victim).unwrap();
     std::fs::write(victim.join("sentinel"), "keep").unwrap();
     let (mut provider, base_url) = start_static_provider();
@@ -155,7 +155,7 @@ fn a_destructive_shell_command_is_blocked_in_auto_mode() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(

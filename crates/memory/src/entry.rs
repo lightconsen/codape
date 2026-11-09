@@ -1,7 +1,7 @@
 //! Transcript entry types — what a single line of a `.jsonl` transcript is.
 //!
 //! A transcript line used to be a bare [`Message`]. That is still true of
-//! every line CodeRex writes today, but it leaves two things unsaid: a
+//! every line Codape writes today, but it leaves two things unsaid: a
 //! compaction boundary is a system message with a magic string inside it, and
 //! a transcript has no header saying which session, working directory, or
 //! model it belongs to.
@@ -34,22 +34,22 @@
 //!
 //! Claude's transcript format has three much larger tables: nine visible
 //! message types, twenty-one system subtypes, and twenty-odd attachment
-//! types. CodeRex produces none of the system subtypes (no hook results, no
+//! types. Codape produces none of the system subtypes (no hook results, no
 //! turn durations, no API-error records are written to a transcript) and has
 //! no attachment concept at all — a file the model read arrives as the output
 //! of a `Read` tool call inside a [`MessageContent::ToolResult`], not as a
 //! separate attachment entry. Inventing those variants would describe a
-//! format CodeRex does not write, so they are not here. If CodeRex grows a
+//! format Codape does not write, so they are not here. If Codape grows a
 //! hook-result or attachment record, it earns a variant then.
 
-use coderex_core::types::{Message, MessageContent, Role};
+use codape_core::types::{Message, MessageContent, Role};
 use serde::{Deserialize, Serialize};
 
 /// The marker inside a system message that says "context was compacted here".
-pub const COMPACT_BOUNDARY_MARKER: &str = "<coderex_compact_boundary>";
+pub const COMPACT_BOUNDARY_MARKER: &str = "<codape_compact_boundary>";
 
 /// The marker that closes a compaction boundary message.
-pub const COMPACT_BOUNDARY_CLOSE: &str = "</coderex_compact_boundary>";
+pub const COMPACT_BOUNDARY_CLOSE: &str = "</codape_compact_boundary>";
 
 /// A single line of a transcript.
 ///
@@ -97,7 +97,7 @@ pub struct SessionMeta {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// What a transcript entry is, at the granularity CodeRex actually produces.
+/// What a transcript entry is, at the granularity Codape actually produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     /// A user's text.
@@ -262,7 +262,7 @@ fn message_text(message: &Message) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ToolCall;
+    use codape_core::types::ToolCall;
 
     /// Two entries are the same when the lines they serialize to are the same.
     fn same(a: &TranscriptEntry, b: &TranscriptEntry) -> bool {

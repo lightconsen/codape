@@ -1,10 +1,11 @@
 [package]
-name = "coderex-cli"
+name = "codape-cli"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "CLI binary — startup orchestrator, REPL loop, CLI subcommands"
 
@@ -12,7 +13,7 @@ description = "CLI binary — startup orchestrator, REPL loop, CLI subcommands"
 workspace = true
 
 [[bin]]
-name = "coderex"
+name = "codape"
 path = "src/main.rs"
 
 [[bin]]
@@ -32,28 +33,28 @@ name = "llm-cassette"
 path = "src/bin/llm_cassette.rs"
 
 [[bin]]
-name = "coderex-interactive-e2e"
-path = "src/bin/coderex_interactive_e2e.rs"
+name = "codape-interactive-e2e"
+path = "src/bin/codape_interactive_e2e.rs"
 
 [dependencies]
-coderex-core = { path = "../core" }
-coderex-tools = { path = "../tools" }
-coderex-agents = { path = "../agents" }
-coderex-commands = { path = "../commands" }
-coderex-hooks = { path = "../hooks" }
-coderex-mods = { path = "../mods" }
-coderex-memory = { path = "../memory" }
-coderex-mcp = { path = "../mcp" }
-coderex-artifacts = { path = "../artifacts" }
-coderex-events = { path = "../events" }
-coderex-workflow = { path = "../workflow" }
-coderex-plugins = { path = "../plugins" }
-coderex-bridge = { path = "../bridge" }
-coderex-server = { path = "../server" }
-coderex-ui = { path = "../ui" }
-coderex-config = { path = "../config" }
+codape-core = { path = "../core" }
+codape-tools = { path = "../tools" }
+codape-agents = { path = "../agents" }
+codape-commands = { path = "../commands" }
+codape-hooks = { path = "../hooks" }
+codape-mods = { path = "../mods" }
+codape-memory = { path = "../memory" }
+codape-mcp = { path = "../mcp" }
+codape-artifacts = { path = "../artifacts" }
+codape-events = { path = "../events" }
+codape-workflow = { path = "../workflow" }
+codape-plugins = { path = "../plugins" }
+codape-bridge = { path = "../bridge" }
+codape-server = { path = "../server" }
+codape-ui = { path = "../ui" }
+codape-config = { path = "../config" }
 notify = { version = "8", optional = true }
-coderex-telemetry = { path = "../telemetry" }
+codape-telemetry = { path = "../telemetry" }
 
 clap.workspace = true
 tokio.workspace = true
@@ -90,7 +91,7 @@ compact_str.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 serde_json.workspace = true
-coderex-test-utils = { path = "../test-utils" }
+codape-test-utils = { path = "../test-utils" }
 futures.workspace = true
 tokio-tungstenite.workspace = true
 
@@ -107,11 +108,11 @@ default = ["core", "hot-reload"]
 core = []
 full = ["core"]
 hot-reload = ["dep:notify"]
-enterprise = ["full", "coderex-config/enterprise"]
+enterprise = ["full", "codape-config/enterprise"]
 
 [package.metadata.dist]
 # The name cargo-dist uses for this binary
-name = "coderex"
+name = "codape"
 # Whether to build this package in releases
 dist = true
 # The hosts to build for (inherits from workspace by default)

@@ -9,9 +9,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use coderex_core::checkpoints::CheckpointStore;
-use coderex_core::tool_executor::ToolExecutor;
-use coderex_tools::{
+use codape_core::checkpoints::CheckpointStore;
+use codape_core::tool_executor::ToolExecutor;
+use codape_tools::{
     ExecutionConfig, ExecutionContext, RegistryToolDispatcher, ToolExecutor as ToolsExecutor,
     ToolRegistry, register_builtin_tools,
 };

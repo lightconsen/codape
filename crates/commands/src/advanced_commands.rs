@@ -14,14 +14,14 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let bridge_url = std::env::var("CODEREX_BRIDGE_URL").ok();
+            let bridge_url = std::env::var("CODAPE_BRIDGE_URL").ok();
             let status = if bridge_url.as_ref().is_some_and(|s| !s.is_empty()) {
                 format!(
                     "Status: Configured\nURL: {}\nNo remote environments connected yet.",
                     bridge_url.unwrap()
                 )
             } else {
-                "Status: Not running\nNo remote environments connected.\n\nSet CODEREX_BRIDGE_URL to configure Bridge.".to_string()
+                "Status: Not running\nNo remote environments connected.\n\nSet CODAPE_BRIDGE_URL to configure Bridge.".to_string()
             };
             CommandResult::success(format!("Bridge\n──────\n{status}"))
         }),
@@ -35,7 +35,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         false,
         Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let bridge_url = std::env::var("CODEREX_BRIDGE_URL").ok();
+            let bridge_url = std::env::var("CODAPE_BRIDGE_URL").ok();
             if bridge_url.as_ref().is_some_and(|s| !s.is_empty()) {
                 CommandResult::success(
                     "Bridge kick requested.\n(Actual connection management is handled by the REPL or Bridge daemon.)"
@@ -102,13 +102,13 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, args: &[String]| {
             let transcripts =
-                coderex_insights::workspace_transcripts(std::path::Path::new(&ctx.cwd));
+                codape_insights::workspace_transcripts(std::path::Path::new(&ctx.cwd));
             let root = args
                 .first()
                 .filter(|arg| !arg.starts_with('-'))
-                .map_or_else(coderex_insights::default_root, std::path::PathBuf::from);
+                .map_or_else(codape_insights::default_root, std::path::PathBuf::from);
 
-            match coderex_insights::run(&[transcripts], root) {
+            match codape_insights::run(&[transcripts], root) {
                 Ok(outcome) => {
                     let mut report = format!(
                         "{}\n\n{}",
@@ -137,7 +137,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             if ctx.is_feature_enabled("thinkback") {
-                let transcript_dir = std::path::Path::new(&ctx.cwd).join(".coderex/transcripts");
+                let transcript_dir = std::path::Path::new(&ctx.cwd).join(".codape/transcripts");
                 let mut output = String::from("Thinkback\n────────\n");
                 let total_msgs;
                 if transcript_dir.exists() {
@@ -206,7 +206,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             if ctx.is_feature_enabled("thinkback") {
-                let transcript_dir = std::path::Path::new(&ctx.cwd).join(".coderex/transcripts");
+                let transcript_dir = std::path::Path::new(&ctx.cwd).join(".codape/transcripts");
                 let mut found = 0;
                 if transcript_dir.exists()
                     && let Ok(entries) = std::fs::read_dir(&transcript_dir) {
@@ -265,7 +265,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn thinkback_play_hands_the_session_a_prompt() {
         let workspace = tempfile::tempdir().unwrap();
-        let transcripts = workspace.path().join(".coderex/transcripts");
+        let transcripts = workspace.path().join(".codape/transcripts");
         std::fs::create_dir_all(&transcripts).unwrap();
         std::fs::write(transcripts.join("sess_1.jsonl"), "{}\n").unwrap();
 
@@ -423,11 +423,11 @@ mod tests {
         assert!(result.output.contains("No sessions"), "{}", result.output);
 
         // With one session written, the report is produced and named.
-        let transcripts = coderex_insights::workspace_transcripts(workspace.path());
+        let transcripts = codape_insights::workspace_transcripts(workspace.path());
         std::fs::create_dir_all(&transcripts).unwrap();
         std::fs::write(
             transcripts.join("sess_1.jsonl"),
-            serde_json::to_string(&coderex_core::types::Message::user("fix the parser")).unwrap(),
+            serde_json::to_string(&codape_core::types::Message::user("fix the parser")).unwrap(),
         )
         .unwrap();
 

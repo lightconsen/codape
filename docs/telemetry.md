@@ -22,7 +22,7 @@ Privacy-first telemetry collection, local storage, and batch upload. Stores even
 
 - **`TelemetryConfig`** — Endpoint, optional explicit crash endpoint, API key, batch size (default 100), interval (default 300s), enabled flag, sample rate (default 1.0), optional pinned root certificate PEM for TLS pinning.
 - **`TelemetryUploader`** — reqwest client + own DB connection + config + circuit breaker + rate limiter + optional `TelemetryChannels`. Opens a fresh SQLite connection per upload batch for safe concurrent access.
-- **`ChannelConfig` / `TelemetryChannels`** (`channels.rs`) — Optional OTLP/HTTP JSON logs and Datadog Logs export channels. `ChannelConfig::from_env` reads the `CODEREX_OTLP_*` / `CODEREX_DATADOG_*` variables; `TelemetryUploader::with_channels` accepts an explicit configuration. See [Channels](#channels).
+- **`ChannelConfig` / `TelemetryChannels`** (`channels.rs`) — Optional OTLP/HTTP JSON logs and Datadog Logs export channels. `ChannelConfig::from_env` reads the `CODAPE_OTLP_*` / `CODAPE_DATADOG_*` variables; `TelemetryUploader::with_channels` accepts an explicit configuration. See [Channels](#channels).
 - **`CircuitBreaker`** — Three-state breaker (Closed/Open/HalfOpen). Opens after 5 consecutive failures, cools down for 60s, then transitions to HalfOpen. Handles *failures*.
 - **`RateLimiter`** — Sliding-window limiter for *rejections*: at most 10 upload attempts per 60s, and after the endpoint answers 429/403 uploads are suppressed for 300s. `upload_pending` surfaces those statuses as `TelemetryError::Rejected` so the loop can back off instead of retrying into the limit.
 
@@ -56,7 +56,7 @@ A model field's value is replaced with the constant `"confidential"`. Two kinds 
   both become `"confidential"`.
 
 **The confidentiality rule.** The reference substitutes `"confidential"` only for models on a
-"needs confidentiality" list (and for unavailable models). CodeRex has one first-party channel and
+"needs confidentiality" list (and for unavailable models). Codape has one first-party channel and
 no cloud model catalogue, so it cannot know which names are sensitive. It therefore treats **every
 concrete model name as confidential** and redacts all of them, keeping only the non-identifying
 placeholders. This is stricter than the reference's default and is the honest choice for a client
@@ -66,7 +66,7 @@ that cannot enumerate the sensitive set.
 
 Strict mode is turned on by either of two triggers:
 
-- the environment variable **`CODEREX_HIPAA`** — present with any value other than
+- the environment variable **`CODAPE_HIPAA`** — present with any value other than
   `0`/`false`/`no`/empty (`hipaa_enabled`); and
 - **`telemetry.strict: true` in settings**, which the CLI resolves and passes to the uploader as
   `TelemetryConfig::strict`.
@@ -126,7 +126,7 @@ It does **not** remove:
 
 **No semantic understanding is claimed.** The scrubber cannot tell a conversation sentence from a
 message, and it cannot prove that a payload is free of secrets. Free-form crash text is therefore
-not sent by default at all (see below); when `CODEREX_CRASH_VERBOSE` is enabled it is sent only
+not sent by default at all (see below); when `CODAPE_CRASH_VERBOSE` is enabled it is sent only
 after these patterns run, and it is explicitly marked as pattern-scrubbed rather than clean.
 
 ### Key Types (crash.rs)
@@ -147,9 +147,9 @@ after these patterns run, and it is explicitly marked as pattern-scrubbed rather
   is dropped rather than truncated. At most **`MAX_BACKTRACE_FRAMES` = 24** frames are kept, and
   `symbols_len` / `symbols_sha256` describe exactly the kept frames joined by `\n`.
 - **`CrashReporter`** — Panic hook + pending directory ingestion with age and disk-space enforcement.
-  `strict` is resolved from `CODEREX_HIPAA` and `verbose` from `CODEREX_CRASH_VERBOSE` at
+  `strict` is resolved from `CODAPE_HIPAA` and `verbose` from `CODAPE_CRASH_VERBOSE` at
   construction (overridable with `with_strict` / `with_verbose` for tests).
-- **`crash_verbose()` / `crash_verbose_with()`** — the `CODEREX_CRASH_VERBOSE` trigger (non-empty
+- **`crash_verbose()` / `crash_verbose_with()`** — the `CODAPE_CRASH_VERBOSE` trigger (non-empty
   and not `0`/`false`/`no`).
 - **`preview_crash_payload` / `preview_crash_payload_with` /
   `TelemetryUploader::preview_crash_payload`** — return the **exact JSON** that would be uploaded
@@ -176,7 +176,7 @@ by default**:
 - **Panic hook (capture at the source):** the message is classified *in memory* into a
   `PanicTemplate` plus safe parsed fields, and its length and SHA-256 are recorded. The default
   pending file contains no message text. A backtrace is captured and immediately reduced to frame
-  symbols; only the symbols are kept. Under `CODEREX_HIPAA` no backtrace is captured at all and no
+  symbols; only the symbols are kept. Under `CODAPE_HIPAA` no backtrace is captured at all and no
   symbols are kept.
 - **Ingestion:** the structured summary and the classification columns are stored. A legacy pending
   file or database row with raw text is classified on the fly and reduced to a summary; the message
@@ -188,7 +188,7 @@ by default**:
   removed and its home user redacted, so no absolute path is uploaded. There is no `panic_info`
   field, no raw `backtrace` field and no `message` field.
 
-`CODEREX_CRASH_VERBOSE` (non-empty and not `0`/`false`/`no`) opts into a **raw local copy**:
+`CODAPE_CRASH_VERBOSE` (non-empty and not `0`/`false`/`no`) opts into a **raw local copy**:
 
 - **Panic hook:** the free-form message and raw backtrace are written to the pending file, which is
   mode **`0600`** on Unix. The message is still classified and the backtrace is still symbolized.
@@ -206,7 +206,7 @@ by default**:
   high-entropy detector) and sent with the taxonomy and symbol-only frames, marked
   `"redaction_status": "pattern"`. The marker never claims the text is clean, because the scrubber
   has no semantic understanding.
-- **`CODEREX_HIPAA` always wins:** even with verbose enabled, strict mode sends structured-only —
+- **`CODAPE_HIPAA` always wins:** even with verbose enabled, strict mode sends structured-only —
   no text and no symbols.
 
 `redaction_status` markers are payload fields, so they travel with the report rather than living in
@@ -224,16 +224,16 @@ The keys are selected by the marker: `structured` and `symbolized` payloads cont
 
 ### Previewing a crash without uploading
 
-`coderex telemetry preview-crash` reads one pending crash file, applies the
+`codape telemetry preview-crash` reads one pending crash file, applies the
 same ingestion modes a real startup would apply, and prints the exact JSON the
 uploader would send:
 
 ```bash
-# The newest file in ~/.coderex/crashes/pending
-coderex telemetry preview-crash
+# The newest file in ~/.codape/crashes/pending
+codape telemetry preview-crash
 
 # A specific pending file
-coderex telemetry preview-crash ~/.coderex/crashes/pending/crash_1729.json
+codape telemetry preview-crash ~/.codape/crashes/pending/crash_1729.json
 ```
 
 The command does **not** ingest, delete, or upload anything. Pending files are
@@ -244,11 +244,11 @@ override) is honored, as it is for the uploader.
 Tuning the modes works the same way it does for a real upload:
 
 ```bash
-CODEREX_CRASH_VERBOSE=1 coderex telemetry preview-crash   # adds scrubbed panic_info
-CODEREX_HIPAA=1 coderex telemetry preview-crash           # structured only
+CODAPE_CRASH_VERBOSE=1 codape telemetry preview-crash   # adds scrubbed panic_info
+CODAPE_HIPAA=1 codape telemetry preview-crash           # structured only
 ```
 
-`CODEREX_HIPAA` wins over `CODEREX_CRASH_VERBOSE`. Verbose output only appears
+`CODAPE_HIPAA` wins over `CODAPE_CRASH_VERBOSE`. Verbose output only appears
 when the pending file actually captured the raw local copy (the panic hook
 wrote it while verbose was enabled); previewing a structured file with verbose
 on does not invent text. The printer uses the same
@@ -272,11 +272,11 @@ that want to build the same row shape in-process.
 - **PII scrubbing**: `Scrubber` regex-sanitizes `Error` and `ApiCall` events before insertion, including high-entropy secret tokens (`<SECRET>`).
 - **Worker panic recovery**: `spawn_worker_with_recovery()` uses `catch_unwind` + fresh connection respawn (max 3 attempts, 10s cooldown).
 - **Certificate pinning**: Optional `pinned_cert_pem` in `TelemetryConfig` adds a custom root certificate to the reqwest client.
-- **Settings.json integration**: `TelemetrySubConfig` nested struct (schema v3) loads user overrides from `~/.coderex/settings.json`.
+- **Settings.json integration**: `TelemetrySubConfig` nested struct (schema v3) loads user overrides from `~/.codape/settings.json`.
 
 ### Public API Surface
 
-- `TelemetryHandle`, `TelemetryEvent`, `TelemetryStore`, `TelemetryUploader`, `TelemetryConfig`, `CrashReporter`, `CrashReport`, `PendingEvent`, `PendingCrash`, `Scrubber`, `HIPAA_ENV`, `hipaa_enabled`, `CRASH_VERBOSE_ENV`, `crash_verbose`, `crash_verbose_with`, `PanicTemplate`, `PanicClassification`, `classify_panic_message`, `BacktraceSymbols`, `symbolize_backtrace`, `symbolize_backtrace_limited`, `MAX_BACKTRACE_FRAMES`, `DEFAULT_PENDING_MAX_AGE_SECS`, `DEFAULT_CRASH_RETENTION_DAYS`, `preview_crash_payload`, `preview_crash_payload_with`, `ChannelConfig`, `TelemetryChannels`, `OTLP_ENDPOINT_ENV`, `OTLP_HEADERS_ENV`, `DATADOG_API_KEY_ENV`, `DD_API_KEY_ENV`, `DATADOG_SITE_ENV`, `DATADOG_ENDPOINT_ENV`, `DEFAULT_DATADOG_SITE`. `CrashReporter::pending_crash_from_report` builds the upload-row shape from a pending file (used by `coderex telemetry preview-crash`).
+- `TelemetryHandle`, `TelemetryEvent`, `TelemetryStore`, `TelemetryUploader`, `TelemetryConfig`, `CrashReporter`, `CrashReport`, `PendingEvent`, `PendingCrash`, `Scrubber`, `HIPAA_ENV`, `hipaa_enabled`, `CRASH_VERBOSE_ENV`, `crash_verbose`, `crash_verbose_with`, `PanicTemplate`, `PanicClassification`, `classify_panic_message`, `BacktraceSymbols`, `symbolize_backtrace`, `symbolize_backtrace_limited`, `MAX_BACKTRACE_FRAMES`, `DEFAULT_PENDING_MAX_AGE_SECS`, `DEFAULT_CRASH_RETENTION_DAYS`, `preview_crash_payload`, `preview_crash_payload_with`, `ChannelConfig`, `TelemetryChannels`, `OTLP_ENDPOINT_ENV`, `OTLP_HEADERS_ENV`, `DATADOG_API_KEY_ENV`, `DD_API_KEY_ENV`, `DATADOG_SITE_ENV`, `DATADOG_ENDPOINT_ENV`, `DEFAULT_DATADOG_SITE`. `CrashReporter::pending_crash_from_report` builds the upload-row shape from a pending file (used by `codape telemetry preview-crash`).
 
 ## Current Status
 
@@ -300,9 +300,9 @@ that want to build the same row shape in-process.
 - **Explicit crash endpoint** override (`TelemetryConfig.crash_endpoint`) or derived from events endpoint.
 - **DB size queries** via `PRAGMA page_count * page_size`.
 - **PII scrubbing** via `Scrubber` (emails, IPs, home paths, AWS/GitHub/Slack tokens, bearer values, JWTs, PEM private-key blocks, Luhn-valid card numbers, SSA-valid SSNs, mod-97-valid IBANs, and 32+ character high-entropy tokens as `<SECRET>`) applied to `Error`, `ApiCall`, and `ToolUsed` events, plus an `EXCLUDED_FIELDS` exclusion set applied recursively to payloads at upload time. Detection is pattern/checksum-based and deliberately conservative: paths, URLs, symbols, frames and ordinary prose are not touched, and card-like runs in paths or filenames survive.
-- **Crash reports are structured/symbolized by default**: the panic hook classifies the message into a fixed taxonomy (never storing the raw text), records its length and SHA-256, and reduces the backtrace to at most 24 symbol frames with no paths. Upload sends the taxonomy, the safe parsed fields (`panic_index`, `panic_container_len`, `panic_range_start`, `panic_range_end`, `panic_slice_len`, `panic_operation`, `panic_error_type`) and the symbol frame list/hash. `CODEREX_CRASH_VERBOSE` opts into a raw local copy (`0600`) whose text is scrubbed at upload and marked `"pattern"`; the raw backtrace is never uploaded. `CODEREX_HIPAA` always forces structured-only (no symbols either). Legacy raw rows are classified on the fly and never upload free-form text unless verbose is enabled.
+- **Crash reports are structured/symbolized by default**: the panic hook classifies the message into a fixed taxonomy (never storing the raw text), records its length and SHA-256, and reduces the backtrace to at most 24 symbol frames with no paths. Upload sends the taxonomy, the safe parsed fields (`panic_index`, `panic_container_len`, `panic_range_start`, `panic_range_end`, `panic_slice_len`, `panic_operation`, `panic_error_type`) and the symbol frame list/hash. `CODAPE_CRASH_VERBOSE` opts into a raw local copy (`0600`) whose text is scrubbed at upload and marked `"pattern"`; the raw backtrace is never uploaded. `CODAPE_HIPAA` always forces structured-only (no symbols either). Legacy raw rows are classified on the fly and never upload free-form text unless verbose is enabled.
 - **Model-name redaction**: the model-field key regex (including `*_models` / `*Models`), the always-model keys (`chain_entry`, `fallbackFrom`, `shortName`), the `repository_model` exclusion, the never-replaced placeholder set, and the `"confidential"` constant. Applied recursively to every uploaded payload by `Scrubber::scrub_json`.
-- **Strict (confidentiality) mode**: `CODEREX_HIPAA` turns on a recursive field-allowlist check; a payload that fails it is uploaded marked `"redaction_status": "unredacted"` in the payload itself.
+- **Strict (confidentiality) mode**: `CODAPE_HIPAA` turns on a recursive field-allowlist check; a payload that fails it is uploaded marked `"redaction_status": "unredacted"` in the payload itself.
 - **Worker panic recovery** with `catch_unwind`, fresh DB connection per respawn, 3-attempt limit, 10s cooldown.
 - **Certificate pinning** via `TelemetryConfig.pinned_cert_pem` + `add_root_certificate()`.
 - **Opt-in consent gate**: telemetry is off until the user consents. `Settings::defaults()` leaves `telemetry_enabled` as `None` ("undecided"), so the first-run prompt in `StartupOrchestrator::phase_load_settings` is actually reachable; an undecided value is treated as *disabled*. The choice is persisted to `settings.json`.
@@ -349,11 +349,11 @@ Channels are configured from the environment when the uploader is constructed:
 
 | Variable | Meaning |
 |---|---|
-| `CODEREX_OTLP_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://localhost:4318`); `/v1/logs` is appended unless already present. |
-| `CODEREX_OTLP_HEADERS` | Optional comma-separated `key=value` request headers (for collector auth). |
-| `CODEREX_DATADOG_API_KEY` | Datadog API key. Falls back to `DD_API_KEY`. |
-| `CODEREX_DATADOG_SITE` | Datadog site; default `datadoghq.com` (also accepts an `http-intake.logs.*` host). |
-| `CODEREX_DATADOG_ENDPOINT` | Full intake URL, overriding the site-derived endpoint. |
+| `CODAPE_OTLP_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://localhost:4318`); `/v1/logs` is appended unless already present. |
+| `CODAPE_OTLP_HEADERS` | Optional comma-separated `key=value` request headers (for collector auth). |
+| `CODAPE_DATADOG_API_KEY` | Datadog API key. Falls back to `DD_API_KEY`. |
+| `CODAPE_DATADOG_SITE` | Datadog site; default `datadoghq.com` (also accepts an `http-intake.logs.*` host). |
+| `CODAPE_DATADOG_ENDPOINT` | Full intake URL, overriding the site-derived endpoint. |
 
 `settings.json` can carry the same values under `telemetry` (`otlp_endpoint`,
 `otlp_headers`, `datadog_api_key`, `datadog_site`, `datadog_endpoint`); a caller
@@ -372,7 +372,7 @@ Every `PendingEvent` becomes one OTLP log record / one Datadog log entry:
 | payload fields | one `KeyValue` attribute each (strings, booleans, numbers); objects/arrays become JSON text | inside `message`, the scrubbed payload JSON |
 | `error` event | severity 17 / `ERROR` | `status: "error"` |
 | other events | severity 9 / `INFO` | `status: "info"` |
-| — | resource `service.name = coderex`, SDK name/language | `ddsource`/`service = coderex` |
+| — | resource `service.name = codape`, SDK name/language | `ddsource`/`service = codape` |
 
 No hostname is sent to Datadog. Channel delivery is best-effort: the
 first-party upload runs and marks the rows first, and a channel failure is
@@ -383,7 +383,7 @@ channel fails, the other is still attempted.
 
 None. Model-field redaction and the strict (confidentiality) mode are both
 implemented; the only deliberate difference from the reference is that the
-strict trigger is the `CODEREX_HIPAA` environment variable rather than an
+strict trigger is the `CODAPE_HIPAA` environment variable rather than an
 environment variable *and* a settings key (the settings layer is not reachable
 from the telemetry crate).
 
@@ -392,13 +392,13 @@ from the telemetry crate).
 - 8 tests in `store.rs` (insert, batch, mark uploaded, crash roundtrip, structured-record roundtrip, old-schema migration, crash retention, size retention).
 - 36 tests in `uploader.rs` (config defaults, crash endpoint explicit/derived, circuit breaker, gzip encoding/header, rate limiter window/suppression, rejection statuses, HIPAA trigger parsing, strict-mode payload marking, structured/symbolized/pattern crash payloads, unknown-message length/hash only, no absolute paths, preview API, HIPAA precedence, legacy rows, tampered-row field validation, disabled uploader sends nothing and keeps rows pending, enabled uploader fans events out to channels).
 - 16 tests in `channels.rs` (OTLP endpoint derivation, Datadog site/explicit endpoint/API-key requirements, env parsing, redacted `Debug`, disabled-set construction, OTLP log-record mapping and scrubbing, Datadog entry mapping and scrubbing, and mock-server delivery to both channels including partial failure).
-- 22 tests in `crash.rs` (taxonomy for every known template, safe-field parsing, unknown length/hash, symbolization/top-N/path rejection, default structured+symbolized ingestion, verbose raw local copy, strict-over-verbose precedence, legacy raw-file handling, `CODEREX_CRASH_VERBOSE` parsing, `0600` mode, TTL prune, serialization).
+- 22 tests in `crash.rs` (taxonomy for every known template, safe-field parsing, unknown length/hash, symbolization/top-N/path rejection, default structured+symbolized ingestion, verbose raw local copy, strict-over-verbose precedence, legacy raw-file handling, `CODAPE_CRASH_VERBOSE` parsing, `0600` mode, TTL prune, serialization).
 - 49 tests in `scrubber.rs` (email, IPv4, home path, API key, GitHub/AWS/Slack/bearer/JWT/private-key, Luhn card/SSN/IBAN, event scrubbing, exclusion set, nested JSON scrubbing, model-key regex, model redaction, placeholder preservation, `repository_model` exclusion, strict allowlist/marker, high-entropy true positives, and path/symbol/URL/prose/numeric false positives).
 - Tests use tempfile/NamedTempFile for SQLite.
 
-M1 verification: `cargo test -p coderex-telemetry --offline` → **131 passed / 0 failed**;
-`cargo test -p coderex-config --offline` → **90 unit + 40 integration passed / 0 failed**
-(including the macOS plist carrier). `cargo test -p coderex-cli --offline -- --test-threads=1`
+M1 verification: `cargo test -p codape-telemetry --offline` → **131 passed / 0 failed**;
+`cargo test -p codape-config --offline` → **90 unit + 40 integration passed / 0 failed**
+(including the macOS plist carrier). `cargo test -p codape-cli --offline -- --test-threads=1`
 → all test binaries passed (the two PATH-sensitive tests flake only when run in
 parallel).
 

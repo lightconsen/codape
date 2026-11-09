@@ -1,10 +1,11 @@
 [package]
-name = "coderex-bridge"
+name = "codape-bridge"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Bridge remote session system — work poller, spawner, permission router, archive"
 
@@ -12,7 +13,7 @@ description = "Bridge remote session system — work poller, spawner, permission
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
+codape-core = { path = "../core" }
 
 thiserror.workspace = true
 tokio.workspace = true
@@ -39,4 +40,4 @@ openssh.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-coderex-server = { path = "../server" }
+codape-server = { path = "../server" }

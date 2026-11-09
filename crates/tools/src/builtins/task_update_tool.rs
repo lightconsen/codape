@@ -106,7 +106,7 @@ mod tests {
     use crate::context::ExecutionContext;
     use crate::task_store::{TaskRecord, TaskStore};
     use crate::tool::ToolContext;
-    use coderex_core::hook_executor::{HookExecutor, HookFireResult};
+    use codape_core::hook_executor::{HookExecutor, HookFireResult};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Mutex;

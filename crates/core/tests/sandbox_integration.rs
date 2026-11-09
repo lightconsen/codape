@@ -1,7 +1,7 @@
 //! Sandbox integration tests — verify resource limits and access controls
 //! are actually enforced at the OS level.
 
-use coderex_core::sandbox::{SandboxConfig, SandboxHandle};
+use codape_core::sandbox::{SandboxConfig, SandboxHandle};
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
@@ -155,7 +155,7 @@ fn linux_rlimit_nofile_enforced() {
 fn macos_sandbox_allows_write_in_allowed_path() {
     // Use /private/tmp (canonical temp on macOS) to avoid sandbox-exec subpath issues
     let allowed = PathBuf::from(format!(
-        "/private/tmp/coderex_sandbox_test_{}",
+        "/private/tmp/codape_sandbox_test_{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&allowed);
@@ -193,11 +193,11 @@ fn macos_sandbox_allows_write_in_allowed_path() {
 #[test]
 fn macos_sandbox_denies_write_outside_allowed_path() {
     let allowed = PathBuf::from(format!(
-        "/private/tmp/coderex_sandbox_allowed_{}",
+        "/private/tmp/codape_sandbox_allowed_{}",
         std::process::id()
     ));
     let restricted = PathBuf::from(format!(
-        "/private/tmp/coderex_sandbox_restricted_{}",
+        "/private/tmp/codape_sandbox_restricted_{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&allowed);
@@ -263,4 +263,4 @@ fn macos_sandbox_denies_network() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // NOTE: Tests for sandbox_policy::default_sandbox_config (Bash, Write policies)
-// live in crates/tools/tests/ since they depend on coderex_tools.
+// live in crates/tools/tests/ since they depend on codape_tools.

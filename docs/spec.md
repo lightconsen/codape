@@ -1,10 +1,10 @@
-CodeRex 功能对等设计方案
+Codape 功能对等设计方案
 
-目标不是只复刻一个”会调工具的 REPL”，而是尽量对齐 coderex 的完整能力面：核心对话引擎、工具系统、上下文压缩、Hook、子代理、任务与团队、Bridge 远程控制、Server/SDK、MCP、插件与 marketplace、企业托管配置、团队记忆同步、自动记忆整理、语音/Vim/UI 产品能力，以及 feature flag 驱动的可选子系统。
+目标不是只复刻一个”会调工具的 REPL”，而是尽量对齐 codape 的完整能力面：核心对话引擎、工具系统、上下文压缩、Hook、子代理、任务与团队、Bridge 远程控制、Server/SDK、MCP、插件与 marketplace、企业托管配置、团队记忆同步、自动记忆整理、语音/Vim/UI 产品能力，以及 feature flag 驱动的可选子系统。
 
 一、设计目标
 
-1. 功能对等优先：对齐 coderex 的主干能力和重要产品能力，而不是只做最小可用代理。
+1. 功能对等优先：对齐 codape 的主干能力和重要产品能力，而不是只做最小可用代理。
 2. 核心与边缘分层：把“必须兼容”的内核能力和“feature gate/产品化”的扩展能力分别建模。
 3. 强安全边界：工具执行、权限、远程控制、MCP、插件都必须有独立的安全模型。
 4. Rust 原生实现：单一二进制、稳定并发、长期运行、跨平台、一致的状态模型。
@@ -109,7 +109,7 @@ OAuth2 | oauth2 | MCP OAuth、登录、托管配置拉取
 
 5.1 QueryEngine
 
-QueryEngine 是内核，必须覆盖 coderex 中真正影响行为的关键路径，而不只是一个“LLM 调工具循环”。
+QueryEngine 是内核，必须覆盖 codape 中真正影响行为的关键路径，而不只是一个“LLM 调工具循环”。
 
 ```rust
 pub struct QueryEngine {
@@ -239,7 +239,7 @@ pub struct TurnRuntime {
 
 5.2 TokenBudget 与 CostTracker
 
-TokenBudget 不只是“达到阈值即停”，而应复刻 coderex 的两个核心判断：
+TokenBudget 不只是“达到阈值即停”，而应复刻 codape 的两个核心判断：
 
 1. 消耗比例是否接近预算上限。
 2. 连续若干次 continuation 后，delta token 是否已接近收益递减。
@@ -267,13 +267,13 @@ CostTracker 需要统计：
 
 5.3 工具系统
 
-coderex 真实能力不是“固定 43 个工具”这么简单，而是：
+codape 真实能力不是“固定 43 个工具”这么简单，而是：
 
 1. 一组稳定公开基线工具。
 2. 一组 feature-gated 或环境限定工具。
 3. 一组 MCP 动态工具。
 
-所以 CodeRex应拆成三层注册：
+所以 Codape应拆成三层注册：
 
 ```rust
 pub enum ToolTier {
@@ -381,7 +381,7 @@ MCP：
 
 43. REPL 内部兼容工具位或 SyntheticOutput 等价层
 
-注：这里保留“43 个公开基线工具”的概念，以对齐 coderex 的系统提示与用户感知；但实现层必须允许 feature-gated/internal 工具在运行时扩展，不把 43 这个数字当作硬上限。
+注：这里保留“43 个公开基线工具”的概念，以对齐 codape 的系统提示与用户感知；但实现层必须允许 feature-gated/internal 工具在运行时扩展，不把 43 这个数字当作硬上限。
 
 5.5 feature-gated / internal 工具
 
@@ -408,7 +408,7 @@ pub struct ToolRegistry {
 
 5.6 执行上下文与可用工具矩阵
 
-coderex 中工具不是“全时可用”。CodeRex应支持：
+codape 中工具不是“全时可用”。Codape应支持：
 
 ```rust
 pub enum ExecutionContext {
@@ -536,7 +536,7 @@ Hook 返回能力：
 
 5.10 Slash Commands
 
-CodeRex命令系统除了命令本身，还要对齐两个实际运行特征：
+Codape命令系统除了命令本身，还要对齐两个实际运行特征：
 
 1. 命令类型：Local、LocalUi、Prompt、Standalone。
 2. 命令可用性矩阵：非交互可用、remote-safe、bridge-safe、feature-gated。
@@ -587,7 +587,7 @@ pub struct SlashCommand {
 
 5.11.1 提示词引擎与上下文装配管线 (Prompt & Context Rendering)
 
-为了最大化利用 Anthropic Prompt Caching 并在对话过程中保持缓存命中率，coderex 的 System Prompt 和上下文装配并非简单的字符串拼接，而是经过了精心设计的分层架构：
+为了最大化利用 Anthropic Prompt Caching 并在对话过程中保持缓存命中率，codape 的 System Prompt 和上下文装配并非简单的字符串拼接，而是经过了精心设计的分层架构：
 
 1. **System Prompt Registry (系统提示词装配)**：
    提示词被拆分为 Static（静态可高度缓存）与 Dynamic（单回合动态生成）两部分：
@@ -595,11 +595,11 @@ pub struct SlashCommand {
    - **Dynamic Sections**：每回合重新计算，如 `session_guidance`、`memory` 最新快照、Feature Flags 控制的约束（如 `[token_budget]` 限额）、最近接入动态刷新的 `mcp_instructions`。
 
 2. **User Context vs System Context**：
-   在真正合并时，coderex 刻意分离了 `systemContext` 与 `userContext` 的存放位置，体现了深度的工程优化：
+   在真正合并时，codape 刻意分离了 `systemContext` 与 `userContext` 的存放位置，体现了深度的工程优化：
    - **System Context (系统基准)**：如 `git status`、`recent commits` 等仓库环境快照。这部分被调用 `appendSystemContext` 直接附加在组装好的 System Prompt 尾部。
    - **User Context (用户文档/指令)**：如贯穿全本的多层级 `CLAUDE.md`、`currentDate` 等。此部分**并非放入系统提示词**，而是通过 `prependUserContext`，**伪装成整个对话历史数组 `messages[]` 的第 1 条用户消息**，将其巧妙地包裹在 `<system-reminder>` XML 标签内。
 
-CodeRex应使用 `PromptCompiler` 负责此管线：
+Codape应使用 `PromptCompiler` 负责此管线：
 
 ```rust
 pub struct PromptCompiler {
@@ -650,11 +650,11 @@ impl PromptCompiler {
 
 5.12.1 数据持久化与存储 Schema (Data Storage)
 
-coderex 完全依赖文件系统和特定组织架构来进行状态管理。为了保证与 coderex 生态的兼容性（包括允许未来两个版本共享配置或离线存储），CodeRex本的本地数据目录必须严格对齐 `getClaudeConfigHomeDir()`（默认 `~/.coderex`）的路径范式：
+codape 完全依赖文件系统和特定组织架构来进行状态管理。为了保证与 codape 生态的兼容性（包括允许未来两个版本共享配置或离线存储），Codape本的本地数据目录必须严格对齐 `getClaudeConfigHomeDir()`（默认 `~/.codape`）的路径范式：
 
 目录拓扑规范：
 ```text
-~/.coderex/
+~/.codape/
 ├── settings.json            # 用户全局配置
 ├── managed_settings.json    # 企业远程托管配置的缓存 (checksum 校验)
 ├── policy_limits.json       # API 速率、Budget 等服务端策略限额缓存
@@ -671,13 +671,13 @@ coderex 完全依赖文件系统和特定组织架构来进行状态管理。为
 ```
 
 为什么使用 JSONL 而不是全量放入 SQLite？
-coderex **没有**使用关系型数据库保存对话流 (Transcript)，而是使用 JSONL `O_APPEND` 追加写入。
+codape **没有**使用关系型数据库保存对话流 (Transcript)，而是使用 JSONL `O_APPEND` 追加写入。
 - 落盘抗毁：在后台崩溃时不易掉数据，追加行为原子且安全。
 - 内存可控：流式读取（部分 session 文件可达 GB 级别），且支持 `SKIP_FIRST_PROMPT_PATTERN` 正则跳过无用进度事件。
 - 第三方兼容：可以直接供外部编辑器或其他工具直接 `tail -f` 监控大模型输出。
 
 附属索引层 (SQLite Session Meta Index) 设计：
-虽然内容体使用 JSONL，但为了支持快速的 `/history` 搜索、`/cost` 聚合统计，CodeRex建议引入 SQLite 数据库（如 `~/.coderex/sessions.db`）建立元数据索引层。仅依靠文件扫描会产生 OOM 与“I/O 读取刺客”问题：
+虽然内容体使用 JSONL，但为了支持快速的 `/history` 搜索、`/cost` 聚合统计，Codape建议引入 SQLite 数据库（如 `~/.codape/sessions.db`）建立元数据索引层。仅依靠文件扫描会产生 OOM 与“I/O 读取刺客”问题：
 
 ```sql
 -- 推荐的 rusqlite Schema
@@ -696,7 +696,7 @@ CREATE TABLE sessions (
 CREATE INDEX idx_project_path ON sessions(project_path);
 CREATE INDEX idx_last_active ON sessions(last_active_at DESC);
 ```
-此架构同时保障了 coderex 级别的安全恢复机制与 Rust 原生的高效检索能力。
+此架构同时保障了 codape 级别的安全恢复机制与 Rust 原生的高效检索能力。
 
 ```rust
 pub struct MemorySystem {
@@ -805,7 +805,7 @@ Server/daemon 必须支持：
 
 5.16.1 Bridge 远程会话业务时序
 
-Bridge 的本质不是“开个 ws 服务器”，而是一个远程工作编排系统。CodeRex应把会话生命周期显式定义出来，避免把 spawn、cleanup、title、permission forwarding 和 stopWork 逻辑揉在一个巨大函数里。
+Bridge 的本质不是“开个 ws 服务器”，而是一个远程工作编排系统。Codape应把会话生命周期显式定义出来，避免把 spawn、cleanup、title、permission forwarding 和 stopWork 逻辑揉在一个巨大函数里。
 
 推荐时序：
 
@@ -872,7 +872,7 @@ Remote Control Plane
 
 5.17 Structured I/O / SDK
 
-要实现与 coderex headless path 对等，必须提供：
+要实现与 codape headless path 对等，必须提供：
 
 - structured event stream
 - tool call / tool result / status / compact boundary 事件
@@ -908,10 +908,10 @@ Buddy 属于可选产品能力，但 spec 必须承认它存在：
 
 5.18.1 UI 范式转换与状态渲染体系 (UI Paradigm Shift)
 
-coderex 的 UI 层使用了基于 React 的 `Ink` 框架，这意味着它深度依赖虚拟 DOM、组件生命周期和响应式状态（如 `useState`, `useAppState`）。而 CodeRex采纳了 `ratatui`，这是一个即时渲染 GUI (Immediate Mode GUI) 框架。要实现平滑迁移并保证与后台引擎的高效互动，必须对 UI 架构做以下范式颠覆：
+codape 的 UI 层使用了基于 React 的 `Ink` 框架，这意味着它深度依赖虚拟 DOM、组件生命周期和响应式状态（如 `useState`, `useAppState`）。而 Codape采纳了 `ratatui`，这是一个即时渲染 GUI (Immediate Mode GUI) 框架。要实现平滑迁移并保证与后台引擎的高效互动，必须对 UI 架构做以下范式颠覆：
 
 1. 分离状态所有权结构（全局状态分离）
-在 React 中，状态散布在全局 `AppState` 和各类组件自身的 Hooks 内。在 CodeRex中，UI 状态（焦点、层级、按键输入）必须与业务内核彻底解耦，形成独立、集中持有的结构树，只读借用内核数据做快照。
+在 React 中，状态散布在全局 `AppState` 和各类组件自身的 Hooks 内。在 Codape中，UI 状态（焦点、层级、按键输入）必须与业务内核彻底解耦，形成独立、集中持有的结构树，只读借用内核数据做快照。
 ```rust
 pub struct UiState {
     pub active_view: ViewMode, // 比如 MainRepl, PermissionModal, MessageSelector
@@ -920,7 +920,7 @@ pub struct UiState {
     pub overlays: Vec<OverlayType>, // 支持多层浮层覆盖
     pub scroll_offset: usize,
     pub notifications: Vec<Notification>,
-    // 将 coderex 原有的零散 useEffect 变量全部集中化
+    // 将 codape 原有的零散 useEffect 变量全部集中化
     pub companion: CompanionState, 
 }
 ```
@@ -939,7 +939,7 @@ pub enum UiEvent {
 整个 UI 生命周期的底层将通过 `tokio::select!` 统一消费 `UiEvent`。拿到事件后立即更新对应的 `AppState` 和 `UiState`，然后无论状态变与不变，触发一次全屏 Frame 重绘。
 
 3. Ratatui 即时绘制树 (Immediate Mode Rendering Tree)
-coderex 的 `<Box><Text color="green">{reaction}</Text></Box>` 组件体系，必须从“常驻内存对象树”重构为“在每一帧 (Tick) 由顶向下的全量重新计算”。
+codape 的 `<Box><Text color="green">{reaction}</Text></Box>` 组件体系，必须从“常驻内存对象树”重构为“在每一帧 (Tick) 由顶向下的全量重新计算”。
 所有部件的绘制抽象为纯函数 `render(&mut Frame, &AppState, &UiState)`，不存在状态留滞污染。
 ```rust
 impl TerminalUi {
@@ -965,7 +965,7 @@ impl TerminalUi {
 }
 ```
 **这一层变革的工程收益**：
-彻底消灭了 coderex 基于 CSS-like Flexbox 模型在长文本输出和特殊尺寸终端下偶尔导致的渲染警告、组件高度重叠、滚屏撕裂等痼疾。让 Rust 具有比 Ink 更加像素级且绝对硬实时的布局操控能力。
+彻底消灭了 codape 基于 CSS-like Flexbox 模型在长文本输出和特殊尺寸终端下偶尔导致的渲染警告、组件高度重叠、滚屏撕裂等痼疾。让 Rust 具有比 Ink 更加像素级且绝对硬实时的布局操控能力。
 
 5.19 配置、托管配置与企业功能
 
@@ -1084,7 +1084,7 @@ async fn main() -> Result<()> {
 
 七点一 启动初始化时序
 
-从架构设计角度看，启动流程是 coderex 和 spec 最大的差异之一。真实系统启动时会并行加载配置、命令、skills、plugins、MCP、remote settings、UI 状态；如果顺序没定义清楚，CodeRex很容易出现隐式依赖和竞态。
+从架构设计角度看，启动流程是 codape 和 spec 最大的差异之一。真实系统启动时会并行加载配置、命令、skills、plugins、MCP、remote settings、UI 状态；如果顺序没定义清楚，Codape很容易出现隐式依赖和竞态。
 
 建议把启动流程拆成 4 个阶段：
 
@@ -1276,4 +1276,4 @@ feature flags 太多导致代码分叉 | 使用 CapabilitySet 统一收束运行
 
 它保留了原方案中正确的主干：QueryEngine、工具系统、Task/Agent、MCP、Bridge、Server、Cron、Hook、Compact、权限、记忆、UI；同时补齐了之前缺失或过度简化的真实子系统：feature-gated/internal tools、expanded hook event surface、remote-safe/bridge-safe command availability、plugin marketplace、team memory sync、remote managed settings、auto dream、buddy/statusline 等产品能力。
 
-如果按这份 spec 落地，CodeRex不只是”像原版”，而是能够在架构上承接 coderex 的完整能力面，并允许按发行层级裁剪。
+如果按这份 spec 落地，Codape不只是”像原版”，而是能够在架构上承接 codape 的完整能力面，并允许按发行层级裁剪。

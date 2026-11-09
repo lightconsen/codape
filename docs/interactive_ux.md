@@ -2,7 +2,7 @@
 
 ## Goal
 
-Define a Claude Code-like interactive experience for `coderex` TUI mode and
+Define a Claude Code-like interactive experience for `codape` TUI mode and
 the engineering work needed to implement it safely and test it reliably.
 
 This document covers:
@@ -24,7 +24,7 @@ REPL, not to leak internal reasoning text.
 
 ## Product Goal
 
-When the user is in interactive mode, `coderex` should feel alive while a task
+When the user is in interactive mode, `codape` should feel alive while a task
 is in progress.
 
 Instead of showing only a final answer, the UI should communicate:
@@ -52,7 +52,7 @@ The user should be able to see status updates such as:
 - `Thinking...`
 - `Planning...`
 - `Reading src/lib.rs...`
-- `Running cargo test -p coderex-cli...`
+- `Running cargo test -p codape-cli...`
 - `Applying patch to 2 files...`
 - `Waiting for permission: Write`
 
@@ -63,7 +63,7 @@ Example:
 ```text
 ◐ Planning...  (3s)
 ◓ Reading src/lib.rs...  (5s)
-◑ Running cargo test -p coderex-cli...  (19s)
+◑ Running cargo test -p codape-cli...  (19s)
 ```
 
 ### After a turn
@@ -231,7 +231,7 @@ Examples:
 
 - `Read { file_path: "src/lib.rs" }` -> `Reading src/lib.rs...`
 - `Grep { pattern: "QueryEngine" }` -> `Searching for QueryEngine...`
-- `Bash { command: "cargo test -p coderex-cli" }` -> `Running cargo test -p coderex-cli...`
+- `Bash { command: "cargo test -p codape-cli" }` -> `Running cargo test -p codape-cli...`
 - patch apply across two files -> `Applying patch to 2 files...`
 
 This layer should:
@@ -293,7 +293,7 @@ Examples:
 
 - `Planning next step...`
 - `Read src/lib.rs`
-- `Running cargo test -p coderex-cli`
+- `Running cargo test -p codape-cli`
 - `Applied patch to 2 files`
 
 These should not flood the transcript; keep them concise.
@@ -405,14 +405,14 @@ Real interactive mode depends on:
 - alternate screen behavior
 - key events rather than line-only stdin
 
-So tests should launch `coderex` **without `-p`** inside a PTY and interact with
+So tests should launch `codape` **without `-p`** inside a PTY and interact with
 it like a user would.
 
 ### Harness capabilities
 
 The harness should support:
 
-1. start `coderex` in PTY mode
+1. start `codape` in PTY mode
 2. set terminal size
 3. send text lines
 4. send special keys (`Enter`, arrows, `Ctrl+C`, `Ctrl+D`, `Esc`)

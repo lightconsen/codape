@@ -16,5 +16,5 @@ iterations="${1:-20000}"
 
 echo "race soak: ${iterations} iterations"
 RACE_SOAK_ITERATIONS="$iterations" \
-    cargo test --locked -p coderex-tools --lib symlink_and_rename_churn \
+    cargo test --locked -p codape-tools --lib symlink_and_rename_churn \
     -- --ignored --nocapture

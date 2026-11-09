@@ -1,14 +1,14 @@
 //! Canonical hook event names.
 //!
-//! Event names cross a crate boundary: `coderex-core` fires them through the
+//! Event names cross a crate boundary: `codape-core` fires them through the
 //! [`HookExecutor`](crate::hook_executor::HookExecutor) trait, and
-//! `coderex-hooks` matches them against the names configured in settings.
+//! `codape-hooks` matches them against the names configured in settings.
 //! Because matching is an exact string comparison, two different spellings of
 //! the same event silently never match — the hook appears configured but never
 //! runs, with no error anywhere.
 //!
 //! These constants are the single source of truth for the spelling. The
-//! `coderex-hooks` enum returns them from `HookEvent::as_str`, and a test there
+//! `codape-hooks` enum returns them from `HookEvent::as_str`, and a test there
 //! asserts the two stay in sync.
 
 /// Before a tool is used.

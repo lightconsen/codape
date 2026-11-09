@@ -1,5 +1,5 @@
 [package]
-name = "coderex-fuzz"
+name = "codape-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -13,13 +13,13 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 
-[dependencies.coderex-core]
+[dependencies.codape-core]
 path = "../crates/core"
 
-[dependencies.coderex-config]
+[dependencies.codape-config]
 path = "../crates/config"
 
-[dependencies.coderex-plugins]
+[dependencies.codape-plugins]
 path = "../crates/plugins"
 
 [[bin]]

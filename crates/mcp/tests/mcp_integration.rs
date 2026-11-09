@@ -9,16 +9,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use coderex_core::tool_executor::ToolExecutor;
-use coderex_mcp::channel::JsonRpcChannel;
-use coderex_mcp::config::{McpConfig, McpServerConfig};
-use coderex_mcp::manager::McpManager;
-use coderex_mcp::oauth::{McpOAuthState, OAuthManager};
-use coderex_mcp::proxy::McpToolProxy;
-use coderex_mcp::resources::{McpResource, McpResourceRegistry};
-use coderex_mcp::result_adapter::McpResultAdapter;
-use coderex_mcp::server::{McpServer, ServerStatus};
-use coderex_tools::{
+use codape_core::tool_executor::ToolExecutor;
+use codape_mcp::channel::JsonRpcChannel;
+use codape_mcp::config::{McpConfig, McpServerConfig};
+use codape_mcp::manager::McpManager;
+use codape_mcp::oauth::{McpOAuthState, OAuthManager};
+use codape_mcp::proxy::McpToolProxy;
+use codape_mcp::resources::{McpResource, McpResourceRegistry};
+use codape_mcp::result_adapter::McpResultAdapter;
+use codape_mcp::server::{McpServer, ServerStatus};
+use codape_tools::{
     ExecutionConfig, ExecutionContext, RegistryToolDispatcher, ToolExecutor as ToolsExecutor,
     ToolRegistry,
 };
@@ -154,7 +154,7 @@ fn mock_server_path() -> PathBuf {
     // name: two concurrently running nextest processes would otherwise write
     // and exec the same file, and exec can race the write with ETXTBSY.
     let path = tmp.join(format!(
-        "coderex_mock_mcp_server_{}_{id}.py",
+        "codape_mock_mcp_server_{}_{id}.py",
         std::process::id()
     ));
     std::fs::write(&path, MOCK_MCP_SERVER).unwrap();
@@ -305,7 +305,7 @@ def send(obj):
 
 def log(obj):
     # What the client answered, for the test to read.
-    path = os.environ.get("CODEREX_MOCK_ANSWER_LOG")
+    path = os.environ.get("CODAPE_MOCK_ANSWER_LOG")
     if path:
         with open(path, "a") as handle:
             handle.write(json.dumps(obj) + "\n")
@@ -344,7 +344,7 @@ fn asking_server_path() -> PathBuf {
     let id = MOCK_ID.fetch_add(1, Ordering::SeqCst);
     // Same per-process counter caveat as `mock_server_path`: include the pid.
     let path =
-        std::env::temp_dir().join(format!("coderex_asking_mcp_{}_{id}.py", std::process::id()));
+        std::env::temp_dir().join(format!("codape_asking_mcp_{}_{id}.py", std::process::id()));
     std::fs::write(&path, ASKING_SERVER).unwrap();
     #[cfg(unix)]
     {
@@ -363,12 +363,12 @@ struct RecordingHandler {
 }
 
 #[async_trait::async_trait]
-impl coderex_mcp::channel::InboundRequestHandler for RecordingHandler {
+impl codape_mcp::channel::InboundRequestHandler for RecordingHandler {
     async fn handle(
         &self,
         method: &str,
         _params: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value, coderex_mcp::channel::JsonRpcError> {
+    ) -> Result<serde_json::Value, codape_mcp::channel::JsonRpcError> {
         self.asked.lock().unwrap().push(method.to_string());
         Ok(serde_json::json!({"action": "accept", "content": {"environment": "test"}}))
     }
@@ -384,12 +384,12 @@ struct SlowHandler {
 }
 
 #[async_trait::async_trait]
-impl coderex_mcp::channel::InboundRequestHandler for SlowHandler {
+impl codape_mcp::channel::InboundRequestHandler for SlowHandler {
     async fn handle(
         &self,
         method: &str,
         _params: Option<&serde_json::Value>,
-    ) -> Result<serde_json::Value, coderex_mcp::channel::JsonRpcError> {
+    ) -> Result<serde_json::Value, codape_mcp::channel::JsonRpcError> {
         self.asked.lock().unwrap().push(method.to_string());
         tokio::time::sleep(self.delay).await;
         Ok(self.answer.clone())
@@ -400,7 +400,7 @@ fn answer_log() -> PathBuf {
     // As with the mock scripts, the counter is per process: include the pid so
     // two nextest processes cannot share one answer log.
     let log = std::env::temp_dir().join(format!(
-        "coderex_mock_answers_{}_{}.jsonl",
+        "codape_mock_answers_{}_{}.jsonl",
         std::process::id(),
         MOCK_ID.fetch_add(1, Ordering::SeqCst)
     ));
@@ -410,7 +410,7 @@ fn answer_log() -> PathBuf {
 
 fn answer_env(log: &std::path::Path) -> HashMap<String, String> {
     HashMap::from([(
-        "CODEREX_MOCK_ANSWER_LOG".to_string(),
+        "CODAPE_MOCK_ANSWER_LOG".to_string(),
         log.to_string_lossy().into_owned(),
     )])
 }
@@ -918,7 +918,7 @@ fn oauth_manager_get_mut_updates_tokens() {
 #[test]
 fn oauth_token_persistence_roundtrip() {
     // An explicit path is file-only: the test must never touch the developer's
-    // keychain or ~/.coderex.
+    // keychain or ~/.codape.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mcp_tokens.json");
 
@@ -947,10 +947,10 @@ fn a_token_written_by_the_mcp_auth_tool_is_readable_by_the_oauth_manager() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mcp_tokens.json");
 
-    coderex_tools::persist_token_at(
+    codape_tools::persist_token_at(
         &path,
         "https://mcp.example",
-        "coderex-cli",
+        "codape-cli",
         "tool_access",
         3600,
         Some("tool_refresh"),
@@ -962,7 +962,7 @@ fn a_token_written_by_the_mcp_auth_tool_is_readable_by_the_oauth_manager() {
     let state = loaded.get("https://mcp.example").unwrap();
     assert_eq!(state.access_token.as_deref(), Some("tool_access"));
     assert_eq!(state.refresh_token.as_deref(), Some("tool_refresh"));
-    assert_eq!(state.client_id, "coderex-cli");
+    assert_eq!(state.client_id, "codape-cli");
     // The refresh path needs an endpoint; it derives the one the tool used.
     assert_eq!(state.token_endpoint(), "https://mcp.example/oauth/token");
 }
@@ -980,10 +980,10 @@ async fn discovery_cached_by_the_mcp_auth_tool_is_reused_by_the_oauth_manager() 
     let authorization = "https://id.example/realms/demo/protocol/openid-connect/auth";
     let token = "https://id.example/realms/demo/protocol/openid-connect/token";
 
-    coderex_tools::cache_discovery_at(
+    codape_tools::cache_discovery_at(
         &path,
         issuer,
-        "coderex-cli",
+        "codape-cli",
         Some(authorization),
         Some(token),
         &["openid".to_string(), "mcp".to_string()],
@@ -1017,10 +1017,10 @@ fn discovery_cached_by_the_tool_is_keyed_by_the_normalized_issuer() {
     let issuer = "http://127.0.0.1:1/realms/demo";
     let token = "https://id.example/realms/demo/protocol/openid-connect/token";
 
-    coderex_tools::cache_discovery_at(
+    codape_tools::cache_discovery_at(
         &path,
         spelled,
-        "coderex-cli",
+        "codape-cli",
         Some("https://id.example/realms/demo/protocol/openid-connect/auth"),
         Some(token),
         &["openid".to_string()],
@@ -1101,7 +1101,7 @@ fn the_discovery_fields_written_by_the_tool_survive_and_parse_in_the_manager() {
     std::fs::write(&path, document.to_string()).unwrap();
 
     // The tool's read-modify-write path must not drop fields it does not set.
-    coderex_tools::persist_token_at(&path, server, "dyn-client", "new", 3600, Some("refresh"))
+    codape_tools::persist_token_at(&path, server, "dyn-client", "new", 3600, Some("refresh"))
         .unwrap();
 
     let raw: serde_json::Value =

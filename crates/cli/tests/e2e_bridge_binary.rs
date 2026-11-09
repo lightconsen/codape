@@ -1,4 +1,4 @@
-//! `coderex bridge` through the real binary: register with a fake control
+//! `codape bridge` through the real binary: register with a fake control
 //! plane, poll an assignment, spawn the session process, and relay its output
 //! over the WebSocket transport.
 
@@ -213,7 +213,7 @@ async fn bridge_runs_an_assignment_and_relays_its_output() {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .unwrap();
-    let mut bridge = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "bridge",
             "--control-plane-url",
@@ -238,12 +238,12 @@ async fn bridge_runs_an_assignment_and_relays_its_output() {
         .env("ANTHROPIC_BASE_URL", &provider_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex bridge");
+        .expect("spawn codape bridge");
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     let mut relayed = Vec::new();
@@ -404,7 +404,7 @@ async fn bridge_reconnects_and_resumes_from_the_last_sequence() {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .unwrap();
-    let mut bridge = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut bridge = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "bridge",
             "--control-plane-url",
@@ -429,12 +429,12 @@ async fn bridge_reconnects_and_resumes_from_the_last_sequence() {
         .env("ANTHROPIC_BASE_URL", &provider_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex bridge");
+        .expect("spawn codape bridge");
 
     let from = tokio::time::timeout(Duration::from_secs(40), resume_rx.recv())
         .await

@@ -9,11 +9,11 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// GitHub repo owner for update checks.
 pub const REPO_OWNER: &str = "lightconsen";
 /// GitHub repo name for update checks.
-pub const REPO_NAME: &str = "coderex";
+pub const REPO_NAME: &str = "codape";
 
 /// Set this to stop the once-a-day startup check (air-gapped machines, or a
 /// host that wants no outbound requests it did not ask for).
-pub const DISABLE_UPDATE_CHECK_ENV: &str = "CODEREX_DISABLE_UPDATE_CHECK";
+pub const DISABLE_UPDATE_CHECK_ENV: &str = "CODAPE_DISABLE_UPDATE_CHECK";
 
 /// The releases page, for messages that tell the user where to look.
 #[must_use]
@@ -31,7 +31,7 @@ pub async fn check_for_updates() -> Option<String> {
 
     if is_newer(&release.version, CURRENT_VERSION) {
         Some(format!(
-            "New version available: {} (current: {CURRENT_VERSION}). Run `coderex update` or visit {}",
+            "New version available: {} (current: {CURRENT_VERSION}). Run `codape update` or visit {}",
             release.version,
             releases_url()
         ))
@@ -77,7 +77,7 @@ fn dot_parts_newer(latest: &str, current: &str) -> bool {
     latest_parts.len() > current_parts.len()
 }
 
-/// Whether the given `CODEREX_DISABLE_UPDATE_CHECK` value turns checks off.
+/// Whether the given `CODAPE_DISABLE_UPDATE_CHECK` value turns checks off.
 ///
 /// Pure so the answer can be tested without mutating the process environment.
 #[must_use]
@@ -97,7 +97,7 @@ pub fn should_check(cwd: &Path) -> bool {
     if update_check_disabled(disabled.as_deref()) {
         return false;
     }
-    let marker = cwd.join(".coderex/.last_version_check");
+    let marker = cwd.join(".codape/.last_version_check");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
@@ -118,7 +118,7 @@ pub fn should_check(cwd: &Path) -> bool {
 
 /// Record that an update check was performed.
 pub fn record_check_time(cwd: &Path) {
-    let marker = cwd.join(".coderex/.last_version_check");
+    let marker = cwd.join(".codape/.last_version_check");
     if let Some(parent) = marker.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -189,7 +189,7 @@ mod tests {
     fn the_releases_url_names_the_public_repo() {
         assert_eq!(
             releases_url(),
-            "https://github.com/lightconsen/coderex/releases"
+            "https://github.com/lightconsen/codape/releases"
         );
     }
 
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn should_check_with_fresh_file() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".coderex")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".codape")).unwrap();
         record_check_time(tmp.path());
         assert!(!should_check(tmp.path()));
     }
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn should_check_with_old_file() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".coderex")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".codape")).unwrap();
         // Write an old timestamp
         let old = SystemTime::now()
             .checked_sub(Duration::from_hours(48))
@@ -219,7 +219,7 @@ mod tests {
             .unwrap()
             .as_secs();
         std::fs::write(
-            tmp.path().join(".coderex/.last_version_check"),
+            tmp.path().join(".codape/.last_version_check"),
             old.to_string(),
         )
         .unwrap();
@@ -230,6 +230,6 @@ mod tests {
     fn record_check_time_creates_file() {
         let tmp = tempfile::tempdir().unwrap();
         record_check_time(tmp.path());
-        assert!(tmp.path().join(".coderex/.last_version_check").exists());
+        assert!(tmp.path().join(".codape/.last_version_check").exists());
     }
 }

@@ -58,8 +58,8 @@ impl OpenAiCompatibleProvider {
             model_map: std::collections::HashMap::new(),
             provider_profile: None,
             default_headers: BTreeMap::new(),
-            session_id: std::env::var("CODEREX_SESSION_ID").ok(),
-            device_id: std::env::var("CODEREX_DEVICE_ID").ok(),
+            session_id: std::env::var("CODAPE_SESSION_ID").ok(),
+            device_id: std::env::var("CODAPE_DEVICE_ID").ok(),
             request_context: None,
             client_name: "cli".into(),
             max_retries: 3,
@@ -212,7 +212,7 @@ impl OpenAiCompatibleProvider {
 
     fn user_agent() -> String {
         format!(
-            "CodeRex/{} ({}; {})",
+            "Codape/{} ({}; {})",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -226,21 +226,21 @@ impl OpenAiCompatibleProvider {
     ) -> reqwest::RequestBuilder {
         req = req
             .header("User-Agent", Self::user_agent())
-            .header("X-CodeRex-Client", &self.client_name)
-            .header("X-CodeRex-Request-Id", request_id);
+            .header("X-Codape-Client", &self.client_name)
+            .header("X-Codape-Request-Id", request_id);
         if let Some(session_id) = self
             .request_context()
             .and_then(|ctx| ctx.session_id.clone())
             .or_else(|| self.session_id.clone())
-            .or_else(|| std::env::var("CODEREX_SESSION_ID").ok())
+            .or_else(|| std::env::var("CODAPE_SESSION_ID").ok())
             && !session_id.trim().is_empty()
         {
-            req = req.header("X-CodeRex-Session-Id", session_id);
+            req = req.header("X-Codape-Session-Id", session_id);
         }
         if let Some(agent_id) = self.request_context().and_then(|ctx| ctx.agent_id.clone())
             && !agent_id.trim().is_empty()
         {
-            req = req.header("X-CodeRex-Agent-Id", agent_id);
+            req = req.header("X-Codape-Agent-Id", agent_id);
         }
         if self.resolved_profile().name == "dashscope" {
             req = req
@@ -259,13 +259,13 @@ impl OpenAiCompatibleProvider {
             .request_context()
             .and_then(|ctx| ctx.session_id.clone())
             .or_else(|| self.session_id.clone())
-            .or_else(|| std::env::var("CODEREX_SESSION_ID").ok())
+            .or_else(|| std::env::var("CODAPE_SESSION_ID").ok())
             .unwrap_or_else(|| "unknown".into());
         let device_id = self
             .request_context()
             .and_then(|ctx| ctx.device_id.clone())
             .or_else(|| self.device_id.clone())
-            .or_else(|| std::env::var("CODEREX_DEVICE_ID").ok())
+            .or_else(|| std::env::var("CODAPE_DEVICE_ID").ok())
             .unwrap_or_else(|| "unknown".into());
         serde_json::json!({
             "device_id": device_id,
@@ -287,7 +287,7 @@ impl OpenAiCompatibleProvider {
                 .request_context()
                 .and_then(|ctx| ctx.session_id.clone())
                 .or_else(|| self.session_id.clone())
-                .or_else(|| std::env::var("CODEREX_SESSION_ID").ok())
+                .or_else(|| std::env::var("CODAPE_SESSION_ID").ok())
                 .unwrap_or_else(|| "unknown".to_string());
             obj.insert(
                 "metadata".to_string(),
@@ -1380,15 +1380,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn apply_standard_headers_includes_coderex_headers() {
+    fn apply_standard_headers_includes_codape_headers() {
         let provider = OpenAiCompatibleProvider::new("openai", "https://api.openai.com", "k");
         let req = provider.client.post("https://example.com");
         let req = provider.apply_standard_headers(req, "req-42");
         let built = req.build().expect("request build");
         let headers = built.headers();
         assert!(headers.get("User-Agent").is_some());
-        assert_eq!(headers.get("X-CodeRex-Client").unwrap(), "cli");
-        assert_eq!(headers.get("X-CodeRex-Request-Id").unwrap(), "req-42");
+        assert_eq!(headers.get("X-Codape-Client").unwrap(), "cli");
+        assert_eq!(headers.get("X-Codape-Request-Id").unwrap(), "req-42");
     }
 
     #[test]
