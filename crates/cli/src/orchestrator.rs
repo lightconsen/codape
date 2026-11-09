@@ -3510,6 +3510,7 @@ impl StartupOrchestrator {
             );
             engine.set_tool_executor(Box::new(dispatcher));
             engine.set_context_window_resolver(context_window.clone());
+            engine.set_persist_learned_context_window(true);
             // The same flag behaviours the REPL installs: a served session
             // honours `coordinator_mode` and `history_snip` too.
             let memory_base = std::path::PathBuf::from(&cwd)

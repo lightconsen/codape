@@ -526,6 +526,53 @@ impl ContextWindowOverrides {
     pub fn load_client_data() -> Self {
         Self::from_json_file(&context_window_client_data_path()).unwrap_or_default()
     }
+
+    /// Remember a window the provider stated, so the next session starts
+    /// knowing it.
+    ///
+    /// The client-data file is the right home for this rather than
+    /// `settings.json`: it is the source whose whole purpose is values learned
+    /// about an endpoint, it is not a file a person maintains by hand, and it
+    /// sits *below* settings and the environment in the resolution chain — so
+    /// an explicit choice in either still wins, and nothing the user wrote is
+    /// ever edited.
+    ///
+    /// The write is merge-in-place: other models already in the file keep
+    /// their entries, and an existing entry that is already correct is left
+    /// alone. A refused or failed write is a warning, never an error — the
+    /// window is still known for the rest of this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O or serialization error so a caller can report it. The
+    /// engine does not: learning a window must not fail a turn.
+    pub fn remember_provider_window(
+        model: &str,
+        tokens: usize,
+        path: &Path,
+    ) -> std::io::Result<()> {
+        if model.trim().is_empty() || tokens == 0 {
+            return Ok(());
+        }
+        let mut overrides = Self::from_json_file(path).unwrap_or_default();
+        if overrides.models.get(model) == Some(&tokens) {
+            return Ok(());
+        }
+        overrides.models.insert(model.to_string(), tokens);
+
+        let json = serde_json::to_string_pretty(&overrides).map_err(std::io::Error::other)?;
+        // Write beside the target and rename over it: a half-written file is
+        // not valid JSON, and the next session would read it as absent and
+        // lose every entry rather than just the new one.
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, json)?;
+        std::fs::rename(&temporary, path)
+    }
 }
 
 /// Where a resolved context window came from.
@@ -1507,5 +1554,99 @@ mod context_window_tests {
             Some(210_000),
             "provider-prefixed map keys still match the bare model name"
         );
+    }
+
+    /// The file a second session reads must keep everything the first one
+    /// knew, not just the entry being written.
+    #[test]
+    fn remembering_a_window_keeps_the_other_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_windows.json");
+        std::fs::write(
+            &path,
+            r#"{"default": 64000, "models": {"my-gateway-alias": 128000}}"#,
+        )
+        .unwrap();
+
+        ContextWindowOverrides::remember_provider_window("claude-sonnet-4-6", 213_462, &path)
+            .unwrap();
+
+        let written = ContextWindowOverrides::from_json_file(&path).expect("still valid JSON");
+        assert_eq!(written.resolve("claude-sonnet-4-6"), Some(213_462));
+        assert_eq!(
+            written.resolve("my-gateway-alias"),
+            Some(128_000),
+            "the entry that was already there was dropped"
+        );
+        assert_eq!(written.default, Some(64_000), "the default was dropped");
+    }
+
+    /// Writing the same window twice is not an error and does not disturb the
+    /// file, so a session that is rejected twice is not a special case.
+    #[test]
+    fn remembering_the_same_window_twice_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_windows.json");
+
+        ContextWindowOverrides::remember_provider_window("m", 200_000, &path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        ContextWindowOverrides::remember_provider_window("m", 200_000, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+    }
+
+    /// A window learned here is the *lowest*-priority remembered source: the
+    /// environment and settings still decide when they say anything.
+    #[test]
+    fn a_remembered_window_loses_to_the_environment_and_settings() {
+        let mut client_data = ContextWindowOverrides::default();
+        client_data.models.insert("m".into(), 213_462);
+
+        let from_client_data = ContextWindowResolver {
+            client_data,
+            ..ContextWindowResolver::default()
+        };
+        assert_eq!(from_client_data.resolve_detailed("m").tokens, 213_462);
+
+        let mut settings = ContextWindowOverrides::default();
+        settings.models.insert("m".into(), 128_000);
+        let with_settings = ContextWindowResolver {
+            settings,
+            ..from_client_data
+        };
+        assert_eq!(with_settings.resolve_detailed("m").tokens, 128_000);
+
+        let mut env = ContextWindowOverrides::default();
+        env.models.insert("M".into(), 200_000);
+        let with_env = ContextWindowResolver {
+            env,
+            ..with_settings
+        };
+        assert_eq!(with_env.resolve_detailed("m").tokens, 200_000);
+    }
+
+    /// The rename is what makes a half-written file impossible; a reader in
+    /// another session must never see the truncated document.
+    #[test]
+    fn a_remembered_window_leaves_no_temporary_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_windows.json");
+        ContextWindowOverrides::remember_provider_window("m", 200_000, &path).unwrap();
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["context_windows.json".to_string()], "{names:?}");
+    }
+
+    /// A missing config directory is created, so the first learned window on a
+    /// fresh machine is remembered rather than warned about.
+    #[test]
+    fn remembering_a_window_creates_the_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("context_windows.json");
+        ContextWindowOverrides::remember_provider_window("m", 200_000, &path).unwrap();
+        assert!(path.exists());
     }
 }

@@ -1946,6 +1946,15 @@ pub struct QueryEngine {
     /// session already paid for the failed request, and the next turn should
     /// not repeat the mistake.
     learned_context_window: Option<usize>,
+    /// Whether a learned window is also written to the client-data file.
+    ///
+    /// Off by default, on in the product: the engine construction path is also
+    /// what unit tests and embedders use, and an engine that writes to the
+    /// config home as a side effect of a constructor is a trap — a test suite
+    /// would then change the window the next real session starts with. The CLI
+    /// turns it on for the sessions it runs, which is where remembering the
+    /// window for the next session is the point.
+    persist_learned_context_window: bool,
     /// Hook executor for firing lifecycle hooks.
     ///
     /// Shared rather than owned so a session can hand a clone to a background
@@ -2337,6 +2346,7 @@ impl QueryEngine {
             compact_config: config,
             context_window_resolver: None,
             learned_context_window: None,
+            persist_learned_context_window: false,
             hooks: Arc::new(NoOpHookExecutor),
             session_watch_paths: Vec::new(),
             tools: Box::new(NoOpToolExecutor),
@@ -2680,6 +2690,15 @@ impl QueryEngine {
         self.context_window_resolver = Some(resolver);
     }
 
+    /// Whether a window learned from a provider is also written to the
+    /// client-data file, for the next session to find.
+    ///
+    /// Disabled by default; the CLI enables it. While disabled the window is
+    /// still learned for the running session.
+    pub const fn set_persist_learned_context_window(&mut self, persist: bool) {
+        self.persist_learned_context_window = persist;
+    }
+
     /// Compaction thresholds for this engine's model and override chain.
     ///
     /// A window learned from a provider's overflow error beats every other
@@ -2728,6 +2747,10 @@ impl QueryEngine {
     }
 
     /// Record a window the provider stated, so the rest of the session uses it.
+    ///
+    /// Also writes it to the client-data file (see
+    /// `persist_learned_context_window`), so the next session does not have to
+    /// be rejected once to learn the same thing.
     pub fn learn_context_window(&mut self, window: usize) {
         if window > 0 && self.learned_context_window != Some(window) {
             tracing::info!(
@@ -2737,6 +2760,25 @@ impl QueryEngine {
                 "provider reported the real context window"
             );
             self.learned_context_window = Some(window);
+            // Remember it for the next session too. A provider that rejects a
+            // request has already cost the session that request; making the
+            // next one pay for the same lesson is the whole complaint this
+            // answers. The write goes to the client-data file, which sits below
+            // settings and the environment — an explicit window in either still
+            // wins, and the user's settings file is never edited.
+            if self.persist_learned_context_window
+                && let Err(error) = crate::types::ContextWindowOverrides::remember_provider_window(
+                    &self.model.0,
+                    window,
+                    &crate::types::context_window_client_data_path(),
+                )
+            {
+                tracing::warn!(
+                    model = %self.model.0,
+                    %error,
+                    "could not remember the learned context window; this session still uses it"
+                );
+            }
         }
     }
 

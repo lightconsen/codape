@@ -188,6 +188,136 @@ fn run(
     child.wait_with_output().expect("wait")
 }
 
+/// A window the provider states must be waiting for the *next* session.
+///
+/// The complaint this answers: every fresh session in a new project was
+/// rejected once by the provider and only then learned the real window. The
+/// learned value now goes to the client-data file, which sits below settings
+/// and the environment — an explicit window still wins.
+#[tokio::test]
+async fn a_provider_stated_window_is_remembered_for_the_next_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            else {
+                break;
+            };
+            // Every request is refused with the shape the engine parses.
+            let _ = read_body(&mut socket).await;
+            let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    let cwd = dir.path().to_path_buf();
+    let home_path = home.path().to_path_buf();
+    let base = base_url.clone();
+    let output = tokio::task::spawn_blocking(move || run(&cwd, &home_path, &base, None, "hello"))
+        .await
+        .expect("join");
+    server.abort();
+    let _ = server.await;
+
+    // The turn itself is not expected to survive a provider that refuses every
+    // request; what matters is that the lesson was written down.
+    // The turn cannot survive a provider that refuses without ever answering;
+    // the frame says so, and the exit status of a reported run is still 0.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("prompt is too long"),
+        "the provider's error did not reach the transcript: {stdout}"
+    );
+    let recorded = std::fs::read_to_string(home.path().join("context_windows.json"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "the learned window was not remembered ({error}); stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert!(
+        recorded.contains("claude-sonnet-4-6") && recorded.contains("213462"),
+        "the provider's number was not what was remembered: {recorded}"
+    );
+}
+
+/// A second session must start with the learned window, not learn it again.
+///
+/// The remembered value is deliberately absurd — 1 000 tokens — so the session
+/// refuses to send anything. Without the file the table's 200 000 would let the
+/// turn through, so the refusal is proof the file was read, not a coincidence
+/// of the mock being permissive.
+#[tokio::test]
+async fn a_remembered_window_is_read_by_the_next_session() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+    // What the previous session left behind.
+    std::fs::write(
+        home.path().join("context_windows.json"),
+        r#"{"models": {"claude-sonnet-4-6": 1000}}"#,
+    )
+    .expect("client data");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            else {
+                break;
+            };
+            let _ = read_body(&mut socket).await;
+            let sse = sse_text("ok");
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                        sse.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    let cwd = dir.path().to_path_buf();
+    let home_path = home.path().to_path_buf();
+    let base = base_url.clone();
+    let output = tokio::task::spawn_blocking(move || run(&cwd, &home_path, &base, None, "hello"))
+        .await
+        .expect("join");
+    server.abort();
+    let _ = server.await;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("context window is still full after compaction"),
+        "the remembered 1 000-token window was not used:\n{stdout}"
+    );
+}
+
 #[tokio::test]
 async fn a_tiny_context_window_refuses_the_request_with_a_reason() {
     let (normal_turn, normal_stdout, _) = run_case(None, "hello").await;

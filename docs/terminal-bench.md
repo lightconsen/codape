@@ -2382,7 +2382,7 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## Codape defects the benchmark exposed
 
-All eighteen were real, and all are fixed:
+All nineteen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2940,20 +2940,33 @@ All eighteen were real, and all are fixed:
     `a_run_that_spent_its_ceiling_thinking_reports_no_output` and
     `a_no_op_turn_is_re_asked_at_a_larger_ceiling`.
 
+19. **A window the provider stated had to be learned again by every session.**
+    The engine adopted a provider-reported context window for the session that
+    saw the overflow (`learn_context_window`) and forgot it at exit, so every
+    new session in a new project paid one rejected request to learn the same
+    number. The benchmark runs sidestepped it with
+    `CODAPE_CONTEXT_WINDOW=131072`; ordinary sessions did not.
+
+    The learned value is now written to the client-data file
+    (`~/.codape/context_windows.json`) keyed by model. That file sits below
+    settings and the environment in the resolution chain, so an explicit window
+    still wins and the user's settings file is never edited. The write merges
+    in place, skips when the value is unchanged, and goes through a temporary
+    file and a rename. It is off for a directly-constructed engine and on for
+    CLI sessions, so a test run cannot change the window a real session starts
+    with.
+
+    Covered by `a_provider_stated_window_is_remembered_for_the_next_session`,
+    `a_remembered_window_is_read_by_the_next_session`, and the merge/atomicity
+    tests in `codape_core::types`.
+
 ### Known, unfixed
 
-- **`UNKNOWN_CONTEXT_WINDOW` is 32 000, and that is a conservative default, not
-  a defect.** For a model Codape does not recognise, it compacts against a 32 K
-  guess. The guess is only a *hint*: it drives when compaction starts but can
-  never refuse a request, and the first provider "prompt too long" error
-  teaches the session the real window (see
-  [Learning the window from the provider](compact.md#learning-the-window-from-the-provider)).
-  Guessing low costs some context; guessing high loses the conversation, so low
-  is the right side to be wrong on. The benchmark runs set
-  `CODAPE_CONTEXT_WINDOW=131072` to compact on the right line from the start
-  rather than after one rejected request. The only real improvement left is for
-  the provider-learned window to be written back to settings, so the next
-  session does not have to be rejected once to learn it.
+Nothing. The last entry here was `UNKNOWN_CONTEXT_WINDOW` being 32 000, which
+was never a defect (a guess drives compaction early but never refuses a
+request), and its one real gap — that a learned window had to be learned again
+by every new session — is closed: the value a provider states is written to
+`~/.codape/context_windows.json` and read by the next session (defect 19).
 
 ## Local fixture patches
 

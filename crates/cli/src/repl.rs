@@ -3949,6 +3949,11 @@ impl ReplLoop {
                 .with_settings(self.context_window_settings.clone())
                 .with_experiment(self.feature_flags.experiment_context_windows());
             engine.set_context_window_resolver(resolver);
+            // A window the provider states should be waiting for the next
+            // session instead of being learned by a rejection every time.
+            // Off in a unit-test build: those run against whatever config home
+            // the developer happens to have, and a test must not edit it.
+            engine.set_persist_learned_context_window(!cfg!(test));
         }
 
         // 9c. Engine flag behaviours. `coordinator_mode` and `history_snip`

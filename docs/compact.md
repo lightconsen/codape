@@ -90,6 +90,10 @@ names, and non-positive defaults are rejected by settings validation.
 A missing or malformed file is ignored (with a warning for malformed input), so
 it can never disable compaction.
 
+Codape writes to this file itself when a provider states a real window in an
+overflow error, and only then — it never rewrites values it merely read. See
+[Learning the window from the provider](#learning-the-window-from-the-provider).
+
 ### Experiment / Feature Flag
 
 Context-window experiments use the existing `FeatureFlags` mechanism. The
@@ -167,6 +171,30 @@ and re-sends once. The request is retried at most twice, and only after a
 compaction that actually removed something — retrying an unchanged request
 fails the same way. `ErrorClass::ContextOverflow` is never auto-retried by the
 transport; the recovery belongs to the turn.
+
+**The learned value is also written to the client-data file**
+(`~/.codape/context_windows.json`, or `$CLAUDE_CONFIG_DIR/context_windows.json`),
+keyed by the model name, so the next session starts knowing it instead of
+being rejected once to learn it again. That file is the right home for the
+value: it is the source whose purpose is facts learned about an endpoint, it is
+not a file anyone maintains by hand, and it sits *below* settings and the
+environment in the resolution chain above — so an explicit window in either
+still wins, and nothing the user wrote is ever edited. The write is
+merge-in-place (other models keep their entries), skips a write when the value
+is already recorded, and goes through a temporary file and a rename so a
+half-written file can never be read. A failed write is a warning, never an
+error: the window still applies for the rest of the session.
+
+`QueryEngine::set_persist_learned_context_window` controls this. It is off for
+an engine built directly (tests and embedders) and on for the sessions the CLI
+runs, so a test suite cannot change the window a real session starts with.
+
+Because the value persists, a provider that states a misleading number makes it
+sticky for that model until the file or an override says otherwise. That is why
+the write goes to the *lowest*-priority remembered source: `CODAPE_CONTEXT_WINDOW`,
+a `context_window` block in settings, or deleting the entry all take effect
+immediately, and a wrong entry is correctable by hand rather than only by
+another rejected request.
 
 Matching is exact or family-prefix after normalization. Normalization
 lower-cases the name, drops a trailing `[1m]`, and strips provider/router
