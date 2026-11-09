@@ -532,7 +532,17 @@ pub enum TerminalReason {
     /// A stop hook decided the conversation should end.
     StopHook,
     /// The model's response was stopped due to token limit.
-    TokenLimitStop,
+    ///
+    /// `produced` is the distinction the variant used to lose. A truncated
+    /// answer and a turn that spent its whole ceiling thinking are both
+    /// `max_tokens`, and only one of them is worth saying anything about: the
+    /// first is a real answer cut short, the second is a run that did no work.
+    /// Two terminal-bench runs ended this way with zero text and zero tool
+    /// calls, and both were reported exactly like a finished task.
+    TokenLimitStop {
+        /// Whether the turn produced any text or tool call before the ceiling.
+        produced: bool,
+    },
     /// A repetitive loop of tool calls was detected.
     LoopDetected {
         /// Period of the repeating pattern (1 = exact repeat, 2 = A-B, etc.).
@@ -560,7 +570,16 @@ impl std::fmt::Display for TerminalReason {
             Self::MaxTurnsReached => write!(f, "max turns reached"),
             Self::Error(msg) => write!(f, "error: {msg}"),
             Self::StopHook => write!(f, "stop hook"),
-            Self::TokenLimitStop => write!(f, "token limit stop"),
+            Self::TokenLimitStop { produced } => {
+                if *produced {
+                    write!(f, "token limit stop")
+                } else {
+                    // The reason a headless run shows its operator. "cut off"
+                    // would be wrong here: nothing was cut, the ceiling went
+                    // to thinking and there was never an answer to truncate.
+                    write!(f, "token limit stop (no output)")
+                }
+            }
             Self::LoopDetected {
                 period,
                 repetitions,
@@ -860,6 +879,13 @@ pub struct TurnRuntime {
     pub last_compact_strategy: Option<crate::compact::CompactStrategy>,
     /// Optional observer called after every transition.
     pub transition_observer: Option<TransitionObserver>,
+    /// How many times this turn re-asked after a `max_tokens` turn produced
+    /// nothing.
+    ///
+    /// Separate from `recovery_count`, which bounds compaction passes: this
+    /// one bounds a different resource (output room), and a turn that has
+    /// spent its compaction budget has not necessarily spent this one.
+    empty_answer_retries: u32,
 }
 
 impl TurnRuntime {
@@ -883,6 +909,7 @@ impl TurnRuntime {
             last_stop_reason: None,
             last_compact_strategy: None,
             transition_observer: None,
+            empty_answer_retries: 0,
         }
     }
 
@@ -1000,6 +1027,7 @@ impl TurnRuntime {
         self.pending_elevation = None;
         self.pending_elicitation = None;
         self.last_stop_reason = None;
+        self.empty_answer_retries = 0;
         // `last_compact_strategy` deliberately survives the turn boundary: it
         // is the escalation ladder, and a pass that made no progress must be
         // followed by a heavier one even when the next attempt starts a new
@@ -1170,6 +1198,60 @@ struct StreamedResponse {
     stop_reason: String,
     /// A thinking block the provider requires to be passed back, if any.
     thinking: Option<ThinkingBlock>,
+}
+
+/// The output ceiling a `max_tokens` turn that produced nothing should be
+/// re-asked with, if re-asking is worth anything.
+///
+/// A reasoning model on a hard step can spend the whole ceiling thinking and
+/// emit neither text nor a tool call. Re-asking it at the same ceiling is a
+/// coin flip that costs a full request, so this only offers a retry when the
+/// request can actually carry a larger one. `None` means "do not retry": the
+/// turn limits it spent are real and the answer is that this run produced
+/// nothing.
+///
+/// The bound is the provider's own rule — `input + max_tokens ≤ window` — plus
+/// the ceiling `CODAPE_MAX_TOKENS` already applies statically: never above half
+/// the window. That second bound is not cosmetic. The context size used here is
+/// an estimate, and the heuristic under-counts JSON- and code-heavy traffic by
+/// 30-40 %, so a request sized to the last available token would be rejected on
+/// arrival. Half leaves the estimate room to be wrong, and it is the only
+/// ceiling compaction can recover from — the compaction line never drops below
+/// half the window, so a ceiling above it would leave nothing to compact into.
+///
+/// The window comes from the engine rather than the model, so a window the
+/// provider stated after an overflow, or one configured in settings, is the
+/// one used. A window nobody established is not used at all: guessing one
+/// small would invent a limit, and guessing one large would send a request
+/// the provider rejects.
+#[must_use]
+fn retry_ceiling(
+    used: u32,
+    context_tokens: usize,
+    window: crate::types::ResolvedContextWindow,
+) -> Option<u32> {
+    if window.tokens == 0 || window.source.is_guess() {
+        return None;
+    }
+    let available = window.tokens.saturating_sub(context_tokens);
+    let recoverable = window.tokens / 2;
+    let room = available.min(recoverable);
+    let candidate = used
+        .saturating_mul(2)
+        .min(u32::try_from(room).unwrap_or(u32::MAX));
+    // No headroom means a bigger number would be rejected, and the same one
+    // would be spent the same way.
+    (candidate > used).then_some(candidate)
+}
+
+/// Whether a response produced anything a person or the loop can act on.
+///
+/// Text and tool calls both count; a thinking block does not. That asymmetry
+/// is the whole point of the distinction: thinking is what consumed the
+/// budget, not what the run came back with.
+#[must_use]
+fn produced_output(content: &str, tool_calls: usize) -> bool {
+    !content.trim().is_empty() || tool_calls > 0
 }
 
 /// Whether a provider's stop reason means "the answer was cut off".
@@ -1658,6 +1740,15 @@ pub const MAX_PROVIDER_RESUMES: u32 = 8;
 /// one pass learns the real window, the second compacts to it.
 const MAX_CONTEXT_OVERFLOW_RETRIES: u32 = 2;
 
+/// How many times a turn that produced nothing while truncated is re-asked at
+/// a larger output ceiling.
+///
+/// One. The first re-ask doubles the ceiling (as far as the window allows);
+/// a second answer that is still empty says the model cannot finish the step at
+/// any ceiling this conversation can carry, and paying twice more to learn the
+/// same thing is not worth it.
+const MAX_EMPTY_ANSWER_RETRIES: u32 = 1;
+
 /// What the outer turn loop does after a turn returns a reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LoopStep {
@@ -1725,7 +1816,7 @@ fn next_loop_step_unlogged(
         reason,
         TerminalReason::Completed
             | TerminalReason::Error(_)
-            | TerminalReason::TokenLimitStop
+            | TerminalReason::TokenLimitStop { .. }
             | TerminalReason::LoopDetected { .. }
             | TerminalReason::ApiUnavailable { .. }
     ) {
@@ -3681,7 +3772,12 @@ impl QueryEngine {
                     {
                         return Ok(reason);
                     }
-                    return Ok(Self::reason_for(&api_response.stop_reason));
+                    // Inside `tool_calls.is_empty()`: no call was made, so
+                    // text is the only thing that could have produced output.
+                    return Ok(Self::reason_for(
+                        &api_response.stop_reason,
+                        produced_output(&api_response.content, 0),
+                    ));
                 }
 
                 return Ok(self
@@ -3708,7 +3804,12 @@ impl QueryEngine {
             {
                 return Ok(reason);
             }
-            return Ok(Self::reason_for(&api_response.stop_reason));
+            return Ok(Self::reason_for(
+                &api_response.stop_reason,
+                // Reaching here means no tool call was made, so the answer
+                // either has text or has nothing.
+                produced_output(&api_response.content, 0),
+            ));
         }
 
         // Phase 5: Execute tools
@@ -4036,6 +4137,11 @@ impl QueryEngine {
                     turn.budget.record_tokens(&retried.usage);
                     self.cost_tracker.record_usage(&retried.usage, &self.model);
                     self.last_usage = Some(retried.usage);
+                    // Whether the re-ask produced anything, read before the
+                    // content is moved into the history. Its tool calls are
+                    // not carried into the loop (the original answer made
+                    // none), so only its text can count as output here.
+                    let produced = produced_output(&retried.content, 0);
                     self.push_thinking_message(turn, retried.thinking);
                     self.push_visible_assistant_message(turn, retried.content);
                     let usage = retried.usage;
@@ -4061,7 +4167,7 @@ impl QueryEngine {
                     {
                         return Ok(reason);
                     }
-                    return Ok(Self::reason_for(&stop_reason));
+                    return Ok(Self::reason_for(&stop_reason, produced));
                 }
                 return Ok(self
                     .finish_turn(
@@ -4074,13 +4180,16 @@ impl QueryEngine {
                     )
                     .await);
             }
+            // A tool call is output too, including one already executed while
+            // the stream was open — it is how the run made progress.
+            let produced = produced_output(&content, early_calls.len() + tool_calls.len());
             if let Some(reason) = self
                 .close_turn(turn, turn_number, &stop_reason, &usage, &pending_for_loop)
                 .await
             {
                 return Ok(reason);
             }
-            return Ok(Self::reason_for(&stop_reason));
+            return Ok(Self::reason_for(&stop_reason, produced));
         }
 
         // Phase 5: Execute tools
@@ -4230,15 +4339,21 @@ impl QueryEngine {
         reason
     }
 
-    /// The reason a closed turn reports, given how the model stopped.
+    /// The reason a closed turn reports, given how the model stopped and
+    /// whether the turn produced anything.
     ///
     /// A paused turn reports [`TerminalReason::Resume`] rather than
     /// `Completed`: both are "not an error", but only one of them tells the
     /// loop to send the request again.
+    ///
+    /// `produced` is only consulted for a `max_tokens` stop. It used to be
+    /// dropped here, which is why a response that spent its whole ceiling on
+    /// thinking reached the host indistinguishable from an answer that was
+    /// merely cut short.
     #[must_use]
-    fn reason_for(stop_reason: &str) -> TerminalReason {
+    fn reason_for(stop_reason: &str, produced: bool) -> TerminalReason {
         if stop_reason_eq(stop_reason, "max_tokens") {
-            TerminalReason::TokenLimitStop
+            TerminalReason::TokenLimitStop { produced }
         } else if matches!(classify_stop_reason(stop_reason), StopDisposition::Resume) {
             TerminalReason::Resume
         } else {
@@ -6096,22 +6211,104 @@ impl QueryEngine {
             // tool result" and broke with `Completed` — a headless run that
             // wrote nothing exited 0 with an empty result (gpt2-codegolf in
             // terminal-bench). An empty answer is not a completion: ask once
-            // more without streaming, then fail the turn.
+            // more, then fail the turn.
             //
-            // A truncated (`max_tokens`) empty answer is excluded: retrying
-            // would spend the same budget again, and the turn already reports
-            // the truncation.
+            // A truncated (`max_tokens`) empty answer used to be excluded from
+            // this, on the grounds that retrying would spend the same budget
+            // again. That is right when the ceiling cannot move — but a
+            // reasoning model that spent 32 768 tokens thinking and emitted
+            // nothing is exactly the case where a larger ceiling is the fix,
+            // and where reporting "your answer was cut off" describes an
+            // answer that never existed. So the distinction is not
+            // truncated-or-not but *whether there is anywhere to go*:
+            // [`retry_ceiling`] offers a bigger ceiling only when the request
+            // can carry one, and a turn with no room left is reported as the
+            // no-op it was (see `TokenLimitStop { produced: false }`).
             let empty_answer = content.trim().is_empty()
                 && deferred_calls.is_empty()
                 && early_calls.is_empty()
                 && early_results.is_empty();
-            let truncated = matches!(stop_reason.as_deref(), Some("max_tokens" | "length"));
-            if empty_answer && !truncated {
+            if empty_answer {
+                let truncated = matches!(stop_reason.as_deref(), Some("max_tokens" | "length"));
+                // Only a truncated turn has something to gain from a larger
+                // ceiling; an `end_turn` that produced nothing is the
+                // provider's answer, not a limit.
+                let retry = truncated
+                    .then(|| {
+                        retry_ceiling(
+                            self.max_tokens,
+                            self.turn_context_tokens(turn),
+                            self.context_window(),
+                        )
+                    })
+                    .flatten()
+                    .filter(|_| turn.empty_answer_retries < MAX_EMPTY_ANSWER_RETRIES);
+                if let Some(ceiling) = retry {
+                    turn.empty_answer_retries += 1;
+                    let previous = self.max_tokens;
+                    tracing::warn!(
+                        previous,
+                        ceiling,
+                        "the turn produced nothing and was cut off at {previous}; re-asking with {ceiling}"
+                    );
+                    self.max_tokens = ceiling;
+                    let retried = self.send_request(turn, options).await;
+                    // The raised ceiling is a retry, not a decision: leaving it
+                    // in place would make the next request carry a number
+                    // chosen for a failure that has already been resolved.
+                    self.max_tokens = previous;
+                    let retried = retried?;
+                    if produced_output(&retried.content, retried.tool_calls.len()) {
+                        return Ok(StreamedResponse {
+                            content: retried.content,
+                            tool_calls: retried.tool_calls,
+                            early_calls: Vec::new(),
+                            early_results: Vec::new(),
+                            usage: retried.usage,
+                            stop_reason: retried.stop_reason,
+                            thinking: retried.thinking,
+                        });
+                    }
+                    // Still nothing, at a ceiling this request could not have
+                    // carried a second time. Report what actually happened
+                    // rather than the generic empty-response error: the
+                    // provider answered, and the budget is where it went.
+                    //
+                    // The stop reason stays the original one when there is one.
+                    // A provider that answers `end_turn` with no content would
+                    // otherwise report `Completed`, which is the empty-answer
+                    // exit this whole branch exists to prevent.
+                    let stop_reason = stop_reason.unwrap_or(retried.stop_reason);
+                    return Ok(StreamedResponse {
+                        content: retried.content,
+                        tool_calls: retried.tool_calls,
+                        early_calls: Vec::new(),
+                        early_results: Vec::new(),
+                        usage: retried.usage,
+                        stop_reason,
+                        thinking: retried.thinking,
+                    });
+                }
+                if truncated {
+                    // No room for a larger ceiling: end the turn as the no-op
+                    // it was. The response is returned unchanged so the caller
+                    // reports `TokenLimitStop { produced: false }` and the host
+                    // can tell this apart from a truncated answer.
+                    return Ok(StreamedResponse {
+                        content,
+                        tool_calls: deferred_calls,
+                        early_calls,
+                        early_results,
+                        usage,
+                        stop_reason: stop_reason.unwrap_or_else(|| "end_turn".to_string()),
+                        thinking: assembler.thinking(),
+                    });
+                }
                 tracing::warn!(
                     "provider ended the turn with no content and no tool call; retrying non-streaming"
                 );
                 let retried = self.send_request(turn, options).await?;
-                if !retried.content.trim().is_empty() || !retried.tool_calls.is_empty() {
+                if produced_output(&retried.content, retried.tool_calls.len()) {
                     return Ok(StreamedResponse {
                         content: retried.content,
                         tool_calls: retried.tool_calls,
@@ -7489,7 +7686,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(streamed, TerminalReason::TokenLimitStop),
+            matches!(streamed, TerminalReason::TokenLimitStop { produced: true }),
             "streaming reported {streamed:?}"
         );
 
@@ -7499,7 +7696,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(blocked, TerminalReason::TokenLimitStop),
+            matches!(blocked, TerminalReason::TokenLimitStop { produced: true }),
             "blocking reported {blocked:?}"
         );
     }
@@ -7513,17 +7710,95 @@ mod tests {
         assert!(!stop_reason_eq("", "max_tokens"));
 
         assert!(matches!(
-            QueryEngine::reason_for("max_tokens"),
-            TerminalReason::TokenLimitStop
+            QueryEngine::reason_for("max_tokens", true),
+            TerminalReason::TokenLimitStop { produced: true }
         ));
         assert!(matches!(
-            QueryEngine::reason_for("length"),
-            TerminalReason::TokenLimitStop
+            QueryEngine::reason_for("length", true),
+            TerminalReason::TokenLimitStop { produced: true }
         ));
         assert!(matches!(
-            QueryEngine::reason_for("end_turn"),
+            QueryEngine::reason_for("end_turn", true),
             TerminalReason::Completed
         ));
+    }
+
+    /// A turn that spent its whole ceiling thinking is not a truncated answer.
+    ///
+    /// Both arrive as `max_tokens`; only one of them produced something. The
+    /// reason carried this bit nowhere before, so a headless run that emitted
+    /// nothing exited looking like a task with an answer that was merely cut
+    /// short.
+    #[test]
+    fn a_cut_off_turn_reports_whether_it_produced_anything() {
+        assert!(matches!(
+            QueryEngine::reason_for("max_tokens", true),
+            TerminalReason::TokenLimitStop { produced: true }
+        ));
+        assert!(matches!(
+            QueryEngine::reason_for("max_tokens", false),
+            TerminalReason::TokenLimitStop { produced: false }
+        ));
+        // The bit means nothing for any other stop reason.
+        assert!(matches!(
+            QueryEngine::reason_for("end_turn", false),
+            TerminalReason::Completed
+        ));
+        assert!(matches!(
+            QueryEngine::reason_for("pause_turn", false),
+            TerminalReason::Resume
+        ));
+    }
+
+    #[test]
+    fn only_text_or_a_tool_call_counts_as_output() {
+        assert!(!produced_output("", 0));
+        assert!(!produced_output("   \n\t ", 0));
+        assert!(produced_output("an answer", 0));
+        assert!(produced_output("", 1));
+        assert!(produced_output("an answer", 2));
+    }
+
+    /// A no-op turn is only worth re-asking when the request can carry a
+    /// larger ceiling. The default configuration never can, which is what
+    /// keeps behaviour byte-identical unless somebody asked for more room.
+    #[test]
+    fn a_retry_ceiling_needs_room_the_request_does_not_have() {
+        use crate::types::{ContextWindowSource, ResolvedContextWindow};
+
+        let known = |tokens| ResolvedContextWindow::new(tokens, ContextWindowSource::Env);
+
+        // A 20 000-token input on a 64 000 window leaves 44 000, but only
+        // half the window (32 000) is a ceiling compaction can recover from,
+        // so a doubling from 8 192 stops there.
+        assert_eq!(retry_ceiling(8_192, 20_000, known(64_000)), Some(16_384));
+        assert_eq!(retry_ceiling(20_000, 20_000, known(64_000)), Some(32_000));
+        // The static clamp: nothing crosses half the window even with all of
+        // it free.
+        assert_eq!(retry_ceiling(20_000, 0, known(64_000)), Some(32_000));
+
+        // The default engine ceiling against a full half-window is the
+        // configuration a DeepSeek session actually runs: no room to grow, so
+        // nothing is retried and the turn reports the no-op it was.
+        assert_eq!(retry_ceiling(32_768, 40_000, known(64_000)), None);
+
+        // A window nobody established is not evidence of room.
+        assert_eq!(retry_ceiling(32_768, 1_000, known(0)), None);
+        assert_eq!(
+            retry_ceiling(
+                32_768,
+                1_000,
+                ResolvedContextWindow::new(64_000, ContextWindowSource::Unknown)
+            ),
+            None
+        );
+
+        // The candidate is never the same number twice: re-asking at an
+        // unchanged ceiling spends the same budget the same way.
+        assert_eq!(retry_ceiling(u32::MAX, 0, known(200_000)), None);
+        // Room for only a token or two is not worth a request.
+        assert_eq!(retry_ceiling(31_999, 1_000, known(64_000)), Some(32_000));
+        assert_eq!(retry_ceiling(32_768, 1_000, known(64_000)), None);
     }
 
     /// A provider outage ends the turn as `ApiUnavailable`, whatever the
@@ -10333,19 +10608,25 @@ mod tests {
     fn a_paused_turn_is_not_reported_as_finished() {
         for paused in ["pause_turn", "compaction"] {
             assert!(
-                matches!(QueryEngine::reason_for(paused), TerminalReason::Resume),
+                matches!(
+                    QueryEngine::reason_for(paused, true),
+                    TerminalReason::Resume
+                ),
                 "{paused} should resume"
             );
         }
         for finished in ["end_turn", "refusal", "stop", ""] {
             assert!(
-                matches!(QueryEngine::reason_for(finished), TerminalReason::Completed),
+                matches!(
+                    QueryEngine::reason_for(finished, true),
+                    TerminalReason::Completed
+                ),
                 "{finished} should finish"
             );
         }
         assert!(matches!(
-            QueryEngine::reason_for("max_tokens"),
-            TerminalReason::TokenLimitStop
+            QueryEngine::reason_for("max_tokens", true),
+            TerminalReason::TokenLimitStop { .. }
         ));
     }
 

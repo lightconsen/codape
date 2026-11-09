@@ -129,10 +129,20 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
   round-trips untouched rather than being rejected.
 - **`result` subtype is a `String`, not a closed enum.** `result_subtype`
   names `success`, `error_max_turns`, `error_during_execution`,
-  `error_max_output_tokens` and `error_loop_detected`; other termination
-  reasons pass through.
+  `error_max_output_tokens`, `error_no_output` and `error_loop_detected`;
+  other termination reasons pass through.
+- **A truncated answer and a turn that produced nothing are separate
+  subtypes.** Both arrive as a `max_tokens` stop, but
+  `error_max_output_tokens` means an answer exists and was cut short, while
+  `error_no_output` means the ceiling went to reasoning and there is no
+  answer to cut — a shape `gpt2-codegolf` and `run-pdp11-code` both ended in.
+  The remedies differ (a shorter answer versus a larger `CODAPE_MAX_TOKENS`
+  or a lower reasoning effort), which is why a host gets its own word. Before
+  the engine started re-asking a no-op turn at a larger ceiling, both were
+  reported as `error_max_output_tokens`.
 - **`is_error` is truthful.** `success` is only for a run that ended because
-  the model finished. A run the provider cut off (`error_max_output_tokens`), a
+  the model finished. A run the provider cut off (`error_max_output_tokens`),
+  a run that spent its ceiling and produced nothing (`error_no_output`), a
   detected tool loop (`error_loop_detected`) and a turn a gate stopped
   (`error_during_execution`) carry `is_error: true` and keep whatever text the
   model produced in `result`, so a host can tell a truncated run from a

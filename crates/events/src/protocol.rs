@@ -46,6 +46,16 @@ pub mod result_subtype {
     /// room. A host that treats this as `success` cannot tell an answer from a
     /// truncated one.
     pub const ERROR_MAX_OUTPUT_TOKENS: &str = "error_max_output_tokens";
+    /// The run spent its whole output ceiling and produced nothing.
+    ///
+    /// Distinct from [`ERROR_MAX_OUTPUT_TOKENS`], which says an answer exists
+    /// and was cut short. Here there is no answer to cut: a reasoning model on
+    /// a hard step spent every token thinking and emitted no text and no tool
+    /// call. The remedies differ — this one wants a larger
+    /// `CODAPE_MAX_TOKENS` or a lower reasoning effort, while a truncated
+    /// answer usually just wants a shorter answer — which is why a host gets
+    /// its own word for it.
+    pub const ERROR_NO_OUTPUT: &str = "error_no_output";
     /// The repetitive-tool-call detector ended the run.
     ///
     /// The run stopped on purpose, but the work the model was doing was not

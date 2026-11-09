@@ -27,13 +27,23 @@ fn workspace_root() -> PathBuf {
 
 /// Start the static provider.
 fn start_static_provider() -> (Child, String) {
+    start_static_provider_recording(None)
+}
+
+/// As [`start_static_provider`], optionally logging every request body it
+/// serves so a test can count them.
+fn start_static_provider_recording(record: Option<&Path>) -> (Child, String) {
     let responses = workspace_root().join("tests/responses.json");
-    let args = vec![
+    let mut args = vec![
         "--port".to_string(),
         "0".to_string(),
         "--responses".to_string(),
         responses.to_str().expect("responses path").to_string(),
     ];
+    if let Some(path) = record {
+        args.push("--record".to_string());
+        args.push(path.to_str().expect("record path").to_string());
+    }
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_static-anthropic-server"))
         .args(&args)
@@ -93,6 +103,16 @@ fn run_headless(cwd: &Path, base_url: &str, prompt: &str) -> std::process::Outpu
 /// Run headless with `--output-format stream-json`, so the test can read the
 /// `result` frame a host would receive.
 fn run_headless_stream(cwd: &Path, base_url: &str, prompt: &str) -> std::process::Output {
+    run_headless_stream_with_env(cwd, base_url, prompt, &[])
+}
+
+/// As [`run_headless_stream`], with extra environment variables.
+fn run_headless_stream_with_env(
+    cwd: &Path,
+    base_url: &str,
+    prompt: &str,
+    env: &[(&str, &str)],
+) -> std::process::Output {
     let home = tempfile::tempdir().expect("config home");
     std::fs::write(
         home.path().join("settings.json"),
@@ -100,7 +120,8 @@ fn run_headless_stream(cwd: &Path, base_url: &str, prompt: &str) -> std::process
     )
     .expect("settings");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
+    command
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -116,9 +137,11 @@ fn run_headless_stream(cwd: &Path, base_url: &str, prompt: &str) -> std::process
         .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn codape");
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("spawn codape");
 
     child
         .stdin
@@ -210,6 +233,142 @@ fn a_truncated_run_reports_a_failed_result_frame() {
             .is_some_and(|text| text.contains("The answer was cut off")),
         "the truncated run dropped the text it produced: {result}"
     );
+}
+
+/// A run that spent its ceiling thinking and produced nothing is not a
+/// truncated answer, and the host has to be able to tell.
+///
+/// Both arrive as `max_tokens` and both are failures, but they want different
+/// remedies: a truncated answer wants a shorter answer, this one wants a
+/// larger ceiling or a lower reasoning effort. Reporting the second as the
+/// first is what two terminal-bench runs came back as — `error_max_output_tokens`
+/// with zero text, which reads as "the model was cut off" when in fact the
+/// model never wrote anything.
+#[test]
+fn a_run_that_spent_its_ceiling_thinking_reports_no_output() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let (mut provider, base_url) = start_static_provider();
+
+    // A 64K window with no room above the ceiling: there is nowhere to grow,
+    // so the turn is reported instead of re-asked.
+    let output = run_headless_stream_with_env(
+        dir.path(),
+        &base_url,
+        "think-only-no-output",
+        &[
+            ("CODAPE_CONTEXT_WINDOW", "64000"),
+            ("CODAPE_MAX_TOKENS", "32000"),
+        ],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+
+    let result = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|frame| frame["type"] == "result")
+        .unwrap_or_else(|| panic!("no result frame:\n{stdout}"));
+    assert_eq!(
+        result["subtype"], "error_no_output",
+        "a thinking-only run reported itself as a truncated answer: {result}"
+    );
+    assert_eq!(result["is_error"], true, "{result}");
+    // Nothing was produced, so nothing is passed off as the answer.
+    assert!(
+        result["result"]
+            .as_str()
+            .is_none_or(|text| !text.contains("cut off")),
+        "a no-op run reported an answer it never produced: {result}"
+    );
+}
+
+/// A no-op turn with room to grow is asked once more at a larger ceiling.
+///
+/// The distinction only earns its keep if the recoverable case is actually
+/// recovered: a model that ran out of room thinking is exactly the case where
+/// the next request can carry more.
+#[test]
+fn a_no_op_turn_is_re_asked_at_a_larger_ceiling() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let (mut provider, base_url) = start_static_provider();
+
+    // 200K window: half of it is 100K, so a 4 096-token ceiling has room to
+    // double.
+    let output = run_headless_stream_with_env(
+        dir.path(),
+        &base_url,
+        "think-only-then-answer",
+        &[
+            ("CODAPE_CONTEXT_WINDOW", "200000"),
+            ("CODAPE_MAX_TOKENS", "4096"),
+        ],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("Answered after a larger ceiling."),
+        "the no-op turn was not re-asked with more room:\n{stdout}"
+    );
+}
+
+/// A no-op turn that is still a no-op after the re-ask is not a success.
+///
+/// The re-ask raises the ceiling for one request; if that request produces
+/// nothing either, the run has to report the no-op it was. Reporting
+/// `Completed` here would put the empty-answer exit back behind a doubled
+/// budget, which is worse than the bug it was fixing.
+#[test]
+fn a_no_op_turn_that_stays_a_no_op_is_reported_as_one() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let bodies = dir.path().join("requests.jsonl");
+    let (mut provider, base_url) = start_static_provider_recording(Some(&bodies));
+
+    let output = run_headless_stream_with_env(
+        dir.path(),
+        &base_url,
+        "think-only-always",
+        &[
+            ("CODAPE_CONTEXT_WINDOW", "200000"),
+            ("CODAPE_MAX_TOKENS", "4096"),
+        ],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+
+    let served = std::fs::read_to_string(&bodies).unwrap_or_default();
+    assert_eq!(
+        served.lines().count(),
+        2,
+        "expected the original request and exactly one re-ask:\n{served}"
+    );
+    let ceilings: Vec<u64> = served
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|body| body["max_tokens"].as_u64())
+        .collect();
+    assert_eq!(ceilings.len(), 2, "a request carried no ceiling: {served}");
+    assert!(
+        ceilings[1] > ceilings[0],
+        "the re-ask did not raise the ceiling: {ceilings:?}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|frame| frame["type"] == "result")
+        .unwrap_or_else(|| panic!("no result frame:\n{stdout}"));
+    // `error_no_output`, not `success` and not `error_max_output_tokens`:
+    // the re-ask happened and still bought nothing.
+    assert_eq!(result["subtype"], "error_no_output", "{result}");
+    assert_eq!(result["is_error"], true, "{result}");
 }
 
 #[test]

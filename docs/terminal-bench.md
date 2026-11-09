@@ -2909,6 +2909,37 @@ All seventeen were real, and all are fixed:
     entry used to sit under "Known, unfixed" with "Fixed" in its own first
     sentence.
 
+18. **A turn that spends its whole ceiling thinking is told apart from a
+    truncated answer.** Both `gpt2-codegolf` (first run) and `run-pdp11-code`
+    (2026-11-05) ended at 32 768 with a `max_tokens` stop, a thinking block,
+    and no text and no tool call; the run reported `error_max_output_tokens`,
+    which reads as "your answer was cut off" for an answer that never started.
+
+    `TerminalReason::TokenLimitStop` now carries `produced: bool`, set from
+    whether the response held any text or tool call. The two shapes want
+    different remedies — a truncated answer wants a shorter answer, a
+    thinking-only turn wants a larger ceiling or a lower reasoning effort —
+    so the stream-json result frame reports the second as its own
+    `error_no_output` subtype (`crates/events/src/protocol.rs`), and the
+    terminal line reads `token limit stop (no output)`.
+
+    The turn is also re-asked when there is room to ask with more:
+    `retry_ceiling` doubles the ceiling, bounded both by the provider's
+    `input + max_tokens ≤ window` rule and by half the window — above half,
+    compaction cannot recover the context, so a larger ceiling there only
+    trades one rejection for another. When the ceiling cannot move (the
+    default 32 768 on any window ≤ 64 K, which includes every DeepSeek
+    deployment) no second request is sent and the turn is reported as the
+    no-op it was. The retry happens inside `send_request_streaming`, before
+    the thinking block is written to the turn's messages, because a
+    thinking-only assistant turn as the *last* message is a prefill and is
+    rejected by current models. `TurnRuntime::empty_answer_retries` keeps the
+    re-ask from compounding with `recovery_count`.
+
+    Covered by `a_retry_ceiling_needs_room_the_request_does_not_have`,
+    `a_run_that_spent_its_ceiling_thinking_reports_no_output` and
+    `a_no_op_turn_is_re_asked_at_a_larger_ceiling`.
+
 ### Known, unfixed
 
 - **`UNKNOWN_CONTEXT_WINDOW` is 32 000, and that is a conservative default, not
@@ -2923,20 +2954,6 @@ All seventeen were real, and all are fixed:
   rather than after one rejected request. The only real improvement left is for
   the provider-learned window to be written back to settings, so the next
   session does not have to be rejected once to learn it.
-- **A turn that spends its whole output ceiling on reasoning still ends the
-  run.** `max_tokens` is a terminal reason by design: re-requesting the same
-  prompt would spend the budget again. Both `gpt2-codegolf` (first run) and
-  `run-pdp11-code` (2026-11-05) hit it at 32 768, with no text and no tool call.
-
-  The *ceiling* is no longer a dead end: `CODAPE_MAX_TOKENS` raises it (clamped
-  to half the model's context window), an agent definition can set it, and both
-  benchmark adapters pass the variable through. What is still unfixed is the
-  distinction the loop cannot make — a turn whose answer was cut off mid-stream
-  and a turn that produced nothing at all are both `TokenLimitStop`. Retrying
-  the second is arguably right (nothing was produced, so nothing is wasted) and
-  retrying the first is not. Changing that means changing what `TokenLimitStop`
-  means, which needs more samples than two runs.
-
 ## Local fixture patches
 
 Two cached copies matter:

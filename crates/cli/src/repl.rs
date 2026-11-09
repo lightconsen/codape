@@ -8409,12 +8409,20 @@ impl ReplLoop {
                 // is_error: false`, so nothing downstream could tell them from
                 // a completed task.
                 Ok(
-                    reason @ (TerminalReason::TokenLimitStop
+                    reason @ (TerminalReason::TokenLimitStop { .. }
                     | TerminalReason::LoopDetected { .. }
                     | TerminalReason::StopHook),
                 ) => {
                     let subtype = match reason {
-                        TerminalReason::TokenLimitStop => {
+                        // A turn that produced nothing is not a truncated
+                        // answer: there was no answer. The distinction is the
+                        // whole reason `produced` is on the variant, and it is
+                        // what tells a host whether to raise the output
+                        // ceiling or shorten the answer.
+                        TerminalReason::TokenLimitStop { produced: false } => {
+                            codape_events::protocol::result_subtype::ERROR_NO_OUTPUT
+                        }
+                        TerminalReason::TokenLimitStop { produced: true } => {
                             codape_events::protocol::result_subtype::ERROR_MAX_OUTPUT_TOKENS
                         }
                         TerminalReason::LoopDetected { .. } => {

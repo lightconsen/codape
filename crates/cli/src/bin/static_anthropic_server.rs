@@ -213,6 +213,24 @@ fn handle_connection(mut stream: TcpStream, responses: &std::sync::Arc<StaticRes
             }
         } else if p_lower.contains("run out of output room") {
             sse_text_block_with_stop("The answer was cut off by the output limit.", "max_tokens")
+        } else if p_lower.contains("think-only-no-output") {
+            // A reasoning model that spent the whole ceiling thinking: a
+            // thinking block, no text, no tool call, `max_tokens`. This is
+            // the shape two terminal-bench runs ended in.
+            sse_thinking_only_with_stop("max_tokens")
+        } else if p_lower.contains("think-only-always") {
+            // Still nothing at the larger ceiling: the retry has to report the
+            // no-op rather than fall back to `end_turn`.
+            sse_thinking_only_with_stop("max_tokens")
+        } else if p_lower.contains("think-only-then-answer") {
+            // The same first answer, but the ceiling offered by the retry is
+            // enough this time. The mock tells them apart the way a provider
+            // does: by the `max_tokens` on the request.
+            if max_tokens_in(&body_str) > THINK_ONLY_FIRST_CEILING {
+                sse_text_block_with_stop("Answered after a larger ceiling.", "end_turn")
+            } else {
+                sse_thinking_only_with_stop("max_tokens")
+            }
         } else if p_lower.contains("decline-this-request") {
             sse_text_block_with_stop("I can't help with that.", "refusal")
         } else if has_tool_result && body_str.contains("soak turn") {
@@ -232,7 +250,7 @@ fn handle_connection(mut stream: TcpStream, responses: &std::sync::Arc<StaticRes
         );
         let _ = stream.write_all(response.as_bytes());
     } else {
-        let json = build_json_response(&prompt, has_tool_result, responses);
+        let json = build_json_response(&body_str, &prompt, has_tool_result, responses);
         let response = format!(
             "HTTP/1.1 200 OK\r\n\
              Content-Type: application/json\r\n\
@@ -538,7 +556,47 @@ fn build_json_sse_response(json: &str) -> String {
     sse_text_block(json)
 }
 
-fn build_json_response(prompt: &str, has_tool_result: bool, responses: &StaticResponses) -> String {
+/// The ceiling the mock gets asked with on the first attempt.
+///
+/// Kept here so a test can set `CODAPE_MAX_TOKENS` above it and have the
+/// second request look different from the first.
+const THINK_ONLY_FIRST_CEILING: u64 = 4_096;
+
+/// `max_tokens` from the request body, or 0 when absent.
+fn max_tokens_in(body: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("max_tokens").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0)
+}
+
+/// A thinking block and nothing else: no text, no tool call.
+///
+/// The signature is opaque to the client and only has to round-trip, so a
+/// fixed value is enough for a mock.
+fn sse_thinking_only_with_stop(stop_reason: &str) -> String {
+    format!(
+        "event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"thinking_delta\",\"thinking\":\"Let me work through this step by step: the prompt asks for a full analysis of the task, and the analysis has to cover every clause of the instruction before it answers. \"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"signature_delta\",\"signature\":\"mock-signature\"}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: message_delta\n\
+         data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop_reason}\"}},\"usage\":{{\"input_tokens\":10,\"output_tokens\":4096}}}}\n\n\
+         event: message_stop\n\
+         data: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+fn build_json_response(
+    body: &str,
+    prompt: &str,
+    has_tool_result: bool,
+    responses: &StaticResponses,
+) -> String {
     // Sub-agents call the provider without streaming, so a deterministic tool
     // call has to be expressible as one JSON message too.
     if !has_tool_result
@@ -581,6 +639,41 @@ fn build_json_response(prompt: &str, has_tool_result: bool, responses: &StaticRe
                 }
             }],
             "stop_reason": "tool_use",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        })
+        .to_string();
+    }
+    // The empty-answer retry goes out non-streaming, so the prompt has to be
+    // answered here too or the retry lands on the generic reply. The request's
+    // own ceiling is the tell, exactly as in the streaming branch.
+    if !has_tool_result && prompt.to_lowercase().contains("think-only-always") {
+        // Nothing at any ceiling.
+        return serde_json::json!({
+            "id": "msg_static_think_only",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "", "signature": "mock-signature"}],
+            "stop_reason": "max_tokens",
+            "stop_sequence": null,
+            "usage": {"input_tokens": 10, "output_tokens": 20}
+        })
+        .to_string();
+    }
+    if !has_tool_result && prompt.to_lowercase().contains("think-only-then-answer") {
+        let answered = max_tokens_in(body) > THINK_ONLY_FIRST_CEILING;
+        let content = if answered {
+            serde_json::json!([{"type": "text", "text": "Answered after a larger ceiling."}])
+        } else {
+            // Same shape as the streaming branch: a thinking block, no text.
+            serde_json::json!([{"type": "thinking", "thinking": "", "signature": "mock-signature"}])
+        };
+        return serde_json::json!({
+            "id": "msg_static_think_only",
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "stop_reason": if answered { "end_turn" } else { "max_tokens" },
             "stop_sequence": null,
             "usage": {"input_tokens": 10, "output_tokens": 20}
         })

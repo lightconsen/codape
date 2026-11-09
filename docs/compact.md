@@ -194,6 +194,16 @@ provider rejects `input + max_tokens > window`, and `window - auto` is
 the line, which the session recovers from by compacting and retrying. See
 [`docs/config.md`](config.md) for the variable and its clamp.
 
+The same arithmetic decides whether a turn that produced nothing can be
+re-asked. A `max_tokens` stop with no text and no tool call is re-sent once at
+a doubled ceiling, but only when `input + 2 × max_tokens` fits inside the
+window *and* the doubled ceiling stays at or below half the window — above
+half, the `auto` line itself would sit below the request, so compaction could
+not clear a path for it. Both bounds fail together at the default 32 768 on any
+window up to 64 K, so a session that never sets `CODAPE_MAX_TOKENS` never
+issues the second request. The reasoning is the same as the clamp's: a ceiling
+the provider will refuse is not a larger ceiling.
+
 `CompactThresholds::resolve` and `select_compact_strategy` use the resolver
 installed on the engine. `QueryEngine::set_context_window_resolver` installs
 one; the CLI builds it from environment, settings, client data, and experiment

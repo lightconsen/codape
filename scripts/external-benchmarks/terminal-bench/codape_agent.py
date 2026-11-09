@@ -377,7 +377,15 @@ class CodapeAgent(AbstractInstalledAgent):
         elif (
             (exit_code is not None and exit_code != 0)
             or (summary or {}).get("is_error")
-            or subtype in ("error_max_output_tokens", "error_loop_detected")
+            # `error_no_output` is a run that spent its whole ceiling
+            # reasoning and never wrote anything; `error_max_output_tokens`
+            # is an answer that was cut short. Neither finished the task.
+            or subtype
+            in (
+                "error_max_output_tokens",
+                "error_no_output",
+                "error_loop_detected",
+            )
         ):
             failure_mode = FailureMode.UNKNOWN_AGENT_ERROR
         return AgentResult(

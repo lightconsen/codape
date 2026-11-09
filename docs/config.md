@@ -118,8 +118,14 @@ clamped to half the model's context window, because a request carries
 anything to compact. Raising it beyond the compaction reserve also means a
 request sent at the compaction line can be rejected once, learned from, and
 retried after compacting — which is why this is opt-in. A named agent
-definition's `max_tokens` wins over it. See
-[`docs/compact.md`](compact.md).
+definition's `max_tokens` wins over it. See [`docs/compact.md`](compact.md).
+
+A turn that stops on `max_tokens` having produced no text and no tool call is
+re-asked once at twice the ceiling, but only when the doubled value still fits
+the window *and* stays at or below half of it. At the default 32 768 that is
+never true on a window of 64 K or less, so leaving this variable unset keeps
+the behaviour unchanged; setting it is what makes the retry reachable. See
+[`docs/compact.md`](compact.md#thresholds).
 
 `settings.json` may also carry a Claude-compatible `env` object; it is applied
 to the process at startup, before providers, the model resolver and feature
