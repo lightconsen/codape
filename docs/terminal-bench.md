@@ -2382,7 +2382,7 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## Codape defects the benchmark exposed
 
-All seventeen were real, and all are fixed:
+All eighteen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2954,6 +2954,7 @@ All seventeen were real, and all are fixed:
   rather than after one rejected request. The only real improvement left is for
   the provider-learned window to be written back to settings, so the next
   session does not have to be rejected once to learn it.
+
 ## Local fixture patches
 
 Two cached copies matter:
