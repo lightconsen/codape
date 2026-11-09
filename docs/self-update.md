@@ -22,6 +22,14 @@ single `SHA256SUMS` to the release:
 | `aarch64-apple-darwin` | `codape-aarch64-apple-darwin.tar.gz` |
 | `x86_64-pc-windows-msvc` | `codape-x86_64-pc-windows-msvc.exe` (and a `.zip` for manual installs) |
 
+Releases up to v0.1.3 predate the rename and publish the same layout under
+`coderex-*` — both the asset and the member inside the archive (`coderex-<target>.tar.gz`
+holds `coderex-<target>`). `install.sh` and the updater accept both prefixes and
+pick whichever the release's `SHA256SUMS` lists, so those releases stay
+installable; the member to extract is derived from the name that was downloaded,
+not hard-coded. A release that publishes neither is a hard error rather than an
+unverified download.
+
 `SHA256SUMS` uses the standard `sha256sum` format — `<64 lowercase hex><two
 spaces><asset name>` — so `sha256sum --check SHA256SUMS`, `scripts/install.sh`
 and the updater all read the same file. The release job regenerates the file

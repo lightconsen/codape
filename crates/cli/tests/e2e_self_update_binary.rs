@@ -155,8 +155,20 @@ fn copied_binary() -> (tempfile::TempDir, PathBuf) {
 
 /// The bytes a release ships for this platform.
 fn payload() -> (String, Vec<u8>) {
+    payload_named(self_update::asset_name, self_update::archive_member)
+}
+
+/// The bytes a pre-rename release ships: `coderex-*` assets holding a
+/// `coderex-*` member.
+fn legacy_payload() -> (String, Vec<u8>) {
+    payload_named(self_update::legacy_asset_name, |target| {
+        format!("coderex-{target}")
+    })
+}
+
+fn payload_named(asset: fn(&str) -> String, member: fn(&str) -> String) -> (String, Vec<u8>) {
     let target = self_update::release_target().expect("a supported platform");
-    let name = self_update::asset_name(target);
+    let name = asset(target);
     #[cfg(unix)]
     {
         // The archive is `codape-<target>.tar.gz` and holds
@@ -166,11 +178,12 @@ fn payload() -> (String, Vec<u8>) {
         // building the fixture with the extension inside the archive is what
         // let a real "holds X, not X.tar.gz" failure through once.
         let script = b"#!/bin/sh\necho fake-new-version\n";
-        let archive = tarball(&self_update::archive_member(target), script);
+        let archive = tarball(&member(target), script);
         (name, archive)
     }
     #[cfg(windows)]
     {
+        let _ = member;
         let mut bytes = std::fs::read(env!("CARGO_BIN_EXE_codape")).expect("read the binary");
         bytes.extend_from_slice(b"\nFAKE-NEW-VERSION");
         (name, bytes)
@@ -263,6 +276,34 @@ fn update_downloads_verifies_and_replaces_the_binary() {
         let replaced = std::fs::read(&binary).expect("read the replaced binary");
         assert!(replaced.ends_with(b"\nFAKE-NEW-VERSION"));
     }
+}
+
+/// A release published before the rename ships `coderex-*` assets. A binary
+/// built from this tree must still be able to install it.
+#[test]
+fn update_installs_a_release_published_under_the_legacy_names() {
+    let (tag_name, asset) = legacy_payload();
+    let release = FakeRelease::new("v99.0.0", &tag_name, asset);
+    let server = FakeServer::start(release);
+    let (_dir, binary) = copied_binary();
+
+    let output = run_update(&binary, &server, &[]);
+
+    assert!(
+        output.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Updated"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::read(&binary).expect("read the replaced binary"),
+        b"#!/bin/sh\necho fake-new-version\n"
+    );
 }
 
 /// Up to date means up to date: when the latest release is not newer, the
