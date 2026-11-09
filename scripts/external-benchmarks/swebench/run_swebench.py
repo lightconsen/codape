@@ -79,6 +79,10 @@ PASSTHROUGH_ENV = (
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
     "CODAPE_CUSTOM_HEADERS",
+    # Raises the per-request output ceiling, which a reasoning model can
+    # otherwise spend entirely on thinking and end the run having emitted
+    # nothing. A raised value is clamped to half the model's context window.
+    "CODAPE_MAX_TOKENS",
 )
 
 API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODAPE_API_KEY", "OPENAI_API_KEY")

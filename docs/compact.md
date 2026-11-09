@@ -186,6 +186,14 @@ family.
 Both `auto` and `warn` have small-window floors so a 32K unknown model still
 compacts sensibly rather than reserving the whole window.
 
+The reserve is what keeps a request sent from the `auto` line acceptable: the
+provider rejects `input + max_tokens > window`, and `window - auto` is
+`output_reserve + trigger_buffer` — 33 000 tokens by default, just above
+`DEFAULT_MAX_TOKENS`'s 32 768. Raising the per-request ceiling above that
+(`CODAPE_MAX_TOKENS`) buys output room at the cost of a possible rejection at
+the line, which the session recovers from by compacting and retrying. See
+[`docs/config.md`](config.md) for the variable and its clamp.
+
 `CompactThresholds::resolve` and `select_compact_strategy` use the resolver
 installed on the engine. `QueryEngine::set_context_window_resolver` installs
 one; the CLI builds it from environment, settings, client data, and experiment

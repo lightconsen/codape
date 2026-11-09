@@ -1606,9 +1606,11 @@ Agent budgets were 600 s for the short groups, 900 s for data/download tasks,
 200 everywhere; test budgets were 120–900 s; the context window was 131072.
 
 The per-request *output* ceiling is separate: Codape's
-`DEFAULT_MAX_TOKENS = 32768`. The adapter has no `max_tokens` option, and the
-CLI has no flag — only an agent definition can set one (`set_max_tokens`), which
-these runs do not use. `gpt2-codegolf`'s first run is the case where this
+`DEFAULT_MAX_TOKENS = 32768`. At the time of these runs the adapter had no
+`max_tokens` option and the CLI had no flag — only an agent definition could set
+one (`set_max_tokens`), which these runs did not use. `CODAPE_MAX_TOKENS` now
+covers that gap; the runs below predate it and ran at 32 768.
+`gpt2-codegolf`'s first run is the case where this
 mattered: it ended after 202 s with `error_max_output_tokens`, one turn, zero
 tool calls, because reasoning consumed all 32 768 tokens before any text or
 tool use. Probing the provider directly with `max_tokens` 65 536 and 131 072
@@ -1839,8 +1841,10 @@ A turn hit the 32 768-token output ceiling with no text and no tool call — the
 same thinking-only shape as `gpt2-codegolf`'s first run, now at the ceiling
 that was supposed to leave room for reasoning. Codape treats `max_tokens` as
 a terminal reason by design (retrying would double the cost), so the whole
-session ends. The adapter offers no `max_tokens` knob and the CLI has no flag;
-the provider accepted 65 536 and 131 072 in a direct probe. Nothing in this
+session ends. At the time the adapter offered no `max_tokens` knob and the CLI
+had no flag; the provider accepted 65 536 and 131 072 in a direct probe. The
+`CODAPE_MAX_TOKENS` variable added on 2026-11-09 is the missing knob, and it is
+clamped to half the model's context window. Nothing in this
 trial is a test result: `/app/out.txt` was never created, and the recorded
 `unknown_agent_error` is the harness mapping the failed result frame.
 
@@ -2378,7 +2382,7 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 ## Codape defects the benchmark exposed
 
-All sixteen were real, and all are fixed:
+All seventeen were real, and all are fixed:
 
 1. **A truncated answer was reported as success.** `max_tokens` 4096 was
    exhausted by reasoning before any text or tool call; the loop ended the run
@@ -2892,33 +2896,46 @@ All sixteen were real, and all are fixed:
     completion contract target the observable failure directly; a second,
     fuzzier signal has no evidence behind it yet.
 
+17. **Compaction could burn its retry budget on a no-op.** A pass that removed
+    nothing counted as a success, so the ladder retried the same ineffective
+    strategy until the circuit breaker opened and the turn failed. A pass now
+    counts as progress only when it reaches the `auto` line or removes a tenth
+    of the context; an ineffective pass counts toward the breaker, and the
+    strategy escalates (`Micro` → `Auto` → `Snip`) on the next attempt.
+    Covered by `a_35_token_pass_is_not_reported_as_progress`. The escalation
+    state and the summary fall-through were themselves broken until defect 13,
+    and the selection, the targets and the progress line were computed on the
+    heuristic ruler rather than the provider's until the same defect. This
+    entry used to sit under "Known, unfixed" with "Fixed" in its own first
+    sentence.
+
 ### Known, unfixed
 
-- **A turn that spends 32 768 output tokens on reasoning ends the run.**
-  `DEFAULT_MAX_TOKENS` is a per-request ceiling, and `max_tokens` is a
-  terminal reason by design: re-requesting the same prompt would spend the
-  budget again. A reasoning model on a hard step can consume all of it with no
-  text and no tool call, and the session then closes with
-  `error_max_output_tokens` having done nothing. Both `gpt2-codegolf` (first
-  run) and `run-pdp11-code` (2026-11-05) hit it. The provider accepted
-  `max_tokens` 65 536 and 131 072 in a direct probe, so the ceiling is
-  Codape's, not the gateway's — but only an agent definition can raise it
-  today, and a benchmark adapter has no way to pass one.
-- **`UNKNOWN_CONTEXT_WINDOW` is still 32 000.** For a model Codape does not
-  recognise, it compacts against a 32 K guess. This is now only a *hint*: the
-  guess drives when compaction starts but can never refuse a request, and the
-  first provider "prompt too long" error teaches the session the real window
-  (see [Learning the window from the provider](compact.md#learning-the-window-from-the-provider)).
-  The benchmark runs still set `CODAPE_CONTEXT_WINDOW=131072` so they compact
-  on the right line from the start rather than after one rejected request.
-- **Compaction can burn its retry budget on a no-op.** Fixed: a pass counts as
-  progress only when it reaches the `auto` line or removes a tenth of the
-  context, an ineffective pass counts toward the circuit breaker, and the
-  strategy escalates (`Micro` → `Auto` → `Snip`) on the next attempt. Covered by
-  `a_35_token_pass_is_not_reported_as_progress`. The escalation state and the
-  summary fall-through were themselves broken until defect 13, and the
-  selection, the targets and the progress line were computed on the heuristic
-  ruler rather than the provider's until the same defect.
+- **`UNKNOWN_CONTEXT_WINDOW` is 32 000, and that is a conservative default, not
+  a defect.** For a model Codape does not recognise, it compacts against a 32 K
+  guess. The guess is only a *hint*: it drives when compaction starts but can
+  never refuse a request, and the first provider "prompt too long" error
+  teaches the session the real window (see
+  [Learning the window from the provider](compact.md#learning-the-window-from-the-provider)).
+  Guessing low costs some context; guessing high loses the conversation, so low
+  is the right side to be wrong on. The benchmark runs set
+  `CODAPE_CONTEXT_WINDOW=131072` to compact on the right line from the start
+  rather than after one rejected request. The only real improvement left is for
+  the provider-learned window to be written back to settings, so the next
+  session does not have to be rejected once to learn it.
+- **A turn that spends its whole output ceiling on reasoning still ends the
+  run.** `max_tokens` is a terminal reason by design: re-requesting the same
+  prompt would spend the budget again. Both `gpt2-codegolf` (first run) and
+  `run-pdp11-code` (2026-11-05) hit it at 32 768, with no text and no tool call.
+
+  The *ceiling* is no longer a dead end: `CODAPE_MAX_TOKENS` raises it (clamped
+  to half the model's context window), an agent definition can set it, and both
+  benchmark adapters pass the variable through. What is still unfixed is the
+  distinction the loop cannot make — a turn whose answer was cut off mid-stream
+  and a turn that produced nothing at all are both `TokenLimitStop`. Retrying
+  the second is arguably right (nothing was produced, so nothing is wasted) and
+  retrying the first is not. Changing that means changing what `TokenLimitStop`
+  means, which needs more samples than two runs.
 
 ## Local fixture patches
 

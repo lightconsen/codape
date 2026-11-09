@@ -2096,9 +2096,14 @@ pub struct ReplLoop {
     fallback_model: Option<ModelId>,
     /// Maximum output tokens per provider request.
     ///
-    /// A named custom agent may set this; the CLI has no override flag, so an
-    /// explicit programmatic value is the only thing that wins over the file.
+    /// A named custom agent may set this; `CODAPE_MAX_TOKENS` may set it too.
+    /// The definition wins, because it was written for this session while the
+    /// variable is ambient. [`Self::max_tokens_from_agent`] records which
+    /// happened, so the environment is not applied over a definition that
+    /// happens to equal the default.
     max_tokens: u32,
+    /// True when a named agent definition supplied [`Self::max_tokens`].
+    max_tokens_from_agent: bool,
     /// True when `--model` was given. A named custom agent's `model` must not
     /// override an explicitly chosen session model.
     explicit_model_override: bool,
@@ -2582,6 +2587,7 @@ impl ReplLoop {
             tool_names: std::collections::HashMap::new(),
             last_usage: codape_core::types::UsageSummary::default(),
             max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
+            max_tokens_from_agent: false,
             explicit_model_override: false,
             cwd,
             running: true,
@@ -2991,6 +2997,7 @@ impl ReplLoop {
             tool_names: std::collections::HashMap::new(),
             last_usage: codape_core::types::UsageSummary::default(),
             max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
+            max_tokens_from_agent: false,
             explicit_model_override: false,
             cwd,
             running: true,
@@ -3739,6 +3746,10 @@ impl ReplLoop {
         // recorded and ignored. Explicit flags win: they are more specific
         // than the agent file.
         self.apply_agent_selection();
+        // A definition's `max_tokens` wins, so this runs after the selection:
+        // otherwise the environment would silently override a file the person
+        // wrote for this session.
+        self.apply_output_ceiling();
         self.apply_plugin_agents();
 
         // 1. Permission mode
@@ -4262,8 +4273,9 @@ impl ReplLoop {
 
         // Resource defaults from the definition apply unless the person chose
         // otherwise on the command line. `--model` is the only CLI override;
-        // there is no max-token flag, so the definition's limit always wins
-        // over the engine default.
+        // the definition's limit beats both the engine default and
+        // `CODAPE_MAX_TOKENS`, so the flag recorded here protects it from
+        // [`Self::apply_output_ceiling`].
         if !self.explicit_model_override
             && let Some(model) = agent.model
         {
@@ -4271,10 +4283,48 @@ impl ReplLoop {
         }
         if let Some(max_tokens) = agent.max_tokens.filter(|limit| *limit > 0) {
             self.max_tokens = max_tokens;
+            self.max_tokens_from_agent = true;
         }
         if let Some(ref mut engine) = self.engine {
             engine.set_model(self.model.clone());
             engine.set_max_tokens(self.max_tokens);
+        }
+    }
+
+    /// Apply `CODAPE_MAX_TOKENS`, clamped to half the model's context window.
+    ///
+    /// A named agent definition that set its own limit wins: the environment
+    /// is ambient, the definition was written for this session.
+    ///
+    /// The clamp is what keeps a raised ceiling safe. A request carries
+    /// `input + max_tokens`, and a ceiling at or above the whole window fails
+    /// on the very first request — before compaction has anything to compact,
+    /// so there is no recovery path. Half the window is the boundary between
+    /// "rejected once and recoverable by compacting" and "no context size
+    /// would make this request acceptable".
+    ///
+    /// A ceiling above the compaction reserve does cost something: a request
+    /// sent at the `auto` line can be rejected, learned from, compacted, and
+    /// retried. That is the price of asking for more output room than the
+    /// default reserve accounts for, and it is why this is opt-in rather than
+    /// the default.
+    fn apply_output_ceiling(&mut self) {
+        if self.max_tokens_from_agent {
+            return;
+        }
+        // The engine already knows its window through the resolver the CLI
+        // installed, which also covers settings and experiment values. A
+        // `ReplLoop` built without an engine only has the environment and the
+        // built-in table, which is the next best thing.
+        let window = match self.engine {
+            Some(ref engine) => engine.context_window(),
+            None => crate::output_ceiling::window_for(&self.model),
+        };
+        let ceiling =
+            crate::output_ceiling::resolve_ceiling(QueryEngine::DEFAULT_MAX_TOKENS, window);
+        self.max_tokens = ceiling;
+        if let Some(ref mut engine) = self.engine {
+            engine.set_max_tokens(ceiling);
         }
     }
 

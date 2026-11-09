@@ -14,6 +14,7 @@ pub mod mcp_sampling;
 pub mod mcp_tokens;
 pub mod memory_tools;
 pub mod orchestrator;
+pub mod output_ceiling;
 pub mod plugin_monitors;
 pub mod recovery;
 pub mod repl;

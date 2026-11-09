@@ -83,6 +83,10 @@ PASSTHROUGH_ENV = (
     # spends most of the task compacting instead of working. These let the
     # caller state the window the endpoint actually has.
     "CODAPE_CONTEXT_WINDOW",
+    # Raises the per-request output ceiling, which a reasoning model can
+    # otherwise spend entirely on thinking and end the run having emitted
+    # nothing. A raised value is clamped to half the model's context window.
+    "CODAPE_MAX_TOKENS",
 )
 
 

@@ -158,10 +158,19 @@ impl Default for CompactConfig {
 }
 
 impl CompactConfig {
-    /// Ceiling on the response reserve the compaction line leaves room for.
+    /// How much output room the compaction line leaves by default.
     ///
     /// Claude's arithmetic uses `min(maxOutputTokens, 20 000)`; Codape does
-    /// not model per-model output caps, so the ceiling is the reserve.
+    /// not model per-model output caps, so this is simply the reserve. It is
+    /// sized for the default output ceiling: `window − auto` is this plus
+    /// [`Self::trigger_buffer_tokens`], which is 33 000 — just enough for a
+    /// 32 768-token request.
+    ///
+    /// A session that raises its output ceiling above that
+    /// (`CODAPE_MAX_TOKENS`) is asking for more than this line reserves, and a
+    /// request sent at the line can be rejected by the provider. That is
+    /// recovered the same way any overflow is: the error states the real
+    /// window, the turn compacts, and the request is retried.
     pub const MAX_OUTPUT_RESERVE_TOKENS: usize = 20_000;
 
     /// Threshold at which a warning (not a compaction) is emitted.

@@ -145,6 +145,16 @@ hint, and a per-turn value on the context wins over a client-level default. An
 unknown level (`--effort maximum`) is rejected at startup with the accepted
 values.
 
+### Output ceiling
+
+The per-request `max_tokens` starts at
+`QueryEngine::DEFAULT_MAX_TOKENS` (32 768). `CODAPE_MAX_TOKENS` raises or lowers
+it for the session; the value is clamped to half the model's context window, so
+a hard reasoning step gets more room without a request that no context size
+could satisfy. A named agent definition's `max_tokens` wins over the variable.
+There is no flag — the variable is the whole interface. See
+[`docs/config.md`](config.md) and `crates/cli/src/output_ceiling.rs`.
+
 ### Telemetry inspection
 
 `codape telemetry preview-crash` loads the newest pending crash from
