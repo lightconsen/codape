@@ -58,9 +58,9 @@ fi
 
 echo "Installing $BINARY $VERSION for $TARGET..."
 
-# Download URL
-ARCHIVE="${BINARY}-${TARGET}.tar.gz"
-URL="$RELEASE_BASE_URL/$VERSION/$ARCHIVE"
+# Releases up to v0.1.3 were published before the project was renamed and use
+# the old prefix for both the asset and the member inside it. Try the current
+# name first and fall back, so the script installs either kind of release.
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -75,27 +75,48 @@ sha256_of() {
     fi
 }
 
-curl -fsSL "$URL" -o "$TMPDIR/${BINARY}.tar.gz"
-
-# The release publishes one SHA256SUMS for every asset. A missing file, a
-# missing entry or a mismatch stops the install: an unverified download is a
-# download from whatever answered the request.
 if ! curl -fsSL "$RELEASE_BASE_URL/$VERSION/SHA256SUMS" -o "$TMPDIR/SHA256SUMS"; then
     echo "Could not download SHA256SUMS for $VERSION; refusing to install an unverified download" >&2
     exit 1
 fi
+
+# Pick the first candidate the release actually publishes. A release that
+# publishes neither is a hard error, not a silent fallthrough to an unverified
+# download.
+ARCHIVE=""
+for candidate in "${BINARY}-${TARGET}.tar.gz" "coderex-${TARGET}.tar.gz"; do
+    if awk -v name="$candidate" '$2 == name { found = 1 } END { exit !found }' "$TMPDIR/SHA256SUMS"; then
+        ARCHIVE="$candidate"
+        break
+    fi
+done
+if [ -z "$ARCHIVE" ]; then
+    echo "SHA256SUMS for $VERSION lists no archive for $TARGET; refusing to install" >&2
+    exit 1
+fi
+
+# The member inside the archive carries the archive's own prefix, minus the
+# extension: `codape-<target>.tar.gz` holds `codape-<target>`.
+MEMBER="${ARCHIVE%.tar.gz}"
+URL="$RELEASE_BASE_URL/$VERSION/$ARCHIVE"
+
+curl -fsSL "$URL" -o "$TMPDIR/$ARCHIVE"
+
+# The release publishes one SHA256SUMS for every asset. A missing file, a
+# missing entry or a mismatch stops the install: an unverified download is a
+# download from whatever answered the request.
 EXPECTED=$(awk -v name="$ARCHIVE" '$2 == name { print $1; exit }' "$TMPDIR/SHA256SUMS")
 if [ -z "$EXPECTED" ]; then
     echo "SHA256SUMS has no entry for $ARCHIVE; refusing to install" >&2
     exit 1
 fi
-ACTUAL=$(sha256_of "$TMPDIR/${BINARY}.tar.gz")
+ACTUAL=$(sha256_of "$TMPDIR/$ARCHIVE")
 if [ "$ACTUAL" != "$EXPECTED" ]; then
     echo "Checksum mismatch for $ARCHIVE: expected $EXPECTED, got $ACTUAL" >&2
     exit 1
 fi
 
-tar xzf "$TMPDIR/${BINARY}.tar.gz" -C "$TMPDIR"
+tar xzf "$TMPDIR/$ARCHIVE" -C "$TMPDIR"
 
 # Install to ~/.local/bin or /usr/local/bin
 INSTALL_DIR="${INSTALL_DIR:-}"
@@ -111,7 +132,7 @@ fi
 mkdir -p "$INSTALL_DIR"
 
 # Move binary
-cp "$TMPDIR/${BINARY}-${TARGET}" "$INSTALL_DIR/$BINARY"
+cp "$TMPDIR/$MEMBER" "$INSTALL_DIR/$BINARY"
 chmod +x "$INSTALL_DIR/$BINARY"
 
 echo "Installed $BINARY to $INSTALL_DIR/$BINARY"

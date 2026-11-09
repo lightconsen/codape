@@ -167,6 +167,20 @@ pub fn is_windows_target(target: &str) -> bool {
     target.contains("windows")
 }
 
+/// The name a target's asset had before the project was renamed to codape.
+///
+/// Releases up to v0.1.3 publish `coderex-*` and a `SHA256SUMS` that lists
+/// those names. The updater accepts both so a binary built from this tree can
+/// still install them; new releases use `asset_name`.
+#[must_use]
+pub fn legacy_asset_name(target: &str) -> String {
+    if target.contains("windows") {
+        format!("coderex-{target}.exe")
+    } else {
+        format!("coderex-{target}.tar.gz")
+    }
+}
+
 /// The file inside a target's `.tar.gz`.
 ///
 /// The archive is named `codape-<target>.tar.gz` and holds `codape-<target>`
@@ -175,6 +189,17 @@ pub fn is_windows_target(target: &str) -> bool {
 #[must_use]
 pub fn archive_member(target: &str) -> String {
     format!("codape-{target}")
+}
+
+/// The file a release archive holds, derived from the archive's own name.
+///
+/// Deriving it from the name that was actually downloaded — rather than from
+/// `archive_member` — keeps the pre-rename `coderex-<target>` archives
+/// extractable: those hold `coderex-<target>`, not `codape-<target>`.
+fn archive_member_of(asset: &str) -> Result<&str, String> {
+    asset
+        .strip_suffix(".tar.gz")
+        .ok_or_else(|| format!("{asset} is not a .tar.gz archive"))
 }
 
 /// Parse a GitHub release body into the parts the updater needs.
@@ -579,13 +604,18 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
         }
     }
 
-    let name = asset_name(target);
-    let asset = release.asset(&name).ok_or_else(|| {
-        format!(
-            "release {} does not publish {name}; see {}/{}",
-            release.tag, DEFAULT_RELEASE_BASE, release.tag
-        )
-    })?;
+    let preferred = asset_name(target);
+    let legacy = legacy_asset_name(target);
+    let (name, asset) = release
+        .asset(&preferred)
+        .map(|asset| (preferred.as_str(), asset))
+        .or_else(|| release.asset(&legacy).map(|asset| (legacy.as_str(), asset)))
+        .ok_or_else(|| {
+            format!(
+                "release {} publishes neither {preferred} nor {legacy}; see {}/{}",
+                release.tag, DEFAULT_RELEASE_BASE, release.tag
+            )
+        })?;
     let checksums = release.asset(CHECKSUM_ASSET).ok_or_else(|| {
         format!(
             "release {} does not publish {CHECKSUM_ASSET}; refusing to install an \
@@ -620,10 +650,10 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
         .map_err(|error| format!("could not read {CHECKSUM_ASSET}: {error}"))?;
     let sums = parse_sha256sums(&sums_text)?;
     let expected = sums
-        .get(&name)
+        .get(name)
         .ok_or_else(|| format!("{CHECKSUM_ASSET} has no entry for {name}"))?;
 
-    let archive_path = staging.path().join(&name);
+    let archive_path = staging.path().join(name);
     let actual = download(
         &client,
         &asset_url(asset, &release.tag, base.as_deref()),
@@ -636,7 +666,7 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
     let replacement = if is_windows_target(target) {
         archive_path
     } else {
-        extract_tarball(&archive_path, &archive_member(target), staging.path())?
+        extract_tarball(&archive_path, archive_member_of(name)?, staging.path())?
     };
 
     replace_binary(&current_exe, &replacement)?;
@@ -696,6 +726,33 @@ mod tests {
         let target = "x86_64-unknown-linux-gnu";
         assert_eq!(asset_name(target), "codape-x86_64-unknown-linux-gnu.tar.gz");
         assert_eq!(archive_member(target), "codape-x86_64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn the_legacy_names_are_the_pre_rename_ones() {
+        assert_eq!(
+            legacy_asset_name("x86_64-unknown-linux-gnu"),
+            "coderex-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            legacy_asset_name("x86_64-pc-windows-msvc"),
+            "coderex-x86_64-pc-windows-msvc.exe"
+        );
+    }
+
+    /// A pre-rename archive holds a pre-rename member, so the member is
+    /// derived from the downloaded name, not from `archive_member`.
+    #[test]
+    fn the_archive_member_follows_the_name_that_was_downloaded() {
+        assert_eq!(
+            archive_member_of("codape-x86_64-unknown-linux-gnu.tar.gz").unwrap(),
+            "codape-x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            archive_member_of("coderex-x86_64-unknown-linux-gnu.tar.gz").unwrap(),
+            "coderex-x86_64-unknown-linux-gnu"
+        );
+        assert!(archive_member_of("codape-x86_64-pc-windows-msvc.exe").is_err());
     }
 
     #[test]

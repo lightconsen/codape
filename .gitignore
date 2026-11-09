@@ -13,6 +13,9 @@ export_env.*.sh
 
 # Local configuration and generated docs
 .codape/
+# Written by pre-rename binaries that are still installed, and by the tests
+# that install a published v0.1.x release to check the legacy names work.
+.coderex/
 .claude/settings.json
 # Local working checklists (diff.local.md, 11.local.md, ...). They are not part
 # of the project and may hold internal notes; the developer's global ignore is

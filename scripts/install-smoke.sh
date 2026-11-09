@@ -127,4 +127,30 @@ fi
 test ! -e "$tmp/bin/codape"
 cp "$tmp/good-sums" "$release/SHA256SUMS"
 
+echo "== a release published under the pre-rename names"
+# Releases up to v0.1.3 ship `coderex-*` assets whose archives hold a
+# `coderex-*` member. The installer must still install them.
+legacy="$tmp/legacy/releases/download/$version"
+mkdir -p "$legacy"
+cp "$binary" "$legacy/coderex-$target"
+tar czf "$legacy/coderex-$target.tar.gz" -C "$legacy" "coderex-$target"
+printf '%s  %s\n' "$(sha256_of "$legacy/coderex-$target.tar.gz")" \
+    "coderex-$target.tar.gz" > "$legacy/SHA256SUMS"
+rm -f "$tmp/bin/codape"
+CODAPE_RELEASE_BASE_URL="$base/legacy/releases/download" \
+    INSTALL_DIR="$tmp/bin" \
+    sh scripts/install.sh "$version" >/dev/null
+"$tmp/bin/codape" --version | grep -qi codape
+
+echo "== neither name is published"
+printf '%064d  %s\n' 0 "something-else.tar.gz" > "$release/SHA256SUMS"
+rm -f "$tmp/bin/codape"
+if CODAPE_RELEASE_BASE_URL="$base/releases/download" \
+    INSTALL_DIR="$tmp/bin" \
+    sh scripts/install.sh "$version" >/dev/null 2>&1; then
+    echo "install.sh installed a release with no archive for this target" >&2
+    exit 1
+fi
+test ! -e "$tmp/bin/codape"
+
 echo "install smoke: ok"
