@@ -2,8 +2,8 @@
 //! first-party endpoint, the OTLP logs channel and the Datadog logs channel,
 //! each in its own wire format.
 
-use coderex_telemetry::{ChannelConfig, TelemetryConfig, TelemetryUploader};
-use coderex_telemetry::{TelemetryEvent, TelemetryStore};
+use codape_telemetry::{ChannelConfig, TelemetryConfig, TelemetryUploader};
+use codape_telemetry::{TelemetryEvent, TelemetryStore};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -86,8 +86,8 @@ async fn one_batch_reaches_all_three_channels_in_their_own_formats() {
     let datadog = &by_path["/api/v2/logs"];
     let entries = datadog.as_array().expect("Datadog takes an array");
     assert_eq!(entries.len(), 1, "{datadog}");
-    assert_eq!(entries[0]["ddsource"], "coderex");
-    assert_eq!(entries[0]["service"], "coderex");
+    assert_eq!(entries[0]["ddsource"], "codape");
+    assert_eq!(entries[0]["service"], "codape");
     assert!(entries[0]["message"].is_string(), "{datadog}");
 
     let store = TelemetryStore::open(&db).unwrap();

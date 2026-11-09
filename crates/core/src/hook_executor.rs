@@ -1,8 +1,8 @@
 //! Hook executor trait — abstract hook firing for QueryEngine.
 //!
-//! This trait lives in `coderex-core` to avoid a circular dependency with
-//! `coderex-hooks`. Concrete implementations (backed by `HookRegistry`)
-//! live in `coderex-hooks`.
+//! This trait lives in `codape-core` to avoid a circular dependency with
+//! `codape-hooks`. Concrete implementations (backed by `HookRegistry`)
+//! live in `codape-hooks`.
 
 use std::collections::HashMap;
 
@@ -71,7 +71,7 @@ pub struct HookFireResult {
     pub pending_prompts: Vec<String>,
 }
 
-/// Abstract hook executor — implemented by `coderex-hooks::HookRegistry`.
+/// Abstract hook executor — implemented by `codape-hooks::HookRegistry`.
 #[async_trait::async_trait]
 pub trait HookExecutor: Send + Sync {
     /// Fire a hook event and return the result.

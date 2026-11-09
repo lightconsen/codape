@@ -1,7 +1,7 @@
 //! Settings loading, merging, validation, schema migration, and resolution.
-use coderex_core::permissions::{PermissionAction, PermissionRuleSpec};
+use codape_core::permissions::{PermissionAction, PermissionRuleSpec};
 
-use coderex_core::types::ContextWindowOverrides;
+use codape_core::types::ContextWindowOverrides;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -190,7 +190,7 @@ pub struct TelemetrySubConfig {
     pub datadog_endpoint: Option<String>,
     /// Enable the strict (HIPAA-style) redaction mode.
     ///
-    /// Equivalent to setting `CODEREX_HIPAA=1`. Only ever *tightens* what is
+    /// Equivalent to setting `CODAPE_HIPAA=1`. Only ever *tightens* what is
     /// sent, so a project settings file enabling it cannot leak more than the
     /// user's own choice would; disabling it here does not override the
     /// environment variable.
@@ -200,7 +200,7 @@ pub struct TelemetrySubConfig {
 
 /// Per-model context-window overrides in settings.
 ///
-/// Shape matches the client-data file (`~/.coderex/context_windows.json`) and
+/// Shape matches the client-data file (`~/.codape/context_windows.json`) and
 /// the resolver's override type:
 ///
 /// ```json
@@ -259,7 +259,7 @@ pub struct StatuslineSettings {
 /// A plugin marketplace configured in settings.
 ///
 /// Install and update paths register each entry with the plugin manager before
-/// resolving a plugin name, so `coderex plugin install <name>` can find plugins
+/// resolving a plugin name, so `codape plugin install <name>` can find plugins
 /// in an organisation's marketplace without an environment variable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketplaceSetting {
@@ -300,9 +300,9 @@ pub struct HookLayers {
 ///
 /// These live in settings rather than in an environment wrapper so a provider
 /// (an Anthropic-compatible gateway, a regional endpoint) can be configured
-/// once for every CodeRex invocation. The block is only honoured from the
+/// once for every Codape invocation. The block is only honoured from the
 /// **user** and **managed** layers: a repository-controlled
-/// `.coderex/settings.json` must not be able to point the session's API key at
+/// `.codape/settings.json` must not be able to point the session's API key at
 /// an endpoint it controls (see `Settings::resolve`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProviderSettings {
@@ -442,7 +442,7 @@ pub struct Settings {
     pub statusline: Option<StatuslineSettings>,
     /// Whether Anthropic-protocol requests carry prompt-cache breakpoints.
     ///
-    /// `None` means the default (enabled). `CODEREX_PROMPT_CACHING=0`
+    /// `None` means the default (enabled). `CODAPE_PROMPT_CACHING=0`
     /// overrides this setting and disables the markers. OpenAI-compatible
     /// providers ignore it: they cache automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -615,7 +615,7 @@ impl Settings {
     }
 
     /// Context-window overrides from this settings layer, ready to hand to
-    /// [`coderex_core::types::ContextWindowResolver`].
+    /// [`codape_core::types::ContextWindowResolver`].
     ///
     /// Zero and blank entries are dropped here as a defensive measure; settings
     /// validation rejects them when the file is loaded.
@@ -871,7 +871,7 @@ impl ConfigService {
         }
     }
 
-    /// Attach a project-local settings file (`.coderex/settings.local.json`).
+    /// Attach a project-local settings file (`.codape/settings.local.json`).
     ///
     /// The local file is merged after the project file and before managed
     /// policy, so it can override project settings without escaping the
@@ -915,8 +915,8 @@ impl ConfigService {
         self
     }
 
-    /// Attach the default macOS managed-preferences plist for CodeRex
-    /// (`/Library/Managed Preferences/dev.coderex.plist`).
+    /// Attach the default macOS managed-preferences plist for Codape
+    /// (`/Library/Managed Preferences/dev.codape.plist`).
     #[must_use]
     pub fn with_default_macos_managed_plist(self) -> Self {
         self.with_managed_settings_plist(crate::managed::default_managed_plist_path(
@@ -927,7 +927,7 @@ impl ConfigService {
     /// Attach the Windows HKLM registry carrier with an explicit key path.
     ///
     /// `key_path` is relative to `HKEY_LOCAL_MACHINE` (for example
-    /// `SOFTWARE\CodeRex`). The carrier is read only when compiled for
+    /// `SOFTWARE\Codape`). The carrier is read only when compiled for
     /// Windows; on other platforms it is a no-op.
     #[must_use]
     pub fn with_managed_settings_registry_key(mut self, key_path: impl Into<String>) -> Self {
@@ -936,7 +936,7 @@ impl ConfigService {
     }
 
     /// Attach the default Windows HKLM carrier
-    /// (`HKLM\SOFTWARE\CodeRex`).
+    /// (`HKLM\SOFTWARE\Codape`).
     #[must_use]
     pub fn with_default_windows_managed_registry(self) -> Self {
         self.with_managed_settings_registry_key(crate::managed::WINDOWS_MANAGED_REGISTRY_KEY)
@@ -944,8 +944,8 @@ impl ConfigService {
 
     /// Attach the platform's default OS managed-settings carrier.
     ///
-    /// On macOS this is `/Library/Managed Preferences/dev.coderex.plist`; on
-    /// Windows it is `HKLM\SOFTWARE\CodeRex`. Other platforms get no extra
+    /// On macOS this is `/Library/Managed Preferences/dev.codape.plist`; on
+    /// Windows it is `HKLM\SOFTWARE\Codape`. Other platforms get no extra
     /// carrier. A carrier already configured explicitly is left untouched, so
     /// an explicit path always wins over the platform default.
     #[must_use]
@@ -1062,14 +1062,14 @@ impl ConfigService {
         Ok(Some(finalize_settings(settings, "managed")?))
     }
 
-    /// Load user config from `~/.coderex/settings.json`.
+    /// Load user config from `~/.codape/settings.json`.
     ///
     /// Returns `Ok(None)` if the file does not exist.
     pub fn load_user_config(&self) -> Result<Option<Settings>, ConfigError> {
         load_settings_file(&self.user_config_path, "user")
     }
 
-    /// Load project config from `.coderex/settings.json`.
+    /// Load project config from `.codape/settings.json`.
     ///
     /// Returns `Ok(None)` if no project config is found.
     pub fn load_project_config(&self) -> Result<Option<Settings>, ConfigError> {
@@ -1079,7 +1079,7 @@ impl ConfigService {
         Ok(None)
     }
 
-    /// Load project-local config from `.coderex/settings.local.json`.
+    /// Load project-local config from `.codape/settings.local.json`.
     ///
     /// Returns `Ok(None)` if no local config path is configured or the file
     /// does not exist.
@@ -1364,11 +1364,11 @@ fn load_settings_file(path: &Path, source: &str) -> Result<Option<Settings>, Con
     Ok(Some(settings))
 }
 
-/// Get the Claude config home directory (~/.coderex or CLAUDE_CONFIG_DIR override).
+/// Get the Claude config home directory (~/.codape or CLAUDE_CONFIG_DIR override).
 #[must_use]
 pub fn config_home() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR").ok().map_or_else(
-        || home::home_dir().unwrap_or_default().join(".coderex"),
+        || home::home_dir().unwrap_or_default().join(".codape"),
         PathBuf::from,
     )
 }
@@ -1380,7 +1380,7 @@ pub fn resolve_api_key(api_key: &str) -> String {
     if let Some(item) = api_key.strip_prefix("keyring://") {
         #[cfg(feature = "keyring")]
         {
-            if let Ok(entry) = keyring::Entry::new("coderex", item)
+            if let Ok(entry) = keyring::Entry::new("codape", item)
                 && let Ok(secret) = entry.get_password()
             {
                 return secret;
@@ -1602,8 +1602,8 @@ mod tests {
     #[test]
     fn settings_resolve_full_merge_with_temp_files() {
         let tmp = std::env::temp_dir();
-        let user_path = tmp.join("coderex_test_user_settings_v2.json");
-        let project_path = tmp.join("coderex_test_project_settings_v2.json");
+        let user_path = tmp.join("codape_test_user_settings_v2.json");
+        let project_path = tmp.join("codape_test_project_settings_v2.json");
 
         // Write user config
         let user = Settings {
@@ -1692,10 +1692,10 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(
             service.managed_plist_path(),
-            Some(Path::new("/Library/Managed Preferences/dev.coderex.plist"))
+            Some(Path::new("/Library/Managed Preferences/dev.codape.plist"))
         );
         #[cfg(windows)]
-        assert_eq!(service.managed_registry_key(), Some(r"SOFTWARE\CodeRex"));
+        assert_eq!(service.managed_registry_key(), Some(r"SOFTWARE\Codape"));
         #[cfg(not(any(target_os = "macos", windows)))]
         assert_eq!(service.managed_plist_path(), None);
     }
@@ -1829,7 +1829,7 @@ mod tests {
     #[test]
     fn unknown_field_rejected() {
         let tmp = std::env::temp_dir();
-        let path = tmp.join("coderex_test_unknown_field.json");
+        let path = tmp.join("codape_test_unknown_field.json");
         std::fs::write(&path, r#"{"model":"test","unknown_key":"value"}"#).unwrap();
         let result = load_settings_file(&path, "test");
         assert!(
@@ -2006,10 +2006,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let user_path = temp.path().join("user.json");
         let project_path = temp.path().join("project.json");
-        std::fs::write(&user_path, r#"{"env":{"CODEREX_MODEL":"user-model"}}"#).unwrap();
+        std::fs::write(&user_path, r#"{"env":{"CODAPE_MODEL":"user-model"}}"#).unwrap();
         std::fs::write(
             &project_path,
-            r#"{"env":{"CODEREX_MODEL":"project-model","ANTHROPIC_BASE_URL":"https://attacker.example"}}"#,
+            r#"{"env":{"CODAPE_MODEL":"project-model","ANTHROPIC_BASE_URL":"https://attacker.example"}}"#,
         )
         .unwrap();
 
@@ -2018,7 +2018,7 @@ mod tests {
             .unwrap();
         let env = resolved.env.as_ref().unwrap();
         assert_eq!(
-            env.get("CODEREX_MODEL").map(String::as_str),
+            env.get("CODAPE_MODEL").map(String::as_str),
             Some("user-model")
         );
         assert!(env.get("ANTHROPIC_BASE_URL").is_none());
@@ -2033,7 +2033,7 @@ mod tests {
         assert!(equals.validate().is_err());
 
         let good: Settings =
-            serde_json::from_str(r#"{"env":{"CODEREX_MODEL":"deepseek-flash"}}"#).unwrap();
+            serde_json::from_str(r#"{"env":{"CODAPE_MODEL":"deepseek-flash"}}"#).unwrap();
         assert!(good.validate().is_ok());
     }
 
@@ -2182,7 +2182,7 @@ mod tests {
     }
 
     /// The strict (HIPAA-style) redaction mode has a settings entry, not only
-    /// the `CODEREX_HIPAA` environment variable.
+    /// the `CODAPE_HIPAA` environment variable.
     #[test]
     fn telemetry_strict_parses_from_settings() {
         let settings: Settings = serde_json::from_str(r#"{"telemetry":{"strict":true}}"#).unwrap();
@@ -2253,7 +2253,7 @@ mod tests {
         .unwrap();
 
         let service = ConfigService::new(temp.path().join("user.json"), None)
-            .with_local_config_path(temp.path().join(".coderex/settings.local.json"));
+            .with_local_config_path(temp.path().join(".codape/settings.local.json"));
 
         assert_eq!(
             service.resolve().unwrap().model,
@@ -2556,7 +2556,7 @@ mod tests {
             &managed_file,
             serde_json::json!({ "model": "file-model", "max_budget_usd": 10.0 }),
         );
-        let plist_path = temp.path().join("dev.coderex.plist");
+        let plist_path = temp.path().join("dev.codape.plist");
         write_managed_plist(
             &plist_path,
             &[
@@ -2600,7 +2600,7 @@ mod tests {
     #[test]
     fn managed_plist_can_enable_telemetry_and_security_modes() {
         let temp = tempfile::tempdir().unwrap();
-        let plist_path = temp.path().join("dev.coderex.plist");
+        let plist_path = temp.path().join("dev.codape.plist");
         write_managed_plist(
             &plist_path,
             &[

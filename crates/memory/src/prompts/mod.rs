@@ -5,7 +5,7 @@
 //! memory compaction, etc.).
 
 /// Re-export core memory prompt constants for convenience.
-pub use coderex_core::prompts::{EXTRACT_MEMORIES_SYSTEM, SESSION_MEMORY_UPDATE_INSTRUCTION};
+pub use codape_core::prompts::{EXTRACT_MEMORIES_SYSTEM, SESSION_MEMORY_UPDATE_INSTRUCTION};
 
 /// Assemble a session memory update user prompt from current memory and
 /// recent conversation excerpt.

@@ -2,11 +2,11 @@
 
 A **surface** is the product a session is presented in: the terminal, an IDE
 panel, a desktop window, a web page, a chat product. It is not a widget toolkit
-and not a rendering API. The abstraction in `coderex-core::surface` answers one
+and not a rendering API. The abstraction in `codape-core::surface` answers one
 question — *which front end is showing this session, and what can it present?* —
 and gives the engine, the mod runtime and every host the same answer.
 
-CodeRex ships **one** surface implementation, the terminal. The abstraction
+Codape ships **one** surface implementation, the terminal. The abstraction
 exists so that adding a second one is a host-side project, not a fork of the
 engine or the mod runtime.
 
@@ -53,9 +53,9 @@ terminal.
 
 ## What is implemented
 
-- `coderex-core::surface` — the ids, capabilities, descriptor, trait and
+- `codape-core::surface` — the ids, capabilities, descriptor, trait and
   registry, with tests for validation, duplicate registration and selection.
-- `coderex-ui::surface::TerminalSurface` — the terminal implementation. It
+- `codape-ui::surface::TerminalSurface` — the terminal implementation. It
   reports `interactive: true, mouse: true, images: false` and renders through
   the same text renderer the headless transcript uses.
 - The CLI registers exactly that surface when it builds the mod session, and

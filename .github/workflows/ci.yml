@@ -138,7 +138,7 @@ jobs:
       # index 424, with the runner's own cancellation behind it. It is not one
       # test's fault and not a concurrency limit — `--test-threads 2` moved the
       # instant (1.47s to 2.64s) but not the index, and the same four tests
-      # (two `coderex-bridge`, two `coderex-cli::bridge_launcher`) were the ones
+      # (two `codape-bridge`, two `codape-cli::bridge_launcher`) were the ones
       # in flight every time.
       #
       # Splitting the call is what changes the outcome: 3967 tests across 61
@@ -159,8 +159,8 @@ jobs:
       # See issue #25. `rerun-cancelled` below re-runs the job when this
       # happens; do not treat a cut-off `Test`/`Coverage` as a regression
       # signal.
-      - name: Test (everything but coderex-cli)
-        run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(coderex-cli)'
+      - name: Test (everything but codape-cli)
+        run: cargo nextest run --workspace --no-fail-fast --locked -E 'not package(codape-cli)'
       # Issue #25: this call is cancelled 50-70 ms after it starts, always, and
       # the probe that ran here on 2026-11-08 established who does it.
       #
@@ -187,8 +187,8 @@ jobs:
       # is outside this repository, so no change here can prevent it.
       # `retry-cancelled.yml` re-runs the job when it happens; do not read a
       # cut-off `Test`/`Coverage` as a regression signal.
-      - name: Test (coderex-cli)
-        run: cargo nextest run -p coderex-cli --no-fail-fast --locked
+      - name: Test (codape-cli)
+        run: cargo nextest run -p codape-cli --no-fail-fast --locked
 
   # `cargo nextest` does not run doctests, and a `cargo test` in another job
   # would run them only incidentally. A doc example that stops compiling is a
@@ -223,12 +223,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
-      - run: cargo test -p coderex-config --locked
+      - run: cargo test -p codape-config --locked
       # The live benchmark cassettes replay sessions recorded on macOS; one of
       # them repairs its fixture with BSD `sed -i ''`, which GNU sed rejects.
       # The case is gated to macOS, so it runs here.
       - name: Live benchmark replay
-        run: cargo test -p coderex-cli --test code_agent_benchmark live_ --locked
+        run: cargo test -p codape-cli --test code_agent_benchmark live_ --locked
       # macOS-only code (sandbox-exec, F_GETPATH, the plist carrier) is not
       # compiled on Linux, so the main clippy job never sees it.
       - name: Clippy (macOS)
@@ -297,12 +297,12 @@ jobs:
             -o "AuthorizedKeysFile=/tmp/authorized_keys" \
             -o "StrictModes=no" -o "PasswordAuthentication=no" -o "UsePAM=no" \
             > /tmp/sshd.log 2>&1 &
-          # The spawner verifies the remote has coderex; the check only needs
+          # The spawner verifies the remote has codape; the check only needs
           # something executable with that name.
-          sudo install -m 755 /bin/true /usr/local/bin/coderex
-          echo "CODEREX_SSH_TEST_HOST=$(whoami)@localhost:2222" >> "$GITHUB_ENV"
-          echo "CODEREX_SSH_TEST_KEY=/tmp/ssh_client_key" >> "$GITHUB_ENV"
-          echo "CODEREX_SSH_TEST_PATH=/tmp/coderex-ssh-test" >> "$GITHUB_ENV"
+          sudo install -m 755 /bin/true /usr/local/bin/codape
+          echo "CODAPE_SSH_TEST_HOST=$(whoami)@localhost:2222" >> "$GITHUB_ENV"
+          echo "CODAPE_SSH_TEST_KEY=/tmp/ssh_client_key" >> "$GITHUB_ENV"
+          echo "CODAPE_SSH_TEST_PATH=/tmp/codape-ssh-test" >> "$GITHUB_ENV"
           : > /tmp/ssh-client.log
           for _ in $(seq 1 30); do
             if ssh -p 2222 -i /tmp/ssh_client_key \
@@ -320,7 +320,7 @@ jobs:
           exit 1
 
       - name: Spawn a session over SSH
-        run: cargo test -p coderex-bridge --test ssh_spawn --locked -- --nocapture
+        run: cargo test -p codape-bridge --test ssh_spawn --locked -- --nocapture
 
   # Compilation and linking for Windows are required, and are checked from
   # ubuntu-latest with the mingw-w64 toolchain below. This matters because the
@@ -349,8 +349,8 @@ jobs:
       - name: Link the Windows test binaries
         run: >
           cargo test --no-run --lib --target x86_64-pc-windows-gnu --locked
-          -p coderex-core -p coderex-tools -p coderex-hooks
-          -p coderex-config -p coderex-cli
+          -p codape-core -p codape-tools -p codape-hooks
+          -p codape-config -p codape-cli
 
   # The Unix test job cannot execute the Windows-only sandbox tests: they are
   # `cfg(target_os = "windows")`, and the `build` matrix only compiles. This
@@ -371,8 +371,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      CODEREX_REQUIRE_APP_CONTAINER: '1'
-      CODEREX_REQUIRE_HKLM_TESTS: '1'
+      CODAPE_REQUIRE_APP_CONTAINER: '1'
+      CODAPE_REQUIRE_HKLM_TESTS: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
@@ -389,46 +389,46 @@ jobs:
       - name: Core sandbox tests (AppContainer)
         timeout-minutes: 20
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib sandbox --locked -- --nocapture
+          cargo test --no-fail-fast -p codape-core --lib sandbox --locked -- --nocapture
           --skip windows_sandbox_confines_a_suspended_child
           --skip spawn_in_container_confines_a_real_process
       - name: AppContainer confinement (suspended child)
         if: always()
         timeout-minutes: 10
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib --locked
+          cargo test --no-fail-fast -p codape-core --lib --locked
           sandbox::tests::windows_sandbox_confines_a_suspended_child
           -- --exact --nocapture
       - name: AppContainer confinement (STARTUPINFOEX)
         if: always()
         timeout-minutes: 10
         run: >
-          cargo test --no-fail-fast -p coderex-core --lib --locked
+          cargo test --no-fail-fast -p codape-core --lib --locked
           sandbox_windows::tests::windows::spawn_in_container_confines_a_real_process
           -- --exact --nocapture
       - name: Process tree tests (Job Objects)
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-core --lib process_tree --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-core --lib process_tree --locked -- --nocapture
       - name: Tools shell sandbox tests
         if: always()
         timeout-minutes: 15
-        run: cargo test --no-fail-fast -p coderex-tools sandbox --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-tools sandbox --locked -- --nocapture
       # `fd_path` (GetFinalPathNameByHandleW) is the Windows half of the
       # verified-file story; macOS has F_GETPATH and a test, Windows had
       # neither until this step.
       - name: Verified file-access tests
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-tools --lib verified_fs --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-tools --lib verified_fs --locked -- --nocapture
       - name: Hooks sandbox tests
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-hooks sandbox --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-hooks sandbox --locked -- --nocapture
       - name: MCP sandbox tests
         if: always()
         timeout-minutes: 15
-        run: cargo test --no-fail-fast -p coderex-mcp --lib windows_ --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-mcp --lib windows_ --locked -- --nocapture
       # The whole crate, not just `archive`: the spawner, poller and
       # orchestrator tests are portable and used to run only on Unix, which
       # left the Windows spawn path with no runtime coverage. `ssh_spawn` is
@@ -437,19 +437,19 @@ jobs:
       - name: Bridge tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-bridge --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-bridge --locked -- --nocapture
       - name: WASM compiler sandbox tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-plugins --test wasm_compile_subprocess --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-plugins --test wasm_compile_subprocess --locked -- --nocapture
       - name: Config tests (Windows registry path)
         if: always()
         timeout-minutes: 10
-        run: cargo test --no-fail-fast -p coderex-config --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-config --locked -- --nocapture
       - name: CLI library tests
         if: always()
         timeout-minutes: 20
-        run: cargo test --no-fail-fast -p coderex-cli --lib --locked -- --nocapture
+        run: cargo test --no-fail-fast -p codape-cli --lib --locked -- --nocapture
 
   # Line coverage, uploaded as an artifact and reported on pull requests.
   #
@@ -505,7 +505,7 @@ jobs:
           echo "delta=$delta" >> "$GITHUB_OUTPUT"
           echo "workspace coverage: ${total}% (baseline ${baseline}%, ${delta} points)"
           {
-            echo "<!-- coderex-coverage -->"
+            echo "<!-- codape-coverage -->"
             echo "### Coverage"
             echo
             echo "Workspace line coverage: **${total}%** (baseline \`${baseline}%\`, ${delta} points)."
@@ -543,7 +543,7 @@ jobs:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('target/coverage/comment.md', 'utf8');
-            const marker = '<!-- coderex-coverage -->';
+            const marker = '<!-- codape-coverage -->';
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments, {
@@ -581,10 +581,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - name: Build eval fixtures
-        run: cargo build -p coderex-cli --bin coderex --bin static-anthropic-server --locked
+        run: cargo build -p codape-cli --bin codape --bin static-anthropic-server --locked
       - name: Run checked-in smoke flow
         run: |
-          cargo run --locked -p coderex-evals --bin run-eval -- \
+          cargo run --locked -p codape-evals --bin run-eval -- \
             --flow-dir evals/flows/smoke \
             --variant baseline \
             --approve-harness \
@@ -612,7 +612,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-mock.sh full
-      - run: cargo test -p coderex-cli --test e2e_stress --locked -- --nocapture
+      - run: cargo test -p codape-cli --test e2e_stress --locked -- --nocapture
 
   # Soak and fuzz: long-running checks that are pointless on every push but
   # catch the failures a unit test cannot — a session that leaks descriptors
@@ -678,7 +678,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CODEREX_SKIP_ENV_SOURCE: "1"
+      CODAPE_SKIP_ENV_SOURCE: "1"
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
@@ -724,7 +724,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CODEREX_SKIP_ENV_SOURCE: "1"
+      CODAPE_SKIP_ENV_SOURCE: "1"
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
       ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}

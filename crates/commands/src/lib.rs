@@ -1,4 +1,4 @@
-//! CodeRex slash command system — registry and all built-in commands.
+//! Codape slash command system — registry and all built-in commands.
 
 #![warn(missing_docs)]
 

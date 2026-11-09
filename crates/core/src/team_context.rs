@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn store_worktree_filter() {
         let mut store = SessionPointerStore::new();
-        let wt_path = PathBuf::from("/worktrees/coderex-1");
+        let wt_path = PathBuf::from("/worktrees/codape-1");
         store.register(SessionPointer {
             session_id: "sess_wt".into(),
             project_hash: "p1".into(),

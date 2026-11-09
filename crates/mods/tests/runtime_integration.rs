@@ -3,17 +3,17 @@
 //! These load real files from disk through the public [`ModRuntime`] API (the
 //! unit tests in `src/runtime.rs` build mods from inline strings), exercise
 //! the worker boundary with a downstream executor, and render a mod's UI
-//! tree through `coderex-ui`.
+//! tree through `codape-ui`.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use coderex_core::hook_executor::{HookExecutor, HookFireResult};
-use coderex_core::surface::SurfaceDescriptor;
-use coderex_core::ui_protocol::{UiElement, UiStyle};
-use coderex_mods::{
+use codape_core::hook_executor::{HookExecutor, HookFireResult};
+use codape_core::surface::SurfaceDescriptor;
+use codape_core::ui_protocol::{UiElement, UiStyle};
+use codape_mods::{
     DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT_BREAKER_LIMIT, MODS_MEMORY_LIMIT_ENV, ModLimits,
     ModRuntime, ModSession,
 };
@@ -152,7 +152,7 @@ fn a_tsx_mod_ui_renders_through_the_ui_crate() {
     let result = fire(&runtime, "PostToolUse", "Bash");
     assert!(!result.failed, "{result:?}");
 
-    let rendered = coderex_ui::mod_elements::render_mod_ui_text(&result.ui, 40);
+    let rendered = codape_ui::mod_elements::render_mod_ui_text(&result.ui, 40);
     assert!(rendered.contains("Build"), "{rendered}");
     assert!(rendered.contains("bundle ok"), "{rendered}");
     assert!(rendered.contains("[Retry]"), "{rendered}");
@@ -403,7 +403,7 @@ fn notify_and_submit_cross_the_worker_boundary() {
 
 #[test]
 fn a_host_surface_is_passed_through_to_hooks() {
-    use coderex_core::surface::SurfaceCapabilities;
+    use codape_core::surface::SurfaceCapabilities;
 
     let dir = tempfile::tempdir().unwrap();
     write_mod(

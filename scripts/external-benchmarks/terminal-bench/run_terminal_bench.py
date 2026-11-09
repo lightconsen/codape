@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Run CodeRex on a Terminal-Bench subset through the ``tb`` harness.
+"""Run Codape on a Terminal-Bench subset through the ``tb`` harness.
 
 This wrapper exists so that the invocation is one command, every version is
 pinned, and ``--dry-run`` works without the harness installed. The adapter
-itself lives in ``coderex_agent.py`` next to this file and is passed to ``tb``
-with ``--agent-import-path coderex_agent:CodeRexAgent``.
+itself lives in ``codape_agent.py`` next to this file and is passed to ``tb``
+with ``--agent-import-path codape_agent:CodapeAgent``.
 
 Terminal-Bench builds a Docker image per task, installs the agent into the
 container, lets it work in a tmux session, then runs the task's tests. It is
@@ -32,15 +32,15 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 TERMINAL_BENCH_VERSION = "0.2.18"
 TERMINAL_BENCH_PYTHON = "3.12"
 DATASET = "terminal-bench-core==0.1.1"
-CODEREX_VERSION = "v0.1.3"
-ADAPTER_IMPORT_PATH = "coderex_agent:CodeRexAgent"
+CODAPE_VERSION = "v0.1.3"
+ADAPTER_IMPORT_PATH = "codape_agent:CodapeAgent"
 
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 200
 DEFAULT_N_CONCURRENT = 1
 
-API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODEREX_API_KEY", "OPENAI_API_KEY")
-MODEL_ENV = ("ANTHROPIC_MODEL", "CODEREX_MODEL", "OPENAI_MODEL")
+API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODAPE_API_KEY", "OPENAI_API_KEY")
+MODEL_ENV = ("ANTHROPIC_MODEL", "CODAPE_MODEL", "OPENAI_MODEL")
 
 
 class BenchError(RuntimeError):
@@ -54,10 +54,10 @@ def utc_stamp() -> str:
 def resolve_cache_dir(explicit: str | None) -> Path:
     if explicit:
         return Path(explicit).expanduser().resolve()
-    env = os.environ.get("CODEREX_BENCH_CACHE")
+    env = os.environ.get("CODAPE_BENCH_CACHE")
     if env:
         return Path(env).expanduser().resolve()
-    return Path.home() / ".cache" / "coderex-external-benchmarks"
+    return Path.home() / ".cache" / "codape-external-benchmarks"
 
 
 def venv_dir(cache_dir: Path) -> Path:
@@ -147,12 +147,12 @@ def ensure_venv(cache_dir: Path) -> None:
 
 def reexec_in_venv(cache_dir: Path) -> None:
     target = venv_python(cache_dir)
-    if os.environ.get("CODEREX_TB_VENV") == str(target):
+    if os.environ.get("CODAPE_TB_VENV") == str(target):
         return
     if Path(sys.executable).resolve() == target.resolve():
         return
     env = os.environ.copy()
-    env["CODEREX_TB_VENV"] = str(target)
+    env["CODAPE_TB_VENV"] = str(target)
     os.execve(str(target), [str(target), str(Path(__file__).resolve()), *sys.argv[1:]], env)
 
 
@@ -221,7 +221,7 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         "--agent-import-path",
         ADAPTER_IMPORT_PATH,
         "--agent-kwarg",
-        f"version={args.coderex_version}",
+        f"version={args.codape_version}",
         "--agent-kwarg",
         f"max_turns={args.max_turns}",
         "--agent-kwarg",
@@ -238,8 +238,8 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         command += ["--global-test-timeout-sec", str(args.test_timeout)]
     if args.model:
         command += ["--model", args.model]
-    if args.coderex_binary:
-        command += ["--agent-kwarg", f"binary_path={args.coderex_binary}"]
+    if args.codape_binary:
+        command += ["--agent-kwarg", f"binary_path={args.codape_binary}"]
     if args.extra_args:
         command += ["--agent-kwarg", f"extra_args={' '.join(args.extra_args)}"]
     if args.extra_instructions:
@@ -267,10 +267,10 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
     print("Terminal-Bench dry run; nothing will be downloaded, built, or executed.")
     print(f"pinned harness : terminal-bench=={TERMINAL_BENCH_VERSION}")
     print(f"pinned dataset : {args.dataset}")
-    print(f"adapter        : {ADAPTER_IMPORT_PATH} ({ADAPTER_DIR / 'coderex_agent.py'})")
-    print(f"adapter install: {args.coderex_version} ({ADAPTER_DIR / 'coderex-setup.sh.j2'})")
-    if args.coderex_binary:
-        print(f"coderex binary : {args.coderex_binary}")
+    print(f"adapter        : {ADAPTER_IMPORT_PATH} ({ADAPTER_DIR / 'codape_agent.py'})")
+    print(f"adapter install: {args.codape_version} ({ADAPTER_DIR / 'codape-setup.sh.j2'})")
+    if args.codape_binary:
+        print(f"codape binary : {args.codape_binary}")
     print(f"venv cache     : {venv_dir(cache_dir)}")
     print(f"output         : {output_dir / args.run_id}")
     print(f"results        : {output_dir / args.run_id / 'results.json'}")
@@ -286,11 +286,11 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
     else:
         print("api key        : NOT SET (a real run needs one)")
     print(f"model          : {args.model or model_label()} (from --model or environment)")
-    if not args.coderex_binary and platform.machine().lower() in ("arm64", "aarch64"):
+    if not args.codape_binary and platform.machine().lower() in ("arm64", "aarch64"):
         print(
             "architecture   : this host is arm64, so task images are usually linux/arm64 "
-            "and the pinned x86_64 CodeRex release will not run; use an x86_64 host or "
-            "pass --coderex-binary with an aarch64 Linux build"
+            "and the pinned x86_64 Codape release will not run; use an x86_64 host or "
+            "pass --codape-binary with an aarch64 Linux build"
         )
     print()
 
@@ -303,7 +303,7 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
     print("#    (network required; the dataset is cached under ~/.cache/terminal-bench)")
     print()
 
-    print("# 3. Run CodeRex through the adapter")
+    print("# 3. Run Codape through the adapter")
     print("+ PYTHONPATH=" + str(ADAPTER_DIR) + " " + " ".join(command))
     print()
 
@@ -366,7 +366,7 @@ def positive_float(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run CodeRex on a pinned Terminal-Bench dataset through the official tb harness.",
+        description="Run Codape on a pinned Terminal-Bench dataset through the official tb harness.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   # Print the full invocation without Docker, keys, or downloads
@@ -379,13 +379,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
   # A locally built Linux binary instead of the pinned release
   scripts/external-benchmarks/terminal-bench/run.sh \\
-      --coderex-binary target/x86_64-unknown-linux-musl/release/coderex --limit 1
+      --codape-binary target/x86_64-unknown-linux-musl/release/codape --limit 1
 
 Notes:
   * --limit maps to tb's --n-tasks. For an exactly reproducible subset, name
     tasks with --task; that is also the only form stable across dataset
     versions, which is why the dataset is pinned here as well.
-  * The CodeRex release is downloaded inside each task container from GitHub;
+  * The Codape release is downloaded inside each task container from GitHub;
     the container needs outbound network access.
   * API keys are read from the environment. They are written only to a
     container-local setup file and are never stored in this repository.
@@ -407,9 +407,9 @@ Notes:
     )
     parser.add_argument("-t", "--task", dest="tasks", action="append", metavar="ID", help="Task ID or glob; repeatable")
     parser.add_argument("--limit", type=positive_int, help="Run the first N tasks from the dataset")
-    parser.add_argument("--model", help="Model ID passed to both tb metadata and CodeRex")
-    parser.add_argument("--timeout", type=positive_float, default=DEFAULT_TIMEOUT, help=f"Per-task CodeRex timeout in seconds (default: {DEFAULT_TIMEOUT})")
-    parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"CodeRex --max-turns (default: {DEFAULT_MAX_TURNS})")
+    parser.add_argument("--model", help="Model ID passed to both tb metadata and Codape")
+    parser.add_argument("--timeout", type=positive_float, default=DEFAULT_TIMEOUT, help=f"Per-task Codape timeout in seconds (default: {DEFAULT_TIMEOUT})")
+    parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"Codape --max-turns (default: {DEFAULT_MAX_TURNS})")
     parser.add_argument(
         "--test-timeout",
         type=positive_float,
@@ -420,15 +420,15 @@ Notes:
         "(default: the task's own value)",
     )
     parser.add_argument("--n-concurrent", type=positive_int, default=DEFAULT_N_CONCURRENT, help=f"Concurrent tasks (default: {DEFAULT_N_CONCURRENT})")
-    parser.add_argument("--coderex-version", default=CODEREX_VERSION, help=f"CodeRex release installed in containers (default: {CODEREX_VERSION})")
-    parser.add_argument("--coderex-binary", type=Path, help="Linux x86_64 ELF CodeRex binary to copy into containers")
+    parser.add_argument("--codape-version", default=CODAPE_VERSION, help=f"Codape release installed in containers (default: {CODAPE_VERSION})")
+    parser.add_argument("--codape-binary", type=Path, help="Linux x86_64 ELF Codape binary to copy into containers")
     parser.add_argument(
         "--extra-arg",
         dest="extra_args",
         action="append",
         default=[],
         metavar="ARG",
-        help="Extra argument for CodeRex; repeatable, must not contain '='. "
+        help="Extra argument for Codape; repeatable, must not contain '='. "
         "Use --extra-arg=--flag for values starting with '-'.",
     )
     parser.add_argument(
@@ -459,19 +459,19 @@ Notes:
         "headless/target-container frame the task assumes.",
     )
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target" / "external-benchmarks" / "terminal-bench", help="Root for harness output (default: target/external-benchmarks/terminal-bench)")
-    parser.add_argument("--cache-dir", type=Path, help="Cache root for the harness venv (default: $CODEREX_BENCH_CACHE or ~/.cache/coderex-external-benchmarks)")
+    parser.add_argument("--cache-dir", type=Path, help="Cache root for the harness venv (default: $CODAPE_BENCH_CACHE or ~/.cache/codape-external-benchmarks)")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without installing, downloading, or running anything")
     args = parser.parse_args(argv)
 
     if args.tasks and args.limit is not None:
         parser.error("use --task or --limit, not both")
-    if args.coderex_binary:
-        args.coderex_binary = args.coderex_binary.expanduser().resolve()
-        if not args.coderex_binary.exists():
-            parser.error(f"--coderex-binary does not exist: {args.coderex_binary}")
-        if not looks_like_linux_elf(args.coderex_binary):
+    if args.codape_binary:
+        args.codape_binary = args.codape_binary.expanduser().resolve()
+        if not args.codape_binary.exists():
+            parser.error(f"--codape-binary does not exist: {args.codape_binary}")
+        if not looks_like_linux_elf(args.codape_binary):
             parser.error(
-                f"--coderex-binary must be a Linux ELF binary: {args.coderex_binary}. "
+                f"--codape-binary must be a Linux ELF binary: {args.codape_binary}. "
                 "A macOS build cannot run in the Linux task containers; build with "
                 "--target x86_64-unknown-linux-musl."
             )
@@ -536,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
             if summary["failure_modes"]:
                 print(f"failures : {', '.join(summary['failure_modes'])}")
             if summary["input_tokens"] is None and summary["output_tokens"] is None:
-                print("tokens   : unavailable (CodeRex did not emit usage in stream-json)")
+                print("tokens   : unavailable (Codape did not emit usage in stream-json)")
             else:
                 print(
                     f"tokens   : input={summary['input_tokens'] or 0} "

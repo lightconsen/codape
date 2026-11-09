@@ -2,8 +2,8 @@
 
 use crate::ai_workflow::MemoryWorkflowError;
 use crate::long_term::LongTermStore;
-use coderex_core::api_client::ApiClient;
-use coderex_core::prompts;
+use codape_core::api_client::ApiClient;
+use codape_core::prompts;
 
 /// Extract long-term memories from conversation and persist them.
 ///

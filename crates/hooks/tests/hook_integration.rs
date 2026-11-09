@@ -8,9 +8,9 @@
 
 use std::collections::HashMap;
 
-use coderex_core::hook_executor::HookExecutor;
-use coderex_hooks::events::HookEvent;
-use coderex_hooks::{
+use codape_core::hook_executor::HookExecutor;
+use codape_hooks::events::HookEvent;
+use codape_hooks::{
     HookAction, HookConfig, HookInput, HookRegistry, HookRequestError, HookRequestHandler,
     HookStreamEvent, HookTier, HookType,
 };
@@ -309,7 +309,7 @@ async fn hook_cwdchanged_runs_through_the_registry() {
     // `watch_paths` must be absolute: a relative path would be resolved
     // against whatever cwd the watcher happens to have.
     let watched = std::env::temp_dir()
-        .join(".coderex")
+        .join(".codape")
         .to_string_lossy()
         .into_owned();
     let answer = serde_json::json!({
@@ -570,7 +570,7 @@ async fn hook_nonzero_exit_is_a_failure() {
     // A hook that exits non-zero did not answer; it is not a silent Continue.
     assert!(matches!(
         results[0],
-        Err(coderex_hooks::HookError::ExecutionFailed(1))
+        Err(codape_hooks::HookError::ExecutionFailed(1))
     ));
 }
 
@@ -583,10 +583,7 @@ async fn hook_empty_stdout_is_a_failure() {
     let results = registry
         .execute_sync(&HookEvent::SessionStart, &input("SessionStart"))
         .await;
-    assert!(matches!(
-        results[0],
-        Err(coderex_hooks::HookError::NoOutput)
-    ));
+    assert!(matches!(results[0], Err(codape_hooks::HookError::NoOutput)));
 }
 
 #[tokio::test]
@@ -599,7 +596,7 @@ async fn hook_unparseable_stdout_is_a_failure() {
         .await;
     assert!(matches!(
         results[0],
-        Err(coderex_hooks::HookError::UnparseableOutput(_))
+        Err(codape_hooks::HookError::UnparseableOutput(_))
     ));
 }
 
@@ -702,7 +699,7 @@ fn http_config_with(
         event: event.to_string(),
         kind: HookType::Http,
         command: String::new(),
-        http: Some(coderex_hooks::HttpHook {
+        http: Some(codape_hooks::HttpHook {
             url: url.to_string(),
             headers,
             allowed_env_vars,
@@ -878,7 +875,7 @@ async fn an_http_hook_sends_a_header_it_was_granted() {
 /// A runner that answers from a script and records what it was asked.
 struct RecordingRunner {
     answer: String,
-    prompts: std::sync::Mutex<Vec<coderex_hooks::ActionPrompt>>,
+    prompts: std::sync::Mutex<Vec<codape_hooks::ActionPrompt>>,
     mcp_calls: std::sync::Mutex<Vec<(String, String, serde_json::Value)>>,
 }
 
@@ -891,7 +888,7 @@ impl RecordingRunner {
         })
     }
 
-    fn prompts(&self) -> Vec<coderex_hooks::ActionPrompt> {
+    fn prompts(&self) -> Vec<codape_hooks::ActionPrompt> {
         self.prompts.lock().unwrap().clone()
     }
 
@@ -901,11 +898,11 @@ impl RecordingRunner {
 }
 
 #[async_trait::async_trait]
-impl coderex_hooks::HookActionRunner for RecordingRunner {
+impl codape_hooks::HookActionRunner for RecordingRunner {
     async fn answer(
         &self,
-        request: &coderex_hooks::ActionPrompt,
-    ) -> Result<String, coderex_hooks::HookError> {
+        request: &codape_hooks::ActionPrompt,
+    ) -> Result<String, codape_hooks::HookError> {
         self.prompts.lock().unwrap().push(request.clone());
         Ok(self.answer.clone())
     }
@@ -915,7 +912,7 @@ impl coderex_hooks::HookActionRunner for RecordingRunner {
         server: &str,
         tool: &str,
         input: &serde_json::Value,
-    ) -> Result<String, coderex_hooks::HookError> {
+    ) -> Result<String, codape_hooks::HookError> {
         self.mcp_calls
             .lock()
             .unwrap()
@@ -1044,7 +1041,7 @@ fn streaming_registry(command: &str) -> HookRegistry {
 
 /// A path unique to this test process.
 fn scratch_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("coderex-{name}-{}.tmp", std::process::id()))
+    std::env::temp_dir().join(format!("codape-{name}-{}.tmp", std::process::id()))
 }
 
 #[tokio::test]

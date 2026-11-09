@@ -238,4 +238,5 @@ opt-level = 3
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
-repository = "https://github.com/lightconsen/coderex"
+homepage = "https://codape.com"
+repository = "https://github.com/lightconsen/codape"

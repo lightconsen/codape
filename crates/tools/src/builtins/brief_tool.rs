@@ -3,7 +3,7 @@
 use crate::context::{ToolError, ToolOutput};
 use crate::tool::{Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier};
 use async_trait::async_trait;
-use coderex_core::types::MessageContent;
+use codape_core::types::MessageContent;
 
 /// Generate a session or task summary from recent messages.
 #[derive(Debug)]
@@ -43,8 +43,8 @@ impl Tool for BriefTool {
         let session_id =
             extract_string_opt(&input.arguments, "session_id").unwrap_or_else(|| "current".into());
 
-        let transcript_dir = ctx.cwd.join(".coderex/transcripts");
-        let store = coderex_memory::transcript::TranscriptStore::new(transcript_dir);
+        let transcript_dir = ctx.cwd.join(".codape/transcripts");
+        let store = codape_memory::transcript::TranscriptStore::new(transcript_dir);
 
         let messages = store
             .read_all(&session_id)
@@ -66,7 +66,7 @@ fn extract_string_opt(args: &serde_json::Value, key: &str) -> Option<String> {
     args.get(key).and_then(|v| v.as_str()).map(String::from)
 }
 
-fn generate_summary(session_id: &str, messages: &[coderex_core::types::Message]) -> String {
+fn generate_summary(session_id: &str, messages: &[codape_core::types::Message]) -> String {
     use std::fmt::Write as _;
 
     if messages.is_empty() {
@@ -76,22 +76,22 @@ fn generate_summary(session_id: &str, messages: &[coderex_core::types::Message])
     let total = messages.len();
     let user_count = messages
         .iter()
-        .filter(|m| matches!(m.role, coderex_core::types::Role::User))
+        .filter(|m| matches!(m.role, codape_core::types::Role::User))
         .count();
     let assistant_count = messages
         .iter()
-        .filter(|m| matches!(m.role, coderex_core::types::Role::Assistant))
+        .filter(|m| matches!(m.role, codape_core::types::Role::Assistant))
         .count();
     let tool_count = messages
         .iter()
-        .filter(|m| matches!(m.role, coderex_core::types::Role::Tool))
+        .filter(|m| matches!(m.role, codape_core::types::Role::Tool))
         .count();
     let compact_count = messages.iter().filter(|m| is_compact_boundary(m)).count();
 
     let preview = messages
         .iter()
         .rev()
-        .find(|m| matches!(m.role, coderex_core::types::Role::User))
+        .find(|m| matches!(m.role, codape_core::types::Role::User))
         .and_then(|m| match &m.content {
             MessageContent::Text(t) => {
                 let t = t.trim();
@@ -117,8 +117,8 @@ fn generate_summary(session_id: &str, messages: &[coderex_core::types::Message])
     output
 }
 
-fn is_compact_boundary(msg: &coderex_core::types::Message) -> bool {
-    matches!(&msg.content, MessageContent::Text(t) if t.contains("<coderex_compact_boundary>"))
+fn is_compact_boundary(msg: &codape_core::types::Message) -> bool {
+    matches!(&msg.content, MessageContent::Text(t) if t.contains("<codape_compact_boundary>"))
 }
 
 #[cfg(test)]
@@ -175,17 +175,17 @@ mod tests {
     #[tokio::test]
     async fn brief_reads_transcript() {
         let tmp = tempfile::tempdir().unwrap();
-        let transcript_dir = tmp.path().join(".coderex/transcripts");
+        let transcript_dir = tmp.path().join(".codape/transcripts");
         std::fs::create_dir_all(&transcript_dir).unwrap();
 
-        let store = coderex_memory::transcript::TranscriptStore::new(transcript_dir);
+        let store = codape_memory::transcript::TranscriptStore::new(transcript_dir);
         store
-            .append("sess_1", &coderex_core::types::Message::user("hello world"))
+            .append("sess_1", &codape_core::types::Message::user("hello world"))
             .unwrap();
         store
             .append(
                 "sess_1",
-                &coderex_core::types::Message::assistant("hi there"),
+                &codape_core::types::Message::assistant("hi there"),
             )
             .unwrap();
 

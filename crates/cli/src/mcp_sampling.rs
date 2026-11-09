@@ -1,27 +1,27 @@
 //! MCP sampling: a server asking the session's model to generate text.
 //!
 //! `sampling/createMessage` spends the person's tokens on a server's behalf,
-//! so it is denied unless `CODEREX_MCP_SAMPLING=allow` is set explicitly.
+//! so it is denied unless `CODAPE_MCP_SAMPLING=allow` is set explicitly.
 //! When it is, this module forwards the server's conversation to the session's
 //! own API client, clamping the requested budget to a ceiling so a server
 //! cannot ask for an unbounded completion. Every failure is returned to the
 //! server as a JSON-RPC error; nothing here panics.
 
-use coderex_core::api_client::ApiClient;
-use coderex_core::types::ModelId;
-use coderex_mcp::channel::JsonRpcError;
-use coderex_mcp::elicitation::{
+use codape_core::api_client::ApiClient;
+use codape_core::types::ModelId;
+use codape_mcp::channel::JsonRpcError;
+use codape_mcp::elicitation::{
     INTERNAL_ERROR, INVALID_PARAMS, ModelPreferences, SAMPLING_OPT_IN_ENV, SAMPLING_OPT_IN_VALUE,
     SamplingContent, SamplingHandler, SamplingRequest, SamplingResult, SamplingRole,
 };
 use std::sync::Arc;
 
-/// The ceiling used when `CODEREX_MCP_SAMPLING_MAX_TOKENS` is unset.
+/// The ceiling used when `CODAPE_MCP_SAMPLING_MAX_TOKENS` is unset.
 ///
 /// A server may ask for more, but this is as many output tokens it can spend
 /// in one request.
 ///
-/// It matches [`coderex_core::engine::QueryEngine::DEFAULT_MAX_TOKENS`] for
+/// It matches [`codape_core::engine::QueryEngine::DEFAULT_MAX_TOKENS`] for
 /// the same reason: a ceiling low enough to exhaust on reasoning alone
 /// truncates an answer before the model writes any of it, and a truncated
 /// sampling result reaches the MCP server as an empty, apparently finished
@@ -29,7 +29,7 @@ use std::sync::Arc;
 pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
 /// The environment variable that raises or lowers the token ceiling.
-pub const MAX_TOKENS_ENV: &str = "CODEREX_MCP_SAMPLING_MAX_TOKENS";
+pub const MAX_TOKENS_ENV: &str = "CODAPE_MCP_SAMPLING_MAX_TOKENS";
 
 /// Whether the person opted into MCP sampling.
 ///
@@ -131,7 +131,7 @@ impl CliSamplingHandler {
     }
 }
 
-/// Map a server's model hint to a model CodeRex knows.
+/// Map a server's model hint to a model Codape knows.
 ///
 /// An unknown name is not forwarded: the provider would reject it, and a
 /// server should not be able to name an arbitrary model.
@@ -213,8 +213,8 @@ pub fn handler_from_env(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::test_utils::MockApiClient;
-    use coderex_mcp::elicitation::SamplingMessage;
+    use codape_core::test_utils::MockApiClient;
+    use codape_mcp::elicitation::SamplingMessage;
 
     fn request(max_tokens: u32, hints: &[&str]) -> SamplingRequest {
         SamplingRequest {
@@ -225,7 +225,7 @@ mod tests {
             model_preferences: Some(ModelPreferences {
                 hints: hints
                     .iter()
-                    .map(|name| coderex_mcp::elicitation::ModelHint {
+                    .map(|name| codape_mcp::elicitation::ModelHint {
                         name: Some((*name).to_string()),
                     })
                     .collect(),

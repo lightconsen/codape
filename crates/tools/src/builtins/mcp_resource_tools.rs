@@ -1,7 +1,7 @@
 //! ListMcpResources / ReadMcpResource baseline tools.
 //!
 //! These tools drive an injected `McpResourceHandle` that the runtime
-//! wires up from the `coderex-mcp` crate. Kept behind a small trait to
+//! wires up from the `codape-mcp` crate. Kept behind a small trait to
 //! avoid a cross-crate dependency from `tools` -> `mcp`.
 
 use crate::context::{ToolError, ToolOutput};

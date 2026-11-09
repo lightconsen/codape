@@ -5,42 +5,42 @@
 //! permission rule has to be able to allow reading memory while still asking
 //! about writing it, and a rule matches on a tool name.
 //!
-//! # Why this is not an `impl coderex_tools::Tool`
+//! # Why this is not an `impl codape_tools::Tool`
 //!
-//! It cannot be. `coderex-tools` depends on `coderex-memory` (its `BriefTool`
-//! reads transcripts), so `coderex-memory` depending on `coderex-tools` would
+//! It cannot be. `codape-tools` depends on `codape-memory` (its `BriefTool`
+//! reads transcripts), so `codape-memory` depending on `codape-tools` would
 //! close a cycle, and Cargo rejects a cycle even when the dependency is
 //! optional. So the family is written against plain JSON — the same shape the
 //! `Tool` trait passes around, with no reference to it — and a crate that
 //! depends on both wraps it:
 //!
 //! ```ignore
-//! // In a crate that depends on both coderex-memory and coderex-tools.
-//! impl coderex_tools::Tool for MemoryToolAdapter {
-//!     fn descriptor(&self) -> coderex_tools::ToolDescriptor {
-//!         coderex_tools::ToolDescriptor {
+//! // In a crate that depends on both codape-memory and codape-tools.
+//! impl codape_tools::Tool for MemoryToolAdapter {
+//!     fn descriptor(&self) -> codape_tools::ToolDescriptor {
+//!         codape_tools::ToolDescriptor {
 //!             name: self.tool.name().to_string(),
-//!             tier: coderex_tools::ToolTier::Baseline,
+//!             tier: codape_tools::ToolTier::Baseline,
 //!             input_schema: self.tool.input_schema(),
 //!             output_schema: self.tool.output_schema(),
 //!             requires_approval: false,
 //!             is_enabled: true,
 //!             is_read_only: self.tool.is_read_only(),
 //!             is_concurrency_safe: self.tool.is_read_only(),
-//!             interrupt_behavior: coderex_tools::InterruptBehavior::RunToCompletion,
+//!             interrupt_behavior: codape_tools::InterruptBehavior::RunToCompletion,
 //!         }
 //!     }
 //!
 //!     async fn execute(
 //!         &self,
-//!         input: coderex_tools::ToolInput,
-//!         _ctx: coderex_tools::ToolContext<'_>,
-//!     ) -> Result<coderex_tools::ToolOutput, coderex_tools::ToolError> {
+//!         input: codape_tools::ToolInput,
+//!         _ctx: codape_tools::ToolContext<'_>,
+//!     ) -> Result<codape_tools::ToolOutput, codape_tools::ToolError> {
 //!         self.tool
 //!             .call(&input.arguments)
 //!             .await
-//!             .map(|output| coderex_tools::ToolOutput { output, is_display: true })
-//!             .map_err(|error| coderex_tools::ToolError::InvalidInput {
+//!             .map(|output| codape_tools::ToolOutput { output, is_display: true })
+//!             .map_err(|error| codape_tools::ToolError::InvalidInput {
 //!                 message: error.to_string(),
 //!             })
 //!     }
@@ -50,7 +50,7 @@
 //! Registering the family is then the same one line the artifact family uses:
 //!
 //! ```ignore
-//! for tool in coderex_memory::tools::MemoryTools::new(memory_service).all() {
+//! for tool in codape_memory::tools::MemoryTools::new(memory_service).all() {
 //!     dispatcher.registry().register_dynamic(std::sync::Arc::new(MemoryToolAdapter::new(tool)));
 //! }
 //! ```
@@ -427,7 +427,7 @@ mod tests {
             .call(&json!({
                 "store": "project",
                 "key": "build",
-                "content": "cargo test -p coderex-memory"
+                "content": "cargo test -p codape-memory"
             }))
             .await
             .unwrap();

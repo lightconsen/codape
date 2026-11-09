@@ -4,7 +4,7 @@
 //! - `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`
 //! - `OPENAI_API_KEY` / `OPENAI_BASE_URL`
 //! - `GROQ_API_KEY` / `GROQ_BASE_URL`
-//! - Config file at `~/.coderex/providers.toml`
+//! - Config file at `~/.codape/providers.toml`
 
 use crate::api_client::ApiConfig;
 use crate::model_router::ModelRouter;
@@ -38,7 +38,7 @@ pub struct ProviderConfig {
     pub request_timeout_secs: Option<u64>,
     /// Whether Anthropic-protocol requests may carry prompt-cache breakpoints.
     ///
-    /// `None` falls back to the `CODEREX_PROMPT_CACHING` environment override
+    /// `None` falls back to the `CODAPE_PROMPT_CACHING` environment override
     /// and then to the enabled default. The CLI sets this from the resolved
     /// `prompt_caching` setting.
     pub prompt_caching: Option<bool>,
@@ -71,20 +71,20 @@ pub struct NamedProviderEndpoint {
 }
 
 /// Environment variables that supply the Anthropic-protocol API key, in
-/// priority order. The CODEREX_ spellings win over the ANTHROPIC_ ones so a
+/// priority order. The CODAPE_ spellings win over the ANTHROPIC_ ones so a
 /// session can override a globally exported Claude configuration.
 const API_KEY_ENV: &[&str] = &[
-    "CODEREX_API_KEY",
-    "CODEREX_AUTH_TOKEN",
+    "CODAPE_API_KEY",
+    "CODAPE_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
 ];
 
 /// Environment variables that supply the Anthropic-protocol base URL.
-const BASE_URL_ENV: &[&str] = &["CODEREX_BASE_URL", "ANTHROPIC_BASE_URL"];
+const BASE_URL_ENV: &[&str] = &["CODAPE_BASE_URL", "ANTHROPIC_BASE_URL"];
 
 /// Environment variable that overrides the HTTP request timeout, in seconds.
-const REQUEST_TIMEOUT_ENV: &str = "CODEREX_REQUEST_TIMEOUT_SECS";
+const REQUEST_TIMEOUT_ENV: &str = "CODAPE_REQUEST_TIMEOUT_SECS";
 
 /// The first variable in `names` that is set to a non-blank value.
 fn env_first(names: &[&str]) -> Option<String> {
@@ -97,8 +97,8 @@ fn env_first(names: &[&str]) -> Option<String> {
 
 /// The request timeout from the environment, in seconds.
 ///
-/// `CODEREX_REQUEST_TIMEOUT_SECS` is already in seconds; Claude's
-/// `API_TIMEOUT_MS` is in milliseconds and is rounded up. The CodeRex variable
+/// `CODAPE_REQUEST_TIMEOUT_SECS` is already in seconds; Claude's
+/// `API_TIMEOUT_MS` is in milliseconds and is rounded up. The Codape variable
 /// wins when both are set.
 fn request_timeout_from_env() -> Option<u64> {
     if let Some(raw) = env_first(&[REQUEST_TIMEOUT_ENV]) {
@@ -139,7 +139,7 @@ impl ProviderConfig {
             config.anthropic = Some(ProviderEndpoint {
                 api_key: key,
                 base_url: env_first(BASE_URL_ENV),
-                provider_profile: std::env::var("CODEREX_PROVIDER_PROFILE").ok(),
+                provider_profile: std::env::var("CODAPE_PROVIDER_PROFILE").ok(),
                 custom_headers: parse_custom_headers_env(),
             });
         }
@@ -152,7 +152,7 @@ impl ProviderConfig {
                 base_url: std::env::var("OPENAI_BASE_URL")
                     .ok()
                     .or_else(|| Some("https://api.openai.com".into())),
-                provider_profile: std::env::var("CODEREX_PROVIDER_PROFILE").ok(),
+                provider_profile: std::env::var("CODAPE_PROVIDER_PROFILE").ok(),
                 custom_headers: parse_custom_headers_env(),
             });
         }
@@ -163,7 +163,7 @@ impl ProviderConfig {
                 base_url: std::env::var("GROQ_BASE_URL")
                     .ok()
                     .or_else(|| Some("https://api.groq.com/openai/v1".into())),
-                provider_profile: std::env::var("CODEREX_PROVIDER_PROFILE").ok(),
+                provider_profile: std::env::var("CODAPE_PROVIDER_PROFILE").ok(),
                 custom_headers: parse_custom_headers_env(),
             });
         }
@@ -183,7 +183,7 @@ impl ProviderConfig {
             self.anthropic = Some(ProviderEndpoint {
                 api_key: key,
                 base_url: env_first(BASE_URL_ENV),
-                provider_profile: std::env::var("CODEREX_PROVIDER_PROFILE").ok(),
+                provider_profile: std::env::var("CODAPE_PROVIDER_PROFILE").ok(),
                 custom_headers: parse_custom_headers_env(),
             });
         }
@@ -313,7 +313,7 @@ impl ProviderConfig {
 
 fn parse_custom_headers_env() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    let Ok(raw) = std::env::var("CODEREX_CUSTOM_HEADERS") else {
+    let Ok(raw) = std::env::var("CODAPE_CUSTOM_HEADERS") else {
         return out;
     };
     for line in raw.lines() {
@@ -333,7 +333,7 @@ fn parse_custom_headers_env() -> BTreeMap<String, String> {
 }
 
 fn parse_fallback_providers_env() -> Vec<String> {
-    std::env::var("CODEREX_FALLBACK_PROVIDERS")
+    std::env::var("CODAPE_FALLBACK_PROVIDERS")
         .ok()
         .map(|raw| {
             raw.split([',', '\n'])
@@ -385,7 +385,7 @@ pub fn cloud_base_url(endpoint: &CloudEndpoint) -> String {
         ProviderKind::Foundry => std::env::var("ANTHROPIC_FOUNDRY_BASE_URL").unwrap_or_else(|_| {
             foundry_base_url(&std::env::var("ANTHROPIC_FOUNDRY_RESOURCE").unwrap_or_default())
         }),
-        ProviderKind::Gateway => std::env::var("CODEREX_GATEWAY_URL").unwrap_or_default(),
+        ProviderKind::Gateway => std::env::var("CODAPE_GATEWAY_URL").unwrap_or_default(),
         ProviderKind::AnthropicGoogleCloud => std::env::var("ANTHROPIC_GOOGLE_CLOUD_BASE_URL")
             .unwrap_or_else(|_| default_base_url(endpoint.kind, &endpoint.region)),
         ProviderKind::FirstParty => default_base_url(endpoint.kind, &endpoint.region),
@@ -464,13 +464,13 @@ mod tests {
     fn coderx_variables_win_over_anthropic_variables() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guards = [
-            EnvGuard::set("CODEREX_API_KEY", Some("coderx-key")),
+            EnvGuard::set("CODAPE_API_KEY", Some("coderx-key")),
             EnvGuard::set("ANTHROPIC_API_KEY", Some("anthropic-key")),
-            EnvGuard::set("CODEREX_AUTH_TOKEN", None),
+            EnvGuard::set("CODAPE_AUTH_TOKEN", None),
             EnvGuard::set("ANTHROPIC_AUTH_TOKEN", None),
-            EnvGuard::set("CODEREX_BASE_URL", Some("https://coderx.example")),
+            EnvGuard::set("CODAPE_BASE_URL", Some("https://coderx.example")),
             EnvGuard::set("ANTHROPIC_BASE_URL", Some("https://anthropic.example")),
-            EnvGuard::set("CODEREX_REQUEST_TIMEOUT_SECS", Some("3000")),
+            EnvGuard::set("CODAPE_REQUEST_TIMEOUT_SECS", Some("3000")),
         ];
 
         let config = ProviderConfig::from_env();
@@ -487,11 +487,11 @@ mod tests {
     fn anthropic_auth_token_is_accepted_as_a_key() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guards = [
-            EnvGuard::set("CODEREX_API_KEY", None),
-            EnvGuard::set("CODEREX_AUTH_TOKEN", None),
+            EnvGuard::set("CODAPE_API_KEY", None),
+            EnvGuard::set("CODAPE_AUTH_TOKEN", None),
             EnvGuard::set("ANTHROPIC_API_KEY", None),
             EnvGuard::set("ANTHROPIC_AUTH_TOKEN", Some("auth-token")),
-            EnvGuard::set("CODEREX_BASE_URL", None),
+            EnvGuard::set("CODAPE_BASE_URL", None),
             EnvGuard::set("ANTHROPIC_BASE_URL", None),
         ];
 
@@ -507,7 +507,7 @@ mod tests {
     fn claude_api_timeout_ms_is_converted_to_seconds() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guards = [
-            EnvGuard::set("CODEREX_REQUEST_TIMEOUT_SECS", None),
+            EnvGuard::set("CODAPE_REQUEST_TIMEOUT_SECS", None),
             EnvGuard::set("API_TIMEOUT_MS", Some("3000000")),
         ];
 

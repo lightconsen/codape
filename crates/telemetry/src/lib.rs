@@ -1,4 +1,4 @@
-//! Telemetry, crash reporting, and usage analytics for CodeRex.
+//! Telemetry, crash reporting, and usage analytics for Codape.
 //!
 //! All telemetry is privacy-first and opt-out. No PII is collected.
 //! Events are stored locally in SQLite and batch-uploaded when online.

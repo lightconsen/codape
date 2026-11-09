@@ -8,8 +8,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use coderex_core::model_router::ModelRouter;
-//! use coderex_core::providers::AnthropicProvider;
+//! use codape_core::model_router::ModelRouter;
+//! use codape_core::providers::AnthropicProvider;
 //!
 //! let mut router = ModelRouter::new("main");
 //! router.add_provider(Box::new(AnthropicProvider::new(config)));

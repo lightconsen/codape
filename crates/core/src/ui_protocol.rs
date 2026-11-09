@@ -6,7 +6,7 @@
 //! after the mod's worker has moved on, timed out, or been unloaded.
 //!
 //! The tree is surface-neutral: [`crate::surface`] names the front end that
-//! presents it and states what it can do. CodeRex registers only the terminal
+//! presents it and states what it can do. Codape registers only the terminal
 //! surface; its renderer focuses a button and routes both `Enter` and mouse
 //! clicks to the mod runtime's `$.ui.onActivate` handler. Another surface
 //! renders the same tree for its own medium.

@@ -16,8 +16,8 @@
 //! - [`SurfaceRegistry`] holds the surfaces a host can present and which one is
 //!   active.
 //!
-//! CodeRex ships one implementation, the terminal
-//! ([`coderex_ui::surface::TerminalSurface`](../coderex_ui/surface/struct.TerminalSurface.html)).
+//! Codape ships one implementation, the terminal
+//! ([`codape_ui::surface::TerminalSurface`](../codape_ui/surface/struct.TerminalSurface.html)).
 //! Adding another is a host-side project: implement [`UiSurface`], register it,
 //! and render the same element tree for that medium. No engine or mod change is
 //! required, and the id travels to mods through
@@ -58,7 +58,7 @@ pub enum SurfaceError {
 /// The stable name of a front-end surface.
 ///
 /// This is the value a mod sees as `e.surface`. Ids are lowercase so they are
-/// comparable across hosts; [`SurfaceId::TERMINAL`] is the one CodeRex ships.
+/// comparable across hosts; [`SurfaceId::TERMINAL`] is the one Codape ships.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SurfaceId(String);
@@ -159,7 +159,7 @@ pub struct SurfaceDescriptor {
 }
 
 impl SurfaceDescriptor {
-    /// The terminal descriptor CodeRex ships.
+    /// The terminal descriptor Codape ships.
     #[must_use]
     pub fn terminal() -> Self {
         Self {

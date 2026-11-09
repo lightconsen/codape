@@ -401,7 +401,7 @@ fn validate_path_glob(pattern: &str, raw: &str) -> Result<(), PermissionRulePars
 /// Both flags are a property of the *call*, not only of the tool: the artifact
 /// tool refuses the shortcut for its mutating actions and honours it for its
 /// reads. Whoever resolves them therefore answers per input — a tool answers
-/// `rule_exemptions_for(input)` in `coderex-tools`, and a session hands the
+/// `rule_exemptions_for(input)` in `codape-tools`, and a session hands the
 /// engine a resolver that consults the registry (see
 /// [`PermissionEngine::set_rule_exemptions_resolver`](crate::permission_engine::PermissionEngine::set_rule_exemptions_resolver)).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

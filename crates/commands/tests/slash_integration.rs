@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use coderex_commands::{
+use codape_commands::{
     CommandContext, CommandRegistry, CommandResult, CommandType, register_all_commands,
 };
-use coderex_core::types::ModelId;
+use codape_core::types::ModelId;
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -103,7 +103,7 @@ fn compact_command_requests_a_compaction_and_flags_it() {
 fn version_shows_version_info() {
     let reg = full_registry();
     let result = reg.execute("version", &test_ctx(), &[]);
-    assert!(result.output.contains("CodeRex"));
+    assert!(result.output.contains("Codape"));
 }
 
 #[test]

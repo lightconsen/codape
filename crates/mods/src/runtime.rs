@@ -28,9 +28,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use coderex_core::hook_executor::{HookExecutor, HookFireResult};
-use coderex_core::surface::SurfaceDescriptor;
-use coderex_core::ui_protocol::{UiElement, UiStyle, parse_ui_elements};
+use codape_core::hook_executor::{HookExecutor, HookFireResult};
+use codape_core::surface::SurfaceDescriptor;
+use codape_core::ui_protocol::{UiElement, UiStyle, parse_ui_elements};
 use rquickjs::function::Opt;
 use rquickjs::object::Property;
 use rquickjs::{
@@ -41,10 +41,10 @@ use sha2::{Digest, Sha256};
 use crate::transform;
 
 /// Environment variable that opts the in-process runtime in.
-pub const MODS_ENV: &str = "CODEREX_MODS";
+pub const MODS_ENV: &str = "CODAPE_MODS";
 
 /// Environment variable that overrides the mods directory.
-pub const MODS_DIR_ENV: &str = "CODEREX_MODS_DIR";
+pub const MODS_DIR_ENV: &str = "CODAPE_MODS_DIR";
 
 /// Environment variable that overrides the timeout circuit-breaker threshold.
 ///
@@ -52,7 +52,7 @@ pub const MODS_DIR_ENV: &str = "CODEREX_MODS_DIR";
 /// tolerated before mods are disabled for the rest of the session. An invalid
 /// value falls back to [`DEFAULT_TIMEOUT_BREAKER_LIMIT`]; `0` disables the
 /// breaker (timeouts never disable mods).
-pub const MODS_TIMEOUT_LIMIT_ENV: &str = "CODEREX_MODS_TIMEOUT_LIMIT";
+pub const MODS_TIMEOUT_LIMIT_ENV: &str = "CODAPE_MODS_TIMEOUT_LIMIT";
 
 /// Environment variable that overrides the JavaScript heap cap.
 ///
@@ -61,7 +61,7 @@ pub const MODS_TIMEOUT_LIMIT_ENV: &str = "CODEREX_MODS_TIMEOUT_LIMIT";
 /// example `33554432`, `32m` or `32MiB`. Values below
 /// [`MIN_MEMORY_LIMIT`] are clamped up to it. An unparseable value falls back
 /// to [`DEFAULT_MEMORY_LIMIT`].
-pub const MODS_MEMORY_LIMIT_ENV: &str = "CODEREX_MODS_MEMORY_LIMIT";
+pub const MODS_MEMORY_LIMIT_ENV: &str = "CODAPE_MODS_MEMORY_LIMIT";
 
 /// The default JavaScript heap cap: 64 MiB.
 pub const DEFAULT_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
@@ -84,7 +84,7 @@ pub const DEFAULT_TIMEOUT_BREAKER_LIMIT: usize = 3;
 ///
 /// The list is deliberately small and contains only locale, terminal and
 /// platform hints. It excludes credentials, machine identity, home and working
-/// directories, and everything under `CODEREX_*`. Names not in this list
+/// directories, and everything under `CODAPE_*`. Names not in this list
 /// return `null`, whatever their value.
 pub const ALLOWED_ENV_VARS: &[&str] = &[
     "LANG",
@@ -311,8 +311,8 @@ fn parse_memory_limit(value: &str) -> Option<usize> {
 
 /// Whether the in-process runtime should be constructed.
 ///
-/// It is off by default. `CODEREX_MODS` accepts `1`, `true`, `yes` or `on`
-/// (case-insensitive); setting `CODEREX_MODS_DIR` to a non-empty path also
+/// It is off by default. `CODAPE_MODS` accepts `1`, `true`, `yes` or `on`
+/// (case-insensitive); setting `CODAPE_MODS_DIR` to a non-empty path also
 /// opts in.
 #[must_use]
 pub fn is_enabled() -> bool {
@@ -321,14 +321,14 @@ pub fn is_enabled() -> bool {
 
 /// The directory mods are loaded from.
 ///
-/// `CODEREX_MODS_DIR` wins when set and non-empty; otherwise this is
-/// `config_home()/mods` (`~/.coderex/mods` unless `CLAUDE_CONFIG_DIR` says
+/// `CODAPE_MODS_DIR` wins when set and non-empty; otherwise this is
+/// `config_home()/mods` (`~/.codape/mods` unless `CLAUDE_CONFIG_DIR` says
 /// otherwise).
 #[must_use]
 pub fn mods_dir() -> PathBuf {
     std::env::var_os(MODS_DIR_ENV)
         .filter(|value| !value.is_empty())
-        .map_or_else(|| coderex_config::config_home().join("mods"), PathBuf::from)
+        .map_or_else(|| codape_config::config_home().join("mods"), PathBuf::from)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -700,7 +700,7 @@ impl ModRuntime {
         self.is_disabled().then(|| {
             format!(
                 "mods are disabled for the rest of this session: {} hook call(s) exceeded the \
-                 {} ms wall-clock budget (threshold {}); restart CodeRex to re-enable mods",
+                 {} ms wall-clock budget (threshold {}); restart Codape to re-enable mods",
                 self.timeout_abandonments(),
                 self.limits.hook_timeout.as_millis(),
                 self.timeout_breaker_limit,
@@ -978,7 +978,7 @@ fn configured_timeout_breaker_limit() -> usize {
 const DOWNSTREAM_BUDGET_FALLBACK: Duration = Duration::from_secs(5);
 
 /// Environment variable that overrides the consecutive downstream-timeout cap.
-const DOWNSTREAM_ABANDON_LIMIT_ENV: &str = "CODEREX_DOWNSTREAM_TIMEOUT_LIMIT";
+const DOWNSTREAM_ABANDON_LIMIT_ENV: &str = "CODAPE_DOWNSTREAM_TIMEOUT_LIMIT";
 
 /// How many consecutive downstream timeouts the pool tolerates before it stops
 /// running the configured hooks for the rest of the session.
@@ -1232,7 +1232,7 @@ impl DownstreamPool {
     ) -> Result<(), String> {
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
-            .name("coderex-mods-downstream".to_string())
+            .name("codape-mods-downstream".to_string())
             .spawn(move || downstream_main(&receiver))
             .map_err(|error| format!("could not start the downstream hook runner: {error}"))?;
         sender.send(job).map_err(|_| {
@@ -1471,7 +1471,7 @@ fn spawn_worker(
     let (sender, receiver) = mpsc::channel();
     let (init_sender, init_receiver) = mpsc::sync_channel(1);
     std::thread::Builder::new()
-        .name("coderex-mods".to_string())
+        .name("codape-mods".to_string())
         // The engine's stack limit is checked against the thread's stack, so
         // the thread must be comfortably larger than `max_stack_size` (4 MiB
         // by default). Rust's 2 MiB default would abort before QuickJS could
@@ -1732,7 +1732,7 @@ fn push_registrations(main: &Context, loaded: &LoadedMod) -> Result<(), String> 
     main.with(|ctx| {
         let registry: Array = ctx
             .globals()
-            .get("__coderExMods")
+            .get("__codapeMods")
             .map_err(|error| format!("could not read the runtime harness: {error}"))?;
         let registrations = loaded
             .registrations
@@ -1745,7 +1745,7 @@ fn push_registrations(main: &Context, loaded: &LoadedMod) -> Result<(), String> 
 
         let activation_registry: Array = ctx
             .globals()
-            .get("__coderExActivations")
+            .get("__codapeActivations")
             .map_err(|error| format!("could not read the runtime activation registry: {error}"))?;
         let activations = loaded
             .activations
@@ -1985,11 +1985,11 @@ fn install_main_harness(ctx: &Ctx<'_>) -> Result<(), String> {
         .map_err(|error| js_error(ctx, error))?;
     let _: Array = ctx
         .globals()
-        .get("__coderExMods")
+        .get("__codapeMods")
         .map_err(|error| js_error(ctx, error))?;
     let _: Array = ctx
         .globals()
-        .get("__coderExActivations")
+        .get("__codapeActivations")
         .map_err(|error| js_error(ctx, error))?;
     Ok(())
 }
@@ -2029,13 +2029,13 @@ fn load_mod_in_realm(
     ctx.eval::<(), _>(format!("register(on, Object.freeze({{ name: {options} }}))").as_str())
         .map_err(|error| format!("register() failed: {}", js_error(ctx, error)))?;
 
-    let registrations: Array = ctx.globals().get("__coderExRegs").map_err(|error| {
+    let registrations: Array = ctx.globals().get("__codapeRegs").map_err(|error| {
         format!(
             "register() did not leave readable hook registrations: {}",
             js_error(ctx, error)
         )
     })?;
-    let activations: Array = ctx.globals().get("__coderExHandlers").map_err(|error| {
+    let activations: Array = ctx.globals().get("__codapeHandlers").map_err(|error| {
         format!(
             "register() did not leave readable activation registrations: {}",
             js_error(ctx, error)
@@ -2325,7 +2325,7 @@ fn run_chain<'js>(
         )
     })?;
     ctx.globals()
-        .set("__coderExStartInner", start)
+        .set("__codapeStartInner", start)
         .map_err(|error| {
             format!(
                 "could not install the downstream executor: {}",
@@ -2333,7 +2333,7 @@ fn run_chain<'js>(
             )
         })?;
 
-    let runner: Function<'js> = ctx.globals().get("__coderExRun").map_err(|error| {
+    let runner: Function<'js> = ctx.globals().get("__codapeRun").map_err(|error| {
         format!(
             "could not read the runtime harness: {}",
             js_error(ctx, error)
@@ -2378,7 +2378,7 @@ fn run_activation<'js>(
     downstream: &DownstreamPool,
     budget_message: &str,
 ) -> Result<Result<Vec<UiElement>, String>, String> {
-    let activate: Function<'js> = ctx.globals().get("__coderExActivate").map_err(|error| {
+    let activate: Function<'js> = ctx.globals().get("__codapeActivate").map_err(|error| {
         format!(
             "could not read the runtime harness: {}",
             js_error(ctx, error)
@@ -2566,7 +2566,7 @@ fn install_host_api<'js>(ctx: &Ctx<'js>, session: &ModSession, name: &str) -> Re
     let module_name =
         rquickjs::String::from_str(ctx.clone(), name).map_err(|error| js_error(ctx, error))?;
     globals
-        .prop("__coderExModName", Property::from(module_name))
+        .prop("__codapeModName", Property::from(module_name))
         .map_err(|error| js_error(ctx, error))?;
 
     let session_object = Object::new(ctx.clone()).map_err(|error| js_error(ctx, error))?;
@@ -2607,7 +2607,7 @@ fn install_host_api<'js>(ctx: &Ctx<'js>, session: &ModSession, name: &str) -> Re
                 .and_then(|text| text.to_string().ok())
                 .unwrap_or_default()
         });
-        tracing::info!(target: "coderex_mods", module = %module, "{message}");
+        tracing::info!(target: "codape_mods", module = %module, "{message}");
     })
     .map_err(|error| js_error(ctx, error))?;
     dollar
@@ -2660,7 +2660,7 @@ fn install_host_api<'js>(ctx: &Ctx<'js>, session: &ModSession, name: &str) -> Re
 /// call. Validation happens here (so the mod gets a JavaScript error at the
 /// call site) and again in [`parse_ui_elements`] at the boundary.
 ///
-/// `notify` stages a [`UiStyle::Notice`](coderex_core::ui_protocol::UiStyle)
+/// `notify` stages a [`UiStyle::Notice`](codape_core::ui_protocol::UiStyle)
 /// text element in a separate list. The drain prepends that list to the
 /// rendered elements, so notices always appear before `$.ui.render` output
 /// from the same hook call.
@@ -2834,7 +2834,7 @@ const HOST_UI_API: &str = r#"
       if (typeof handler !== 'function') {
         throw new TypeError('$.ui.onActivate(id, handler): handler must be a function');
       }
-      __coderExOnActivate(id, handler);
+      __codapeOnActivate(id, handler);
       return undefined;
     },
     render: function (element) {
@@ -3035,10 +3035,10 @@ const JSX_RUNTIME: &str = r#"
 /// of a chain segment.
 const MAIN_HARNESS: &str = r#"
 'use strict';
-globalThis.__coderExMods = [];
-globalThis.__coderExActivations = [];
+globalThis.__codapeMods = [];
+globalThis.__codapeActivations = [];
 
-globalThis.__coderExNormalize = function (value) {
+globalThis.__codapeNormalize = function (value) {
   if (value === undefined || value === null || typeof value !== 'object') return null;
   const normalized = {};
   if (value.stop === true) normalized.stop = true;
@@ -3053,8 +3053,8 @@ globalThis.__coderExNormalize = function (value) {
   return normalized;
 };
 
-globalThis.__coderExCall = async function (modIndex, hookIndex, event, input, contextJson, nextFn) {
-  const module = __coderExMods[modIndex];
+globalThis.__codapeCall = async function (modIndex, hookIndex, event, input, contextJson, nextFn) {
+  const module = __codapeMods[modIndex];
   const registration = module !== undefined ? module[hookIndex] : undefined;
   if (!registration) {
     return JSON.stringify({ ok: false, error: 'hook registration ' + modIndex + '/' + hookIndex + ' is missing' });
@@ -3093,7 +3093,7 @@ globalThis.__coderExCall = async function (modIndex, hookIndex, event, input, co
 
   const host = registration.host;
   // The surface a person is looking at, supplied by the host. A host that has
-  // not configured one is the terminal, which is what CodeRex ships.
+  // not configured one is the terminal, which is what Codape ships.
   eventObject.surface = (host && host.session && host.session.surface) || 'terminal';
   eventObject.surfaceCapabilities = (host && host.session && host.session.surfaceCapabilities)
     || { interactive: false, mouse: false, images: false };
@@ -3119,13 +3119,13 @@ globalThis.__coderExCall = async function (modIndex, hookIndex, event, input, co
       staged.push({
         type: 'text',
         text: '[' + submitted.dropped + ' mod submission(s) dropped: at most '
-          + __coderExMaxSubmissionsPerCall + ' per hook call]',
+          + __codapeMaxSubmissionsPerCall + ' per hook call]',
         style: 'dim'
       });
     }
     return JSON.stringify({
       ok: true,
-      result: __coderExNormalize(value),
+      result: __codapeNormalize(value),
       ui: staged,
       submissions: submitted.prompts
     });
@@ -3141,10 +3141,10 @@ globalThis.__coderExCall = async function (modIndex, hookIndex, event, input, co
 // every mod (a later registration replaces an earlier one), calls it with its
 // own realm's `$`, and returns whatever it staged plus whatever elements it
 // returned. Validation of the returned tree happens at the Rust boundary.
-globalThis.__coderExActivate = async function (id, eventJson) {
+globalThis.__codapeActivate = async function (id, eventJson) {
   let chosen = null;
-  for (let modIndex = 0; modIndex < __coderExActivations.length; modIndex++) {
-    const handlers = __coderExActivations[modIndex];
+  for (let modIndex = 0; modIndex < __codapeActivations.length; modIndex++) {
+    const handlers = __codapeActivations[modIndex];
     for (let index = 0; index < handlers.length; index++) {
       if (handlers[index] !== null && handlers[index].id === id) chosen = handlers[index];
     }
@@ -3201,7 +3201,7 @@ globalThis.__coderExActivate = async function (id, eventJson) {
 //
 // A merged result has exactly the shape of HookFireResult: `stop`,
 // `updatedInput` and `updatedToolOutput` (string or null), `watchPaths`,
-// `errors`, `failed`, and `ui`. `__coderExChain` runs `hooks[start..]` in
+// `errors`, `failed`, and `ui`. `__codapeChain` runs `hooks[start..]` in
 // order. If a hook calls `next`, that hook's closure recurses for the hooks
 // after it, the recursion runs the inner executor when no deeper hook called
 // `next`, and this level then merges the hook's own return value over that
@@ -3209,7 +3209,7 @@ globalThis.__coderExActivate = async function (id, eventJson) {
 // If no hook at this level calls `next`, the loop runs them all and then the
 // inner executor once.
 
-globalThis.__coderExEmptyResult = function () {
+globalThis.__codapeEmptyResult = function () {
   return {
     stop: false,
     updatedInput: null,
@@ -3224,7 +3224,7 @@ globalThis.__coderExEmptyResult = function () {
 
 // Submissions merge in call order. Identical adjacent messages are folded:
 // two hooks that independently queue the same text should submit it once.
-globalThis.__coderExDedupePrompts = function (prompts) {
+globalThis.__codapeDedupePrompts = function (prompts) {
   const unique = [];
   for (let index = 0; index < prompts.length; index++) {
     if (unique.length === 0 || unique[unique.length - 1] !== prompts[index]) {
@@ -3234,7 +3234,7 @@ globalThis.__coderExDedupePrompts = function (prompts) {
   return unique;
 };
 
-globalThis.__coderExDedupe = function (paths) {
+globalThis.__codapeDedupe = function (paths) {
   // A null prototype keeps a path such as "__proto__" an ordinary entry.
   const seen = Object.create(null);
   const unique = [];
@@ -3251,7 +3251,7 @@ globalThis.__coderExDedupe = function (paths) {
 // What `next(e)` hands back to the hook: the public result, without the UI
 // snapshot, and detached from the stored downstream result so a hook that
 // mutates it cannot change what is merged.
-globalThis.__coderExPublicResult = function (result) {
+globalThis.__codapePublicResult = function (result) {
   return {
     stop: result.stop,
     updatedInput: result.updatedInput,
@@ -3266,7 +3266,7 @@ globalThis.__coderExPublicResult = function (result) {
 // combined and deduplicated; downstream errors and failure state are carried.
 // The calling hook's submissions happened before it called `next`, so they
 // precede everything the downstream chain queued.
-globalThis.__coderExMergeEffect = function (effect, ui, submissions, downstream) {
+globalThis.__codapeMergeEffect = function (effect, ui, submissions, downstream) {
   const ownWatchPaths = (effect !== null && Array.isArray(effect.watchPaths))
     ? effect.watchPaths
     : [];
@@ -3280,13 +3280,13 @@ globalThis.__coderExMergeEffect = function (effect, ui, submissions, downstream)
       : downstream.updatedToolOutput,
     errors: downstream.errors.slice(),
     failed: downstream.failed,
-    watchPaths: __coderExDedupe(ownWatchPaths.concat(downstream.watchPaths)),
+    watchPaths: __codapeDedupe(ownWatchPaths.concat(downstream.watchPaths)),
     ui: ui.concat(downstream.ui),
     pendingPrompts: submissions.concat(downstream.pendingPrompts)
   };
 };
 
-globalThis.__coderExApplyEffect = function (combined, effect, ui, submissions) {
+globalThis.__codapeApplyEffect = function (combined, effect, ui, submissions) {
   if (effect !== null) {
     if (effect.stop === true) combined.stop = true;
     if (effect.updatedInput !== undefined) combined.updatedInput = effect.updatedInput;
@@ -3297,7 +3297,7 @@ globalThis.__coderExApplyEffect = function (combined, effect, ui, submissions) {
   combined.pendingPrompts = combined.pendingPrompts.concat(submissions);
 };
 
-globalThis.__coderExApplyResult = function (combined, result) {
+globalThis.__codapeApplyResult = function (combined, result) {
   combined.stop = combined.stop || result.stop;
   if (result.updatedInput !== null && result.updatedInput !== undefined) {
     combined.updatedInput = result.updatedInput;
@@ -3314,7 +3314,7 @@ globalThis.__coderExApplyResult = function (combined, result) {
 
 // The inner executor ran second, so it wins an updated-value conflict; a side
 // that left a field unset does not erase what the other set.
-globalThis.__coderExMergeWithInner = function (js, inner) {
+globalThis.__codapeMergeWithInner = function (js, inner) {
   return {
     stop: js.stop || inner.stop,
     updatedInput: (inner.updatedInput !== null && inner.updatedInput !== undefined)
@@ -3325,7 +3325,7 @@ globalThis.__coderExMergeWithInner = function (js, inner) {
       : js.updatedToolOutput,
     errors: js.errors.concat(inner.errors),
     failed: js.failed || inner.failed,
-    watchPaths: __coderExDedupe(js.watchPaths.concat(inner.watchPaths)),
+    watchPaths: __codapeDedupe(js.watchPaths.concat(inner.watchPaths)),
     ui: js.ui.concat(inner.ui),
     pendingPrompts: js.pendingPrompts.concat(inner.pendingPrompts)
   };
@@ -3335,14 +3335,14 @@ globalThis.__coderExMergeWithInner = function (js, inner) {
 // configured hooks, which are asynchronous and must not block the thread that
 // owns QuickJS. A hook that does not await `next()` still works — the level
 // awaits the pending chain after the hook returns before merging.
-globalThis.__coderExInner = function (event, input, contextJson) {
+globalThis.__codapeInner = function (event, input, contextJson) {
   return new Promise(function (resolve, reject) {
-    __coderExStartInner(event, input, contextJson, resolve, reject);
+    __codapeStartInner(event, input, contextJson, resolve, reject);
   });
 };
 
-globalThis.__coderExChain = async function (hooks, start, event, input, contextJson, depth, gating) {
-  const combined = __coderExEmptyResult();
+globalThis.__codapeChain = async function (hooks, start, event, input, contextJson, depth, gating) {
+  const combined = __codapeEmptyResult();
   let nextCalled = false;
 
   for (let index = start; index < hooks.length; index++) {
@@ -3357,8 +3357,8 @@ globalThis.__coderExChain = async function (hooks, start, event, input, contextJ
         throw new TypeError('next(e) may only be called once per hook invocation');
       }
       used = true;
-      if (depth + 1 > __coderExMaxChainDepth) {
-        throw new RangeError('next(e) exceeded the chain depth limit of ' + __coderExMaxChainDepth);
+      if (depth + 1 > __codapeMaxChainDepth) {
+        throw new RangeError('next(e) exceeded the chain depth limit of ' + __codapeMaxChainDepth);
       }
 
       let nextInput = input;
@@ -3380,14 +3380,14 @@ globalThis.__coderExChain = async function (hooks, start, event, input, contextJ
         }
       }
 
-      pendingDownstream = __coderExChain(hooks, index + 1, event, nextInput, nextContext, depth + 1, gating);
+      pendingDownstream = __codapeChain(hooks, index + 1, event, nextInput, nextContext, depth + 1, gating);
       return pendingDownstream.then(function (result) {
         downstream = result;
-        return __coderExPublicResult(result);
+        return __codapePublicResult(result);
       });
     };
 
-    const reply = JSON.parse(await __coderExCall(hook.m, hook.h, event, input, contextJson, next));
+    const reply = JSON.parse(await __codapeCall(hook.m, hook.h, event, input, contextJson, next));
     closed = true;
     if (downstream === null && pendingDownstream !== null) {
       downstream = await pendingDownstream;
@@ -3396,16 +3396,16 @@ globalThis.__coderExChain = async function (hooks, start, event, input, contextJ
     if (reply.ok) {
       const submissions = Array.isArray(reply.submissions) ? reply.submissions : [];
       if (downstream !== null) {
-        __coderExApplyResult(
+        __codapeApplyResult(
           combined,
-          __coderExMergeEffect(reply.result, reply.ui, submissions, downstream)
+          __codapeMergeEffect(reply.result, reply.ui, submissions, downstream)
         );
       } else {
-        __coderExApplyEffect(combined, reply.result, reply.ui, submissions);
+        __codapeApplyEffect(combined, reply.result, reply.ui, submissions);
       }
     } else {
       if (downstream !== null) {
-        __coderExApplyResult(combined, downstream);
+        __codapeApplyResult(combined, downstream);
       }
       combined.failed = true;
       combined.errors.push('mod `' + hook.name + '`: ' + reply.error);
@@ -3429,37 +3429,37 @@ globalThis.__coderExChain = async function (hooks, start, event, input, contextJ
     const innerInput = (combined.updatedInput !== null && combined.updatedInput !== undefined)
       ? combined.updatedInput
       : input;
-    result = __coderExMergeWithInner(
+    result = __codapeMergeWithInner(
       combined,
-      JSON.parse(await __coderExInner(event, innerInput, contextJson))
+      JSON.parse(await __codapeInner(event, innerInput, contextJson))
     );
   }
-  result.watchPaths = __coderExDedupe(result.watchPaths);
-  result.pendingPrompts = __coderExDedupePrompts(result.pendingPrompts);
+  result.watchPaths = __codapeDedupe(result.watchPaths);
+  result.pendingPrompts = __codapeDedupePrompts(result.pendingPrompts);
   // Only the outermost call finalizes: a deeper level would otherwise add the
   // same drop notice again after the outer level merges it back in.
-  if (depth === 0 && result.pendingPrompts.length > __coderExMaxPendingPrompts) {
-    const dropped = result.pendingPrompts.length - __coderExMaxPendingPrompts;
-    result.pendingPrompts = result.pendingPrompts.slice(0, __coderExMaxPendingPrompts);
+  if (depth === 0 && result.pendingPrompts.length > __codapeMaxPendingPrompts) {
+    const dropped = result.pendingPrompts.length - __codapeMaxPendingPrompts;
+    result.pendingPrompts = result.pendingPrompts.slice(0, __codapeMaxPendingPrompts);
     result.ui.push({
       type: 'text',
       text: '[' + dropped + ' mod submission(s) dropped: at most '
-        + __coderExMaxPendingPrompts + ' queued messages per hook firing]',
+        + __codapeMaxPendingPrompts + ' queued messages per hook firing]',
       style: 'dim'
     });
   }
   return result;
 };
 
-globalThis.__coderExRun = async function (chainJson, event, input, contextJson, gating) {
+globalThis.__codapeRun = async function (chainJson, event, input, contextJson, gating) {
   return JSON.stringify(
-    await __coderExChain(JSON.parse(chainJson), 0, event, input, contextJson, 0, gating === true)
+    await __codapeChain(JSON.parse(chainJson), 0, event, input, contextJson, 0, gating === true)
   );
 };
 
-globalThis.__coderExMaxChainDepth = @@MAX_CHAIN_DEPTH@@;
-globalThis.__coderExMaxSubmissionsPerCall = @@MAX_SUBMISSIONS_PER_CALL@@;
-globalThis.__coderExMaxPendingPrompts = @@MAX_PENDING_PROMPTS@@;
+globalThis.__codapeMaxChainDepth = @@MAX_CHAIN_DEPTH@@;
+globalThis.__codapeMaxSubmissionsPerCall = @@MAX_SUBMISSIONS_PER_CALL@@;
+globalThis.__codapeMaxPendingPrompts = @@MAX_PENDING_PROMPTS@@;
 "#;
 
 /// The per-mod harness: `on` and the registration array it fills.
@@ -3470,9 +3470,9 @@ fn install_mod_harness(ctx: &Ctx<'_>) -> Result<(), String> {
         format!(
             r"
 'use strict';
-globalThis.__coderExRegs = [];
-globalThis.__coderExHandlers = [];
-globalThis.__coderExOn = function (event, matcher, hook) {{
+globalThis.__codapeRegs = [];
+globalThis.__codapeHandlers = [];
+globalThis.__codapeOn = function (event, matcher, hook) {{
   if (typeof event !== 'string' || event.trim().length === 0) {{
     throw new TypeError('on(event, matcher, hook): event must be a non-empty string');
   }}
@@ -3486,28 +3486,28 @@ globalThis.__coderExOn = function (event, matcher, hook) {{
   if (typeof hook !== 'function') {{
     throw new TypeError('on(event, matcher, hook): hook must be a function');
   }}
-  if (__coderExRegs.length >= {max_hooks}) {{
+  if (__codapeRegs.length >= {max_hooks}) {{
     throw new RangeError('on(event, matcher, hook): a mod may register at most {max_hooks} hooks');
   }}
-  __coderExRegs.push({{ event: event, matcher: matcher, hook: hook, host: $ }});
+  __codapeRegs.push({{ event: event, matcher: matcher, hook: hook, host: $ }});
   return undefined;
 }};
-globalThis.__coderExOnActivate = function (id, handler) {{
-  for (let index = 0; index < __coderExHandlers.length; index++) {{
-    if (__coderExHandlers[index].id === id) {{
-      __coderExHandlers[index] = {{ id: id, handler: handler, host: $ }};
+globalThis.__codapeOnActivate = function (id, handler) {{
+  for (let index = 0; index < __codapeHandlers.length; index++) {{
+    if (__codapeHandlers[index].id === id) {{
+      __codapeHandlers[index] = {{ id: id, handler: handler, host: $ }};
       return undefined;
     }}
   }}
-  if (__coderExHandlers.length >= {max_activations}) {{
+  if (__codapeHandlers.length >= {max_activations}) {{
     throw new RangeError('$.ui.onActivate: a mod may register at most {max_activations} handlers');
   }}
-  __coderExHandlers.push({{ id: id, handler: handler, host: $ }});
+  __codapeHandlers.push({{ id: id, handler: handler, host: $ }});
   return undefined;
 }};
 Object.defineProperty(globalThis, 'on', {{
   value: function (event, matcher, hook) {{
-    return __coderExOn(event, matcher, hook);
+    return __codapeOn(event, matcher, hook);
   }},
   writable: false,
   enumerable: false,
@@ -3538,14 +3538,14 @@ fn matcher_matches(matcher: &str, input: &str) -> bool {
 }
 
 pub const fn is_gating_event(event: &str) -> bool {
-    use coderex_core::hook_events::{PRE_TOOL_USE, USER_PROMPT_SUBMIT};
+    use codape_core::hook_events::{PRE_TOOL_USE, USER_PROMPT_SUBMIT};
     event.eq_ignore_ascii_case(PRE_TOOL_USE) || event.eq_ignore_ascii_case(USER_PROMPT_SUBMIT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::ui_protocol::{UiElement, UiStyle};
+    use codape_core::ui_protocol::{UiElement, UiStyle};
 
     #[derive(Clone)]
     struct RecordingInner {
@@ -4462,7 +4462,7 @@ mod tests {
     }
 
     /// `e.surface` is exposed so a mod can branch on where it is running.
-    /// CodeRex has one surface today, so it is always `terminal`.
+    /// Codape has one surface today, so it is always `terminal`.
     #[test]
     fn the_hook_sees_the_terminal_surface() {
         let runtime = load(
@@ -4491,7 +4491,7 @@ mod tests {
             permission_mode: "default".to_string(),
             surface: SurfaceDescriptor::new(
                 "ide",
-                coderex_core::surface::SurfaceCapabilities::TEXT_ONLY,
+                codape_core::surface::SurfaceCapabilities::TEXT_ONLY,
             )
             .unwrap(),
         };
@@ -5581,7 +5581,7 @@ mod tests {
             }]
         );
 
-        let rendered = coderex_ui::mod_elements::render_mod_ui_text(&result.ui, 60);
+        let rendered = codape_ui::mod_elements::render_mod_ui_text(&result.ui, 60);
         for expected in ["Typed report", "hello", "ok", "[Retry]"] {
             assert!(
                 rendered.contains(expected),

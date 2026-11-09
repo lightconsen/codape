@@ -1,7 +1,7 @@
 //! MCP elicitation — forwarding user prompts/questions from MCP servers.
 
 use crate::channel::{InboundRequestHandler, JsonRpcError, METHOD_NOT_FOUND};
-use coderex_core::elicitation::{
+use codape_core::elicitation::{
     ElicitationHandler, ElicitationQuestion, ElicitationResult as PromptResult,
 };
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ pub const SAMPLING_CREATE: &str = "sampling/createMessage";
 ///
 /// Sampling spends the person's tokens on a server's behalf, so it is denied
 /// unless this variable is exactly `allow`.
-pub const SAMPLING_OPT_IN_ENV: &str = "CODEREX_MCP_SAMPLING";
+pub const SAMPLING_OPT_IN_ENV: &str = "CODAPE_MCP_SAMPLING";
 
 /// The only value of [`SAMPLING_OPT_IN_ENV`] that enables sampling.
 pub const SAMPLING_OPT_IN_VALUE: &str = "allow";
@@ -910,7 +910,7 @@ pub trait FormElicitationHandler: Send + Sync + std::fmt::Debug {
 
 /// Answers `elicitation/create` by asking the session's user.
 ///
-/// The prompt itself is a [`coderex_core::elicitation::ElicitationHandler`],
+/// The prompt itself is a [`codape_core::elicitation::ElicitationHandler`],
 /// which is the same interface the engine uses for its own clarification
 /// questions: the CLI supplies a handler that routes to the TUI or REPL, and a
 /// headless session supplies one that declines. This type only translates
@@ -1183,7 +1183,7 @@ fn question_for_field(spec: &FormSpec, field: &FormField, index: usize) -> Elici
     let options = field
         .choices
         .iter()
-        .map(|value| coderex_core::elicitation::ElicitationOption {
+        .map(|value| codape_core::elicitation::ElicitationOption {
             label: value
                 .as_str()
                 .map_or_else(|| value.to_string(), str::to_string),
@@ -1200,7 +1200,7 @@ fn question_for_field(spec: &FormSpec, field: &FormField, index: usize) -> Elici
 }
 
 /// The text of a prompt response: a selected choice wins over free text.
-fn answer_text(response: &coderex_core::elicitation::ElicitationResponse) -> Option<String> {
+fn answer_text(response: &codape_core::elicitation::ElicitationResponse) -> Option<String> {
     response
         .selected
         .first()
@@ -1378,7 +1378,7 @@ mod tests {
     }
 
     fn answered(text: &str) -> PromptResult {
-        PromptResult::Responded(coderex_core::elicitation::ElicitationResponse {
+        PromptResult::Responded(codape_core::elicitation::ElicitationResponse {
             request_id: String::new(),
             selected: Vec::new(),
             other_text: Some(text.into()),
@@ -1386,7 +1386,7 @@ mod tests {
     }
 
     fn no_answer() -> PromptResult {
-        PromptResult::Responded(coderex_core::elicitation::ElicitationResponse {
+        PromptResult::Responded(codape_core::elicitation::ElicitationResponse {
             request_id: String::new(),
             selected: Vec::new(),
             other_text: None,
@@ -1518,7 +1518,7 @@ mod tests {
     async fn enum_integer_and_number_answers_are_typed() {
         let result = ask_scripted(
             vec![
-                PromptResult::Responded(coderex_core::elicitation::ElicitationResponse {
+                PromptResult::Responded(codape_core::elicitation::ElicitationResponse {
                     request_id: String::new(),
                     selected: vec!["staging".into()],
                     other_text: Some("1".into()),
@@ -1547,7 +1547,7 @@ mod tests {
     #[tokio::test]
     async fn an_accepted_answer_is_shaped_by_the_requested_schema() {
         let result = ask(
-            PromptResult::Responded(coderex_core::elicitation::ElicitationResponse {
+            PromptResult::Responded(codape_core::elicitation::ElicitationResponse {
                 request_id: "environment".into(),
                 selected: Vec::new(),
                 other_text: Some("staging".into()),
@@ -1566,7 +1566,7 @@ mod tests {
     #[tokio::test]
     async fn a_numeric_answer_is_coerced_to_the_declared_type() {
         let result = ask(
-            PromptResult::Responded(coderex_core::elicitation::ElicitationResponse {
+            PromptResult::Responded(codape_core::elicitation::ElicitationResponse {
                 request_id: "port".into(),
                 selected: Vec::new(),
                 other_text: Some("8080".into()),
@@ -1594,7 +1594,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_method_is_refused_without_asking_the_user() {
         let handler = McpElicitationHandler::new(Arc::new(FixedPrompt(PromptResult::Responded(
-            coderex_core::elicitation::ElicitationResponse {
+            codape_core::elicitation::ElicitationResponse {
                 request_id: String::new(),
                 selected: Vec::new(),
                 other_text: Some("should not be used".into()),
@@ -1858,7 +1858,7 @@ mod tests {
 
         assert_eq!(error.code, METHOD_NOT_FOUND);
         assert!(
-            error.message.contains("CODEREX_MCP_SAMPLING=allow"),
+            error.message.contains("CODAPE_MCP_SAMPLING=allow"),
             "the refusal must name the opt-in: {}",
             error.message
         );

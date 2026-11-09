@@ -330,7 +330,7 @@ impl ArtifactStore {
 pub fn default_root() -> PathBuf {
     home::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".coderex")
+        .join(".codape")
         .join("artifacts")
 }
 

@@ -2,8 +2,8 @@
 
 use crate::context::{ExecutionContext, ToolError, ToolOutput};
 use async_trait::async_trait;
-use coderex_core::hook_executor::HookExecutor;
-use coderex_core::permissions::ToolRuleExemptions;
+use codape_core::hook_executor::HookExecutor;
+use codape_core::permissions::ToolRuleExemptions;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
@@ -75,10 +75,10 @@ pub const CHECKPOINT_STORE_KEY: &str = "checkpoint_store";
 #[must_use]
 pub fn checkpoint_store_from(
     ctx: &ToolContext<'_>,
-) -> Option<Arc<coderex_core::checkpoints::CheckpointStore>> {
+) -> Option<Arc<codape_core::checkpoints::CheckpointStore>> {
     ctx.extra
         .get(CHECKPOINT_STORE_KEY)
-        .and_then(|state| state.downcast_ref::<Arc<coderex_core::checkpoints::CheckpointStore>>())
+        .and_then(|state| state.downcast_ref::<Arc<codape_core::checkpoints::CheckpointStore>>())
         .cloned()
 }
 

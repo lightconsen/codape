@@ -116,12 +116,12 @@ pub fn load_pricing_from_path(path: &Path) -> HashMap<String, ModelPricing> {
     }
 }
 
-/// Load pricing from the default user config path (`~/.coderex/pricing.json`).
+/// Load pricing from the default user config path (`~/.codape/pricing.json`).
 #[must_use]
 pub fn load_user_pricing() -> HashMap<String, ModelPricing> {
     if let Ok(home) = std::env::var("HOME") {
         let path = std::path::PathBuf::from(home)
-            .join(".coderex")
+            .join(".codape")
             .join("pricing.json");
         return load_pricing_from_path(&path);
     }
@@ -163,7 +163,7 @@ pub struct TurnCost {
 impl CostTracker {
     /// Create a new cost tracker.
     ///
-    /// Attempts to load custom pricing from `~/.coderex/pricing.json`.
+    /// Attempts to load custom pricing from `~/.codape/pricing.json`.
     /// Falls back to built-in defaults if the file is missing or invalid.
     #[must_use]
     pub fn new() -> Self {
@@ -178,7 +178,7 @@ impl CostTracker {
         }
     }
 
-    /// Reload pricing from `~/.coderex/pricing.json` at runtime.
+    /// Reload pricing from `~/.codape/pricing.json` at runtime.
     pub fn reload_pricing(&mut self) {
         self.pricing = load_user_pricing();
     }

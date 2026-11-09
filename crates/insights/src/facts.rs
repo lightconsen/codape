@@ -9,7 +9,7 @@
 //! failing the whole session, and a session that cannot be read at all is
 //! reported as unreadable rather than silently dropped from the totals.
 
-use coderex_core::types::{Message, MessageContent};
+use codape_core::types::{Message, MessageContent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -124,7 +124,7 @@ impl SessionFacts {
                     if role == "user" && facts.first_prompt.is_empty() {
                         facts.first_prompt = excerpt(text, PROMPT_EXCERPT_CHARS);
                     }
-                    if text.contains("<coderex_compact_boundary>") {
+                    if text.contains("<codape_compact_boundary>") {
                         facts.compactions += 1;
                     }
                 }
@@ -141,7 +141,7 @@ impl SessionFacts {
                 }
                 // Thinking is provider state, not visible assistant output.
                 // The content enum is open: a transcript written by a newer
-                // CodeRex may hold something this one does not know. It still
+                // Codape may hold something this one does not know. It still
                 // counts as a message; it just has nothing to add.
                 _ => {}
             }
@@ -189,10 +189,10 @@ pub fn read_dir(dir: &Path) -> Result<Vec<SessionFacts>, std::io::Error> {
 
 const fn role_name(message: &Message) -> &'static str {
     match message.role {
-        coderex_core::types::Role::User => "user",
-        coderex_core::types::Role::Assistant => "assistant",
-        coderex_core::types::Role::System => "system",
-        coderex_core::types::Role::Tool => "tool",
+        codape_core::types::Role::User => "user",
+        codape_core::types::Role::Assistant => "assistant",
+        codape_core::types::Role::System => "system",
+        codape_core::types::Role::Tool => "tool",
         // Open enum: a role this version does not know is still a message,
         // and naming it keeps it out of the counts it does not belong in.
         _ => "other",
@@ -218,7 +218,7 @@ fn excerpt(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::{Role, ToolCall, ToolResult};
+    use codape_core::types::{Role, ToolCall, ToolResult};
 
     fn line(message: &Message) -> String {
         serde_json::to_string(message).unwrap()
@@ -262,7 +262,7 @@ mod tests {
                     images: Vec::new(),
                 }),
             },
-            Message::system("<coderex_compact_boundary>\nsummarized\n</coderex_compact_boundary>"),
+            Message::system("<codape_compact_boundary>\nsummarized\n</codape_compact_boundary>"),
         ];
 
         let text = messages.iter().map(line).collect::<Vec<_>>().join("\n");

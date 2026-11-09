@@ -15,7 +15,7 @@ channel without describing the details.
 
 Please include:
 
-- the version or commit, the platform, and how CodeRex was built;
+- the version or commit, the platform, and how Codape was built;
 - a minimal reproduction (prompt, configuration, plugin/mod if relevant);
 - the impact you believe it has.
 
@@ -23,7 +23,7 @@ We aim to acknowledge a report within three business days.
 
 ## Scope
 
-CodeRex runs model-proposed shell commands, reads and writes files, and loads
+Codape runs model-proposed shell commands, reads and writes files, and loads
 user-installed plugins and mods. A report is in scope when it shows a way to
 cross one of the boundaries the project claims:
 

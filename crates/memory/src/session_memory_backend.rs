@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use coderex_core::session_memory::SessionMemoryBackend;
+use codape_core::session_memory::SessionMemoryBackend;
 use std::sync::Arc;
 use uuid::Uuid;
 

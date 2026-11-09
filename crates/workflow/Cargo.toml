@@ -1,10 +1,11 @@
 [package]
-name = "coderex-workflow"
+name = "codape-workflow"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Workflow runtime — deterministic JavaScript orchestration of sub-agents"
 
@@ -12,8 +13,8 @@ description = "Workflow runtime — deterministic JavaScript orchestration of su
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
-coderex-tools = { path = "../tools" }
+codape-core = { path = "../core" }
+codape-tools = { path = "../tools" }
 
 async-trait.workspace = true
 thiserror.workspace = true

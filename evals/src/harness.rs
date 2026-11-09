@@ -20,7 +20,7 @@ use crate::paths::{HarnessError, assert_in_flow, path_safe_id};
 pub const HARNESS_FILE: &str = "flow.json";
 
 /// Where the hill-climb loop keeps its state inside a repository.
-pub const HILLCLIMB_DIR: &str = ".coderex/hillclimb";
+pub const HILLCLIMB_DIR: &str = ".codape/hillclimb";
 
 /// File the run records are appended to.
 pub const RESULTS_FILE: &str = "results.jsonl";
@@ -476,7 +476,7 @@ mod tests {
     fn the_flow_directory_is_under_the_repository() {
         assert_eq!(
             flow_dir(Path::new("/repo"), "smoke"),
-            PathBuf::from("/repo/.coderex/hillclimb/smoke")
+            PathBuf::from("/repo/.codape/hillclimb/smoke")
         );
     }
 }

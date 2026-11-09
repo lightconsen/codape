@@ -48,7 +48,7 @@ const LEGACY_SSE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// The value is seconds. The default is
 /// [`DEFAULT_STREAM_PROBE_INTERVAL`]; `0` disables recovery (the task stays
 /// `Degraded`, as it did before the probe existed).
-pub const MCP_STREAM_PROBE_ENV: &str = "CODEREX_MCP_STREAM_PROBE_SECS";
+pub const MCP_STREAM_PROBE_ENV: &str = "CODAPE_MCP_STREAM_PROBE_SECS";
 /// The probe interval used when [`MCP_STREAM_PROBE_ENV`] is unset.
 pub const DEFAULT_STREAM_PROBE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -1052,7 +1052,7 @@ impl HttpChannel {
             params: Some(serde_json::json!({
                 "protocolVersion": DEFAULT_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "coderex", "version": "0.1.0"}
+                "clientInfo": {"name": "codape", "version": "0.1.0"}
             })),
         };
         let result = self
@@ -1379,7 +1379,7 @@ async fn reinitialize(
         params: Some(serde_json::json!({
             "protocolVersion": DEFAULT_PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "coderex", "version": "0.1.0"}
+            "clientInfo": {"name": "codape", "version": "0.1.0"}
         })),
     };
     let response = context

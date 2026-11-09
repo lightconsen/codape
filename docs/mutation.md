@@ -39,7 +39,7 @@ failing the run unless `MUTATION_STRICT=1`.
 | `hooks/src/engine.rs` | 216 | 151 | 3 | 30 | 32 | **82.8%** |
 | `mcp/src/channel.rs` | 53 | 37 | 7 | 6 | 3 | **93.6%** |
 
-Baseline re-measured 2026-10-29 after `coderex_test_utils::capture_logs` made
+Baseline re-measured 2026-10-29 after `codape_test_utils::capture_logs` made
 log-only behaviour assertable. hooks: 32 missed, down from 36 (new tests cover
 `parse_absolute_paths`, `warn_about_inert_hooks`, `announce_status`, dry-run,
 the non-zero-exit stderr excerpt and streaming `log` lines). mcp: 3 missed,

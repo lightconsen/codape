@@ -11,7 +11,7 @@ cd "$root"
 failed=0
 run() {
   echo "== $*"
-  if ! cargo test -p coderex-cli "$@" -- --test-threads=1; then
+  if ! cargo test -p codape-cli "$@" -- --test-threads=1; then
     failed=1
   fi
 }

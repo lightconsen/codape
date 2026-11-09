@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use coderex_config::ConfigService;
-use coderex_config::dirs::ManagedSettings;
+use codape_config::ConfigService;
+use codape_config::dirs::ManagedSettings;
 
 fn write(path: &PathBuf, json: &str) {
     std::fs::write(path, json).expect("write settings");
@@ -121,7 +121,7 @@ fn a_managed_plist_is_merged_over_user_and_file_settings() {
     let dir = tempfile::tempdir().unwrap();
     let user = dir.path().join("settings.json");
     let managed = dir.path().join("managed.json");
-    let plist = dir.path().join("dev.coderex.plist");
+    let plist = dir.path().join("dev.codape.plist");
     write(
         &user,
         r#"{"model": "user-model", "telemetry": {"strict": false}}"#,
@@ -158,7 +158,7 @@ fn a_managed_plist_is_merged_over_user_and_file_settings() {
 fn a_managed_plist_over_the_size_limit_is_skipped_whole() {
     let dir = tempfile::tempdir().unwrap();
     let user = dir.path().join("settings.json");
-    let plist = dir.path().join("dev.coderex.plist");
+    let plist = dir.path().join("dev.codape.plist");
     write(&user, r#"{"model": "user-model"}"#);
     write_plist(
         &plist,
@@ -188,7 +188,7 @@ fn a_managed_plist_over_the_size_limit_is_skipped_whole() {
 fn a_managed_plist_can_carry_permission_rules() {
     let dir = tempfile::tempdir().unwrap();
     let user = dir.path().join("settings.json");
-    let plist = dir.path().join("dev.coderex.plist");
+    let plist = dir.path().join("dev.codape.plist");
     write(&user, r#"{"config_version": 4}"#);
 
     let mut permissions = plist::Dictionary::new();

@@ -5,13 +5,13 @@
 //! at a file whose filters run on diff, `init.templateDir` can land hooks in a
 //! clone, and `protocol.*.allow` can re-enable transports that execute commands.
 //! None of that is visible in a command line, and all of it matters the moment
-//! CodeRex runs `git` inside a checkout it did not create.
+//! Codape runs `git` inside a checkout it did not create.
 //!
 //! The reference solves this by injecting a fixed config table through
 //! `GIT_CONFIG_*` environment variables rather than by rewriting the command
 //! line. It injects them process-wide, so git calls made from its shell inherit
 //! them too. This port sets the same variables on each [`git_command()`] spawn
-//! instead: every git command CodeRex starts is hardened, but a user's own
+//! instead: every git command Codape starts is hardened, but a user's own
 //! `git` run through the Bash tool is not covered.
 //!
 //! It is deliberately **not** a sandbox. It removes the ways a repository's
@@ -19,7 +19,7 @@
 
 use std::process::Command;
 
-/// Configuration CodeRex refuses to inherit from a repository.
+/// Configuration Codape refuses to inherit from a repository.
 ///
 /// Ported key for key from the reference's table, including the deliberate
 /// `protocol.file.allow=user` — local-path operations (submodules) need it.
@@ -66,7 +66,7 @@ pub fn harden(command: &mut Command) {
 
 /// A hardened `git` command.
 ///
-/// Every place CodeRex runs `git` on its own behalf should start here; the
+/// Every place Codape runs `git` on its own behalf should start here; the
 /// hardening is only as good as the call sites that use it. There are currently
 /// 14 production call sites across the workspace (test modules excluded).
 #[must_use]

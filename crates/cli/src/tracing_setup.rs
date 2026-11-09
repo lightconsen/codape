@@ -5,13 +5,13 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 /// Initialize the tracing subscriber.
 ///
 /// Controls:
-/// - `CODEREX_LOG` — log level filter (default: `off`)
-/// - `CODEREX_LOG_FORMAT` — output format: `pretty` (default) or `json`
-/// - `CODEREX_LOG_FILE` — optional file path for additional file output
+/// - `CODAPE_LOG` — log level filter (default: `off`)
+/// - `CODAPE_LOG_FORMAT` — output format: `pretty` (default) or `json`
+/// - `CODAPE_LOG_FILE` — optional file path for additional file output
 pub fn init_tracing() {
-    let filter = EnvFilter::try_from_env("CODEREX_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
+    let filter = EnvFilter::try_from_env("CODAPE_LOG").unwrap_or_else(|_| EnvFilter::new("off"));
 
-    let format_json = std::env::var("CODEREX_LOG_FORMAT").is_ok_and(|v| v == "json");
+    let format_json = std::env::var("CODAPE_LOG_FORMAT").is_ok_and(|v| v == "json");
 
     if format_json {
         tracing_subscriber::registry()
@@ -33,13 +33,11 @@ pub fn init_tracing() {
 
 /// Install a panic hook using the telemetry crash reporter.
 ///
-/// Crash reports are written to `~/.coderex/crashes/pending/` and ingested
+/// Crash reports are written to `~/.codape/crashes/pending/` and ingested
 /// into the telemetry store on the next startup.
 pub fn install_panic_hook() {
-    let pending_dir = coderex_config::config_home()
-        .join("crashes")
-        .join("pending");
-    let reporter = coderex_telemetry::CrashReporter::new(pending_dir);
+    let pending_dir = codape_config::config_home().join("crashes").join("pending");
+    let reporter = codape_telemetry::CrashReporter::new(pending_dir);
     reporter.install_hook();
 
     // Release builds use `panic = "abort"`, so no destructor runs after a

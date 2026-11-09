@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "coderex",
+    name = "codape",
     version,
-    about = "CodeRex — AI-powered coding assistant",
-    long_about = "CodeRex — AI-powered coding assistant.\n\
+    about = "Codape — AI-powered coding assistant",
+    long_about = "Codape — AI-powered coding assistant.\n\
 \n\
 Running without a subcommand starts the interactive REPL."
 )]
@@ -120,7 +120,7 @@ pub struct Cli {
 
     /// Time budget in seconds for the run. The model is told how much of it
     /// remains at 25, 50, 75 and 90 percent of the budget.
-    #[arg(long, value_name = "SECS", env = "CODEREX_TIME_BUDGET")]
+    #[arg(long, value_name = "SECS", env = "CODAPE_TIME_BUDGET")]
     pub time_budget: Option<u64>,
 
     /// A path the request requires as its output. When a headless turn ends
@@ -129,7 +129,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        env = "CODEREX_REQUIRE_ARTIFACTS",
+        env = "CODAPE_REQUIRE_ARTIFACTS",
         value_delimiter = ':'
     )]
     pub require_artifact: Vec<std::path::PathBuf>,
@@ -158,7 +158,7 @@ pub struct Cli {
     #[arg(long, value_name = "DIR")]
     pub plugin_dir: Option<PathBuf>,
 
-    /// Settings file path (overrides default ~/.coderex/settings.json).
+    /// Settings file path (overrides default ~/.codape/settings.json).
     #[arg(long, value_name = "PATH")]
     pub settings: Option<PathBuf>,
 
@@ -191,7 +191,7 @@ pub struct Cli {
     pub effort: Option<String>,
 
     /// Comma-separated feature flags: `+name` enables, `-name` disables, a
-    /// bare `name` enables. Applied on top of CODEREX_FEATURE_FLAGS.
+    /// bare `name` enables. Applied on top of CODAPE_FEATURE_FLAGS.
     #[arg(long, value_name = "FLAGS")]
     pub betas: Vec<String>,
 
@@ -210,7 +210,7 @@ pub struct Cli {
 
     /// Run the session as a named custom agent.
     ///
-    /// The name refers to a JSON definition in `~/.coderex/agents/`; its
+    /// The name refers to a JSON definition in `~/.codape/agents/`; its
     /// system prompt and tool whitelist are applied to the session. An
     /// unknown name is an error listing the configured agents.
     #[arg(long, value_name = "AGENT")]
@@ -311,7 +311,7 @@ pub enum TelemetryAction {
     /// Print the JSON that would be uploaded for a pending crash.
     ///
     /// Reads the newest `*.json` file in the pending crash directory, or the
-    /// file given as an argument. `CODEREX_CRASH_VERBOSE` and `CODEREX_HIPAA`
+    /// file given as an argument. `CODAPE_CRASH_VERBOSE` and `CODAPE_HIPAA`
     /// affect the payload exactly as they do for a real upload.
     PreviewCrash {
         /// A pending crash file to preview (defaults to the newest one).
@@ -320,7 +320,7 @@ pub enum TelemetryAction {
     },
 }
 
-/// Arguments for `coderex bridge`.
+/// Arguments for `codape bridge`.
 ///
 /// The control-plane URL and environment ID identify this worker to the
 /// gateway; every other value has a default and can be overridden by flag or
@@ -331,44 +331,39 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "URL",
-        env = "CODEREX_BRIDGE_CONTROL_PLANE_URL",
+        env = "CODAPE_BRIDGE_CONTROL_PLANE_URL",
         required = true
     )]
     pub control_plane_url: Option<String>,
 
     /// Environment identifier registered with the control plane.
-    #[arg(
-        long,
-        value_name = "ID",
-        env = "CODEREX_BRIDGE_ENV_ID",
-        required = true
-    )]
+    #[arg(long, value_name = "ID", env = "CODAPE_BRIDGE_ENV_ID", required = true)]
     pub env_id: Option<String>,
 
     /// Git repository root (defaults to the current directory).
-    #[arg(long, value_name = "DIR", env = "CODEREX_BRIDGE_REPO_ROOT")]
+    #[arg(long, value_name = "DIR", env = "CODAPE_BRIDGE_REPO_ROOT")]
     pub repo_root: Option<PathBuf>,
 
     /// Base directory for session worktrees (defaults to
-    /// `<repo>/.coderex/worktrees`).
-    #[arg(long, value_name = "DIR", env = "CODEREX_BRIDGE_WORKTREE_BASE")]
+    /// `<repo>/.codape/worktrees`).
+    #[arg(long, value_name = "DIR", env = "CODAPE_BRIDGE_WORKTREE_BASE")]
     pub worktree_base: Option<PathBuf>,
 
     /// Base directory for session data (defaults to
-    /// `<repo>/.coderex/sessions`).
-    #[arg(long, value_name = "DIR", env = "CODEREX_BRIDGE_SESSION_BASE")]
+    /// `<repo>/.codape/sessions`).
+    #[arg(long, value_name = "DIR", env = "CODAPE_BRIDGE_SESSION_BASE")]
     pub session_base: Option<PathBuf>,
 
     /// Base directory for archived sessions (defaults to
-    /// `<repo>/.coderex/archives`).
-    #[arg(long, value_name = "DIR", env = "CODEREX_BRIDGE_ARCHIVE_BASE")]
+    /// `<repo>/.codape/archives`).
+    #[arg(long, value_name = "DIR", env = "CODAPE_BRIDGE_ARCHIVE_BASE")]
     pub archive_base: Option<PathBuf>,
 
     /// Maximum concurrent sessions.
     #[arg(
         long,
         value_name = "N",
-        env = "CODEREX_BRIDGE_MAX_CONCURRENT",
+        env = "CODAPE_BRIDGE_MAX_CONCURRENT",
         default_value_t = 5
     )]
     pub max_concurrent: usize,
@@ -377,7 +372,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "KIND",
-        env = "CODEREX_BRIDGE_TRANSPORT",
+        env = "CODAPE_BRIDGE_TRANSPORT",
         default_value = "websocket"
     )]
     pub transport: String,
@@ -385,20 +380,20 @@ pub struct BridgeArgs {
     /// Transport endpoint. Defaults to the control-plane URL with the
     /// `http`/`https` scheme rewritten to `ws`/`wss`.
     ///
-    /// `CODEREX_BRIDGE_URL` keeps the historical `ws://host:port` spelling.
-    #[arg(long, value_name = "URL", env = "CODEREX_BRIDGE_URL")]
+    /// `CODAPE_BRIDGE_URL` keeps the historical `ws://host:port` spelling.
+    #[arg(long, value_name = "URL", env = "CODAPE_BRIDGE_URL")]
     pub transport_url: Option<String>,
 
     /// Connection identifier reported by the transport (defaults to the
     /// environment ID).
-    #[arg(long, value_name = "ID", env = "CODEREX_BRIDGE_CONNECTION_ID")]
+    #[arg(long, value_name = "ID", env = "CODAPE_BRIDGE_CONNECTION_ID")]
     pub connection_id: Option<String>,
 
     /// Bearer token sent in the transport `Authorization` header.
     #[arg(
         long,
         value_name = "TOKEN",
-        env = "CODEREX_BRIDGE_TOKEN",
+        env = "CODAPE_BRIDGE_TOKEN",
         hide_env_values = true
     )]
     pub auth_token: Option<String>,
@@ -407,7 +402,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "SECS",
-        env = "CODEREX_BRIDGE_HEARTBEAT_INTERVAL_SECS",
+        env = "CODAPE_BRIDGE_HEARTBEAT_INTERVAL_SECS",
         default_value_t = 30
     )]
     pub heartbeat_interval_secs: u64,
@@ -416,7 +411,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "SECS",
-        env = "CODEREX_BRIDGE_HEARTBEAT_TIMEOUT_SECS",
+        env = "CODAPE_BRIDGE_HEARTBEAT_TIMEOUT_SECS",
         default_value_t = 10
     )]
     pub heartbeat_timeout_secs: u64,
@@ -425,7 +420,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "N",
-        env = "CODEREX_BRIDGE_HEARTBEAT_DEGRADED_THRESHOLD",
+        env = "CODAPE_BRIDGE_HEARTBEAT_DEGRADED_THRESHOLD",
         default_value_t = 2
     )]
     pub heartbeat_degraded_threshold: usize,
@@ -434,7 +429,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "N",
-        env = "CODEREX_BRIDGE_HEARTBEAT_LOST_THRESHOLD",
+        env = "CODAPE_BRIDGE_HEARTBEAT_LOST_THRESHOLD",
         default_value_t = 5
     )]
     pub heartbeat_lost_threshold: usize,
@@ -443,7 +438,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "SECS",
-        env = "CODEREX_BRIDGE_POLL_INTERVAL_SECS",
+        env = "CODAPE_BRIDGE_POLL_INTERVAL_SECS",
         default_value_t = 5
     )]
     pub poll_interval_secs: u64,
@@ -456,7 +451,7 @@ pub struct BridgeArgs {
     #[arg(
         long,
         value_name = "PATH",
-        env = "CODEREX_BRIDGE_CLAIM_PATH",
+        env = "CODAPE_BRIDGE_CLAIM_PATH",
         default_value = "/api/environments/{env_id}/assignments/{assignment_id}/claim"
     )]
     pub claim_path: Option<String>,
@@ -534,12 +529,12 @@ pub fn parse_args() -> Cli {
 /// Shared with the plugins crate so the injected command and the handler can
 /// never disagree about the spelling.
 pub const INTERNAL_WASM_COMPILE_FLAG: &str =
-    coderex_plugins::wasm_runtime::INTERNAL_WASM_COMPILE_FLAG;
+    codape_plugins::wasm_runtime::INTERNAL_WASM_COMPILE_FLAG;
 
 /// Run the hidden WASM compiler subcommand when it is the first argument.
 ///
 /// This runs *before* clap sees the arguments, so
-/// `coderex --internal-wasm-compile <input> <output>` cannot be mistaken for a
+/// `codape --internal-wasm-compile <input> <output>` cannot be mistaken for a
 /// user-facing flag. Returns `Some(exit_code)` when the command was handled.
 #[must_use]
 pub fn maybe_run_internal_wasm_compile() -> Option<i32> {
@@ -550,10 +545,10 @@ pub fn maybe_run_internal_wasm_compile() -> Option<i32> {
     }
 
     Some(
-        match coderex_plugins::wasm_runtime::compile_helper_main(args) {
+        match codape_plugins::wasm_runtime::compile_helper_main(args) {
             Ok(()) => 0,
             Err(err) => {
-                eprintln!("coderex: {err}");
+                eprintln!("codape: {err}");
                 1
             }
         },
@@ -563,7 +558,7 @@ pub fn maybe_run_internal_wasm_compile() -> Option<i32> {
 /// Point the WASM runtime at this executable as its compiler.
 ///
 /// The runtime appends `<input> <output>` to the injected command, so a
-/// packaged `coderex` binary needs no sibling `coderex-wasm-compile`.
+/// packaged `codape` binary needs no sibling `codape-wasm-compile`.
 ///
 /// # Errors
 ///
@@ -571,8 +566,8 @@ pub fn maybe_run_internal_wasm_compile() -> Option<i32> {
 /// determined.
 pub fn install_wasm_compiler() -> std::io::Result<()> {
     let program = std::env::current_exe()?;
-    coderex_plugins::wasm_runtime::set_compiler_command(
-        coderex_plugins::wasm_runtime::WasmCompilerCommand::new(program)
+    codape_plugins::wasm_runtime::set_compiler_command(
+        codape_plugins::wasm_runtime::WasmCompilerCommand::new(program)
             .arg(INTERNAL_WASM_COMPILE_FLAG),
     );
     Ok(())
@@ -593,21 +588,21 @@ mod tests {
 
     #[test]
     fn telemetry_preview_crash_defaults_to_the_newest_pending_file() {
-        let cli = Cli::try_parse_from(["coderex", "telemetry", "preview-crash"]).unwrap();
+        let cli = Cli::try_parse_from(["codape", "telemetry", "preview-crash"]).unwrap();
         assert_eq!(preview_file(cli), None);
     }
 
     #[test]
     fn telemetry_preview_crash_accepts_an_explicit_file() {
         let cli =
-            Cli::try_parse_from(["coderex", "telemetry", "preview-crash", "/tmp/crash_1.json"])
+            Cli::try_parse_from(["codape", "telemetry", "preview-crash", "/tmp/crash_1.json"])
                 .unwrap();
         assert_eq!(preview_file(cli), Some(PathBuf::from("/tmp/crash_1.json")));
     }
 
     #[test]
     fn telemetry_without_an_action_is_still_parseable() {
-        let cli = Cli::try_parse_from(["coderex", "telemetry"]).unwrap();
+        let cli = Cli::try_parse_from(["codape", "telemetry"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Telemetry { action: None })
@@ -616,20 +611,20 @@ mod tests {
 
     #[test]
     fn append_system_prompt_takes_a_value() {
-        let cli = Cli::try_parse_from(["coderex", "--append-system-prompt", "be terse"]).unwrap();
+        let cli = Cli::try_parse_from(["codape", "--append-system-prompt", "be terse"]).unwrap();
         assert_eq!(cli.append_system_prompt.as_deref(), Some("be terse"));
         assert!(cli.system_prompt.is_none());
     }
 
     #[test]
     fn append_system_prompt_without_a_value_is_a_parse_error() {
-        assert!(Cli::try_parse_from(["coderex", "--append-system-prompt"]).is_err());
+        assert!(Cli::try_parse_from(["codape", "--append-system-prompt"]).is_err());
     }
 
     #[test]
     fn system_prompt_and_append_system_prompt_compose() {
         let cli = Cli::try_parse_from([
-            "coderex",
+            "codape",
             "--system-prompt",
             "replace the base",
             "--append-system-prompt",
@@ -643,7 +638,7 @@ mod tests {
     #[test]
     fn append_system_prompt_is_independent_of_the_replacement_prompt() {
         let cli =
-            Cli::try_parse_from(["coderex", "--append-system-prompt", "only additive"]).unwrap();
+            Cli::try_parse_from(["codape", "--append-system-prompt", "only additive"]).unwrap();
         assert!(cli.system_prompt.is_none());
         assert_eq!(cli.append_system_prompt.as_deref(), Some("only additive"));
     }

@@ -4,7 +4,7 @@
 //! Claude exposes `memory_list` / `memory_read` / `memory_write` over several
 //! stores — personal, project, shared, org — with `if_version` optimistic
 //! concurrency, and requires a classifier to pass before a shared store is
-//! written. CodeRex had no model-facing memory surface at all: the stores
+//! written. Codape had no model-facing memory surface at all: the stores
 //! existed but only the engine used them. This module is the missing seam. It
 //! owns no storage of its own — it routes to the stores that already exist and
 //! adds the three things they lack: a store name a model can say, a version to
@@ -21,14 +21,14 @@
 //!
 //! The `org` row is reachable after [`MemoryService::with_org`] attaches a
 //! second, org-scoped [`TeamMemorySyncService`]. The CLI does this at startup
-//! (`crates/cli/src/repl.rs`), using `CODEREX_ORG_ID` and falling back to the
+//! (`crates/cli/src/repl.rs`), using `CODAPE_ORG_ID` and falling back to the
 //! org id in the remote-settings cache; when neither is configured, `org`
 //! answers [`MemoryServiceError::StoreUnavailable`] rather than falling back
 //! to another store.
 //!
 //! `personal` and `project` share one [`LongTermStore`] and are told apart by a
 //! key namespace. That is deliberate for a local-first tool: there is no
-//! hidden `~/.coderex` memory directory, and a "personal" memory is still
+//! hidden `~/.codape` memory directory, and a "personal" memory is still
 //! written next to the workspace it belongs to. The two namespaces keep the
 //! two scopes from colliding; they do not promise a global one.
 //!
@@ -43,7 +43,7 @@
 //! version it expects (`if_version`); if the entry has moved on, the write is
 //! refused and reports what the version is now, so a caller can re-read rather
 //! than clobber a change it did not see. This is the same convention the
-//! artifact database uses (`coderex-artifacts`'s `db::Write`), reused rather
+//! artifact database uses (`codape-artifacts`'s `db::Write`), reused rather
 //! than reinvented.
 //!
 //! # The classifier gate
@@ -202,7 +202,7 @@ pub enum MemoryServiceError {
 ///
 /// The permission engine already has this shape — a hook that looks at a
 /// request and returns allow or refuse (`AutoClassifierHook` in
-/// `coderex-core`). This trait is the memory-shaped face of it: `Ok(())` lets
+/// `codape-core`). This trait is the memory-shaped face of it: `Ok(())` lets
 /// the write through, `Err(reason)` refuses it and the reason is reported back
 /// to the caller.
 #[async_trait::async_trait]

@@ -65,7 +65,7 @@ fn a_mod_ui_tree_reaches_the_stream_json_host() {
     .expect("settings");
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -77,14 +77,14 @@ fn a_mod_ui_tree_reaches_the_stream_json_host() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_MODS", "1")
-        .env("CODEREX_MODS_DIR", mods.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_MODS", "1")
+        .env("CODAPE_MODS_DIR", mods.path())
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -97,7 +97,7 @@ fn a_mod_ui_tree_reaches_the_stream_json_host() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);

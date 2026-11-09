@@ -1,12 +1,12 @@
-//! The terminal surface: the only surface CodeRex ships.
+//! The terminal surface: the only surface Codape ships.
 //!
-//! The abstraction lives in [`coderex_core::surface`]; this module is its
+//! The abstraction lives in [`codape_core::surface`]; this module is its
 //! terminal implementation. It reuses the plain-text renderer so headless
 //! transcripts, wire clients and tests present mod UI exactly as the TUI's
 //! compact form does.
 
-use coderex_core::surface::{SurfaceDescriptor, UiSurface};
-use coderex_core::ui_protocol::UiElement;
+use codape_core::surface::{SurfaceDescriptor, UiSurface};
+use codape_core::ui_protocol::UiElement;
 
 use crate::mod_elements::render_mod_ui_text;
 
@@ -48,8 +48,8 @@ impl UiSurface for TerminalSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::surface::UiSurface;
-    use coderex_core::ui_protocol::UiStyle;
+    use codape_core::surface::UiSurface;
+    use codape_core::ui_protocol::UiStyle;
 
     #[test]
     fn the_terminal_surface_names_itself_and_reports_its_capabilities() {

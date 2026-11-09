@@ -5,7 +5,7 @@
 //!
 //! - **macOS**: a property list installed by an MDM profile, conventionally at
 //!   `/Library/Managed Preferences/<bundle-id>.plist`.
-//! - **Windows**: values under `HKLM\SOFTWARE\CodeRex`.
+//! - **Windows**: values under `HKLM\SOFTWARE\Codape`.
 //!
 //! Both are administrator-controlled, so the resulting [`Settings`] document is
 //! finalized as a `"managed"` source: it may enable telemetry and
@@ -24,10 +24,10 @@ use crate::settings::{
 use std::path::{Path, PathBuf};
 
 /// Default bundle-like domain for the macOS managed-preferences plist.
-pub const DEFAULT_MACOS_MANAGED_PLIST_DOMAIN: &str = "dev.coderex";
+pub const DEFAULT_MACOS_MANAGED_PLIST_DOMAIN: &str = "dev.codape";
 
 /// Default Windows registry key, relative to `HKEY_LOCAL_MACHINE`.
-pub const WINDOWS_MANAGED_REGISTRY_KEY: &str = r"SOFTWARE\CodeRex";
+pub const WINDOWS_MANAGED_REGISTRY_KEY: &str = r"SOFTWARE\Codape";
 
 /// Path of the system-wide macOS managed-preferences plist for `domain`.
 ///
@@ -169,7 +169,7 @@ fn registry_validation(name: &str, message: impl Into<String>) -> ConfigError {
     }
 }
 
-/// Read managed settings from `HKEY_LOCAL_MACHINE\SOFTWARE\CodeRex`.
+/// Read managed settings from `HKEY_LOCAL_MACHINE\SOFTWARE\Codape`.
 ///
 /// Returns `Ok(None)` when the key is absent. Supports `REG_SZ`,
 /// `REG_EXPAND_SZ`, `REG_DWORD`, `REG_QWORD` and `REG_MULTI_SZ`; other value
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn plist_carrier_loads_settings() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("dev.coderex.plist");
+        let path = temp.path().join("dev.codape.plist");
         let mut dict = plist::Dictionary::new();
         dict.insert("model".into(), plist::Value::String("plist-model".into()));
         dict.insert("telemetry_enabled".into(), plist::Value::Boolean(true));
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn plist_carrier_rejects_unknown_keys() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("dev.coderex.plist");
+        let path = temp.path().join("dev.codape.plist");
         let mut dict = plist::Dictionary::new();
         dict.insert("model".into(), plist::Value::String("plist-model".into()));
         dict.insert("not_a_setting".into(), plist::Value::String("value".into()));
@@ -269,8 +269,8 @@ mod tests {
     #[test]
     fn default_macos_plist_path_is_the_system_managed_location() {
         assert_eq!(
-            default_managed_plist_path("dev.coderex"),
-            PathBuf::from("/Library/Managed Preferences/dev.coderex.plist")
+            default_managed_plist_path("dev.codape"),
+            PathBuf::from("/Library/Managed Preferences/dev.codape.plist")
         );
     }
 
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn registry_key_constant_matches_the_documented_location() {
-        assert_eq!(WINDOWS_MANAGED_REGISTRY_KEY, r"SOFTWARE\CodeRex");
+        assert_eq!(WINDOWS_MANAGED_REGISTRY_KEY, r"SOFTWARE\Codape");
     }
 
     // ── Windows registry carrier (real HKLM) ─────────────────────────────
@@ -381,7 +381,7 @@ mod tests {
     /// Whether CI requires the registry tests to really run.
     #[cfg(windows)]
     fn require_hklm_tests() -> bool {
-        std::env::var("CODEREX_REQUIRE_HKLM_TESTS").as_deref() == Ok("1")
+        std::env::var("CODAPE_REQUIRE_HKLM_TESTS").as_deref() == Ok("1")
     }
 
     #[cfg(windows)]
@@ -397,7 +397,7 @@ mod tests {
             use winreg::enums::{KEY_ALL_ACCESS, KEY_READ};
 
             let path = format!(
-                r"{root}\Tests\coderex-{}-{}",
+                r"{root}\Tests\codape-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -433,12 +433,12 @@ mod tests {
     fn registry_carrier_reads_hklm() {
         use winreg::enums::HKEY_LOCAL_MACHINE;
 
-        let scratch = match ScratchKey::new(HKEY_LOCAL_MACHINE, r"SOFTWARE\CodeRex") {
+        let scratch = match ScratchKey::new(HKEY_LOCAL_MACHINE, r"SOFTWARE\Codape") {
             Ok(scratch) => scratch,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 assert!(
                     !require_hklm_tests(),
-                    "HKLM is not writable on this runner but CODEREX_REQUIRE_HKLM_TESTS=1"
+                    "HKLM is not writable on this runner but CODAPE_REQUIRE_HKLM_TESTS=1"
                 );
                 eprintln!("skipping: this process cannot write HKLM ({error})");
                 return;
@@ -468,7 +468,7 @@ mod tests {
     fn registry_carrier_ignores_hkcu() {
         use winreg::enums::HKEY_CURRENT_USER;
 
-        let scratch = ScratchKey::new(HKEY_CURRENT_USER, r"SOFTWARE\CodeRex")
+        let scratch = ScratchKey::new(HKEY_CURRENT_USER, r"SOFTWARE\Codape")
             .expect("HKCU is always writable");
         scratch.key().set_value("model", &"user-model").unwrap();
 
@@ -486,12 +486,12 @@ mod tests {
     fn registry_carrier_rejects_an_unknown_value() {
         use winreg::enums::HKEY_LOCAL_MACHINE;
 
-        let scratch = match ScratchKey::new(HKEY_LOCAL_MACHINE, r"SOFTWARE\CodeRex") {
+        let scratch = match ScratchKey::new(HKEY_LOCAL_MACHINE, r"SOFTWARE\Codape") {
             Ok(scratch) => scratch,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 assert!(
                     !require_hklm_tests(),
-                    "HKLM is not writable on this runner but CODEREX_REQUIRE_HKLM_TESTS=1"
+                    "HKLM is not writable on this runner but CODAPE_REQUIRE_HKLM_TESTS=1"
                 );
                 eprintln!("skipping: this process cannot write HKLM ({error})");
                 return;

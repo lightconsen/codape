@@ -12,7 +12,7 @@ pub use crate::session_memory_agent::update_session_memory_ai;
 pub enum MemoryWorkflowError {
     /// Orchestrator-level error.
     #[error("AI error: {0}")]
-    Ai(#[from] coderex_core::orchestrator::OrchestratorError),
+    Ai(#[from] codape_core::orchestrator::OrchestratorError),
     /// Storage I/O error.
     #[error("storage error: {0}")]
     Storage(#[from] std::io::Error),
@@ -23,9 +23,9 @@ pub enum MemoryWorkflowError {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use coderex_core::api_client::{ApiClient, ApiResponse, StreamEvent};
-    use coderex_core::tool_executor::ToolInfo;
-    use coderex_core::types::{ModelId, UsageSummary};
+    use codape_core::api_client::{ApiClient, ApiResponse, StreamEvent};
+    use codape_core::tool_executor::ToolInfo;
+    use codape_core::types::{ModelId, UsageSummary};
     use futures::Stream;
     use std::pin::Pin;
 
@@ -55,7 +55,7 @@ pub(crate) mod tests {
             _model: &ModelId,
             _max_tokens: u32,
             _tools: &[ToolInfo],
-        ) -> Result<ApiResponse, coderex_core::api_client::ApiError> {
+        ) -> Result<ApiResponse, codape_core::api_client::ApiError> {
             Ok(ApiResponse {
                 content: self.response_content.clone(),
                 tool_calls: Vec::new(),

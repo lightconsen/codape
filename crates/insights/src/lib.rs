@@ -1,4 +1,4 @@
-//! CodeRex insights — what the sessions on this machine add up to.
+//! Codape insights — what the sessions on this machine add up to.
 //!
 //! The report answers three questions from transcripts alone: what the work
 //! actually was, where it went wrong, and what is worth changing. It is built
@@ -6,7 +6,7 @@
 //! nothing here calls a model — the counts are counted, and the suggestions
 //! say which counts they came from.
 //!
-//! CodeRex keeps transcripts per workspace (`<cwd>/.coderex/transcripts`), so
+//! Codape keeps transcripts per workspace (`<cwd>/.codape/transcripts`), so
 //! insights are per workspace too: a report covers the sessions of the project
 //! it was generated in.
 
@@ -98,5 +98,5 @@ pub fn run(
 /// The transcript directory a workspace keeps.
 #[must_use]
 pub fn workspace_transcripts(cwd: &Path) -> PathBuf {
-    cwd.join(".coderex").join("transcripts")
+    cwd.join(".codape").join("transcripts")
 }

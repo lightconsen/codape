@@ -17,7 +17,7 @@ fn config_home() -> std::path::PathBuf {
     TEST_CONFIG_HOME.with(|h| {
         h.borrow()
             .clone()
-            .unwrap_or_else(coderex_config::settings::config_home)
+            .unwrap_or_else(codape_config::settings::config_home)
     })
 }
 
@@ -126,9 +126,9 @@ chrome_get_content    — Extract page HTML as markdown"
 
     // /desktop — desktop app integration
     //
-    // CodeRex ships no desktop host; the surface abstraction has one
+    // Codape ships no desktop host; the surface abstraction has one
     // implementation, the terminal (`crates/ui/src/surface.rs`). This used to
-    // report "Connected" whenever `CODEREX_DESKTOP` was set, and nothing sets
+    // report "Connected" whenever `CODAPE_DESKTOP` was set, and nothing sets
     // it, so the only honest answer is that there is no desktop app.
     registry.register(SlashCommand::local(
         "desktop",
@@ -137,17 +137,17 @@ chrome_get_content    — Extract page HTML as markdown"
         true,
         true,
         Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let detected = std::env::var("CODEREX_DESKTOP").is_ok_and(|s| !s.is_empty());
+            let detected = std::env::var("CODAPE_DESKTOP").is_ok_and(|s| !s.is_empty());
             if detected {
                 // An environment marker is not a connection: say what was
                 // seen rather than claiming an integration exists.
                 CommandResult::success(
-                    "Desktop integration: CODEREX_DESKTOP is set, but this build has no desktop \
+                    "Desktop integration: CODAPE_DESKTOP is set, but this build has no desktop \
                      host. The session is presented in the terminal surface.",
                 )
             } else {
                 CommandResult::success(
-                    "Desktop integration: none. CodeRex ships the terminal surface only.",
+                    "Desktop integration: none. Codape ships the terminal surface only.",
                 )
             }
         }),
@@ -155,9 +155,9 @@ chrome_get_content    — Extract page HTML as markdown"
 
     // /mobile — mobile remote connection
     //
-    // The same problem as `/desktop`: `CODEREX_MOBILE` was the only evidence
+    // The same problem as `/desktop`: `CODAPE_MOBILE` was the only evidence
     // ever consulted, and nothing sets it. Remote clients reach a session
-    // through the bridge's own launcher (`coderex bridge`), not through this
+    // through the bridge's own launcher (`codape bridge`), not through this
     // command, so the honest answer names that and the gateway that is not in
     // this repository.
     registry.register(SlashCommand::local(
@@ -167,16 +167,16 @@ chrome_get_content    — Extract page HTML as markdown"
         true,
         true,
         Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let detected = std::env::var("CODEREX_MOBILE").is_ok_and(|s| !s.is_empty());
+            let detected = std::env::var("CODAPE_MOBILE").is_ok_and(|s| !s.is_empty());
             if detected {
                 CommandResult::success(
-                    "Mobile: CODEREX_MOBILE is set, but this command cannot observe a client. \
-                     Remote clients attach through `coderex bridge` and are approved by the \
+                    "Mobile: CODAPE_MOBILE is set, but this command cannot observe a client. \
+                     Remote clients attach through `codape bridge` and are approved by the \
                      gateway, which is not part of this binary.",
                 )
             } else {
                 CommandResult::success(
-                    "Mobile: none. Remote clients attach through `coderex bridge`.",
+                    "Mobile: none. Remote clients attach through `codape bridge`.",
                 )
             }
         }),
@@ -185,7 +185,7 @@ chrome_get_content    — Extract page HTML as markdown"
     // /voice — report the voice input state
     //
     // The mode is not a toggle this command can flip on its own: the
-    // microphone is owned by whatever host implements `coderex_ui::voice`, and
+    // microphone is owned by whatever host implements `codape_ui::voice`, and
     // this build's `voice` cargo feature is not enabled anywhere (the compile
     // gate in `crates/ui/src/lib.rs`). Before this, the command answered
     // "Toggled" and nothing was ever listening.
@@ -299,7 +299,7 @@ chrome_get_content    — Extract page HTML as markdown"
         true,
         true,
         Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let bridge_url = std::env::var("CODEREX_BRIDGE_URL").ok();
+            let bridge_url = std::env::var("CODAPE_BRIDGE_URL").ok();
             let api_key_set = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|s| !s.is_empty())
                 || std::env::var("OPENAI_API_KEY").is_ok_and(|s| !s.is_empty());
             let mut lines = vec!["Remote Setup".to_string(), "───────────".to_string()];
@@ -314,10 +314,10 @@ chrome_get_content    — Extract page HTML as markdown"
                 lines.push("Bridge is configured. Use /bridge to check status.".to_string());
             } else {
                 lines.push("Bridge: not configured".to_string());
-                lines.push("  export CODEREX_BRIDGE_URL=ws://host:port".to_string());
+                lines.push("  export CODAPE_BRIDGE_URL=ws://host:port".to_string());
             }
             lines.push(String::new());
-            lines.push("Run: coderex serve".to_string());
+            lines.push("Run: codape serve".to_string());
             lines.push("Use Bridge for full remote session support.".to_string());
             CommandResult::success(lines.join("\n"))
         }),
@@ -373,7 +373,7 @@ chrome_get_content    — Extract page HTML as markdown"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -413,11 +413,7 @@ mod tests {
             r
         };
         let result = reg.execute("mobile", &ctx(), &[]);
-        assert!(
-            result.output.contains("coderex bridge"),
-            "{}",
-            result.output
-        );
+        assert!(result.output.contains("codape bridge"), "{}", result.output);
     }
 
     #[test]
@@ -469,7 +465,7 @@ mod tests {
         let settings_path = tmp.path().join("settings.json");
         assert!(settings_path.exists());
         let content = std::fs::read_to_string(&settings_path).unwrap();
-        let settings: coderex_config::Settings = serde_json::from_str(&content).unwrap();
+        let settings: codape_config::Settings = serde_json::from_str(&content).unwrap();
         assert_eq!(settings.vim_mode, Some(true));
     }
 
@@ -493,7 +489,7 @@ mod tests {
         let settings_path = tmp.path().join("settings.json");
         assert!(settings_path.exists());
         let content = std::fs::read_to_string(&settings_path).unwrap();
-        let settings: coderex_config::Settings = serde_json::from_str(&content).unwrap();
+        let settings: codape_config::Settings = serde_json::from_str(&content).unwrap();
         assert_eq!(settings.vim_mode, Some(false));
     }
 
@@ -628,7 +624,7 @@ mod tests {
         let settings_path = tmp.path().join("settings.json");
         assert!(settings_path.exists());
         let content = std::fs::read_to_string(&settings_path).unwrap();
-        let settings: coderex_config::Settings = serde_json::from_str(&content).unwrap();
+        let settings: codape_config::Settings = serde_json::from_str(&content).unwrap();
         let statusline = settings.statusline.as_ref().unwrap();
         assert_eq!(
             statusline.format.as_deref(),
@@ -655,7 +651,7 @@ mod tests {
         assert!(result.state_changed);
 
         let content = std::fs::read_to_string(tmp.path().join("settings.json")).unwrap();
-        let settings: coderex_config::Settings = serde_json::from_str(&content).unwrap();
+        let settings: codape_config::Settings = serde_json::from_str(&content).unwrap();
         let statusline = settings.statusline.as_ref().unwrap();
         assert!(statusline.format.as_deref().unwrap().contains("[vim]"));
         assert_eq!(statusline.theme.as_deref(), Some("dark"));

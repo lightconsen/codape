@@ -1,7 +1,7 @@
 //! Miscellaneous commands: /advisor, /btw, /good-claude, /stickers, /bughunter, /issue, /env, /diff, /oauth-refresh, /backfill-sessions.
 
 use crate::registry::{CommandArgs, CommandContext, CommandRegistry, CommandResult, SlashCommand};
-use coderex_core::query_profiles::PromptProfile;
+use codape_core::query_profiles::PromptProfile;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ pub fn register(registry: &mut CommandRegistry) {
 
     // /stickers — stickers/emoji (feature-gated)
     //
-    // A sticker is an image message, and no CodeRex surface renders one: the
+    // A sticker is an image message, and no Codape surface renders one: the
     // terminal surface reports `images: false` and the only image-carrying
     // message is a `ToolResult` (a screenshot the model asked for), not a
     // user-posted sticker. There is nothing to send, so the command says that
@@ -62,7 +62,7 @@ pub fn register(registry: &mut CommandRegistry) {
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             if ctx.is_feature_enabled("stickers") {
                 CommandResult::success(
-                    "Stickers: not implemented. No CodeRex surface renders image messages, so \
+                    "Stickers: not implemented. No Codape surface renders image messages, so \
                      there is nothing to send one to.",
                 )
             } else {
@@ -110,7 +110,7 @@ pub fn register(registry: &mut CommandRegistry) {
                         "--title",
                         &title,
                         "--body",
-                        &format!("Created via CodeRex: {title}"),
+                        &format!("Created via Codape: {title}"),
                     ])
                     .current_dir(dir)
                     .output();
@@ -200,7 +200,7 @@ pub fn register(registry: &mut CommandRegistry) {
             // Ask git whether this is a repository before asking for a diff.
             // Reporting an empty diff for a directory git cannot read would
             // say "nothing changed" about a place where nothing is known.
-            let inside = coderex_core::git_hardening::git_command()
+            let inside = codape_core::git_hardening::git_command()
                 .args(["rev-parse", "--is-inside-work-tree"])
                 .current_dir(dir)
                 .output();
@@ -225,7 +225,7 @@ pub fn register(registry: &mut CommandRegistry) {
             if cached {
                 cmd_args.push("--cached");
             }
-            match coderex_core::git_hardening::git_command()
+            match codape_core::git_hardening::git_command()
                 .args(&cmd_args)
                 .current_dir(dir)
                 .output()
@@ -254,7 +254,7 @@ pub fn register(registry: &mut CommandRegistry) {
 
     // /oauth-refresh — report the credential state
     //
-    // There is no *model provider* OAuth token to refresh: CodeRex
+    // There is no *model provider* OAuth token to refresh: Codape
     // authenticates with an API key or, for the cloud providers, with
     // credentials from the environment. The command used to say a token had
     // been refreshed, which was not true of anything it did; it now says what
@@ -272,8 +272,8 @@ pub fn register(registry: &mut CommandRegistry) {
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "GROQ_API_KEY",
-                "CODEREX_API_KEY",
-                "CODEREX_PLUGIN_PUBLIC_KEY",
+                "CODAPE_API_KEY",
+                "CODAPE_PLUGIN_PUBLIC_KEY",
             ];
             let present: Vec<&str> = key_vars
                 .iter()
@@ -281,7 +281,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 .filter(|name| std::env::var(name).is_ok_and(|value| !value.is_empty()))
                 .collect();
 
-            let aws = coderex_core::providers::AwsCredentials::from_env().is_some();
+            let aws = codape_core::providers::AwsCredentials::from_env().is_some();
 
             if present.is_empty() && !aws && !ctx.api_key_set {
                 return CommandResult::error(
@@ -314,7 +314,7 @@ pub fn register(registry: &mut CommandRegistry) {
 
     // /backfill-sessions — write the session index for transcripts that
     // predate it. The index belongs to the CLI (it owns the SQLite handle and
-    // the `.coderex` layout), so the registry only reports the request; the
+    // the `.codape` layout), so the registry only reports the request; the
     // REPL answers it in `sync_command_state`, the same place `/init` queues
     // its hook. Writing the index from here would mean a second, divergent
     // implementation of the row shape.
@@ -325,7 +325,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
-            let transcripts = std::path::Path::new(&ctx.cwd).join(".coderex/transcripts");
+            let transcripts = std::path::Path::new(&ctx.cwd).join(".codape/transcripts");
             let found = std::fs::read_dir(&transcripts).map_or(0, |entries| {
                 entries
                     .flatten()
@@ -411,7 +411,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -587,7 +587,7 @@ mod tests {
     fn diff_in_git_repo() {
         let tmp = tempfile::tempdir().unwrap();
         // Init a git repo
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["init", "--quiet"])
             .current_dir(tmp.path())
             .output()

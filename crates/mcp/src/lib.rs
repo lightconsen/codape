@@ -1,4 +1,4 @@
-//! CodeRex MCP (Model Context Protocol) system.
+//! Codape MCP (Model Context Protocol) system.
 
 #![warn(missing_docs)]
 
@@ -6,7 +6,7 @@ pub mod channel;
 pub mod config;
 pub mod elicitation;
 mod http;
-/// The probe interval used when `CODEREX_MCP_STREAM_PROBE_SECS` is unset.
+/// The probe interval used when `CODAPE_MCP_STREAM_PROBE_SECS` is unset.
 pub use http::DEFAULT_STREAM_PROBE_INTERVAL;
 /// How hard that stream retries before it gives up.
 pub use http::EventStreamRetryPolicy;

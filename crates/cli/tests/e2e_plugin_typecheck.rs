@@ -1,6 +1,6 @@
-//! `coderex plugin-typecheck` against a stand-in TypeScript compiler.
+//! `codape plugin-typecheck` against a stand-in TypeScript compiler.
 //!
-//! The unit tests in `coderex-plugins` cover parsing and spawning; this runs
+//! The unit tests in `codape-plugins` cover parsing and spawning; this runs
 //! the real binary so the exit status and the printed report — what a plugin
 //! author or CI script actually consumes — are exercised too.
 
@@ -27,20 +27,20 @@ fn fake_compiler(dir: &Path, body: &str, status: i32) -> PathBuf {
 }
 
 fn run(dir: &Path, compiler: Option<&Path>) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command
         .arg("plugin-typecheck")
         .arg("--dir")
         .arg(dir)
         .stdin(Stdio::null())
-        .env("CODEREX_LOG", "off");
+        .env("CODAPE_LOG", "off");
     // A compiler is named explicitly so the machine's own `tsc` (or its
     // absence) cannot change the result.
     match compiler {
-        Some(path) => command.env("CODEREX_TSC", path),
-        None => command.env("CODEREX_TSC", dir.join("no-such-compiler")),
+        Some(path) => command.env("CODAPE_TSC", path),
+        None => command.env("CODAPE_TSC", dir.join("no-such-compiler")),
     };
-    command.output().expect("run coderex plugin-typecheck")
+    command.output().expect("run codape plugin-typecheck")
 }
 
 #[cfg(unix)]

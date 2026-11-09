@@ -1,4 +1,4 @@
-//! CodeRex evals — the hill-climbing loop.
+//! Codape evals — the hill-climbing loop.
 //!
 //! A flow is a directory of cases; a variant is a way of doing the work; the
 //! loop is: run the cases against the baseline, change something, run them

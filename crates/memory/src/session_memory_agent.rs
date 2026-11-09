@@ -3,8 +3,8 @@
 use crate::ai_workflow::MemoryWorkflowError;
 use crate::session_memory::{FactCategory, SessionFact, SessionMemoryStore};
 use chrono::Utc;
-use coderex_core::api_client::ApiClient;
-use coderex_core::prompts;
+use codape_core::api_client::ApiClient;
+use codape_core::prompts;
 use uuid::Uuid;
 
 /// Update session memory by calling AI and persisting the result.

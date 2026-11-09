@@ -9,18 +9,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use coderex_bridge::archive::UsageStats;
-use coderex_bridge::heartbeat::{HeartbeatConfig, HeartbeatStatus, WsReconnector};
-use coderex_bridge::orchestrator::{Bridge, BridgeConfig, BridgeEvent, ManagedSession};
-use coderex_bridge::permission::{BridgePermissionRouter, PermissionResponse};
-use coderex_bridge::poller::{BridgeWorkPoller, SpawnMode, WorkAssignment};
-use coderex_bridge::relay::{
+use codape_bridge::archive::UsageStats;
+use codape_bridge::heartbeat::{HeartbeatConfig, HeartbeatStatus, WsReconnector};
+use codape_bridge::orchestrator::{Bridge, BridgeConfig, BridgeEvent, ManagedSession};
+use codape_bridge::permission::{BridgePermissionRouter, PermissionResponse};
+use codape_bridge::poller::{BridgeWorkPoller, SpawnMode, WorkAssignment};
+use codape_bridge::relay::{
     APPROVED_INTENT_HEADER, ApprovedIntent, RelayDecision, TOOL_USE_ID_HEADER,
 };
-use coderex_bridge::spawner::{BridgeSessionSpawner, SpawnConfig};
-use coderex_bridge::state::{BridgeSessionState, BridgeSessionStateMachine};
-use coderex_bridge::transport::{InProcessTransport, Transport, TransportMessage};
-use coderex_bridge::ws_transport::{WebSocketTransport, WsTransportConfig};
+use codape_bridge::spawner::{BridgeSessionSpawner, SpawnConfig};
+use codape_bridge::state::{BridgeSessionState, BridgeSessionStateMachine};
+use codape_bridge::transport::{InProcessTransport, Transport, TransportMessage};
+use codape_bridge::ws_transport::{WebSocketTransport, WsTransportConfig};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Helpers
@@ -478,7 +478,7 @@ async fn disconnect_recovery_transport_disconnect_reconnect() {
 
 #[test]
 fn disconnect_recovery_heartbeat_status_transitions() {
-    use coderex_bridge::heartbeat::Heartbeat;
+    use codape_bridge::heartbeat::Heartbeat;
 
     let mut hb = Heartbeat::new(HeartbeatConfig {
         degraded_threshold: 2,
@@ -563,7 +563,7 @@ fn disconnect_recovery_all_active_sessions() {
     );
     bridge.sessions.insert(
         "s2".into(),
-        coderex_bridge::orchestrator::ManagedSession {
+        codape_bridge::orchestrator::ManagedSession {
             state_machine: BridgeSessionStateMachine::new("s2".into()),
             work_dir: PathBuf::from("/tmp/s2"),
             worktree_created: true,
@@ -1041,7 +1041,7 @@ fn alive(pid: u32) -> bool {
 #[test]
 fn cleanup_terminates_a_registered_child() {
     let dir = tempfile::tempdir().unwrap();
-    let mut manager = coderex_bridge::archive::BridgeCleanupManager::new(
+    let mut manager = codape_bridge::archive::BridgeCleanupManager::new(
         dir.path().join("worktrees"),
         dir.path().join("sessions"),
     );
@@ -1069,13 +1069,13 @@ fn cleanup_of_a_tracked_tree_kills_the_grandchild() {
     use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut manager = coderex_bridge::archive::BridgeCleanupManager::new(
+    let mut manager = codape_bridge::archive::BridgeCleanupManager::new(
         dir.path().join("worktrees"),
         dir.path().join("sessions"),
     );
 
-    let tree = coderex_core::process_tree::ProcessTree::create(
-        coderex_core::process_tree::JobLimits::default(),
+    let tree = codape_core::process_tree::ProcessTree::create(
+        codape_core::process_tree::JobLimits::default(),
     )
     .unwrap();
     let mut command = std::process::Command::new("sh");
@@ -1104,7 +1104,7 @@ fn cleanup_of_a_tracked_tree_kills_the_grandchild() {
 #[test]
 fn cleanup_of_an_untracked_session_reports_no_process() {
     let dir = tempfile::tempdir().unwrap();
-    let mut manager = coderex_bridge::archive::BridgeCleanupManager::new(
+    let mut manager = codape_bridge::archive::BridgeCleanupManager::new(
         dir.path().join("worktrees"),
         dir.path().join("sessions"),
     );
@@ -1119,7 +1119,7 @@ fn cleanup_of_an_untracked_session_reports_no_process() {
 #[test]
 fn the_shared_registry_sees_registrations_from_the_spawn_site() {
     let dir = tempfile::tempdir().unwrap();
-    let mut manager = coderex_bridge::archive::BridgeCleanupManager::new(
+    let mut manager = codape_bridge::archive::BridgeCleanupManager::new(
         dir.path().join("worktrees"),
         dir.path().join("sessions"),
     );

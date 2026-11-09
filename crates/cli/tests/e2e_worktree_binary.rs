@@ -92,19 +92,19 @@ fn worktree_mode_edits_the_worktree_not_the_original_checkout() {
     )
     .unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--worktree", "--dangerously-skip-permissions"])
         .current_dir(repo.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -117,7 +117,7 @@ fn worktree_mode_edits_the_worktree_not_the_original_checkout() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -127,7 +127,7 @@ fn worktree_mode_edits_the_worktree_not_the_original_checkout() {
         "the original checkout was edited"
     );
 
-    let worktrees = repo.path().join(".coderex").join("worktrees");
+    let worktrees = repo.path().join(".codape").join("worktrees");
     let written: Vec<PathBuf> = std::fs::read_dir(&worktrees)
         .expect("a worktree directory")
         .flatten()

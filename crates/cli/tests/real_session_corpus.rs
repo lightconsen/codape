@@ -9,7 +9,7 @@
 //!
 //! This file reads that corpus from the machine it runs on:
 //!
-//! - `CODEREX_REAL_SESSIONS_DIR`, defaulting to `~/.claude/projects`;
+//! - `CODAPE_REAL_SESSIONS_DIR`, defaulting to `~/.claude/projects`;
 //! - the same JSONL transcripts Claude Code writes, one entry per line;
 //! - the longest sessions with at least a dozen assistant turns.
 //!
@@ -19,17 +19,17 @@
 //! it with `--nocapture` to see the report:
 //!
 //! ```bash
-//! cargo test -p coderex-cli --test real_session_corpus -- --nocapture
+//! cargo test -p codape-cli --test real_session_corpus -- --nocapture
 //! ```
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use coderex_core::PromptCompiler;
-use coderex_core::compact;
-use coderex_core::loop_detector::{LoopDetection, LoopDetector};
-use coderex_core::types::{Message, MessageContent, Role, ThinkingBlock, ToolCall, ToolResult};
-use coderex_memory::transcript::TranscriptStore;
+use codape_core::PromptCompiler;
+use codape_core::compact;
+use codape_core::loop_detector::{LoopDetection, LoopDetector};
+use codape_core::types::{Message, MessageContent, Role, ThinkingBlock, ToolCall, ToolResult};
+use codape_memory::transcript::TranscriptStore;
 
 /// How many sessions the corpus keeps.
 const MAX_SESSIONS: usize = 20;
@@ -53,7 +53,7 @@ struct Turn {
 #[derive(Debug)]
 struct Session {
     path: PathBuf,
-    /// CodeRex messages, in conversation order.
+    /// Codape messages, in conversation order.
     messages: Vec<Message>,
     /// One entry per assistant turn: the calls the model made in it and what
     /// they returned. An empty call list is a turn with no tool calls, which
@@ -66,13 +66,13 @@ struct Session {
 
 /// The corpus, or `None` when this machine has none.
 fn corpus() -> Option<Vec<Session>> {
-    let root = match std::env::var("CODEREX_REAL_SESSIONS_DIR") {
+    let root = match std::env::var("CODAPE_REAL_SESSIONS_DIR") {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => home::home_dir()?.join(".claude").join("projects"),
     };
     if !root.is_dir() {
         eprintln!(
-            "skipping: no transcript corpus at {} (set CODEREX_REAL_SESSIONS_DIR)",
+            "skipping: no transcript corpus at {} (set CODAPE_REAL_SESSIONS_DIR)",
             root.display()
         );
         return None;

@@ -1,6 +1,6 @@
 # Server Protocol — WebSocket JSON Protocol
 
-CodeRex daemon server communicates over WebSocket using a structured JSON protocol.
+Codape daemon server communicates over WebSocket using a structured JSON protocol.
 
 ## Connection
 

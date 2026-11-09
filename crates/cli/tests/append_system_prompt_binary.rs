@@ -62,7 +62,7 @@ async fn respond(socket: &mut TcpStream) {
     socket.shutdown().await.expect("shutdown");
 }
 
-fn run_coderex(args: &[&str], cwd: &Path, base_url: &str) -> std::process::Output {
+fn run_codape(args: &[&str], cwd: &Path, base_url: &str) -> std::process::Output {
     let config_home = tempfile::tempdir().expect("config home");
     std::fs::write(
         config_home.path().join("settings.json"),
@@ -70,7 +70,7 @@ fn run_coderex(args: &[&str], cwd: &Path, base_url: &str) -> std::process::Outpu
     )
     .expect("seed config");
 
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(args)
         .arg("hi")
         .current_dir(cwd)
@@ -78,12 +78,12 @@ fn run_coderex(args: &[&str], cwd: &Path, base_url: &str) -> std::process::Outpu
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 /// Serve every request the session makes (the turn, and the session-title
@@ -112,14 +112,14 @@ async fn the_appended_prompt_reaches_the_provider() {
 
     let server = tokio::spawn(serve_until_idle(listener));
     let args = ["-p", "--append-system-prompt", "APPENDED-MARKER-XYZ"];
-    let output = tokio::task::spawn_blocking(move || run_coderex(&args, dir.path(), &base_url))
+    let output = tokio::task::spawn_blocking(move || run_codape(&args, dir.path(), &base_url))
         .await
         .expect("join");
 
     let bodies = server.await.expect("server task");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!bodies.is_empty(), "no provider request was made");
@@ -133,13 +133,13 @@ async fn the_appended_prompt_reaches_the_provider() {
 #[test]
 fn the_flag_alone_is_a_usage_error() {
     let dir = tempfile::tempdir().expect("workspace");
-    let output = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let output = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--append-system-prompt"])
         .current_dir(dir.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .output()
-        .expect("run coderex");
+        .expect("run codape");
 
     assert!(!output.status.success(), "a value is required");
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();

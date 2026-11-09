@@ -1,4 +1,4 @@
-//! CodeRex workflows — deterministic JavaScript that orchestrates sub-agents.
+//! Codape workflows — deterministic JavaScript that orchestrates sub-agents.
 //!
 //! A workflow is a script the model writes: metadata in a literal `meta`
 //! export, then a body that calls `agent()` to spawn sub-agents and `parallel`,

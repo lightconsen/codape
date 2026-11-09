@@ -1,18 +1,19 @@
 [package]
-name = "coderex-evals"
+name = "codape-evals"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
-description = "Evaluation for CodeRex — in-process scenario evals, and the hill-climb loop"
+description = "Evaluation for Codape — in-process scenario evals, and the hill-climb loop"
 
 [lints]
 workspace = true
 
 [lib]
-name = "coderex_evals"
+name = "codape_evals"
 path = "src/lib.rs"
 
 [[bin]]
@@ -24,8 +25,8 @@ name = "run-eval"
 path = "src/bin/run_eval.rs"
 
 [dependencies]
-coderex-core = { path = "../crates/core" }
-coderex-test-utils = { path = "../crates/test-utils" }
+codape-core = { path = "../crates/core" }
+codape-test-utils = { path = "../crates/test-utils" }
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -37,5 +38,5 @@ sha2.workspace = true
 home.workspace = true
 
 [dev-dependencies]
-coderex-test-utils = { path = "../crates/test-utils" }
+codape-test-utils = { path = "../crates/test-utils" }
 tempfile.workspace = true

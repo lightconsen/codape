@@ -1,8 +1,8 @@
 //! Config commands: /config, /model, /permissions.
 
 use crate::registry::{CommandArgs, CommandContext, CommandRegistry, CommandResult, SlashCommand};
-use coderex_core::permissions::PermissionMode;
-use coderex_core::types::ModelId;
+use codape_core::permissions::PermissionMode;
+use codape_core::types::ModelId;
 use std::sync::Arc;
 
 thread_local! {
@@ -18,7 +18,7 @@ fn config_home_for_commands() -> std::path::PathBuf {
     TEST_CONFIG_HOME.with(|h| {
         h.borrow()
             .clone()
-            .unwrap_or_else(coderex_config::settings::config_home)
+            .unwrap_or_else(codape_config::settings::config_home)
     })
 }
 
@@ -212,7 +212,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())

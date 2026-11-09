@@ -1,10 +1,11 @@
 [package]
-name = "coderex-tools"
+name = "codape-tools"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "Tool trait, registry, execution, and all built-in tools"
 
@@ -12,10 +13,10 @@ description = "Tool trait, registry, execution, and all built-in tools"
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
-coderex-agents = { path = "../agents" }
-coderex-config = { path = "../config", features = ["keyring"] }
-coderex-memory = { path = "../memory" }
+codape-core = { path = "../core" }
+codape-agents = { path = "../agents" }
+codape-config = { path = "../config", features = ["keyring"] }
+codape-memory = { path = "../memory" }
 
 serde.workspace = true
 serde_json.workspace = true

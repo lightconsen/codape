@@ -246,7 +246,7 @@ impl TeamSyncTransport for RelayTransport {
 /// next write. Sync uses checksums to detect changes and only transfers deltas.
 #[derive(Debug)]
 pub struct TeamMemorySyncService {
-    /// Base directory for team memories (typically `<repo>/.coderex/team-memory/`).
+    /// Base directory for team memories (typically `<repo>/.codape/team-memory/`).
     pub memory_dir: PathBuf,
     /// Repo identifier.
     pub repo_id: String,

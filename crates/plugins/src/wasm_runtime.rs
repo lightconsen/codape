@@ -4,17 +4,17 @@
 //! - `memory` — a WebAssembly memory
 //! - `alloc(size: i32) -> i32` — allocate guest memory
 //! - `dealloc(ptr: i32, size: i32)` — free guest memory
-//! - `coderex_initialize(config_ptr: i32, config_len: i32) -> i32`
-//! - `coderex_commands_list() -> i32`
-//! - `coderex_skills_list() -> i32`
-//! - `coderex_command_execute(name_ptr: i32, name_len: i32, args_ptr: i32, args_len: i32) -> i32`
-//! - `coderex_skill_execute(name_ptr: i32, name_len: i32, ctx_ptr: i32, ctx_len: i32) -> i32`
+//! - `codape_initialize(config_ptr: i32, config_len: i32) -> i32`
+//! - `codape_commands_list() -> i32`
+//! - `codape_skills_list() -> i32`
+//! - `codape_command_execute(name_ptr: i32, name_len: i32, args_ptr: i32, args_len: i32) -> i32`
+//! - `codape_skill_execute(name_ptr: i32, name_len: i32, ctx_ptr: i32, ctx_len: i32) -> i32`
 //!
 //! All pointer returns point to a null-terminated UTF-8 JSON string in guest
 //! memory. The host reads the string, then deallocates it.
 //!
 //! The host also provides one optional import:
-//! - `coderex.user_config(ptr: i32, capacity: i32) -> i32` — copy the resolved
+//! - `codape.user_config(ptr: i32, capacity: i32) -> i32` — copy the resolved
 //!   `userConfig` options, as a JSON object, into guest memory. It returns the
 //!   full JSON length (call with `ptr = 0, capacity = 0` to query it), so a
 //!   guest can detect truncation when the return value is greater than the
@@ -41,7 +41,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 /// A compiler command supplied by the host: a program plus leading arguments.
 ///
 /// The runtime appends `<input> <output>` and runs the result as a killable
-/// child. The CodeRex CLI configures this to `current_exe()` with
+/// child. The Codape CLI configures this to `current_exe()` with
 /// [`INTERNAL_WASM_COMPILE_FLAG`], so the installed binary compiles modules
 /// itself and no sibling helper is required.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +112,7 @@ pub fn configured_compiler_command() -> Option<WasmCompilerCommand> {
 
 /// Override the AOT cache directory for this process.
 ///
-/// Equivalent to setting `CODEREX_WASM_CACHE_DIR`, but without touching the
+/// Equivalent to setting `CODAPE_WASM_CACHE_DIR`, but without touching the
 /// process environment. The directory is created on the first cache write.
 pub fn set_cache_dir(dir: impl Into<PathBuf>) {
     let mut slot = CACHE_DIR_OVERRIDE
@@ -182,11 +182,11 @@ const PLUGIN_MAX_WAT_BYTES: usize = 1024 * 1024;
 /// Name of the out-of-process compiler helper binary.
 ///
 /// Kept as a `[[bin]]` target for tests and for hosts that prefer a separate
-/// compiler process to the CLI's hidden subcommand. The CodeRex CLI does *not*
+/// compiler process to the CLI's hidden subcommand. The Codape CLI does *not*
 /// depend on it: the CLI injects its own executable instead (see
 /// [`INTERNAL_WASM_COMPILE_FLAG`]).
 #[cfg(feature = "wasm-runtime")]
-const WASM_COMPILE_HELPER: &str = "coderex-wasm-compile";
+const WASM_COMPILE_HELPER: &str = "codape-wasm-compile";
 
 /// Hidden argument that makes the host binary act as the WASM compiler.
 ///
@@ -217,13 +217,13 @@ const WASM_COMPILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// Compiled into debug builds only; it exists so the subprocess tests can
 /// simulate a helper that is missing or that points at a test binary.
 #[cfg(all(feature = "wasm-runtime", debug_assertions))]
-const WASM_COMPILE_HELPER_ENV: &str = "CODEREX_WASM_COMPILE_HELPER";
+const WASM_COMPILE_HELPER_ENV: &str = "CODAPE_WASM_COMPILE_HELPER";
 
 /// Environment override for the wall-clock timeout, in milliseconds.
 ///
 /// Compiled into debug builds only; used by the "slow helper is killed" test.
 #[cfg(all(feature = "wasm-runtime", debug_assertions))]
-const WASM_COMPILE_TIMEOUT_ENV: &str = "CODEREX_WASM_COMPILE_TIMEOUT_MS";
+const WASM_COMPILE_TIMEOUT_ENV: &str = "CODAPE_WASM_COMPILE_TIMEOUT_MS";
 
 /// Environment override for the AOT cache directory.
 ///
@@ -231,7 +231,7 @@ const WASM_COMPILE_TIMEOUT_ENV: &str = "CODEREX_WASM_COMPILE_TIMEOUT_MS";
 /// volume (and so tests can isolate it). The platform default is documented in
 /// `docs/plugins.md`.
 #[cfg(feature = "wasm-runtime")]
-const WASM_CACHE_DIR_ENV: &str = "CODEREX_WASM_CACHE_DIR";
+const WASM_CACHE_DIR_ENV: &str = "CODAPE_WASM_CACHE_DIR";
 
 /// Total size the AOT cache is pruned back to after a new entry is written.
 ///
@@ -265,7 +265,7 @@ const WASM_CACHE_HEADER_LEN: usize = 8 + 4 + 32 + 32 + 8 + WASM_CACHE_TAG_LEN;
 /// Honoured in every build so a deployment can pin the key rather than rely on
 /// the generated one, and so tests can supply a fixed key.
 #[cfg(feature = "wasm-runtime")]
-const WASM_CACHE_KEY_ENV: &str = "CODEREX_WASM_CACHE_KEY";
+const WASM_CACHE_KEY_ENV: &str = "CODAPE_WASM_CACHE_KEY";
 
 /// The file the generated cache key is stored in, under the user config dir.
 #[cfg(feature = "wasm-runtime")]
@@ -280,7 +280,7 @@ const WASM_CACHE_KEY_FILE: &str = "wasm-cache.key";
 ///   atomics.
 ///
 /// No WASI is linked. The only host interface is the optional
-/// `coderex.user_config` import; a module that imports anything else still
+/// `codape.user_config` import; a module that imports anything else still
 /// fails to instantiate, and a module that imports nothing instantiates
 /// unchanged. The plugin ABI needs no imports to work.
 ///
@@ -458,7 +458,7 @@ fn prescan_module<'a>(
 
 /// Find the compiler helper next to the current executable.
 ///
-/// Debug builds also honour `CODEREX_WASM_COMPILE_HELPER`, which the tests use
+/// Debug builds also honour `CODAPE_WASM_COMPILE_HELPER`, which the tests use
 /// to point at the helper, at a slow one, or at a path that does not exist (to
 /// prove the fail-closed behaviour). The search walks up a few directories so
 /// unit tests — whose binary lives in `target/<profile>/deps/` — find the
@@ -513,7 +513,7 @@ fn compile_timeout() -> std::time::Duration {
 }
 
 /// The AOT cache directory, honouring (in order) a host override, the
-/// `CODEREX_WASM_CACHE_DIR` environment variable, and the platform default.
+/// `CODAPE_WASM_CACHE_DIR` environment variable, and the platform default.
 #[cfg(feature = "wasm-runtime")]
 fn resolved_cache_dir() -> PathBuf {
     let override_dir = CACHE_DIR_OVERRIDE
@@ -538,7 +538,7 @@ fn user_cache_root() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home::home_dir() {
-            return Some(home.join("Library/Caches/coderex"));
+            return Some(home.join("Library/Caches/codape"));
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -546,19 +546,19 @@ fn user_cache_root() -> Option<PathBuf> {
         if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME")
             && !xdg.is_empty()
         {
-            return Some(PathBuf::from(xdg).join("coderex"));
+            return Some(PathBuf::from(xdg).join("codape"));
         }
         if let Some(home) = home::home_dir() {
-            return Some(home.join(".cache/coderex"));
+            return Some(home.join(".cache/codape"));
         }
     }
     #[cfg(target_os = "windows")]
     {
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            return Some(PathBuf::from(local).join("coderex"));
+            return Some(PathBuf::from(local).join("codape"));
         }
         if let Some(home) = home::home_dir() {
-            return Some(home.join("AppData").join("Local").join("coderex"));
+            return Some(home.join("AppData").join("Local").join("codape"));
         }
     }
     None
@@ -568,7 +568,7 @@ fn user_cache_root() -> Option<PathBuf> {
 #[cfg(feature = "wasm-runtime")]
 fn default_cache_dir() -> PathBuf {
     user_cache_root().map_or_else(
-        || std::env::temp_dir().join("coderex-wasm"),
+        || std::env::temp_dir().join("codape-wasm"),
         |root| root.join("wasm"),
     )
 }
@@ -643,7 +643,7 @@ fn engine_config_hash(engine: &wasmtime::Engine) -> [u8; 32] {
     use std::hash::Hash;
 
     let mut hasher = Sha256Hasher(sha2::Sha256::new());
-    hasher.0.update(b"coderex-wasm-aot-v1");
+    hasher.0.update(b"codape-wasm-aot-v1");
     engine.precompile_compatibility_hash().hash(&mut hasher);
     hasher.0.finalize().into()
 }
@@ -676,7 +676,7 @@ fn cache_entry_path(
 /// both fields are attacker-controlled in that case. The HMAC binds the entry
 /// to a key that is not stored with it.
 ///
-/// The key is, in order: `CODEREX_WASM_CACHE_KEY` (hex), a generated key in the
+/// The key is, in order: `CODAPE_WASM_CACHE_KEY` (hex), a generated key in the
 /// user's config directory, or a generated key beside the cache. A host where
 /// none can be written disables the cache rather than caching unauthenticated
 /// bytes.
@@ -720,7 +720,7 @@ fn config_root() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home::home_dir() {
-            return Some(home.join("Library/Application Support/coderex"));
+            return Some(home.join("Library/Application Support/codape"));
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -728,19 +728,19 @@ fn config_root() -> Option<PathBuf> {
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
             && !xdg.is_empty()
         {
-            return Some(PathBuf::from(xdg).join("coderex"));
+            return Some(PathBuf::from(xdg).join("codape"));
         }
         if let Some(home) = home::home_dir() {
-            return Some(home.join(".config/coderex"));
+            return Some(home.join(".config/codape"));
         }
     }
     #[cfg(target_os = "windows")]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            return Some(PathBuf::from(appdata).join("coderex"));
+            return Some(PathBuf::from(appdata).join("codape"));
         }
         if let Some(home) = home::home_dir() {
-            return Some(home.join("AppData").join("Roaming").join("coderex"));
+            return Some(home.join("AppData").join("Roaming").join("codape"));
         }
     }
     None
@@ -1118,7 +1118,7 @@ fn load_module(
         return Err(format!(
             "refusing to load WASM plugin '{}': no WASM compiler command is configured. \
              The host must inject one with \
-             coderex_plugins::wasm_runtime::set_compiler_command (the CodeRex CLI points it at \
+             codape_plugins::wasm_runtime::set_compiler_command (the Codape CLI points it at \
              its own executable with '{INTERNAL_WASM_COMPILE_FLAG}'). Refusing to compile \
              untrusted code in-process.",
             wasm_path.display()
@@ -1166,7 +1166,7 @@ fn load_module(
 /// * `SystemRoot` and `windir` (Windows) — the loader and the Win32 APIs read
 ///   the system root from the environment, and a child without it fails to
 ///   start.
-/// * The `CODEREX_WASM_COMPILE_TEST_*` hooks (debug builds) — the subprocess
+/// * The `CODAPE_WASM_COMPILE_TEST_*` hooks (debug builds) — the subprocess
 ///   tests drive the child through them.
 #[cfg(feature = "wasm-runtime")]
 fn apply_compiler_child_env(child_command: &mut std::process::Command) {
@@ -1187,9 +1187,9 @@ fn apply_compiler_child_env(child_command: &mut std::process::Command) {
     // subprocess tests' observation files and sleep must reach it.
     #[cfg(debug_assertions)]
     for key in [
-        "CODEREX_WASM_COMPILE_TEST_COUNT_FILE",
-        "CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE",
-        "CODEREX_WASM_COMPILE_TEST_SLEEP_MS",
+        "CODAPE_WASM_COMPILE_TEST_COUNT_FILE",
+        "CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE",
+        "CODAPE_WASM_COMPILE_TEST_SLEEP_MS",
     ] {
         if let Some(value) = std::env::var_os(key) {
             child_command.env(key, value);
@@ -1296,7 +1296,7 @@ fn run_compile_helper(
     // parallel compilation sizes its pool from the core count. A cap written
     // for shell commands would break compilation on a very large host.
     #[cfg(target_os = "linux")]
-    let compile_cgroup = match coderex_core::sandbox::CgroupMemoryLimit::create(
+    let compile_cgroup = match codape_core::sandbox::CgroupMemoryLimit::create(
         Some(WASM_COMPILE_MEMORY_BYTES),
         None,
     ) {
@@ -1320,7 +1320,7 @@ fn run_compile_helper(
     let compiler_seccomp = if used_bwrap {
         None
     } else {
-        Some(coderex_core::sandbox::compiler_seccomp::CompilerSeccompFilter::wasm_compiler())
+        Some(codape_core::sandbox::compiler_seccomp::CompilerSeccompFilter::wasm_compiler())
     };
 
     #[cfg(unix)]
@@ -1360,7 +1360,7 @@ fn run_compile_helper(
     // resumes it.
     #[cfg(target_os = "windows")]
     let sandbox = {
-        use coderex_core::sandbox::{SandboxConfig, SandboxHandle};
+        use codape_core::sandbox::{SandboxConfig, SandboxHandle};
 
         let compiler = std::fs::canonicalize(command.program())
             .unwrap_or_else(|_| command.program().to_path_buf());
@@ -1376,8 +1376,8 @@ fn run_compile_helper(
         // the sandbox for the test.
         #[cfg(debug_assertions)]
         for key in [
-            "CODEREX_WASM_COMPILE_TEST_COUNT_FILE",
-            "CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE",
+            "CODAPE_WASM_COMPILE_TEST_COUNT_FILE",
+            "CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE",
         ] {
             if let Some(path) = std::env::var_os(key)
                 && let Some(parent) = std::path::Path::new(&path).parent()
@@ -1501,13 +1501,13 @@ fn wrap_with_macos_sandbox(
     args: &mut Vec<OsString>,
     work_dir: &std::path::Path,
     compiler: &std::path::Path,
-) -> Option<coderex_core::sandbox::SandboxHandle> {
-    use coderex_core::sandbox::SandboxHandle;
+) -> Option<codape_core::sandbox::SandboxHandle> {
+    use codape_core::sandbox::SandboxHandle;
 
     // Test hook: the leading-argument forwarding test uses a shell script
     // wrapper, which the compiler profile intentionally does not execute.
     #[cfg(debug_assertions)]
-    if std::env::var_os("CODEREX_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
+    if std::env::var_os("CODAPE_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
         return None;
     }
 
@@ -1556,13 +1556,13 @@ fn wrap_with_bubblewrap(
     args: &mut Vec<OsString>,
     work_dir: &std::path::Path,
 ) -> bool {
-    use coderex_core::sandbox::{SandboxConfig, bubblewrap_program};
+    use codape_core::sandbox::{SandboxConfig, bubblewrap_program};
 
     // Test hook, matching the macOS wrapper: the scoping test runs a shell
     // script that writes into the test's own directory, which is outside the
     // sandbox's writable set (and under the `/tmp` tmpfs bubblewrap installs).
     #[cfg(debug_assertions)]
-    if std::env::var_os("CODEREX_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
+    if std::env::var_os("CODAPE_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
         return false;
     }
 
@@ -1617,8 +1617,8 @@ fn wrap_with_bubblewrap(
 fn compile_sandbox_config(
     work_dir: &std::path::Path,
     compiler: &std::path::Path,
-) -> coderex_core::sandbox::SandboxConfig {
-    use coderex_core::sandbox::SandboxConfig;
+) -> codape_core::sandbox::SandboxConfig {
+    use codape_core::sandbox::SandboxConfig;
 
     let compiler = std::fs::canonicalize(compiler).unwrap_or_else(|_| compiler.to_path_buf());
     let mut allowed_read_paths = vec![work_dir.to_path_buf(), compiler.clone()];
@@ -1641,10 +1641,10 @@ fn compile_sandbox_config(
             }
         }
         for candidate in [
-            exe.parent().map(|p| p.join("coderex-wasm-compile")),
+            exe.parent().map(|p| p.join("codape-wasm-compile")),
             exe.parent()
                 .and_then(std::path::Path::parent)
-                .map(|p| p.join("coderex-wasm-compile")),
+                .map(|p| p.join("codape-wasm-compile")),
         ]
         .into_iter()
         .flatten()
@@ -1670,8 +1670,8 @@ fn compile_sandbox_config(
         // directory; grant exactly those directories instead of disabling the
         // sandbox for the test.
         for key in [
-            "CODEREX_WASM_COMPILE_TEST_COUNT_FILE",
-            "CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE",
+            "CODAPE_WASM_COMPILE_TEST_COUNT_FILE",
+            "CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE",
         ] {
             if let Some(path) = std::env::var_os(key)
                 && let Some(parent) = std::path::Path::new(&path).parent()
@@ -1711,13 +1711,13 @@ fn wrap_with_landlock(
     child_command: &mut std::process::Command,
     work_dir: &std::path::Path,
     compiler: &std::path::Path,
-) -> Option<coderex_core::sandbox::LandlockRuleset> {
-    use coderex_core::sandbox::{landlock_restrict, landlock_ruleset};
+) -> Option<codape_core::sandbox::LandlockRuleset> {
+    use codape_core::sandbox::{landlock_restrict, landlock_ruleset};
     use std::os::unix::process::CommandExt;
 
     // Test hook, as in `wrap_with_bubblewrap`.
     #[cfg(debug_assertions)]
-    if std::env::var_os("CODEREX_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
+    if std::env::var_os("CODAPE_WASM_COMPILE_TEST_NO_SANDBOX").is_some() {
         return None;
     }
 
@@ -1906,7 +1906,7 @@ impl ChildKiller {
 /// process group. Without a cgroup the group kill is all Linux offers.
 #[cfg(all(target_os = "linux", feature = "wasm-runtime"))]
 enum ChildKiller<'a> {
-    Cgroup(&'a coderex_core::sandbox::CgroupMemoryLimit),
+    Cgroup(&'a codape_core::sandbox::CgroupMemoryLimit),
     Group,
 }
 
@@ -1926,7 +1926,7 @@ impl ChildKiller<'_> {
 #[cfg(all(windows, feature = "wasm-runtime"))]
 enum ChildKiller<'a> {
     /// The child and every descendant live in this sandbox's Job Object.
-    Sandbox(&'a coderex_core::sandbox::SandboxHandle),
+    Sandbox(&'a codape_core::sandbox::SandboxHandle),
 }
 
 #[cfg(all(windows, feature = "wasm-runtime"))]
@@ -1988,7 +1988,7 @@ fn wait_for_compile_child(
 
 /// Compile a WASM module and return wasmtime's serialized representation.
 ///
-/// Entry point for the hidden compiler process (the `coderex-wasm-compile`
+/// Entry point for the hidden compiler process (the `codape-wasm-compile`
 /// helper binary and the CLI's `--internal-wasm-compile` argument); not part
 /// of the stable plugin API. The pre-scan runs here too, so a directly invoked
 /// compiler still refuses pathological input.
@@ -2021,7 +2021,7 @@ pub fn deserialize_compiled_module(bytes: &[u8]) -> Result<(), String> {
 
 /// Run the hidden compiler protocol: `<args> <input> <output>`.
 ///
-/// Both the `coderex-wasm-compile` helper binary and the CLI's internal
+/// Both the `codape-wasm-compile` helper binary and the CLI's internal
 /// subcommand call this. It reads the input file, pre-scans and compiles it,
 /// and writes `Module::serialize` bytes to the output path.
 #[cfg(feature = "wasm-runtime")]
@@ -2068,7 +2068,7 @@ mod compiler_test_hooks {
     use std::io::Write as _;
 
     pub fn before_compile() {
-        if let Ok(path) = std::env::var("CODEREX_WASM_COMPILE_TEST_COUNT_FILE")
+        if let Ok(path) = std::env::var("CODAPE_WASM_COMPILE_TEST_COUNT_FILE")
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -2080,7 +2080,7 @@ mod compiler_test_hooks {
         // Spawn a descendant that outlives the compiler unless the parent's
         // timeout kill takes the whole process group / job.
         #[cfg(unix)]
-        if let Ok(path) = std::env::var("CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE")
+        if let Ok(path) = std::env::var("CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE")
             && let Ok(child) = std::process::Command::new("sleep")
                 .arg("60")
                 .stdin(std::process::Stdio::null())
@@ -2094,7 +2094,7 @@ mod compiler_test_hooks {
         }
 
         #[cfg(target_os = "windows")]
-        if let Ok(path) = std::env::var("CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE") {
+        if let Ok(path) = std::env::var("CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE") {
             // Spawn the helper binary itself as the descendant. It is already
             // in the AppContainer's exec grant, whereas a shell (`cmd.exe`)
             // depends on the best-effort system-root grant and can be refused
@@ -2104,7 +2104,7 @@ mod compiler_test_hooks {
                 std::process::Command::new(std::env::current_exe().unwrap_or_default());
             descendant
                 .env_clear()
-                .env("CODEREX_WASM_COMPILE_TEST_SLEEP_MS", "60000")
+                .env("CODAPE_WASM_COMPILE_TEST_SLEEP_MS", "60000")
                 // Not `Stdio::null()`: opening `NUL` is denied to an
                 // AppContainer token (os error 5), which made the descendant
                 // impossible to spawn. Pipes are created by this process and
@@ -2131,7 +2131,7 @@ mod compiler_test_hooks {
             }
         }
 
-        if let Ok(raw) = std::env::var("CODEREX_WASM_COMPILE_TEST_SLEEP_MS")
+        if let Ok(raw) = std::env::var("CODAPE_WASM_COMPILE_TEST_SLEEP_MS")
             && let Ok(millis) = raw.parse::<u64>()
         {
             std::thread::sleep(std::time::Duration::from_millis(millis));
@@ -2141,7 +2141,7 @@ mod compiler_test_hooks {
 
 /// Module name of the `user_config` host import.
 #[cfg(feature = "wasm-runtime")]
-const USER_CONFIG_MODULE: &str = "coderex";
+const USER_CONFIG_MODULE: &str = "codape";
 
 /// Function name of the `user_config` host import.
 #[cfg(feature = "wasm-runtime")]
@@ -2158,7 +2158,7 @@ struct StoreState {
 #[cfg(feature = "wasm-runtime")]
 type PluginStore = wasmtime::Store<StoreState>;
 
-/// Implement `coderex.user_config(ptr, capacity) -> required_len`.
+/// Implement `codape.user_config(ptr, capacity) -> required_len`.
 ///
 /// The host copies the serialized options object into guest memory at `ptr`,
 /// writing at most `capacity` bytes, and returns the full JSON length. A guest
@@ -2229,7 +2229,7 @@ pub struct PluginWasmInstance {
     #[cfg(feature = "wasm-runtime")]
     module: wasmtime::Module,
     /// The resolved `userConfig` options as a JSON object, served to the guest
-    /// through the `coderex.user_config` import. Empty modules never see it;
+    /// through the `codape.user_config` import. Empty modules never see it;
     /// modules that import the function do.
     #[cfg(feature = "wasm-runtime")]
     user_config: Arc<[u8]>,
@@ -2280,13 +2280,13 @@ impl PluginWasmInstance {
     }
 
     /// Load a WASM module and make resolved `userConfig` options available to
-    /// it through the `coderex.user_config` import.
+    /// it through the `codape.user_config` import.
     ///
     /// `user_config` holds the same values a process plugin receives as
-    /// `CODEREX_PLUGIN_OPTION_<KEY>`: one entry per resolved option, with
+    /// `CODAPE_PLUGIN_OPTION_<KEY>`: one entry per resolved option, with
     /// absent optional options simply missing. The values are encoded as one
     /// JSON object; a plugin receives them only if it imports and calls
-    /// `coderex.user_config`. A module with no imports loads and runs exactly
+    /// `codape.user_config`. A module with no imports loads and runs exactly
     /// as before.
     pub fn new_with_options(
         wasm_path: &std::path::Path,
@@ -2412,24 +2412,24 @@ impl PluginWasmInstance {
         &self.skills
     }
 
-    /// Perform the coderex initialize handshake.
+    /// Perform the codape initialize handshake.
     pub fn initialize(&mut self) -> Result<serde_json::Value, String> {
         let config = serde_json::json!({
             "protocolVersion": "1.0",
             "capabilities": {},
             "clientInfo": {
-                "name": "coderex",
+                "name": "codape",
                 "version": env!("CARGO_PKG_VERSION")
             }
         });
-        let result = self.call_with_json("coderex_initialize", Some(&config.to_string()))?;
+        let result = self.call_with_json("codape_initialize", Some(&config.to_string()))?;
         self.initialized = true;
         Ok(result)
     }
 
     /// Discover commands from the plugin.
     pub fn list_commands(&mut self) -> Result<Vec<PluginCommandInfo>, String> {
-        let result = self.call_with_json("coderex_commands_list", None)?;
+        let result = self.call_with_json("codape_commands_list", None)?;
         let commands: Vec<PluginCommandInfo> = serde_json::from_value(result)
             .map_err(|e| format!("failed to parse commands/list response: {e}"))?;
         self.commands.clone_from(&commands);
@@ -2438,7 +2438,7 @@ impl PluginWasmInstance {
 
     /// Discover skills from the plugin.
     pub fn list_skills(&mut self) -> Result<Vec<PluginSkillInfo>, String> {
-        let result = self.call_with_json("coderex_skills_list", None)?;
+        let result = self.call_with_json("codape_skills_list", None)?;
         let skills: Vec<PluginSkillInfo> = serde_json::from_value(result)
             .map_err(|e| format!("failed to parse skills/list response: {e}"))?;
         self.skills.clone_from(&skills);
@@ -2449,7 +2449,7 @@ impl PluginWasmInstance {
     pub fn execute_command(&mut self, name: &str, args: &[String]) -> Result<String, String> {
         let args_json =
             serde_json::to_string(args).map_err(|e| format!("failed to serialize args: {e}"))?;
-        let result = self.call_with_two_strings("coderex_command_execute", name, &args_json)?;
+        let result = self.call_with_two_strings("codape_command_execute", name, &args_json)?;
         match result {
             serde_json::Value::String(s) => Ok(s),
             other => Ok(other.to_string()),
@@ -2463,7 +2463,7 @@ impl PluginWasmInstance {
         context: &serde_json::Value,
     ) -> Result<String, String> {
         let ctx_json = context.to_string();
-        let result = self.call_with_two_strings("coderex_skill_execute", name, &ctx_json)?;
+        let result = self.call_with_two_strings("codape_skill_execute", name, &ctx_json)?;
         match result {
             serde_json::Value::String(s) => Ok(s),
             other => Ok(other.to_string()),
@@ -2737,7 +2737,7 @@ mod tests {
     }
 
     /// Debug builds resolve the helper binary shipped next to the tests, which
-    /// is what lets `cargo test -p coderex-plugins` exercise the real
+    /// is what lets `cargo test -p codape-plugins` exercise the real
     /// compiler without configuring a command explicitly.
     #[cfg(all(feature = "wasm-runtime", debug_assertions))]
     #[test]
@@ -2758,10 +2758,10 @@ mod tests {
     /// absent.
     #[test]
     fn compile_sandbox_plan_grants_only_staging_for_writes() {
-        let work_dir = PathBuf::from("/tmp/coderex-plan/staging/compile-1");
-        let compiler = PathBuf::from("/usr/local/bin/coderex");
+        let work_dir = PathBuf::from("/tmp/codape-plan/staging/compile-1");
+        let compiler = PathBuf::from("/usr/local/bin/codape");
         let config = compile_sandbox_config(&work_dir, &compiler);
-        let plan = coderex_core::sandbox::landlock_plan(&config, 4);
+        let plan = codape_core::sandbox::landlock_plan(&config, 4);
 
         // Writes: the staging directory and `/dev/null` (redirection), nothing
         // else. The compiler binary's directory is a read/exec path, not a
@@ -2832,7 +2832,7 @@ mod tests {
     #[test]
     fn staging_moves_out_of_the_system_temp_tree() {
         let system_temp = std::env::temp_dir();
-        let root = system_temp.join("coderex-staging-test");
+        let root = system_temp.join("codape-staging-test");
         let staged = staging_root(&root);
         assert!(
             !staged.starts_with(std::fs::canonicalize(&system_temp).unwrap_or(system_temp)),
@@ -2925,7 +2925,7 @@ mod sandbox_tests {
     /// The real helper binary built next to the test binary.
     fn test_compiler() -> WasmCompilerCommand {
         let helper = helper_next_to_current_exe()
-            .expect("the coderex-wasm-compile helper must be built next to the test binary");
+            .expect("the codape-wasm-compile helper must be built next to the test binary");
         WasmCompilerCommand::new(helper)
     }
 
@@ -2957,7 +2957,7 @@ mod sandbox_tests {
         )
     }
 
-    /// A module that imports `coderex.user_config` receives the resolved
+    /// A module that imports `codape.user_config` receives the resolved
     /// options as one JSON object.
     ///
     /// `FILE_TOKEN` stands in for a sensitive value: at this layer the runtime
@@ -2972,13 +2972,13 @@ mod sandbox_tests {
             dir.path(),
             "config.wasm",
             r#"(module
-                 (import "coderex" "user_config"
+                 (import "codape" "user_config"
                    (func $user_config (param i32 i32) (result i32)))
                  (memory (export "memory") 1)
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    (local $required i32)
                    ;; Ask how long the JSON is without writing anything.
                    i32.const 0
@@ -3008,7 +3008,7 @@ mod sandbox_tests {
                 // host must not invent one.
             ],
         )
-        .expect("a module importing coderex.user_config must load");
+        .expect("a module importing codape.user_config must load");
 
         let value = instance
             .initialize()
@@ -3041,7 +3041,7 @@ mod sandbox_tests {
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    i32.const 16))"#,
         );
 
@@ -3115,7 +3115,7 @@ mod sandbox_tests {
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    (loop $spin
                      br $spin)
                    i32.const 0))"#,
@@ -3146,7 +3146,7 @@ mod sandbox_tests {
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    ;; ask for 2000 more pages (128 MiB), above the 64 MiB ceiling
                    i32.const 2000
                    memory.grow
@@ -3181,7 +3181,7 @@ mod sandbox_tests {
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    i32.const 16))"#,
         );
 
@@ -3231,7 +3231,7 @@ mod sandbox_tests {
                  (func (export "alloc") (param i32) (result i32)
                    i32.const 1024)
                  (func (export "dealloc") (param i32 i32))
-                 (func (export "coderex_initialize") (param i32 i32) (result i32)
+                 (func (export "codape_initialize") (param i32 i32) (result i32)
                    i32.const 0))"#,
         );
 
@@ -3274,7 +3274,7 @@ mod compiler_child_env_tests {
     #[test]
     fn compiler_child_does_not_inherit_the_host_environment() {
         for (key, _) in child_environment() {
-            let allowed = key == "PATH" || key.starts_with("CODEREX_WASM_COMPILE_TEST_");
+            let allowed = key == "PATH" || key.starts_with("CODAPE_WASM_COMPILE_TEST_");
             assert!(
                 allowed,
                 "the compiler child inherited a variable it does not need: {key}"
@@ -3299,7 +3299,7 @@ mod compiler_child_env_tests {
     fn compiler_child_drops_host_only_variables() {
         let host_only = std::env::vars_os()
             .map(|(key, _)| key.to_string_lossy().into_owned())
-            .find(|key| key != "PATH" && !key.starts_with("CODEREX_WASM_COMPILE_TEST_"))
+            .find(|key| key != "PATH" && !key.starts_with("CODAPE_WASM_COMPILE_TEST_"))
             .expect("the host process must set at least one non-allowlisted variable");
         let inherited = child_environment().iter().any(|(key, _)| key == &host_only);
         assert!(

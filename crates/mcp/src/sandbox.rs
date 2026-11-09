@@ -7,7 +7,7 @@
 //! installation and package caches, and many servers exist to talk to a remote
 //! API (so the network is allowed by default).
 //!
-//! `CODEREX_MCP_SANDBOX=0` or a server's `"sandbox": {"enabled": false}`
+//! `CODAPE_MCP_SANDBOX=0` or a server's `"sandbox": {"enabled": false}`
 //! opts out.
 //!
 //! # Failure policy: fail closed
@@ -25,15 +25,15 @@
 //! names them.
 
 use crate::config::McpSandboxConfig;
-use coderex_core::sandbox::{SandboxConfig, SandboxHandle, resolve_program};
+use codape_core::sandbox::{SandboxConfig, SandboxHandle, resolve_program};
 use std::path::{Path, PathBuf};
 
 /// Set to `0`, `false` or `no` to run stdio servers without a sandbox.
-pub const MCP_SANDBOX_ENV: &str = "CODEREX_MCP_SANDBOX";
+pub const MCP_SANDBOX_ENV: &str = "CODAPE_MCP_SANDBOX";
 
 /// Whether an environment value is an explicit negative.
 ///
-/// Consistent with `CODEREX_BWRAP`: anything but `0`, `false` or `no` leaves
+/// Consistent with `CODAPE_BWRAP`: anything but `0`, `false` or `no` leaves
 /// the sandbox on, because a sandbox that switches itself off over an
 /// unexpected value is worse than one that says what it wants.
 fn env_value_disables(value: &str) -> bool {
@@ -187,7 +187,7 @@ fn stdio_sandbox_config_with(
 /// An MCP server is confined like a *gating* hook rather than a non-gating one:
 /// when a policy is in force and this platform cannot provide filesystem
 /// confinement, the server is refused instead of silently running unconfined.
-/// `CODEREX_MCP_SANDBOX=0` and a server's `"sandbox": {"enabled": false}` are
+/// `CODAPE_MCP_SANDBOX=0` and a server's `"sandbox": {"enabled": false}` are
 /// the explicit escape hatches; both make [`stdio_sandbox_config`] return
 /// `None`, so this function is never reached for an opted-out server.
 ///
@@ -235,22 +235,21 @@ fn confinement_availability() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if coderex_core::sandbox::bubblewrap_in_force()
-            || coderex_core::sandbox::landlock_in_force()
+        if codape_core::sandbox::bubblewrap_in_force() || codape_core::sandbox::landlock_in_force()
         {
             Ok(())
-        } else if coderex_core::sandbox::bubblewrap_available() {
+        } else if codape_core::sandbox::bubblewrap_available() {
             Err(format!(
                 "bubblewrap (bwrap) is installed but switched off by {}, and the Landlock \
                  fallback is switched off by {}",
-                coderex_core::sandbox::BWRAP_ENV,
-                coderex_core::sandbox::LANDLOCK_ENV
+                codape_core::sandbox::BWRAP_ENV,
+                codape_core::sandbox::LANDLOCK_ENV
             ))
-        } else if coderex_core::sandbox::landlock_available() {
+        } else if codape_core::sandbox::landlock_available() {
             Err(format!(
                 "bubblewrap (bwrap) is not installed and the Landlock fallback is switched \
                  off by {}",
-                coderex_core::sandbox::LANDLOCK_ENV
+                codape_core::sandbox::LANDLOCK_ENV
             ))
         } else {
             Err(
@@ -358,7 +357,7 @@ mod tests {
     }
 
     /// The policy decision with the environment opt-out forced on or off, so
-    /// the process-global `CODEREX_MCP_SANDBOX` never has to be touched.
+    /// the process-global `CODAPE_MCP_SANDBOX` never has to be touched.
     fn policy_with_env(disabled_by_env: bool) -> Option<SandboxConfig> {
         stdio_sandbox_config_with("node", &sandbox(), Path::new("."), disabled_by_env)
     }
@@ -422,7 +421,7 @@ mod tests {
         assert!(stdio_sandbox_config_with("node", &sandbox, Path::new("."), false).is_none());
     }
 
-    /// `CODEREX_MCP_SANDBOX=0` is the global escape hatch. The decision is
+    /// `CODAPE_MCP_SANDBOX=0` is the global escape hatch. The decision is
     /// exercised through the injectable core rather than by mutating the
     /// process environment, which would race the other tests.
     #[test]

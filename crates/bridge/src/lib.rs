@@ -1,4 +1,4 @@
-//! CodeRex Bridge system — remote session orchestration.
+//! Codape Bridge system — remote session orchestration.
 
 #![warn(missing_docs)]
 

@@ -1,13 +1,13 @@
 //! Git/PR commands: /commit, /commit-push-pr, /review, /security-review, /autofix-pr, /pr_comments, /branch.
 
 use crate::registry::{CommandContext, CommandRegistry, CommandResult, SlashCommand};
-use coderex_core::query_profiles::PromptProfile;
+use codape_core::query_profiles::PromptProfile;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Run a git command in the given directory.
 fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
-    let output = coderex_core::git_hardening::git_command()
+    let output = codape_core::git_hardening::git_command()
         .args(args)
         .current_dir(dir)
         .output()
@@ -297,11 +297,11 @@ pub fn register(registry: &mut CommandRegistry) {
 mod tests {
     use super::*;
     use crate::registry::CommandType;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn init_git_repo(path: &std::path::Path) {
         std::fs::create_dir_all(path).ok();
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["init", "--quiet"])
             .current_dir(path)
             .output()
@@ -312,10 +312,10 @@ mod tests {
         // this, a machine with no global identity fails the tests, and the
         // assertions measure the environment rather than the command.
         for (key, value) in [
-            ("user.name", "CodeRex Test"),
-            ("user.email", "test@coderex.invalid"),
+            ("user.name", "Codape Test"),
+            ("user.email", "test@codape.invalid"),
         ] {
-            let configured = coderex_core::git_hardening::git_command()
+            let configured = codape_core::git_hardening::git_command()
                 .args(["config", key, value])
                 .current_dir(path)
                 .output()
@@ -323,12 +323,12 @@ mod tests {
             assert!(configured.status.success(), "could not set {key}");
         }
         std::fs::write(path.join("README"), "root").unwrap();
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["add", "README"])
             .current_dir(path)
             .output()
             .expect("git add failed");
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["commit", "--quiet", "-m", "init"])
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
@@ -340,12 +340,12 @@ mod tests {
     }
 
     fn commit_all(path: &std::path::Path, message: &str) {
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["add", "-A"])
             .current_dir(path)
             .output()
             .expect("git add failed");
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["commit", "--quiet", "-m", message])
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")

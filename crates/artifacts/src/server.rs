@@ -1,7 +1,7 @@
 //! The local origin artifacts are served from.
 //!
 //! A published page is only useful if something can open it, and the reference
-//! gets that from a hosted service. CodeRex serves its own store instead: a
+//! gets that from a hosted service. Codape serves its own store instead: a
 //! loopback HTTP server that answers `/artifact/<slug>/…` out of the version
 //! the artifact currently points at.
 //!

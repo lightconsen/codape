@@ -1,10 +1,10 @@
-//! Data directory management for CodeRex.
+//! Data directory management for Codape.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// Manages all CodeRex data directories under a base path.
+/// Manages all Codape data directories under a base path.
 #[derive(Debug, Clone)]
 pub struct DataDirectories {
     base: PathBuf,
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn data_directories_ensure_all_creates_dirs() {
-        let tmp = std::env::temp_dir().join("coderex_test_dirs");
+        let tmp = std::env::temp_dir().join("codape_test_dirs");
         let _ = std::fs::remove_dir_all(&tmp);
 
         let dirs = DataDirectories::new(tmp.clone());

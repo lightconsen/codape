@@ -258,7 +258,7 @@ impl PtySession {
             })
             .expect("open pty");
 
-        let mut cmd = CommandBuilder::new(cargo_bin("coderex"));
+        let mut cmd = CommandBuilder::new(cargo_bin("codape"));
         if !persist_session {
             cmd.arg("--no-session-persistence");
         }
@@ -268,10 +268,10 @@ impl PtySession {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
-        cmd.env("CODEREX_LOG", "off");
+        cmd.env("CODAPE_LOG", "off");
         // A config home of its own: the CLI looks here for settings, and the
         // first-run consent gate writes here. Pointing it at the developer's
-        // real `~/.coderex` would make every test depend on their settings —
+        // real `~/.codape` would make every test depend on their settings —
         // and let a test run change them.
         //
         // It is seeded with a decision already recorded, because an untouched
@@ -316,7 +316,7 @@ impl PtySession {
             cmd.env(key, value);
         }
 
-        let child = pair.slave.spawn_command(cmd).expect("spawn coderex");
+        let child = pair.slave.spawn_command(cmd).expect("spawn codape");
         let master = pair.master;
         let mut reader = master.try_clone_reader().expect("clone reader");
         let writer = master.take_writer().expect("take writer");
@@ -554,7 +554,7 @@ impl PtySession {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for coderex to exit\n--- screen ---\n{}\n--- raw ---\n{}",
+                "timed out waiting for codape to exit\n--- screen ---\n{}\n--- raw ---\n{}",
                 self.screen_text(),
                 self.raw_text()
             );
@@ -573,7 +573,7 @@ impl PtySession {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for coderex to exit\n--- screen ---\n{}\n--- raw ---\n{}",
+                "timed out waiting for codape to exit\n--- screen ---\n{}\n--- raw ---\n{}",
                 self.screen_text(),
                 self.raw_text()
             );
@@ -785,11 +785,11 @@ fn startup_renders_prompt_and_default_regions() {
     let dir = setup_project_dir();
     let session = session_without_engine(dir.path());
     // The banner is drawn before the status line under it: waiting for
-    // "CodeRex v" alone reads a screen that is still being painted, and the
+    // "Codape v" alone reads a screen that is still being painted, and the
     // last row's assertion then fails on a fast runner rather than a slow one.
     // Wait for the region that is checked last.
     let screen = session.wait_for_text("Permissions: default", SCREEN_TIMEOUT);
-    assert!(screen.contains("CodeRex v"), "{screen}");
+    assert!(screen.contains("Codape v"), "{screen}");
     assert!(screen.contains("Type /help for commands"));
     assert!(screen.contains("claude-sonnet-4-6"));
     assert!(screen.contains("Permissions: default"));
@@ -803,9 +803,9 @@ fn startup_renders_prompt_and_default_regions() {
 fn signalled_tui_exit_code(signal: &str) -> u32 {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
-    let pid = session.child.process_id().expect("coderex pid");
+    let pid = session.child.process_id().expect("codape pid");
     let status = std::process::Command::new("kill")
         .arg(format!("-{signal}"))
         .arg(pid.to_string())
@@ -876,9 +876,9 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
     )
     .unwrap();
     std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::create_dir_all(dir.path().join(".coderex")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".codape")).unwrap();
     std::fs::write(
-        dir.path().join(".coderex/settings.json"),
+        dir.path().join(".codape/settings.json"),
         serde_json::json!({
             "config_version": 4,
             "hooks": [{
@@ -900,7 +900,7 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
     // First session: the hook fires and the write never lands.
     {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line(prompt);
         wait_for_gate_hits(&hits, 1, SCREEN_TIMEOUT);
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
@@ -920,7 +920,7 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
     // again. The counter, not the transcript, is the evidence.
     {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("/resume");
         let resumed = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
         assert!(resumed.contains("Loaded"));
@@ -949,7 +949,7 @@ fn a_completed_turn_emits_a_desktop_notification() {
     let dir = setup_project_dir();
     let (_server, mut session) =
         session_with_static_server_envs(dir.path(), &[("TERM_PROGRAM", "iTerm.app")]);
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("hello");
     session.wait_for_text("Hello!", SCREEN_TIMEOUT);
@@ -957,7 +957,7 @@ fn a_completed_turn_emits_a_desktop_notification() {
 
     let raw = session.raw_text();
     assert!(
-        raw.contains("\u{1b}]9;CodeRex: Turn completed\u{7}"),
+        raw.contains("\u{1b}]9;Codape: Turn completed\u{7}"),
         "no OSC 9 notification in the terminal stream"
     );
 }
@@ -969,7 +969,7 @@ fn an_unsupported_terminal_gets_no_osc9_notification() {
     let dir = setup_project_dir();
     let (_server, mut session) =
         session_with_static_server_envs(dir.path(), &[("TERM_PROGRAM", "Apple_Terminal")]);
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("hello");
     session.wait_for_text("Hello!", SCREEN_TIMEOUT);
@@ -987,12 +987,12 @@ fn an_unsupported_terminal_gets_no_osc9_notification() {
 fn piped_commands_work_in_the_tui() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
-    session.send_line("/version | /env CODEREX_LOG");
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
+    session.send_line("/version | /env CODAPE_LOG");
     // Ask for one variable instead of relying on it landing in the first 50
-    // entries of an unordered environment listing. CODEREX_LOG is set by this
+    // entries of an unordered environment listing. CODAPE_LOG is set by this
     // harness, so it is present regardless of the developer's environment.
-    let screen = session.wait_for_text("CODEREX_LOG=off", SCREEN_TIMEOUT);
+    let screen = session.wait_for_text("CODAPE_LOG=off", SCREEN_TIMEOUT);
     drop(session);
     assert!(
         !screen.contains("Unknown command"),
@@ -1006,7 +1006,7 @@ fn piped_commands_work_in_the_tui() {
 fn vim_visual_mode_shows_the_indicator_in_tui() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
     // Enabling Vim mode keeps the prompt in Insert mode, exactly as Vim does:
@@ -1029,7 +1029,7 @@ fn vim_visual_mode_shows_the_indicator_in_tui() {
 fn help_command_renders_in_tui() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/help");
     let screen = session.wait_for_any_text(&["/clear", "Available"], SCREEN_TIMEOUT);
     drop(session);
@@ -1040,7 +1040,7 @@ fn help_command_renders_in_tui() {
 fn status_command_renders_in_tui() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/status");
     let screen = session.wait_for_text("System Status", SCREEN_TIMEOUT);
     drop(session);
@@ -1051,7 +1051,7 @@ fn status_command_renders_in_tui() {
 fn tokens_command_renders_in_tui() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/tokens");
     let screen = session.wait_for_text("Token Usage", SCREEN_TIMEOUT);
     drop(session);
@@ -1062,7 +1062,7 @@ fn tokens_command_renders_in_tui() {
 fn model_command_updates_interactive_state() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/model haiku");
     let screen = session.wait_for_any_text(
         &["Model switched to:", "claude-haiku-4-5-20251001"],
@@ -1076,7 +1076,7 @@ fn model_command_updates_interactive_state() {
 fn clear_command_clears_transcript_state() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/help");
     session.wait_for_text("/clear", SCREEN_TIMEOUT);
     session.send_line("/clear");
@@ -1092,7 +1092,7 @@ fn clear_command_clears_transcript_state() {
 fn unknown_command_keeps_repl_usable() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/does-not-exist");
     let screen = session.wait_for_text("Unknown command", SCREEN_TIMEOUT);
     assert!(screen.contains("Unknown command"));
@@ -1106,7 +1106,7 @@ fn unknown_command_keeps_repl_usable() {
 fn ctrl_c_clears_current_input() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_text("temporary input");
     session.wait_for_text("temporary input", SCREEN_TIMEOUT);
     session.ctrl_c();
@@ -1120,7 +1120,7 @@ fn ctrl_c_clears_current_input() {
 fn ctrl_d_exits_cleanly() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.ctrl_d();
     session.wait_for_exit(Duration::from_secs(5));
 }
@@ -1129,7 +1129,7 @@ fn ctrl_d_exits_cleanly() {
 fn single_prompt_gets_response() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello");
     let screen = session.wait_for_any_text(&["Hello!", "happy to help"], SCREEN_TIMEOUT);
     assert!(screen.contains("Hello!"));
@@ -1140,7 +1140,7 @@ fn single_prompt_gets_response() {
 fn question_response_stays_in_transcript_without_raw_elicitation_prompt() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("ask a question");
     let screen = session.wait_for_text("Which approach would you prefer?", SCREEN_TIMEOUT);
     let raw = strip_ansi(&session.raw_text());
@@ -1156,7 +1156,7 @@ fn question_response_stays_in_transcript_without_raw_elicitation_prompt() {
 fn long_response_keeps_tail_visible_in_tui() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("long response");
     let screen = session.wait_for_text("TAIL: final sentence visible.", SCREEN_TIMEOUT);
     assert!(screen.contains("TAIL: final sentence visible."));
@@ -1166,7 +1166,7 @@ fn long_response_keeps_tail_visible_in_tui() {
 fn long_response_does_not_hide_following_turn() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("very long response");
     session.wait_for_text("VERY_LONG_TAIL", SCREEN_TIMEOUT);
     session.send_line("long response");
@@ -1178,7 +1178,7 @@ fn long_response_does_not_hide_following_turn() {
 fn message_area_scrolls_while_footer_stays_fixed() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("very long response");
     session.wait_for_text("VERY_LONG_TAIL", SCREEN_TIMEOUT);
 
@@ -1220,7 +1220,7 @@ fn a_subagent_forks_the_parent_conversation() {
     let record = dir.path().join("requests.jsonl");
     let server = StaticServer::start_recording(Some(&record));
     let mut session = PtySession::launch_with_persistence(dir.path(), &server.envs(), "K2.6", true);
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("hello");
     session.wait_for_text("Hello!", SCREEN_TIMEOUT);
@@ -1283,7 +1283,7 @@ fn a_subagent_forks_the_parent_conversation() {
 fn a_background_subagent_cannot_run_shell_tools() {
     let dir = setup_project_dir();
     let home = tempfile::tempdir().expect("home");
-    let logs = home.path().join(".coderex").join("agent_logs");
+    let logs = home.path().join(".codape").join("agent_logs");
     let server = StaticServer::start();
     let mut envs = server.envs();
     envs.push(("HOME".into(), home.path().display().to_string()));
@@ -1294,7 +1294,7 @@ fn a_background_subagent_cannot_run_shell_tools() {
         false,
         &["--dangerously-skip-permissions"],
     );
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("spawn a background subagent to run a command");
 
@@ -1344,7 +1344,7 @@ fn the_statusline_shows_model_tokens_cost_and_branch() {
     assert!(!branch.is_empty(), "the fixture has no branch");
 
     let (_server, session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     let screen = session.wait_for_text("tok:0,", SCREEN_TIMEOUT);
     assert!(screen.contains("K2.6"), "model segment missing:\n{screen}");
     assert!(screen.contains("$0.00"), "cost segment missing:\n{screen}");
@@ -1361,7 +1361,7 @@ fn the_statusline_shows_model_tokens_cost_and_branch() {
 fn the_statusline_and_permission_bar_keep_their_own_rows() {
     let dir = setup_git_project_dir();
     let (_server, session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     let screen = session.wait_for_text("Permissions:", SCREEN_TIMEOUT);
     let statusline_row = screen
         .lines()
@@ -1388,7 +1388,7 @@ fn a_supported_terminal_gets_the_keyboard_protocol_push_and_pop() {
     let dir = setup_project_dir();
     let (_server, mut session) =
         session_with_static_server_envs(dir.path(), &[("TERM_PROGRAM", "ghostty")]);
-    let _ = session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    let _ = session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     assert!(
         session.raw_text().contains("\u{1b}[>1u"),
         "the keyboard protocol was not pushed"
@@ -1409,7 +1409,7 @@ fn an_unsupported_terminal_is_not_asked_for_the_keyboard_protocol() {
     let dir = setup_project_dir();
     let (_server, mut session) =
         session_with_static_server_envs(dir.path(), &[("TERM_PROGRAM", "Apple_Terminal")]);
-    let _ = session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    let _ = session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello");
     let _ = session.wait_for_text("Completed in", SCREEN_TIMEOUT);
     assert!(
@@ -1426,10 +1426,10 @@ fn the_keyboard_protocol_opt_out_pushes_nothing() {
         dir.path(),
         &[
             ("TERM_PROGRAM", "ghostty"),
-            ("CODEREX_KEYBOARD_PROTOCOL", "legacy"),
+            ("CODAPE_KEYBOARD_PROTOCOL", "legacy"),
         ],
     );
-    let _ = session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    let _ = session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     assert!(
         !session.raw_text().contains("\u{1b}[>1u"),
         "legacy mode pushed the keyboard protocol anyway"
@@ -1442,7 +1442,7 @@ fn a_compacted_session_backs_up_and_summarizes() {
     let record = dir.path().join("requests.jsonl");
     let server = StaticServer::start_recording(Some(&record));
     let mut envs = server.envs();
-    envs.push(("CODEREX_CONTEXT_WINDOW".into(), "12000".into()));
+    envs.push(("CODAPE_CONTEXT_WINDOW".into(), "12000".into()));
     let mut session = PtySession::launch_with_args(
         dir.path(),
         &envs,
@@ -1450,7 +1450,7 @@ fn a_compacted_session_backs_up_and_summarizes() {
         true,
         &["--allowed-tools", "Read", "--dangerously-skip-permissions"],
     );
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     for (prompt, answer) in [
         ("compact-turn fibonacci", "remove the `use` line"),
@@ -1469,7 +1469,7 @@ fn a_compacted_session_backs_up_and_summarizes() {
         session.wait_for_text(answer, SCREEN_TIMEOUT);
     }
 
-    let transcripts = dir.path().join(".coderex").join("transcripts");
+    let transcripts = dir.path().join(".codape").join("transcripts");
     let deadline = Instant::now() + Duration::from_secs(10);
     let backups: Vec<PathBuf> = loop {
         let found = std::fs::read_dir(&transcripts)
@@ -1508,7 +1508,7 @@ fn a_compacted_session_backs_up_and_summarizes() {
 fn two_turn_transcript_is_preserved() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello");
     session.wait_for_any_text(&["Hello!", "happy to help"], SCREEN_TIMEOUT);
     session.send_line("cargo test results");
@@ -1539,7 +1539,7 @@ fn two_turn_transcript_is_preserved() {
 fn safe_read_action_completes_without_broken_state() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("show content of file");
     session.wait_for_any_text(&["Reading src/lib.rs...", "[Read]"], SCREEN_TIMEOUT);
     session.wait_for_any_text(&["pub fn add", "a + b"], SCREEN_TIMEOUT);
@@ -1552,7 +1552,7 @@ fn safe_read_action_completes_without_broken_state() {
 fn write_action_shows_permission_wait() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("add a recursive fibonacci function to src/lib.rs with unit tests");
     let raw = session.wait_for_raw_text("Waitingforpermission:Writingsrc/lib.rs", SCREEN_TIMEOUT);
     let squeezed = squeeze_whitespace(&raw);
@@ -1567,7 +1567,7 @@ fn write_action_shows_permission_wait() {
 fn write_action_denial_keeps_session_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("add a recursive fibonacci function to src/lib.rs with unit tests");
     session.wait_for_raw_text("Waitingforpermission:Writingsrc/lib.rs", SCREEN_TIMEOUT);
     session.send_text("d");
@@ -1581,7 +1581,7 @@ fn write_action_denial_keeps_session_usable() {
 fn write_action_approval_updates_file_and_keeps_session_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("add a recursive fibonacci function to src/lib.rs with unit tests");
     session.wait_for_raw_text("Waitingforpermission:Writingsrc/lib.rs", SCREEN_TIMEOUT);
     session.send_text("a");
@@ -1606,7 +1606,7 @@ fn write_action_approval_updates_file_and_keeps_session_usable() {
 fn bash_action_denial_keeps_session_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("list files in this directory");
     let raw = session.wait_for_raw_text(
         "Waitingforpermission:Runningfind.-name'*.rs'-typef",
@@ -1631,7 +1631,7 @@ fn bash_action_denial_keeps_session_usable() {
 fn an_elevation_prompt_is_approved_and_retried_in_the_tui() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("run a command with sudo");
     approve_permission(&mut session, "Waitingforpermission");
     let raw = session.wait_for_raw_text("elevation-marker", SCREEN_TIMEOUT);
@@ -1646,7 +1646,7 @@ fn an_elevation_prompt_is_approved_and_retried_in_the_tui() {
 fn an_elevation_prompt_is_denied_in_the_tui() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("run a command with sudo");
     deny_permission(&mut session, "Waitingforpermission");
     let raw = session.wait_for_raw_text("elevation denied", SCREEN_TIMEOUT);
@@ -1664,7 +1664,7 @@ fn an_elevation_prompt_is_denied_in_the_tui() {
 fn a_su_command_is_an_elevation_and_can_be_denied() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("run a command with su");
     let screen = session.wait_for_text("Permission Request", SCREEN_TIMEOUT);
     assert!(
@@ -1687,20 +1687,20 @@ fn a_su_command_is_an_elevation_and_can_be_denied() {
 fn the_permission_prompt_shows_the_shell_analysis_reason() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("benchmark malicious shell");
     session.wait_for_text("Permission Request", SCREEN_TIMEOUT);
     let screen = session.wait_for_text("Dangerous", SCREEN_TIMEOUT);
     assert!(
-        screen.contains("rm -rf /tmp/coderex-benchmark-should-not-run")
-            || screen.contains("rm-rf/tmp/coderex-benchmark-should-not-run"),
+        screen.contains("rm -rf /tmp/codape-benchmark-should-not-run")
+            || screen.contains("rm-rf/tmp/codape-benchmark-should-not-run"),
         "the prompt did not name the command that was dangerous:\n{screen}"
     );
     session.send_text("d");
     session.wait_for_raw_text("denied", SCREEN_TIMEOUT);
     session.wait_for_text("Completed in", SCREEN_TIMEOUT);
     assert!(
-        !std::path::Path::new("/tmp/coderex-benchmark-should-not-run").exists(),
+        !std::path::Path::new("/tmp/codape-benchmark-should-not-run").exists(),
         "the denied command ran"
     );
     // The reason the prompt showed is what made the refusal sensible.
@@ -1711,7 +1711,7 @@ fn the_permission_prompt_shows_the_shell_analysis_reason() {
 fn slash_palette_filters_selects_and_dismisses() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_text("/tok");
     let screen = session.wait_for_text("Commands [/tok]", SCREEN_TIMEOUT);
@@ -1734,7 +1734,7 @@ fn slash_palette_filters_selects_and_dismisses() {
 fn history_recall_restores_previous_input() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/status");
     session.wait_for_text("System Status", SCREEN_TIMEOUT);
     session.up();
@@ -1747,7 +1747,7 @@ fn history_recall_restores_previous_input() {
 fn cursor_left_and_backspace_edit_input_before_submit() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_text("/hlp");
     session.left();
@@ -1771,7 +1771,7 @@ fn cursor_left_and_backspace_edit_input_before_submit() {
 fn open_command_shows_split_pane_file_viewer() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/open src/lib.rs");
     let screen =
         session.wait_for_any_text(&["File Viewer", "src/lib.rs", "pub fn add"], SCREEN_TIMEOUT);
@@ -1783,7 +1783,7 @@ fn open_command_shows_split_pane_file_viewer() {
 fn plan_and_activity_overlays_render_details() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello");
     session.wait_for_text("Hello!", SCREEN_TIMEOUT);
 
@@ -1802,7 +1802,7 @@ fn plan_and_activity_overlays_render_details() {
 fn provider_failure_recovers_to_usable_prompt() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("simulate error");
     let screen =
         session.wait_for_any_text(&["temporarily unavailable", "Query failed"], SCREEN_TIMEOUT);
@@ -1814,7 +1814,7 @@ fn provider_failure_recovers_to_usable_prompt() {
 
 /// The redraw after a resize still draws the banner and the prompt.
 ///
-/// This used to assert `screen.contains("CodeRex v") || raw_text().contains("❯")`
+/// This used to assert `screen.contains("Codape v") || raw_text().contains("❯")`
 /// — and `raw_text()` is everything the terminal has ever received, so the
 /// right-hand side was true no matter what the TUI did after the resize. The
 /// assertion is now about what is *on the screen* afterwards, which is the
@@ -1872,7 +1872,7 @@ fn screen_has_order(screen: &str, needles: &[&str]) -> bool {
 fn vim_o_and_upper_o_insert_lines_around_the_cursor() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -1899,7 +1899,7 @@ fn vim_o_and_upper_o_insert_lines_around_the_cursor() {
 fn vim_dd_and_p_move_a_line() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -1935,7 +1935,7 @@ fn vim_dd_and_p_move_a_line() {
 fn vim_cc_replaces_the_current_line() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -1971,7 +1971,7 @@ fn vim_cc_replaces_the_current_line() {
 fn vim_counted_3dd_deletes_three_lines() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -2003,7 +2003,7 @@ fn vim_counted_3dd_deletes_three_lines() {
 fn vim_counted_motion_and_visual_indent_leave_no_selection() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -2060,7 +2060,7 @@ fn vim_counted_motion_and_visual_indent_leave_no_selection() {
 fn resize_keeps_tui_alive() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     // The banner and the prompt are painted by the same startup sequence, but
     // the prompt is what proves the input area exists. Resizing before it has
     // appeared left the smaller screen with no prompt to assert on; wait for
@@ -2068,7 +2068,7 @@ fn resize_keeps_tui_alive() {
     session.wait_for_text("❯", SCREEN_TIMEOUT);
 
     session.resize(16, 70);
-    let after_shrink = session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    let after_shrink = session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     assert!(
         after_shrink.contains("❯"),
         "the prompt is missing after shrinking:\n{after_shrink}"
@@ -2089,7 +2089,7 @@ fn resize_keeps_tui_alive() {
     // shrink half does, and it makes the wait deterministic under load.
     let after_grow = session.type_after_resize("grown");
     assert!(
-        after_grow.contains("CodeRex v"),
+        after_grow.contains("Codape v"),
         "the banner is missing after growing:\n{after_grow}"
     );
     assert!(
@@ -2111,7 +2111,7 @@ fn resize_keeps_tui_alive() {
 fn vim_command_enables_normal_mode_editing() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
     session.send_text("abc");
@@ -2131,7 +2131,7 @@ fn vim_command_enables_normal_mode_editing() {
 fn vim_visual_mode_selects_and_deletes_input() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/vim");
     session.wait_for_text("Vim mode: enabled", SCREEN_TIMEOUT);
 
@@ -2162,7 +2162,7 @@ fn vim_visual_mode_selects_and_deletes_input() {
 fn unicode_input_is_preserved_in_interactive_session() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello 你好，世界");
     session.wait_for_any_text(&["Hello!", "happy to help"], SCREEN_TIMEOUT);
     let raw = session.wait_for_raw_text("你好，世界", SCREEN_TIMEOUT);
@@ -2173,7 +2173,7 @@ fn unicode_input_is_preserved_in_interactive_session() {
 fn five_turn_interaction_stays_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("hello");
     session.wait_for_text("Hello!", SCREEN_TIMEOUT);
@@ -2192,7 +2192,7 @@ fn five_turn_interaction_stays_usable() {
 fn reported_skills_tools_sequence_stays_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     run_interaction_sequence(
         &mut session,
@@ -2217,7 +2217,7 @@ fn reported_skills_tools_sequence_stays_usable() {
 fn delegating_shows_the_sub_agent_in_the_transcript() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("delegate a simple agent");
     session.wait_for_text("Sub-agent", SCREEN_TIMEOUT);
@@ -2228,7 +2228,7 @@ fn delegating_shows_the_sub_agent_in_the_transcript() {
 fn mixed_prompt_tool_sequence_matrix_stays_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     run_interaction_sequence(
         &mut session,
@@ -2284,7 +2284,7 @@ fn mixed_prompt_tool_sequence_matrix_stays_usable() {
 fn read_search_list_sequence_matrix_stays_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("show content of file");
     session.wait_for_any_text(&["pub fn add", "a + b"], SCREEN_TIMEOUT);
@@ -2319,7 +2319,7 @@ fn read_search_list_sequence_matrix_stays_usable() {
 fn code_write_and_git_sequence_matrix_stays_usable() {
     let dir = setup_git_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("add multiply function to src/lib.rs");
     approve_permission(&mut session, "Waitingforpermission:Writingsrc/lib.rs");
@@ -2393,7 +2393,7 @@ fn code_write_and_git_sequence_matrix_stays_usable() {
 fn dangerous_git_deny_sequence_matrix_stays_usable() {
     let dir = setup_git_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("run git reset --hard");
     deny_permission(&mut session, r#"Args:{"command":"gitreset--hard"}"#);
@@ -2425,7 +2425,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "default"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("show content of file");
         session.wait_for_any_text(&["pub fn add", "a + b"], SCREEN_TIMEOUT);
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
@@ -2437,7 +2437,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "default"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("add a recursive fibonacci function to src/lib.rs with unit tests");
         deny_permission(&mut session, "Waitingforpermission:Writingsrc/lib.rs");
         session.wait_for_raw_text("Error:tool'Write'denied", SCREEN_TIMEOUT);
@@ -2451,7 +2451,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "accept-edits"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("add multiply function to src/lib.rs");
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
         let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap_or_default();
@@ -2469,7 +2469,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "plan"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("show content of file");
         session.wait_for_any_text(&["pub fn add", "a + b"], SCREEN_TIMEOUT);
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
@@ -2487,7 +2487,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "dont-ask"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("add multiply function to src/lib.rs");
         session.wait_for_raw_text("Error:tool'Write'denied", SCREEN_TIMEOUT);
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
@@ -2501,7 +2501,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--permissions", "bypass-permissions"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("add multiply function to src/lib.rs");
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
         let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap_or_default();
@@ -2518,7 +2518,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
         let dir = setup_project_dir();
         let (_server, mut session) =
             session_with_static_server_args(dir.path(), &["--dangerously-skip-permissions"]);
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("add multiply function to src/lib.rs");
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
         let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap_or_default();
@@ -2531,7 +2531,7 @@ fn permission_mode_sequence_matrix_enforces_expected_policy() {
 fn extension_slash_sequence_matrix_stays_usable() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     run_interaction_sequence(
         &mut session,
@@ -2556,7 +2556,7 @@ fn extension_slash_sequence_matrix_stays_usable() {
 fn ui_recovery_sequence_matrix_stays_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("/theme light");
     session.wait_for_text("Theme changed to: light", SCREEN_TIMEOUT);
@@ -2587,7 +2587,7 @@ fn ui_recovery_sequence_matrix_stays_usable() {
 fn theme_command_switches_interactive_theme_and_stays_usable() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("/theme light");
     session.wait_for_text("Theme changed to: light", SCREEN_TIMEOUT);
@@ -2607,7 +2607,7 @@ fn theme_command_switches_interactive_theme_and_stays_usable() {
 fn theme_switch_paints_the_background() {
     let dir = setup_project_dir();
     let mut session = session_without_engine(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
 
     session.send_line("/theme light");
     session.wait_for_text("Theme changed to: light", SCREEN_TIMEOUT);
@@ -2630,7 +2630,7 @@ fn theme_switch_paints_the_background() {
 fn compact_after_history_keeps_session_usable() {
     let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("hello");
     session.wait_for_any_text(&["Hello!", "happy to help"], SCREEN_TIMEOUT);
     session.send_line("long response");
@@ -2693,7 +2693,7 @@ fn resume_restores_persisted_plan_and_activity() {
 
     {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("show content of file");
         session.wait_for_any_text(&["pub fn add", "a + b"], SCREEN_TIMEOUT);
         // The transcript is written when the engine is returned at the end of
@@ -2706,7 +2706,7 @@ fn resume_restores_persisted_plan_and_activity() {
 
     {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("/resume");
         let resumed = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
         assert!(resumed.contains("Loaded"));
@@ -2750,7 +2750,7 @@ fn launch_with_cassette(dir: &Path) -> PtySession {
         ("ANTHROPIC_API_KEY".to_string(), "cassette".to_string()),
         ("ANTHROPIC_AUTH_TOKEN".to_string(), "cassette".to_string()),
         (
-            "CODEREX_CUSTOM_HEADERS".to_string(),
+            "CODAPE_CUSTOM_HEADERS".to_string(),
             common::cassette_headers(dir),
         ),
     ];
@@ -2761,7 +2761,7 @@ fn launch_with_cassette(dir: &Path) -> PtySession {
 fn interactive_live_read_smoke() {
     let dir = setup_project_dir();
     let mut session = launch_with_cassette(dir.path());
-    session.wait_for_text("CodeRex v", LIVE_TIMEOUT);
+    session.wait_for_text("Codape v", LIVE_TIMEOUT);
     session.send_line("Use the Read tool to show content of src/lib.rs and summarize it");
     session.wait_for_any_text(
         &["Reading src/lib.rs...", "pub fn add", "a + b"],
@@ -2780,15 +2780,15 @@ fn interactive_live_read_smoke() {
 fn interactive_live_directory_listing_smoke() {
     let dir = setup_project_dir();
     let mut session = launch_with_cassette(dir.path());
-    session.wait_for_text("CodeRex v", LIVE_TIMEOUT);
+    session.wait_for_text("Codape v", LIVE_TIMEOUT);
     session.send_line("show current dir");
-    let screen = session.wait_for_any_text(&["coderex", "/tmp", "tmp"], LIVE_TIMEOUT);
-    assert!(screen.contains("coderex") || screen.contains("/tmp") || screen.contains("tmp"));
+    let screen = session.wait_for_any_text(&["codape", "/tmp", "tmp"], LIVE_TIMEOUT);
+    assert!(screen.contains("codape") || screen.contains("/tmp") || screen.contains("tmp"));
 
     session.send_line("list the files in this dir");
-    let screen = session.wait_for_any_text(&["Cargo.toml", "src", ".coderex"], LIVE_TIMEOUT);
+    let screen = session.wait_for_any_text(&["Cargo.toml", "src", ".codape"], LIVE_TIMEOUT);
     drop(session);
-    assert!(screen.contains("Cargo.toml") || screen.contains("src") || screen.contains(".coderex"));
+    assert!(screen.contains("Cargo.toml") || screen.contains("src") || screen.contains(".codape"));
 }
 
 /// A provider that streams a text delta every 150 ms, so a turn can be
@@ -2916,7 +2916,7 @@ fn session_with_slow_provider(dir: &Path) -> (SlowProvider, PtySession) {
 fn ctrl_c_interrupts_a_running_turn_and_the_prompt_stays_usable() {
     let dir = setup_project_dir();
     let (provider, mut session) = session_with_slow_provider(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("write a very long response");
     session.wait_for_text("tick", SCREEN_TIMEOUT);
 
@@ -2934,7 +2934,7 @@ fn ctrl_c_interrupts_a_running_turn_and_the_prompt_stays_usable() {
 fn escape_interrupts_a_running_turn_in_the_default_mode() {
     let dir = setup_project_dir();
     let (provider, mut session) = session_with_slow_provider(dir.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("write a very long response");
     session.wait_for_text("tick", SCREEN_TIMEOUT);
 
@@ -2950,7 +2950,7 @@ fn first_run_consent(answer: &str) -> bool {
     let mut session = PtySession::launch_unseeded(dir.path(), &[], "claude-sonnet-4-6");
     session.wait_for_raw_text("Enable telemetry?", SCREEN_TIMEOUT);
     session.send_line(answer);
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     let settings = std::fs::read_to_string(session.config_home().join("settings.json"))
         .expect("the consent decision is written");
     drop(session);
@@ -2981,7 +2981,7 @@ fn resume_finds_a_session_by_a_fragment() {
 
     {
         let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
-        session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+        session.wait_for_text("Codape v", SCREEN_TIMEOUT);
         session.send_line("hello");
         session.wait_for_text("Completed in", SCREEN_TIMEOUT);
         session.ctrl_d();
@@ -2989,7 +2989,7 @@ fn resume_finds_a_session_by_a_fragment() {
     }
 
     let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("/resume hello");
     let screen = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
     drop(session);
@@ -3191,7 +3191,7 @@ fn interrupting_before_the_tool_call_leaves_no_tool_or_history() {
     ];
     let mut session =
         PtySession::launch_with_persistence(dir.path(), &envs, "claude-sonnet-4-6", true);
-    session.wait_for_text("CodeRex v", SCREEN_TIMEOUT);
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
     session.send_line("interrupt-before-tool");
     session.wait_for_text("tick", SCREEN_TIMEOUT);
 
@@ -3210,7 +3210,7 @@ fn interrupting_before_the_tool_call_leaves_no_tool_or_history() {
         !marker.exists(),
         "the interrupted turn still executed its Bash tool"
     );
-    let transcripts = dir.path().join(".coderex/transcripts");
+    let transcripts = dir.path().join(".codape/transcripts");
     let mut history = String::new();
     if let Ok(entries) = std::fs::read_dir(&transcripts) {
         for entry in entries.flatten() {

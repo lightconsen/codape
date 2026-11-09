@@ -90,7 +90,7 @@ pub fn is_model_key(key: &str) -> bool {
 /// unavailable value (empty string, or not a string at all) — becomes
 /// [`CONFIDENTIAL_MODEL`].
 ///
-/// CodeRex has a single first-party channel and no cloud model catalogue, so it
+/// Codape has a single first-party channel and no cloud model catalogue, so it
 /// cannot know which names are sensitive: every concrete name is treated as
 /// confidential, and only the placeholders (which name no model) are left in
 /// the clear. See `docs/telemetry.md`.
@@ -1070,7 +1070,7 @@ mod tests {
         let scrubber = Scrubber::new();
         for text in [
             "at /rustc/abcdef0123456789abcdef0123456789/library/std/src/panicking.rs:123:5",
-            "coderex_core::engine::QueryEngine::submit",
+            "codape_core::engine::QueryEngine::submit",
             "at file.rs:12:9",
             "this_is_a_very_long_function_name_with_digits_12345",
             "ThisIsAVeryLongCamelCaseTypeNameWithoutDigits",
@@ -1297,7 +1297,7 @@ mod tests {
     #[test]
     fn diagnostics_survive_the_financial_detectors() {
         let scrubber = Scrubber::new();
-        let text = "at /home/somebody/project/src/main.rs:123:5 coderex_core::engine::run https://example.com/docs/reference";
+        let text = "at /home/somebody/project/src/main.rs:123:5 codape_core::engine::run https://example.com/docs/reference";
         let scrubbed = scrubber.scrub(text);
         assert_eq!(scrubbed.replace("/home/<USER>", "/home/somebody"), text);
     }

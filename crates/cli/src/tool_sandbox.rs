@@ -1,6 +1,6 @@
 //! Whether tool execution gets the OS sandbox.
 //!
-//! The shell-tool sandbox is on by default. `CODEREX_SANDBOX=off` turns it off
+//! The shell-tool sandbox is on by default. `CODAPE_SANDBOX=off` turns it off
 //! for the whole process. That escape hatch is for environments that are
 //! already an isolation boundary — a benchmark or CI container, a throwaway VM
 //! — where the extra filter is redundant and blocks legitimate work such as
@@ -9,12 +9,12 @@
 //! It deliberately affects only the tool-execution config. Hook, MCP and WASM
 //! sandboxes are separate and keep their own policy.
 
-use coderex_tools::ExecutionConfig;
+use codape_tools::ExecutionConfig;
 
 /// Environment variable that overrides the shell-tool sandbox.
-pub const SANDBOX_ENV: &str = "CODEREX_SANDBOX";
+pub const SANDBOX_ENV: &str = "CODAPE_SANDBOX";
 
-/// Whether `CODEREX_SANDBOX` names an off value.
+/// Whether `CODAPE_SANDBOX` names an off value.
 ///
 /// Anything unset or unrecognised leaves the sandbox on; only explicit
 /// negatives disable it.

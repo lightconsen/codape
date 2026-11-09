@@ -1,6 +1,6 @@
 //! Durable background-job records and the adoptability classifier.
 //!
-//! CodeRex's background work runs as **in-process `tokio` tasks**
+//! Codape's background work runs as **in-process `tokio` tasks**
 //! ([`crate::task`]), so when the process exits the work is gone: unlike the
 //! reference implementation, there is no worker process that outlives its
 //! supervisor for a later session to re-attach to. This module therefore does
@@ -8,7 +8,7 @@
 //! honest and useful:
 //!
 //! * [`JobRecord`] + [`JobStore`] — one JSON file per job under
-//!   `<cwd>/.coderex/jobs/<id>.json`, written atomically (temp file + rename),
+//!   `<cwd>/.codape/jobs/<id>.json`, written atomically (temp file + rename),
 //!   so a record of the work survives the process that created it;
 //! * [`adopt`] — a **pure** classifier that sorts the records a starting
 //!   session finds into [`AdoptOutcome`] buckets, plus
@@ -31,7 +31,7 @@
 //!   matter how old they are.
 //! * **resumable** vs **interrupted** — a cron definition
 //!   ([`JobKind::Cron`]) can genuinely be re-scheduled, so it lands in
-//!   `resumable`. Everything else CodeRex records (agent / shell / workflow)
+//!   `resumable`. Everything else Codape records (agent / shell / workflow)
 //!   was an in-process task; a persisted record of it can only be **reported**
 //!   as interrupted.
 
@@ -60,7 +60,7 @@ pub const CLOCK_SKEW_ALLOWANCE_MS: i64 = 60_000;
 /// previously-granted consent and *discloses* rather than asks, so this is a
 /// switch, not an adopt-time dialog: setting it to any value other than
 /// `0`/`false`/`no`/empty makes [`adopt_for_session`] a no-op.
-pub const DISABLE_ADOPT_ENV: &str = "CODEREX_DISABLE_ADOPT";
+pub const DISABLE_ADOPT_ENV: &str = "CODAPE_DISABLE_ADOPT";
 
 // ─── JobKind ────────────────────────────────────────────────────────────────
 
@@ -150,7 +150,7 @@ impl JobState {
 /// One record is one JSON file in a [`JobStore`]. The store is deliberately
 /// *not* indexed: the reference keeps a `roster.json` index next to its
 /// per-job `state.json` files because its daemon rescans a job tree of unknown
-/// size on every restart. CodeRex's job directory is written by a single
+/// size on every restart. Codape's job directory is written by a single
 /// session and holds a handful of files, so listing the directory is enough —
 /// an index would be a second source of truth that can disagree with the files
 /// it indexes. See `docs/tasks.md` for the full rationale.
@@ -274,7 +274,7 @@ pub struct TaskNotification {
 /// classification — nothing is silently dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdoptOutcome {
-    /// Records that can genuinely be re-attached. For CodeRex that is cron
+    /// Records that can genuinely be re-attached. For Codape that is cron
     /// definitions only ([`JobKind::is_resumable`]).
     pub resumable: Vec<JobRecord>,
     /// Records of work that cannot be re-attached: the owning process is gone.
@@ -480,7 +480,7 @@ pub enum JobStoreError {
     Encode(String, serde_json::Error),
 }
 
-/// One-JSON-file-per-job store rooted at `<cwd>/.coderex/jobs`.
+/// One-JSON-file-per-job store rooted at `<cwd>/.codape/jobs`.
 ///
 /// Writes are atomic: the record is serialized into a sibling temp file and
 /// renamed over the target, so a concurrent reader sees either the old record
@@ -491,11 +491,11 @@ pub struct JobStore {
 }
 
 impl JobStore {
-    /// Open the store for a working directory: `<cwd>/.coderex/jobs`.
+    /// Open the store for a working directory: `<cwd>/.codape/jobs`.
     #[must_use]
     pub fn new(cwd: impl AsRef<Path>) -> Self {
         Self {
-            root: cwd.as_ref().join(".coderex").join("jobs"),
+            root: cwd.as_ref().join(".codape").join("jobs"),
         }
     }
 

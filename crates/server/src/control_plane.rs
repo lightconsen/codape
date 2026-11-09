@@ -617,7 +617,7 @@ mod tests {
             spawn_mode: "ssh".into(),
             ssh: Some(SshTarget {
                 host: "deploy@remote.example".into(),
-                remote_path: "/srv/coderex".into(),
+                remote_path: "/srv/codape".into(),
                 identity_file: Some("/home/deploy/.ssh/id_ed25519".into()),
             }),
             assigned_to: None,
@@ -627,7 +627,7 @@ mod tests {
         let json = serde_json::to_value(&entry).unwrap();
         assert_eq!(json["spawn_mode"], "ssh");
         assert_eq!(json["ssh"]["host"], "deploy@remote.example");
-        assert_eq!(json["ssh"]["remote_path"], "/srv/coderex");
+        assert_eq!(json["ssh"]["remote_path"], "/srv/codape");
         assert_eq!(json["ssh"]["identity_file"], "/home/deploy/.ssh/id_ed25519");
     }
 

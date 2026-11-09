@@ -1,7 +1,7 @@
 //! The hidden `--internal-wasm-compile` subcommand, through the real binary.
 //!
 //! The CLI injects itself as the WASM compiler: a packaged binary has no
-//! sibling `coderex-wasm-compile`, so the runtime re-executes `coderex
+//! sibling `codape-wasm-compile`, so the runtime re-executes `codape
 //! --internal-wasm-compile <input> <output>`. The command is handled before
 //! clap parses anything, and it must actually compile — the plugin tests use a
 //! separate helper binary, so this path had no coverage.
@@ -18,7 +18,7 @@ fn write_module(dir: &Path) -> PathBuf {
 }
 
 fn run_compile(input: &Path, output: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .arg("--internal-wasm-compile")
         .arg(input)
         .arg(output)
@@ -26,7 +26,7 @@ fn run_compile(input: &Path, output: &Path) -> std::process::Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 #[test]
@@ -59,14 +59,14 @@ fn the_flag_later_in_the_arguments_is_a_usage_error() {
     let dir = tempfile::tempdir().expect("dir");
     let input = write_module(dir.path());
 
-    let result = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let result = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--internal-wasm-compile"])
         .arg(&input)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex");
+        .expect("run codape");
 
     assert!(
         !result.status.success(),
@@ -98,7 +98,7 @@ fn a_failed_compile_exits_non_zero() {
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("coderex:"),
+        stderr.contains("codape:"),
         "the failure was not reported: {stderr}"
     );
 }

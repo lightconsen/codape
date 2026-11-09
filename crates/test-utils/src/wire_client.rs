@@ -1,22 +1,22 @@
 //! Wire-protocol test client.
 //!
-//! Provides [`WireTestClient`] for interacting with a CodeRex engine
+//! Provides [`WireTestClient`] for interacting with a Codape engine
 //! over the wire protocol in tests — useful for subprocess-based E2E
 //! tests and integration tests.
 
-use coderex_core::wire_protocol::{WireEvent, WireRequest, decode_event, encode_request};
+use codape_core::wire_protocol::{WireEvent, WireRequest, decode_event, encode_request};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-/// A test client that communicates with a CodeRex subprocess over stdio.
+/// A test client that communicates with a Codape subprocess over stdio.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use coderex_test_utils::WireTestClient;
+/// use codape_test_utils::WireTestClient;
 ///
 /// # async fn example() {
-/// let mut client = WireTestClient::spawn("cargo", &["run", "--bin", "coderex"])
+/// let mut client = WireTestClient::spawn("cargo", &["run", "--bin", "codape"])
 ///     .expect("spawn failed");
 ///
 /// client.submit("Hello, world!").await.unwrap();
@@ -34,7 +34,7 @@ pub struct WireTestClient {
 }
 
 impl WireTestClient {
-    /// Spawn a new CodeRex subprocess and connect to it over stdio.
+    /// Spawn a new Codape subprocess and connect to it over stdio.
     ///
     /// # Errors
     /// Returns an error if the subprocess cannot be spawned or if

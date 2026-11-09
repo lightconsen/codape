@@ -4,7 +4,7 @@ use crate::context::{ToolError, ToolOutput};
 use crate::tool::{Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier};
 use async_trait::async_trait;
 
-/// Load and execute skill scripts from .coderex/skills/.
+/// Load and execute skill scripts from .codape/skills/.
 #[derive(Debug)]
 pub struct SkillTool;
 
@@ -49,8 +49,8 @@ impl Tool for SkillTool {
         // Search for skill file in multiple locations
         let skill_file = format!("{skill}.md");
         let search_dirs = [
-            ctx.cwd.join(".coderex/skills"),
-            coderex_config::settings::config_home().join("skills"),
+            ctx.cwd.join(".codape/skills"),
+            codape_config::settings::config_home().join("skills"),
         ];
 
         for dir in &search_dirs {
@@ -97,7 +97,7 @@ impl Tool for SkillTool {
 
         let mut msg = format!("Skill '{skill}' not found.");
         if available.is_empty() {
-            msg.push_str("\nNo skills found in .coderex/skills/ or ~/.coderex/skills/");
+            msg.push_str("\nNo skills found in .codape/skills/ or ~/.codape/skills/");
         } else {
             let _ = write!(msg, "\nAvailable skills: {}", available.join(", "));
         }
@@ -140,7 +140,7 @@ mod tests {
     #[tokio::test]
     async fn skill_loads() {
         let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join(".coderex/skills");
+        let skills_dir = tmp.path().join(".codape/skills");
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::write(
             skills_dir.join("pdf.md"),

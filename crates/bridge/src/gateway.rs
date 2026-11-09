@@ -24,7 +24,7 @@
 //! inbound `permission_response` before it resolves anything, so a duplicate or
 //! unknown answer is refused on the worker side too.
 //!
-//! The process that serves the host side lives in `coderex-server`
+//! The process that serves the host side lives in `codape-server`
 //! (`gateway::GatewayServer`): it runs the control plane and a per-environment
 //! frame mailbox that a worker and an operator poll. What is still outside this
 //! repository is the *human* half of that — authenticating the operator,

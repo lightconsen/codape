@@ -81,7 +81,7 @@ fn run(
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command
         .args(args)
         .current_dir(cwd)
@@ -89,7 +89,7 @@ fn run(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -97,7 +97,7 @@ fn run(
     for (key, value) in extra_env {
         command.env(key, value);
     }
-    let mut child = command.spawn().expect("spawn coderex");
+    let mut child = command.spawn().expect("spawn codape");
     child
         .stdin
         .take()
@@ -132,7 +132,7 @@ fn from_pr_fetches_the_pull_request_through_gh() {
             "-p",
             "--dangerously-skip-permissions",
             "--from-pr",
-            "https://github.com/lightconsen/coderex/pull/42",
+            "https://github.com/lightconsen/codape/pull/42",
             "hello",
         ],
         &path_with(fake.path()),
@@ -149,7 +149,7 @@ fn from_pr_fetches_the_pull_request_through_gh() {
     assert!(calls.contains("pr view"), "{calls}");
     assert!(calls.contains("pr diff"), "{calls}");
     assert!(
-        calls.contains("https://github.com/lightconsen/coderex/pull/42"),
+        calls.contains("https://github.com/lightconsen/codape/pull/42"),
         "{calls}"
     );
 }
@@ -167,7 +167,7 @@ fn from_pr_reports_a_failed_fetch_instead_of_carrying_on() {
             "-p",
             "--dangerously-skip-permissions",
             "--from-pr",
-            "https://github.com/lightconsen/coderex/pull/42",
+            "https://github.com/lightconsen/codape/pull/42",
             "hello",
         ],
         &path_with(fake.path()),
@@ -203,7 +203,7 @@ fn tmux_retitles_the_current_pane_when_already_inside_tmux() {
         &base_url,
         &["-p", "--dangerously-skip-permissions", "--tmux", "hello"],
         &path_with(fake.path()),
-        &[("CODEREX_TMUX_ACTIVE", "1")],
+        &[("CODAPE_TMUX_ACTIVE", "1")],
     );
     let _ = provider.kill();
     let _ = provider.wait();
@@ -214,7 +214,7 @@ fn tmux_retitles_the_current_pane_when_already_inside_tmux() {
     );
     let calls = std::fs::read_to_string(&marker).expect("tmux was never invoked");
     assert!(
-        calls.contains("rename-window coderex:"),
+        calls.contains("rename-window codape:"),
         "the pane was not retitled: {calls}"
     );
     assert!(

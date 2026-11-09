@@ -1,6 +1,6 @@
 //! Interactive and headless re-authorization for MCP servers.
 //!
-//! `coderex-mcp` owns the token lifecycle but cannot sign in by itself: the
+//! `codape-mcp` owns the token lifecycle but cannot sign in by itself: the
 //! authorization-code + PKCE flow belongs to the `McpAuth` tool. This module
 //! installs the bridge. When a server answers `401 invalid_token` and no
 //! refresh token can replace the credential, the OAuth manager calls this
@@ -14,19 +14,19 @@
 //!   complete the sign-in. The pending flow is persisted by the tool, so a
 //!   later `McpAuth` call can finish it with the redirect URL.
 
-use coderex_mcp::oauth::ReauthHandler;
-use coderex_tools::{ExecutionContext, McpAuthTool, Tool, ToolContext, ToolInput};
+use codape_mcp::oauth::ReauthHandler;
+use codape_tools::{ExecutionContext, McpAuthTool, Tool, ToolContext, ToolInput};
 use std::path::PathBuf;
 
 /// Whether a headless session should wait for the loopback callback.
 ///
-/// `CODEREX_MCP_CALLBACK_WAIT` overrides the SSH detection (`1`/`0`); without
+/// `CODAPE_MCP_CALLBACK_WAIT` overrides the SSH detection (`1`/`0`); without
 /// it, an SSH session waits, because the operator can forward the port and
 /// approve in one click. A non-SSH headless run returns the hand-off instead
 /// of blocking a login that nothing is listening for.
 fn wait_for_callback() -> bool {
     should_wait_for_callback(
-        std::env::var("CODEREX_MCP_CALLBACK_WAIT").ok().as_deref(),
+        std::env::var("CODAPE_MCP_CALLBACK_WAIT").ok().as_deref(),
         std::env::var_os("SSH_CONNECTION").is_some(),
     )
 }

@@ -1,6 +1,6 @@
 #![no_main]
 
-use coderex_config::settings::Settings;
+use codape_config::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 use std::str;
 

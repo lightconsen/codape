@@ -2,7 +2,7 @@
 
 ## Goal
 
-Configuration layers: defaults → user config (`~/.coderex/settings.json`) → project config (`.coderex/settings.json`) → local config (`.coderex/settings.local.json`), plus a managed/enterprise layer. Manages settings, feature flags, experiments, and enterprise policies.
+Configuration layers: defaults → user config (`~/.codape/settings.json`) → project config (`.codape/settings.json`) → local config (`.codape/settings.local.json`), plus a managed/enterprise layer. Manages settings, feature flags, experiments, and enterprise policies.
 
 ## Design
 
@@ -16,9 +16,9 @@ Configuration layers: defaults → user config (`~/.coderex/settings.json`) → 
 - **`RuntimeOverrides`** (`settings.rs`) — Environment-variable and CLI-arg overrides.
 - **`ConfigError`** (`settings.rs`) — Error enum with `Io`, `Json`, `Validation`, `UnknownField`, and `TooLarge` variants.
 - **`ConfigDiff`/`ConfigDiffEntry`** (`settings.rs`) — Structured diff between current settings and defaults with `render()` for human-readable output.
-- **`config_home()`** (`settings.rs`) — Returns `~/.coderex`.
-- **`managed.rs`** — OS-level managed-settings carriers. `load_managed_plist` converts a macOS MDM property list (via the `plist` crate) to `Settings`; `load_managed_registry` reads `HKLM\SOFTWARE\CodeRex` (via `winreg`, Windows-only) and converts registry values to `Settings`. `default_managed_plist_path`, `DEFAULT_MACOS_MANAGED_PLIST_DOMAIN` and `WINDOWS_MANAGED_REGISTRY_KEY` expose the defaults.
-- **`TelemetrySubConfig`** (`settings.rs`) — Endpoint/batch/sampling settings plus optional export-channel settings: `otlp_endpoint`, `otlp_headers`, `datadog_api_key`, `datadog_site`, `datadog_endpoint` (see [`docs/telemetry.md`](telemetry.md#channels)). `strict: true` enables the strict/HIPAA redaction mode; it is OR-ed with `CODEREX_HIPAA` and can only add the stricter mode, never remove it.
+- **`config_home()`** (`settings.rs`) — Returns `~/.codape`.
+- **`managed.rs`** — OS-level managed-settings carriers. `load_managed_plist` converts a macOS MDM property list (via the `plist` crate) to `Settings`; `load_managed_registry` reads `HKLM\SOFTWARE\Codape` (via `winreg`, Windows-only) and converts registry values to `Settings`. `default_managed_plist_path`, `DEFAULT_MACOS_MANAGED_PLIST_DOMAIN` and `WINDOWS_MANAGED_REGISTRY_KEY` expose the defaults.
+- **`TelemetrySubConfig`** (`settings.rs`) — Endpoint/batch/sampling settings plus optional export-channel settings: `otlp_endpoint`, `otlp_headers`, `datadog_api_key`, `datadog_site`, `datadog_endpoint` (see [`docs/telemetry.md`](telemetry.md#channels)). `strict: true` enables the strict/HIPAA redaction mode; it is OR-ed with `CODAPE_HIPAA` and can only add the stricter mode, never remove it.
 - **`FeatureFlags`** (`flags.rs`) — Toggleable features with project-level overrides, including context-window experiment values.
 - **`Experiments`** (`experiments.rs`) — A/B experiment configuration with disk caching.
 - **`resolve_api_key()`** (`settings.rs`) — Resolves `keyring://` URI references to OS keychain secrets.
@@ -29,11 +29,11 @@ Configuration layers: defaults → user config (`~/.coderex/settings.json`) → 
 ```
 Defaults (compiled)
   ↓ override
-~/.coderex/settings.json (user-level)
+~/.codape/settings.json (user-level)
   ↓ override
-.coderex/settings.json (project-level)
+.codape/settings.json (project-level)
   ↓ override
-.coderex/settings.local.json (local, gitignored by convention; written by /init)
+.codape/settings.local.json (local, gitignored by convention; written by /init)
   ↓ override
 managed sources (managed_settings.json → macOS plist → Windows registry; see below)
   ↓ override
@@ -70,9 +70,9 @@ Validation rejects zero windows and blank model names, so a mistyped value
 cannot turn compaction off.
 
 `Settings::context_window_overrides()` converts the field into the
-`coderex_core::types::ContextWindowOverrides` type used by the resolver.
+`codape_core::types::ContextWindowOverrides` type used by the resolver.
 Resolution precedence, environment variables, the client-data file
-(`~/.coderex/context_windows.json`), experiment syntax, and the built-in model
+(`~/.codape/context_windows.json`), experiment syntax, and the built-in model
 table are documented in [`docs/compact.md`](compact.md).
 
 ### Provider Endpoint and Timeout
@@ -100,15 +100,15 @@ it either.
 
 ### Environment Variables
 
-Provider variables are read from both prefixes. The `CODEREX_*` spelling wins,
+Provider variables are read from both prefixes. The `CODAPE_*` spelling wins,
 so a session can override a globally exported Claude configuration:
 
-| Setting | CodeRex | Claude-compatible |
+| Setting | Codape | Claude-compatible |
 |---|---|---|
-| API key | `CODEREX_API_KEY`, `CODEREX_AUTH_TOKEN` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` |
-| Base URL | `CODEREX_BASE_URL` | `ANTHROPIC_BASE_URL` |
-| Model | `CODEREX_MODEL` | `ANTHROPIC_MODEL`, `OPENAI_MODEL` |
-| Request timeout | `CODEREX_REQUEST_TIMEOUT_SECS` (seconds) | `API_TIMEOUT_MS` (milliseconds, rounded up) |
+| API key | `CODAPE_API_KEY`, `CODAPE_AUTH_TOKEN` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` |
+| Base URL | `CODAPE_BASE_URL` | `ANTHROPIC_BASE_URL` |
+| Model | `CODAPE_MODEL` | `ANTHROPIC_MODEL`, `OPENAI_MODEL` |
+| Request timeout | `CODAPE_REQUEST_TIMEOUT_SECS` (seconds) | `API_TIMEOUT_MS` (milliseconds, rounded up) |
 
 `settings.json` may also carry a Claude-compatible `env` object; it is applied
 to the process at startup, before providers, the model resolver and feature
@@ -117,9 +117,9 @@ flags read the environment:
 ```json
 {
   "env": {
-    "CODEREX_BASE_URL": "https://api.example.com/anthropic",
-    "CODEREX_API_KEY": "sk-…",
-    "CODEREX_MODEL": "my-gateway-alias"
+    "CODAPE_BASE_URL": "https://api.example.com/anthropic",
+    "CODAPE_API_KEY": "sk-…",
+    "CODAPE_MODEL": "my-gateway-alias"
   }
 }
 ```
@@ -157,7 +157,7 @@ than silently dropped; an empty template falls back to the default layout.
 { "statusline": { "format": "[branch] > [model] ([tokens])", "theme": "dark" } }
 ```
 
-Custom themes are JSON files in `~/.coderex/themes/`. The theme is keyed by
+Custom themes are JSON files in `~/.codape/themes/`. The theme is keyed by
 its `name` field, not the file name, and every colour field is required (the
 same keys a built-in serializes: `background`, `foreground`, `dim`, `accent`,
 `accent_secondary`, `user`, `assistant`, `tool`, `statusbar_bg`,
@@ -187,7 +187,7 @@ palette.
 
 ### Permission Rules (`permissions.allow` / `deny` / `ask`)
 
-CodeRex reads the Claude-compatible rule block from any settings layer:
+Codape reads the Claude-compatible rule block from any settings layer:
 
 ```json
 {
@@ -308,7 +308,7 @@ settings *source*:
   `permissions` is never taken.
 - **`telemetry_enabled`** — project/local settings may only **disable**
   telemetry. An attempt to set `true` is dropped, so a repository-committed
-  `.coderex/settings.json` can never turn telemetry on for a user who has not
+  `.codape/settings.json` can never turn telemetry on for a user who has not
   consented. User, flag, and managed sources may enable it.
 
 ### Invalid Files and Size Cap
@@ -334,9 +334,9 @@ settings file.
 | Carrier | Status |
 |---|---|
 | Remote HTTP | Implemented — `remote_settings.rs` (checksum-verified fetch, disk cache, fail-open, `LoadingBarrier`). |
-| Managed file | Implemented — `ConfigService::with_managed_settings_path` reads a `ManagedSettings` document, verifies its SHA-256 checksum (mismatch ⇒ ignored, fail closed), and merges it after user/project settings. Default path `<config_dir>/managed_settings.json`, overridable with `CODEREX_MANAGED_SETTINGS_PATH` so it can point at an admin-controlled location. |
-| macOS plist (MDM) | Implemented — `ConfigService::with_managed_settings_plist(path)` reads a property list with the `plist` crate; `with_default_macos_managed_plist()` selects `/Library/Managed Preferences/dev.coderex.plist`. The top level must be a dictionary of settings keys (`model`, `permission_mode`, `telemetry_enabled`, `telemetry`, …). Merged after the managed file. No checksum is verified (the OS protects `/Library/Managed Preferences`); the file is still size-capped, validated, and rejected whole on an unknown key. |
-| Windows HKLM registry | Implemented, **unverified** — `ConfigService::with_managed_settings_registry_key(path)` (or `with_default_windows_managed_registry()` for `HKLM\SOFTWARE\CodeRex`) reads values via `winreg`. Merged last. The reader is compile-gated to Windows and has not been executed on the macOS development machine; its pure value-conversion layer is unit-tested on every platform. |
+| Managed file | Implemented — `ConfigService::with_managed_settings_path` reads a `ManagedSettings` document, verifies its SHA-256 checksum (mismatch ⇒ ignored, fail closed), and merges it after user/project settings. Default path `<config_dir>/managed_settings.json`, overridable with `CODAPE_MANAGED_SETTINGS_PATH` so it can point at an admin-controlled location. |
+| macOS plist (MDM) | Implemented — `ConfigService::with_managed_settings_plist(path)` reads a property list with the `plist` crate; `with_default_macos_managed_plist()` selects `/Library/Managed Preferences/dev.codape.plist`. The top level must be a dictionary of settings keys (`model`, `permission_mode`, `telemetry_enabled`, `telemetry`, …). Merged after the managed file. No checksum is verified (the OS protects `/Library/Managed Preferences`); the file is still size-capped, validated, and rejected whole on an unknown key. |
+| Windows HKLM registry | Implemented, **unverified** — `ConfigService::with_managed_settings_registry_key(path)` (or `with_default_windows_managed_registry()` for `HKLM\SOFTWARE\Codape`) reads values via `winreg`. Merged last. The reader is compile-gated to Windows and has not been executed on the macOS development machine; its pure value-conversion layer is unit-tested on every platform. |
 
 #### Windows registry value mapping
 
@@ -362,14 +362,14 @@ carrier.
 
 **Not copied from Claude:** `preserveOnWrite` for managed-only keys. In Claude,
 managed keys can live in the same `settings.json` the CLI rewrites, so a
-non-managed write could delete an admin key. In CodeRex, managed settings are a
+non-managed write could delete an admin key. In Codape, managed settings are a
 separate source (file/remote) applied *after* user/project settings, so a
 rewrite of a user or project file can never delete a managed value. The
 mechanism has no trigger here, so adding it would be dead code.
 
 ## Current Status
 
-The `coderex-config` crate is implemented with no stubs. `WINNER_ONLY_UNDER_MERGE`
+The `codape-config` crate is implemented with no stubs. `WINNER_ONLY_UNDER_MERGE`
 and `preserveOnWrite` are deliberate ⚪ (see above). The macOS plist carrier is
 implemented and tested on macOS; the Windows registry carrier is implemented and
 compile-gated but **unverified** — it has not run on this development machine.
@@ -390,17 +390,17 @@ compile-gated but **unverified** — it has not run on this development machine.
 }
 ```
 
-The telemetry crate reads the equivalent `CODEREX_OTLP_*` / `CODEREX_DATADOG_*`
+The telemetry crate reads the equivalent `CODAPE_OTLP_*` / `CODAPE_DATADOG_*`
 environment variables directly (see [`docs/telemetry.md`](telemetry.md#channels));
-embedders that construct `coderex_telemetry::ChannelConfig` can pass these
+embedders that construct `codape_telemetry::ChannelConfig` can pass these
 settings explicitly with `TelemetryUploader::with_channels`.
 
 ### Secret store (MCP tokens)
 
 `secret_store.rs` persists the MCP OAuth tokens both `OAuthManager` and the
-`McpAuth` tool read. The OS keychain (service `coderex`, one account per store
-path) is preferred; `CODEREX_DISABLE_KEYCHAIN` forces the private-file fallback
-at `~/.coderex/mcp_tokens.json`, which is what CI uses.
+`McpAuth` tool read. The OS keychain (service `codape`, one account per store
+path) is preferred; `CODAPE_DISABLE_KEYCHAIN` forces the private-file fallback
+at `~/.codape/mcp_tokens.json`, which is what CI uses.
 
 The fallback file is written atomically from a sibling temp file:
 
@@ -420,7 +420,7 @@ fails.
 
 ### Tests
 
-`cargo test -p coderex-config` covers:
+`cargo test -p codape-config` covers:
 
 - macOS plist loading, unknown-key rejection, missing-file handling, and
   precedence over the managed JSON file (compile-gated to macOS).

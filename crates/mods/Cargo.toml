@@ -1,10 +1,11 @@
 [package]
-name = "coderex-mods"
+name = "codape-mods"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
 description = "In-process JavaScript extension hooks — a read-only host API and bounded execution"
 
@@ -12,8 +13,8 @@ description = "In-process JavaScript extension hooks — a read-only host API an
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
-coderex-config = { path = "../config" }
+codape-core = { path = "../core" }
+codape-config = { path = "../config" }
 
 async-trait.workspace = true
 rquickjs.workspace = true
@@ -32,8 +33,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-coderex-core = { path = "../core" }
-coderex-ui = { path = "../ui" }
+codape-core = { path = "../core" }
+codape-ui = { path = "../ui" }
 async-trait.workspace = true
 sha2.workspace = true
 hex.workspace = true

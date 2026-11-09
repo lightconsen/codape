@@ -1,7 +1,7 @@
 //! The telemetry event catalogue: the five event kinds a gateway may receive,
 //! their wire names, and the round-trip through the store.
 
-use coderex_telemetry::{TelemetryEvent, TelemetryHandle, TelemetryStore};
+use codape_telemetry::{TelemetryEvent, TelemetryHandle, TelemetryStore};
 
 #[test]
 fn every_event_kind_is_stored_under_its_documented_name() {

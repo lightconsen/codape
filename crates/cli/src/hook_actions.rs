@@ -2,20 +2,20 @@
 //!
 //! Three hook kinds — `prompt`, `agent`, `mcp_tool` — need something the hooks
 //! crate cannot reach: a model client and the tool registry. The session owns
-//! both, so it installs this on its [`HookRegistry`](coderex_hooks::HookRegistry).
+//! both, so it installs this on its [`HookRegistry`](codape_hooks::HookRegistry).
 //! Without it those kinds still load and then **fail**, which on a gating event
 //! denies: a gate nobody can answer must not read as an allow.
 //!
 //! This is the same shape as the rule-exemption resolver
-//! (`coderex_tools::install_rule_exemptions`): the crate that owns the decision
+//! (`codape_tools::install_rule_exemptions`): the crate that owns the decision
 //! asks, and the session that owns the capability answers.
 
 use std::sync::Arc;
 
-use coderex_core::api_client::ApiClient;
-use coderex_core::permissions::{PermissionChecker, PermissionMode};
-use coderex_core::types::ModelId;
-use coderex_hooks::{
+use codape_core::api_client::ApiClient;
+use codape_core::permissions::{PermissionChecker, PermissionMode};
+use codape_core::types::ModelId;
+use codape_hooks::{
     ActionPrompt, HookActionRunner, HookError, HookRequestError, HookRequestHandler,
     METHOD_NOT_FOUND,
 };
@@ -50,9 +50,9 @@ pub trait HookToolCaller: Send + Sync {
 }
 
 #[async_trait::async_trait]
-impl HookToolCaller for coderex_tools::RegistryToolDispatcher {
+impl HookToolCaller for codape_tools::RegistryToolDispatcher {
     async fn call(&self, name: &str, input: &serde_json::Value) -> Result<String, String> {
-        use coderex_core::tool_executor::ToolExecutor as _;
+        use codape_core::tool_executor::ToolExecutor as _;
 
         // The call id is a label, not a correlation: nothing is waiting on a
         // matching result, because the hook consumes the text directly.
@@ -107,7 +107,7 @@ impl HookActionRunner for SessionHookActionRunner {
         );
         let system = if request.agent { AGENT_SYSTEM } else { "" };
 
-        let answer = coderex_core::orchestrator::run_side_query(
+        let answer = codape_core::orchestrator::run_side_query(
             self.api.as_ref(),
             system,
             &request.prompt,
@@ -128,7 +128,7 @@ impl HookActionRunner for SessionHookActionRunner {
     ) -> Result<String, HookError> {
         // The qualified name is what the registry knows the tool by; the server
         // and tool are how the hook's configuration names it.
-        let name = coderex_mcp::proxy::qualified_tool_name(server, tool);
+        let name = codape_mcp::proxy::qualified_tool_name(server, tool);
         self.tools
             .call(&name, input)
             .await
@@ -230,10 +230,10 @@ impl HookRequestHandler for SessionHookRequestHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::api_client::{ApiError, ApiResponse, StreamEvent};
-    use coderex_core::tool_executor::ToolInfo;
-    use coderex_core::types::UsageSummary;
-    use coderex_hooks::{ActionPrompt, HookActionRunner};
+    use codape_core::api_client::{ApiError, ApiResponse, StreamEvent};
+    use codape_core::tool_executor::ToolInfo;
+    use codape_core::types::UsageSummary;
+    use codape_hooks::{ActionPrompt, HookActionRunner};
 
     /// Records what it was asked and answers with fixed text.
     struct RecordingApi {

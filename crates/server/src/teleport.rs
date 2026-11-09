@@ -1,4 +1,4 @@
-//! Rendezvous service for `coderex teleport`.
+//! Rendezvous service for `codape teleport`.
 //!
 //! `TeleportManager` can hand a session snapshot to another *directory* on the
 //! same machine, but not to another machine: the two sides need somewhere to

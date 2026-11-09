@@ -6,7 +6,7 @@ use crate::state::{TextSelection, UiState};
 use crate::statusline::Statusline;
 use crate::terminal_profile::TerminalProfile;
 use crate::themes::Theme;
-use coderex_core::ui_protocol::UiElement;
+use codape_core::ui_protocol::UiElement;
 use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::queue;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -53,9 +53,9 @@ pub struct ModUiHitRegion {
 }
 
 /// Lazy-initialized syntax highlighter for the TUI.
-fn syntax_highlighter() -> &'static coderex_core::syntax::SyntaxHighlighter {
-    static HIGHLIGHTER: OnceLock<coderex_core::syntax::SyntaxHighlighter> = OnceLock::new();
-    HIGHLIGHTER.get_or_init(coderex_core::syntax::SyntaxHighlighter::new)
+fn syntax_highlighter() -> &'static codape_core::syntax::SyntaxHighlighter {
+    static HIGHLIGHTER: OnceLock<codape_core::syntax::SyntaxHighlighter> = OnceLock::new();
+    HIGHLIGHTER.get_or_init(codape_core::syntax::SyntaxHighlighter::new)
 }
 
 /// ASCII T-Rex on the welcome page.
@@ -305,7 +305,7 @@ fn enter_commands(profile: &TerminalProfile, out: &mut impl std::io::Write) -> s
 ///
 /// `keyboard_pushed` is passed explicitly rather than re-derived from the
 /// profile: popping a level that was never pushed would corrupt the stack for
-/// whatever runs after CodeRex.
+/// whatever runs after Codape.
 fn exit_commands(keyboard_pushed: bool, out: &mut impl std::io::Write) -> std::io::Result<()> {
     if keyboard_pushed {
         queue!(out, PopKeyboardEnhancementFlags)?;
@@ -1438,9 +1438,9 @@ fn render_welcome_art(
     }
 }
 
-/// `CodeRex v0.1.0 · model · branch`, omitting what the session does not know.
+/// `Codape v0.1.0 · model · branch`, omitting what the session does not know.
 fn welcome_meta(model: &str, branch: &str) -> String {
-    let mut parts = vec![format!("CodeRex v{}", env!("CARGO_PKG_VERSION"))];
+    let mut parts = vec![format!("Codape v{}", env!("CARGO_PKG_VERSION"))];
     if !model.is_empty() {
         parts.push(model.to_string());
     }
@@ -1548,7 +1548,7 @@ fn welcome_meta_spans(theme: &Theme, model: &str, branch: &str) -> Vec<Span<'sta
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
-            format!("CodeRex v{}", env!("CARGO_PKG_VERSION")),
+            format!("Codape v{}", env!("CARGO_PKG_VERSION")),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -2540,7 +2540,7 @@ mod layout_tests {
             .join("\n");
 
         assert!(screen.contains("C O D E R E X"), "{screen}");
-        assert!(screen.contains("CodeRex v"), "{screen}");
+        assert!(screen.contains("Codape v"), "{screen}");
         assert!(screen.contains("claude-sonnet-4-6"), "{screen}");
         assert!(screen.contains("Type /help for commands"), "{screen}");
         assert!(
@@ -2677,11 +2677,11 @@ mod layout_tests {
             Some("rs")
         );
         assert_eq!(
-            guess_language("[package]\nname = \"coderex\"\n"),
+            guess_language("[package]\nname = \"codape\"\n"),
             Some("toml")
         );
         assert_eq!(
-            guess_language("{\n  \"name\": \"coderex\"\n}\n"),
+            guess_language("{\n  \"name\": \"codape\"\n}\n"),
             Some("json")
         );
         assert_eq!(guess_language("def f():\n    pass\n"), Some("py"));
@@ -2807,7 +2807,7 @@ mod layout_tests {
             .join("\n");
 
         assert!(screen.contains("C O D E R E X"), "{screen}");
-        assert!(screen.contains("CodeRex v"), "{screen}");
+        assert!(screen.contains("Codape v"), "{screen}");
         assert!(screen.contains("Type /help for commands"), "{screen}");
         assert!(
             !screen.contains('╭'),
@@ -2916,7 +2916,7 @@ mod layout_tests {
     /// the system-message prefix and the box's border/padding columns.
     #[test]
     fn a_mod_ui_block_records_absolute_button_hits() {
-        use coderex_core::ui_protocol::UiElement;
+        use codape_core::ui_protocol::UiElement;
 
         let elements = vec![UiElement::Box {
             title: None,

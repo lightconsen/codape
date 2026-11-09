@@ -10,10 +10,10 @@
 //! - **Filesystem and network confinement** — a Seatbelt profile on macOS; on
 //!   Linux a bubblewrap mount and network namespace, or the Landlock
 //!   path-beneath fallback when bubblewrap is unavailable. Both reuse
-//!   `coderex_core::sandbox`, the same primitives the shell tools use, rather
+//!   `codape_core::sandbox`, the same primitives the shell tools use, rather
 //!   than defining a second policy language.
 //! - **cgroup v2 limits (Linux)** — when `max_memory_mb` is configured, the
-//!   hook is placed in a `coderex-*` cgroup with `memory.max`/`pids.max`
+//!   hook is placed in a `codape-*` cgroup with `memory.max`/`pids.max`
 //!   after spawn, in addition to `RLIMIT_AS`. If the cgroup tree is not
 //!   writable or delegated, the hook runs with the rlimit and a warning.
 //!
@@ -27,7 +27,7 @@
 //!
 //! ## Escape hatches and failure
 //!
-//! `CODEREX_HOOK_SANDBOX=0` (or `false`/`no`) and a hook's
+//! `CODAPE_HOOK_SANDBOX=0` (or `false`/`no`) and a hook's
 //! `sandbox.enabled: false` both disable confinement explicitly; resource
 //! limits still apply. When confinement **cannot** be created — Windows has no
 //! path isolation, Linux has neither bubblewrap nor Landlock, macOS has no
@@ -57,13 +57,13 @@
 
 use crate::engine::HookConfig;
 use crate::events::HookError;
-use coderex_core::sandbox::{SandboxConfig, SandboxHandle};
+use codape_core::sandbox::{SandboxConfig, SandboxHandle};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// The environment variable that switches hook confinement off.
-pub const HOOK_SANDBOX_ENV: &str = "CODEREX_HOOK_SANDBOX";
+pub const HOOK_SANDBOX_ENV: &str = "CODAPE_HOOK_SANDBOX";
 
 /// The result of deciding how a command hook will be confined.
 pub enum SandboxPlan {
@@ -77,7 +77,7 @@ pub enum SandboxPlan {
 
 /// Whether an environment value is an explicit negative.
 ///
-/// Consistent with `CODEREX_BWRAP`: anything but `0`, `false` or `no` leaves
+/// Consistent with `CODAPE_BWRAP`: anything but `0`, `false` or `no` leaves
 /// the sandbox on, because a sandbox that switches itself off over an
 /// unexpected value is worse than one that says what it wants.
 fn sandbox_disabled_by_env(value: Option<&str>) -> bool {
@@ -154,7 +154,7 @@ pub fn enforce(plan: SandboxPlan, gating: bool) -> Result<Option<SandboxHandle>,
 
 /// Whether this platform can actually apply filesystem confinement.
 ///
-/// `coderex_core::sandbox::filesystem_isolation()` reports the platform's
+/// `codape_core::sandbox::filesystem_isolation()` reports the platform's
 /// capability, but the wrapper still has to be present: a missing
 /// `sandbox-exec` or `bwrap` would otherwise turn every hook into a spawn
 /// failure rather than a clear policy decision.
@@ -172,22 +172,21 @@ fn confinement_availability() -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if coderex_core::sandbox::bubblewrap_in_force()
-            || coderex_core::sandbox::landlock_in_force()
+        if codape_core::sandbox::bubblewrap_in_force() || codape_core::sandbox::landlock_in_force()
         {
             Ok(())
-        } else if coderex_core::sandbox::bubblewrap_available() {
+        } else if codape_core::sandbox::bubblewrap_available() {
             Err(format!(
                 "bubblewrap (bwrap) is installed but switched off by {}, and the Landlock \
                  fallback is switched off by {}",
-                coderex_core::sandbox::BWRAP_ENV,
-                coderex_core::sandbox::LANDLOCK_ENV
+                codape_core::sandbox::BWRAP_ENV,
+                codape_core::sandbox::LANDLOCK_ENV
             ))
-        } else if coderex_core::sandbox::landlock_available() {
+        } else if codape_core::sandbox::landlock_available() {
             Err(format!(
                 "bubblewrap (bwrap) is not installed and the Landlock fallback is switched \
                  off by {}",
-                coderex_core::sandbox::LANDLOCK_ENV
+                codape_core::sandbox::LANDLOCK_ENV
             ))
         } else {
             Err(
@@ -557,7 +556,7 @@ impl HookSandboxConfig {
 /// macOS attempts `RLIMIT_DATA` as a **best-effort** ceiling and ignores the
 /// kernel's rejection (modern Darwin returns `EINVAL` for every useful finite
 /// value, as it does for `RLIMIT_AS` and `RLIMIT_RSS`). Windows uses a Job
-/// Object through [`coderex_core::sandbox`]; see [`finish_windows_spawn`].
+/// Object through [`codape_core::sandbox`]; see [`finish_windows_spawn`].
 ///
 /// On Linux a cgroup with `memory.max` is applied after spawn in addition to
 /// these limits — see [`prepare_cgroup_limits`] and [`attach_cgroup_limits`].
@@ -654,7 +653,7 @@ fn apply_unix_limits(command: &mut Command, config: &HookConfig) {
                 // failure. Where it is accepted, it bounds the data segment.
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = coderex_core::sandbox::apply_darwin_memory_limit(bytes);
+                    let _ = codape_core::sandbox::apply_darwin_memory_limit(bytes);
                 }
             }
 
@@ -672,14 +671,14 @@ fn apply_unix_limits(command: &mut Command, config: &HookConfig) {
 #[cfg(target_os = "linux")]
 pub fn prepare_cgroup_limits(
     config: &HookConfig,
-) -> Option<coderex_core::sandbox::CgroupMemoryLimit> {
+) -> Option<codape_core::sandbox::CgroupMemoryLimit> {
     let bytes = config
         .max_memory_mb
         .map(|mb| mb.saturating_mul(1024 * 1024))?;
 
-    match coderex_core::sandbox::CgroupMemoryLimit::create(
+    match codape_core::sandbox::CgroupMemoryLimit::create(
         Some(bytes),
-        Some(coderex_core::sandbox::cgroup::DEFAULT_PIDS_MAX),
+        Some(codape_core::sandbox::cgroup::DEFAULT_PIDS_MAX),
     ) {
         Ok(limit) => Some(limit),
         Err(error) => {
@@ -700,7 +699,7 @@ pub fn prepare_cgroup_limits(
 /// the rlimit rather than the cgroup limit.
 #[cfg(target_os = "linux")]
 pub fn attach_cgroup_limits(
-    limit: &coderex_core::sandbox::CgroupMemoryLimit,
+    limit: &codape_core::sandbox::CgroupMemoryLimit,
     child: &tokio::process::Child,
 ) {
     let Some(pid) = child.id() else {
@@ -732,7 +731,7 @@ pub fn attach_cgroup_limits(
 #[cfg(target_os = "windows")]
 #[allow(clippy::unused_async)] // awaited by one caller for every platform
 pub async fn finish_windows_spawn(
-    sandbox: Option<&coderex_core::sandbox::SandboxHandle>,
+    sandbox: Option<&codape_core::sandbox::SandboxHandle>,
     child: &mut tokio::process::Child,
 ) -> Result<(), crate::HookError> {
     let Some(sandbox) = sandbox else {
@@ -792,7 +791,7 @@ mod tests {
         // exit status is not the assertion because `sh` runs the next command
         // after the one that hit the limit.
         let target =
-            std::env::temp_dir().join(format!("coderex-hook-limit-sandbox-{}", std::process::id()));
+            std::env::temp_dir().join(format!("codape-hook-limit-sandbox-{}", std::process::id()));
         let mut hook = config();
         hook.command = format!(
             "ulimit -f unlimited 2>/dev/null || true; \
@@ -838,7 +837,7 @@ mod tests {
             .is_ok_and(|status| status.success());
 
         let marker = std::env::temp_dir().join(format!(
-            "coderex-hook-memory-{}-{}",
+            "codape-hook-memory-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -931,10 +930,7 @@ mod policy_tests {
 
     #[cfg(unix)]
     fn unique_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "coderex-hook-sandbox-{name}-{}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("codape-hook-sandbox-{name}-{}", std::process::id()))
     }
 
     /// The default policy writes the workspace and temp directory, reads home
@@ -947,7 +943,7 @@ mod policy_tests {
         // is always writable, so `temp_dir()` would be in `allowed_write_paths`
         // either way. Point the cwd at a subdirectory so "the shared temp tree
         // was not added on its own" is a statement the test can actually make.
-        hook.cwd = Some(std::env::temp_dir().join("coderex-hook-policy-fixture"));
+        hook.cwd = Some(std::env::temp_dir().join("codape-hook-policy-fixture"));
         let workspace = canonicalize_lenient(hook.cwd.as_deref().unwrap());
         let policy = sandbox_config(&hook);
 
@@ -1038,7 +1034,7 @@ mod policy_tests {
         );
     }
 
-    /// `CODEREX_HOOK_SANDBOX=0` is the global escape hatch, and only an
+    /// `CODAPE_HOOK_SANDBOX=0` is the global escape hatch, and only an
     /// explicit negative counts.
     #[test]
     fn env_opt_out_only_on_an_explicit_negative() {
@@ -1075,7 +1071,7 @@ mod policy_tests {
             "{error:?}"
         );
         assert!(
-            error.to_string().contains("CODEREX_HOOK_SANDBOX"),
+            error.to_string().contains("CODAPE_HOOK_SANDBOX"),
             "the error must name the escape hatch: {error}"
         );
     }
@@ -1232,7 +1228,7 @@ mod policy_tests {
         let workspace = unique_dir("denied");
         std::fs::create_dir_all(&workspace).unwrap();
         let forbidden = home.join(format!(
-            ".coderex-hook-sandbox-escape-{}",
+            ".codape-hook-sandbox-escape-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&forbidden);
@@ -1265,7 +1261,7 @@ mod policy_tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_hook_sandbox_denies_a_write_outside_the_allowed_paths() {
-        if !coderex_core::sandbox::bubblewrap_in_force() {
+        if !codape_core::sandbox::bubblewrap_in_force() {
             eprintln!("skipping: bubblewrap is not in force");
             return;
         }
@@ -1278,7 +1274,7 @@ mod policy_tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let inside = workspace.join("inside.txt");
         let forbidden = home.join(format!(
-            ".coderex-hook-sandbox-escape-{}",
+            ".codape-hook-sandbox-escape-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&forbidden);
@@ -1314,7 +1310,7 @@ mod policy_tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_hook_landlock_denies_a_write_outside_the_allowed_paths() {
-        if !coderex_core::sandbox::landlock_in_force() {
+        if !codape_core::sandbox::landlock_in_force() {
             eprintln!("skipping: Landlock is not the backend in force");
             return;
         }
@@ -1327,7 +1323,7 @@ mod policy_tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let inside = workspace.join("inside.txt");
         let forbidden = home.join(format!(
-            ".coderex-hook-landlock-escape-{}",
+            ".codape-hook-landlock-escape-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_file(&forbidden);
@@ -1362,8 +1358,7 @@ mod policy_tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_gating_hook_is_denied_when_no_confinement_exists() {
-        if coderex_core::sandbox::bubblewrap_in_force()
-            || coderex_core::sandbox::landlock_in_force()
+        if codape_core::sandbox::bubblewrap_in_force() || codape_core::sandbox::landlock_in_force()
         {
             eprintln!("skipping: bubblewrap or Landlock is in force");
             return;
@@ -1382,11 +1377,11 @@ mod policy_tests {
     #[cfg(target_os = "windows")]
     #[tokio::test]
     async fn windows_hook_sandbox_confines_a_write() {
-        if !coderex_core::sandbox::app_container_available() {
+        if !codape_core::sandbox::app_container_available() {
             assert!(
-                std::env::var("CODEREX_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
+                std::env::var("CODAPE_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
                 "AppContainer is unavailable on this runner but \
-                 CODEREX_REQUIRE_APP_CONTAINER=1"
+                 CODAPE_REQUIRE_APP_CONTAINER=1"
             );
             // The refusal is the contract when the runtime is missing.
             let error = run_hook(hook_config())

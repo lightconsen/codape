@@ -1,7 +1,7 @@
 //! Plugin process runtime — JSON-RPC stdio transport for external process plugins.
 //!
 //! Spawns plugin executables and communicates via JSON-RPC 2.0 over stdio,
-//! using the `coderex/` method namespace.
+//! using the `codape/` method namespace.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,19 +169,19 @@ impl PluginProcess {
         Ok(())
     }
 
-    /// Perform the coderex initialize handshake.
+    /// Perform the codape initialize handshake.
     pub async fn initialize(&mut self) -> Result<Value, String> {
         let init_params = serde_json::json!({
             "protocolVersion": "1.0",
             "capabilities": {},
             "clientInfo": {
-                "name": "coderex",
+                "name": "codape",
                 "version": env!("CARGO_PKG_VERSION")
             }
         });
 
         let result = self
-            .send_request("coderex/initialize", Some(init_params))
+            .send_request("codape/initialize", Some(init_params))
             .await?;
         self.initialized = true;
         Ok(result)
@@ -189,7 +189,7 @@ impl PluginProcess {
 
     /// Discover commands from the plugin.
     pub async fn list_commands(&mut self) -> Result<Vec<PluginCommandInfo>, String> {
-        let result = self.send_request("coderex/commands/list", None).await?;
+        let result = self.send_request("codape/commands/list", None).await?;
         let commands: Vec<PluginCommandInfo> = serde_json::from_value(result)
             .map_err(|e| format!("failed to parse commands/list response: {e}"))?;
         self.commands.clone_from(&commands);
@@ -203,7 +203,7 @@ impl PluginProcess {
             "args": args,
         });
         let result = self
-            .send_request("coderex/commands/execute", Some(params))
+            .send_request("codape/commands/execute", Some(params))
             .await?;
         match result {
             Value::String(s) => Ok(s),
@@ -213,7 +213,7 @@ impl PluginProcess {
 
     /// Discover skills from the plugin.
     pub async fn list_skills(&mut self) -> Result<Vec<PluginSkillInfo>, String> {
-        let result = self.send_request("coderex/skills/list", None).await?;
+        let result = self.send_request("codape/skills/list", None).await?;
         let skills: Vec<PluginSkillInfo> = serde_json::from_value(result)
             .map_err(|e| format!("failed to parse skills/list response: {e}"))?;
         self.skills.clone_from(&skills);
@@ -227,7 +227,7 @@ impl PluginProcess {
             "context": context,
         });
         let result = self
-            .send_request("coderex/skills/execute", Some(params))
+            .send_request("codape/skills/execute", Some(params))
             .await?;
         match result {
             Value::String(s) => Ok(s),
@@ -237,7 +237,7 @@ impl PluginProcess {
 
     /// Ping the plugin process for health.
     pub async fn ping(&mut self) -> Result<(), String> {
-        self.send_request("coderex/ping", None).await?;
+        self.send_request("codape/ping", None).await?;
         Ok(())
     }
 
@@ -374,7 +374,7 @@ impl PluginProcess {
     /// Terminate the process gracefully.
     pub async fn terminate(&mut self) -> Result<(), String> {
         // Try graceful shutdown request first
-        let _ = self.send_notification("coderex/shutdown", None).await;
+        let _ = self.send_notification("codape/shutdown", None).await;
 
         if let Some(ref mut process) = self.process {
             process
@@ -445,13 +445,13 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: 42,
-            method: "coderex/ping".to_string(),
+            method: "codape/ping".to_string(),
             params: Some(serde_json::json!({})),
         };
         let serialized = serde_json::to_string(&req).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed["id"], 42);
-        assert_eq!(parsed["method"], "coderex/ping");
+        assert_eq!(parsed["method"], "codape/ping");
     }
 
     #[test]

@@ -1,12 +1,13 @@
 [package]
-name = "coderex-core"
+name = "codape-core"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
-description = "Core types, QueryEngine, state machines, and shared traits for CodeRex"
+description = "Core types, QueryEngine, state machines, and shared traits for Codape"
 
 [lints]
 workspace = true
@@ -17,7 +18,7 @@ test-utils = ["dep:wiremock"]
 
 [dependencies]
 # The Linux sandbox reaches libc directly (seccomp, prlimit). It was declared in
-# the workspace and never listed here, so `coderex-core` did not build on Linux
+# the workspace and never listed here, so `codape-core` did not build on Linux
 # at all — the sandbox code was reviewed but never compiled on the platform it
 # exists for.
 libc.workspace = true
@@ -55,7 +56,7 @@ crossterm = { workspace = true, optional = true }
 
 # The Windows sandbox needs Win32 directly: AppContainer profiles, DACL
 # editing, process attributes and Job Objects. Declaring it only in the code
-# left `coderex-core` unable to build for Windows at all.
+# left `codape-core` unable to build for Windows at all.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

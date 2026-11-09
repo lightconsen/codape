@@ -86,7 +86,7 @@ pub struct ToolOutput {
     ///
     /// Most tools leave this empty; MCP image content and an image read use
     /// it so the model sees the image instead of base64 text.
-    pub images: Vec<coderex_core::types::ImageBlock>,
+    pub images: Vec<codape_core::types::ImageBlock>,
 }
 
 impl ToolOutput {

@@ -1,4 +1,4 @@
-//! Standalone eval runner for CodeRex.
+//! Standalone eval runner for Codape.
 //!
 //! Run all registered eval scenarios and report pass/fail status.
 //!
@@ -8,7 +8,7 @@
 //! cargo run --bin eval-runner
 //! ```
 
-use coderex_test_utils::{EvalAssertion, EvalScenario, run_eval};
+use codape_test_utils::{EvalAssertion, EvalScenario, run_eval};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -18,7 +18,7 @@ async fn main() {
         .init();
 
     println!("╔══════════════════════════════════════════════════════════════╗");
-    println!("║           CodeRex AI Eval Runner                             ║");
+    println!("║           Codape AI Eval Runner                             ║");
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
 

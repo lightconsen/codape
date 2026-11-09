@@ -1,4 +1,4 @@
-# CodeRex Capability Matrix
+# Codape Capability Matrix
 
 ## Legend
 

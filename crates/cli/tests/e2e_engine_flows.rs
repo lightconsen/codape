@@ -3,12 +3,12 @@
 //! These tests exercise the full QueryEngine with a mock API client,
 //! verifying end-to-end behavior without hitting real LLM APIs.
 
-use coderex_core::api_client::StreamEvent;
-use coderex_core::engine::{SubmitOptions, TerminalReason};
-use coderex_core::types::EngineEvent;
-use coderex_core::types::ToolCall;
-use coderex_core::types::UsageSummary;
-use coderex_test_utils::{
+use codape_core::api_client::StreamEvent;
+use codape_core::engine::{SubmitOptions, TerminalReason};
+use codape_core::types::EngineEvent;
+use codape_core::types::ToolCall;
+use codape_core::types::UsageSummary;
+use codape_test_utils::{
     MockApiClient, MockResponseType, StubOkToolExecutor, TestRig, TestRigBuilder, mock_response,
     mock_response_with_tool_calls,
 };

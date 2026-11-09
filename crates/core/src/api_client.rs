@@ -488,7 +488,7 @@ impl std::str::FromStr for ReasoningEffort {
 ///
 /// Set it to `0`/`false` to stop sending `cache_control` breakpoints, or to
 /// `1`/`true` to force them on. The variable wins over the settings file.
-pub const PROMPT_CACHING_ENV: &str = "CODEREX_PROMPT_CACHING";
+pub const PROMPT_CACHING_ENV: &str = "CODAPE_PROMPT_CACHING";
 
 /// Parse a prompt-caching override, returning `None` for "not specified".
 ///
@@ -621,11 +621,11 @@ impl ApiConfig {
             max_retries: 3,
             retry_backoff: Duration::from_secs(1),
             request_timeout_secs: 120,
-            provider_profile: std::env::var("CODEREX_PROVIDER_PROFILE").ok(),
+            provider_profile: std::env::var("CODAPE_PROVIDER_PROFILE").ok(),
             custom_headers: parse_custom_headers_env(),
             metadata_policy: MetadataPolicy::Session,
-            session_id: std::env::var("CODEREX_SESSION_ID").ok(),
-            device_id: std::env::var("CODEREX_DEVICE_ID").ok(),
+            session_id: std::env::var("CODAPE_SESSION_ID").ok(),
+            device_id: std::env::var("CODAPE_DEVICE_ID").ok(),
             client_name: "cli".into(),
             request_context: None,
             reasoning_effort: None,
@@ -998,7 +998,7 @@ impl AnthropicApiClient {
 
     fn user_agent() -> String {
         format!(
-            "CodeRex/{} ({}; {})",
+            "Codape/{} ({}; {})",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -1051,7 +1051,7 @@ impl AnthropicApiClient {
     /// A cloud deployment is its own case: Bedrock, Vertex, and the other cloud
     /// kinds all speak the Anthropic Messages shape here, so they take the
     /// extended-thinking budget even though their host name resolves to a
-    /// profile CodeRex does not otherwise know.
+    /// profile Codape does not otherwise know.
     fn reasoning_effort_support(&self) -> ReasoningEffortSupport {
         if self.config.cloud.is_some() {
             return ReasoningEffortSupport::AnthropicThinking;
@@ -1251,7 +1251,7 @@ impl AnthropicApiClient {
             .as_ref()
             .and_then(|ctx| ctx.session_id.clone())
             .or_else(|| self.config.session_id.clone())
-            .or_else(|| std::env::var("CODEREX_SESSION_ID").ok())
+            .or_else(|| std::env::var("CODAPE_SESSION_ID").ok())
             .unwrap_or_else(|| "unknown".into());
         let device_id = self
             .config
@@ -1259,7 +1259,7 @@ impl AnthropicApiClient {
             .as_ref()
             .and_then(|ctx| ctx.device_id.clone())
             .or_else(|| self.config.device_id.clone())
-            .or_else(|| std::env::var("CODEREX_DEVICE_ID").ok())
+            .or_else(|| std::env::var("CODAPE_DEVICE_ID").ok())
             .unwrap_or_else(|| "unknown".into());
         serde_json::json!({
             "device_id": device_id,
@@ -1280,8 +1280,8 @@ impl AnthropicApiClient {
         let user_agent = Self::user_agent();
         req = req
             .header("User-Agent", user_agent.clone())
-            .header("X-CodeRex-Client", &self.config.client_name)
-            .header("X-CodeRex-Request-Id", request_id);
+            .header("X-Codape-Client", &self.config.client_name)
+            .header("X-Codape-Request-Id", request_id);
 
         if let Some(session_id) = self
             .config
@@ -1289,10 +1289,10 @@ impl AnthropicApiClient {
             .as_ref()
             .and_then(|ctx| ctx.session_id.clone())
             .or_else(|| self.config.session_id.clone())
-            .or_else(|| std::env::var("CODEREX_SESSION_ID").ok())
+            .or_else(|| std::env::var("CODAPE_SESSION_ID").ok())
             && !session_id.trim().is_empty()
         {
-            req = req.header("X-CodeRex-Session-Id", session_id);
+            req = req.header("X-Codape-Session-Id", session_id);
         }
 
         if let Some(agent_id) = self
@@ -1302,7 +1302,7 @@ impl AnthropicApiClient {
             .and_then(|ctx| ctx.agent_id.clone())
             && !agent_id.trim().is_empty()
         {
-            req = req.header("X-CodeRex-Agent-Id", agent_id);
+            req = req.header("X-Codape-Agent-Id", agent_id);
         }
 
         if self.profile_name() == "dashscope" {
@@ -1311,7 +1311,7 @@ impl AnthropicApiClient {
                 .header("X-DashScope-CacheControl", "enable")
                 .header(
                     "X-DashScope-AuthType",
-                    std::env::var("CODEREX_AUTHTYPE").unwrap_or_else(|_| "api_key".into()),
+                    std::env::var("CODAPE_AUTHTYPE").unwrap_or_else(|_| "api_key".into()),
                 );
         }
 
@@ -2279,7 +2279,7 @@ fn parse_custom_headers(raw: &str) -> BTreeMap<String, String> {
 }
 
 fn parse_custom_headers_env() -> BTreeMap<String, String> {
-    std::env::var("CODEREX_CUSTOM_HEADERS")
+    std::env::var("CODAPE_CUSTOM_HEADERS")
         .map_or_else(|_| BTreeMap::new(), |value| parse_custom_headers(&value))
 }
 
@@ -2337,7 +2337,7 @@ mod tests {
             .collect();
         let mut body = serde_json::json!({
             "model": "claude-sonnet-4-6",
-            "system": "You are CodeRex.",
+            "system": "You are Codape.",
             "messages": messages,
             "max_tokens": 1024,
         });
@@ -2440,7 +2440,7 @@ mod tests {
         assert_eq!(count_cache_markers(&body), 0);
         assert_eq!(
             body["system"],
-            serde_json::json!("You are CodeRex."),
+            serde_json::json!("You are Codape."),
             "the string form is kept when there is no marker to attach"
         );
     }
@@ -3060,8 +3060,8 @@ mod tests {
         let built = req.build().expect("request should build");
         let headers = built.headers();
         assert!(headers.get("User-Agent").is_some());
-        assert_eq!(headers.get("X-CodeRex-Client").unwrap(), "cli");
-        assert_eq!(headers.get("X-CodeRex-Request-Id").unwrap(), "req-123");
+        assert_eq!(headers.get("X-Codape-Client").unwrap(), "cli");
+        assert_eq!(headers.get("X-Codape-Request-Id").unwrap(), "req-123");
         assert_eq!(headers.get("X-Custom").unwrap(), "1");
         assert_eq!(headers.get("X-DashScope-CacheControl").unwrap(), "enable");
     }

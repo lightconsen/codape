@@ -76,19 +76,19 @@ fn run_with_control_responses(
 
     // The prompt is positional: the control channel answers on stdin, and a
     // prompt read from stdin to EOF closes it before any request exists.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--output-format", "stream-json", prompt])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
 
     let mut stdin = Some(child.stdin.take().expect("stdin"));
 
@@ -164,7 +164,7 @@ fn run_with_control_responses(
     }
 
     let status = child.wait().expect("wait");
-    assert!(status.success(), "coderex failed");
+    assert!(status.success(), "codape failed");
     let _ = child.kill();
     let _ = child.wait();
     outcome

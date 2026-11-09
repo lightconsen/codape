@@ -1,6 +1,6 @@
 //! Custom agent definitions loaded from user configuration files.
 //!
-//! Scans `~/.coderex/agents/*.json` for custom agent definitions that
+//! Scans `~/.codape/agents/*.json` for custom agent definitions that
 //! extend the built-in agent types with user-defined prompts, tool
 //! whitelists, and resource limits.
 
@@ -51,7 +51,7 @@ impl std::fmt::Display for AgentLoadWarning {
     }
 }
 
-/// Load all custom agent definitions from `~/.coderex/agents/*.json`.
+/// Load all custom agent definitions from `~/.codape/agents/*.json`.
 ///
 /// Returns a map of agent name to definition. An unreadable or malformed
 /// file is skipped with a warning naming its path and the error, so a typo
@@ -59,7 +59,7 @@ impl std::fmt::Display for AgentLoadWarning {
 #[must_use]
 pub fn load_custom_agents() -> HashMap<String, CustomAgentDef> {
     home::home_dir().map_or_else(HashMap::new, |home| {
-        load_custom_agents_from_dir(&home.join(".coderex").join("agents"))
+        load_custom_agents_from_dir(&home.join(".codape").join("agents"))
     })
 }
 

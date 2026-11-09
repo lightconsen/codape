@@ -27,7 +27,7 @@ attackers="${3:-2}"
 echo "race soak: ${processes} process(es) x ${iterations} iterations x ${attackers} attacker(s)"
 
 # Build once so the processes do not race each other through cargo's lock.
-cargo test --locked -p coderex-tools --lib --no-run --message-format=json \
+cargo test --locked -p codape-tools --lib --no-run --message-format=json \
     > target/race-soak-build.json
 test_binary=$(python3 - <<'PY'
 import json

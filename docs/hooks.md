@@ -52,7 +52,7 @@ prints a JSON result on stdout; a `PreToolUse` hook can deny a tool, a
 `Settings.hooks` is raw JSON that nothing used to load. The install path is:
 
 ```rust
-let registry = coderex_hooks::HookRegistry::from_settings_json(
+let registry = codape_hooks::HookRegistry::from_settings_json(
     settings.hooks.as_ref().unwrap_or(&serde_json::Value::Null),
 )?;
 engine.set_hooks(registry.into_executor());
@@ -69,7 +69,7 @@ HookTier::Managed)` so they can run ahead of repository-controlled hooks.
 registry, which is what the CLI uses.
 
 **Status:** wired. `Settings` carries the hook layers separately (`HookLayers`
-in `coderex-config`: core, managed, and plugin), so `crates/cli/src/repl.rs`
+in `codape-config`: core, managed, and plugin), so `crates/cli/src/repl.rs`
 loads managed hooks as `HookTier::Managed` and user/project hooks as
 `HookTier::Core` in `apply_cli_config`. Managed hooks are not also installed as
 Core. Active plugins are the source for the `Plugin` tier: each manifest's
@@ -116,11 +116,11 @@ defaults to `command`, so existing settings keep working.
 
 These three kinds need something this crate deliberately does not have: a model
 client (`prompt`, `agent`) or the MCP server registry (`mcp_tool`).
-`coderex-core`'s API client and `coderex-mcp` are the *session's*, not the hook
+`codape-core`'s API client and `codape-mcp` are the *session's*, not the hook
 system's, so the session injects one implementation:
 
 ```rust
-let mut registry = coderex_hooks::HookRegistry::from_settings_json(hooks)?;
+let mut registry = codape_hooks::HookRegistry::from_settings_json(hooks)?;
 registry.set_action_runner(std::sync::Arc::new(SessionHookActionRunner::new(api, mcp)));
 engine.set_hooks(registry.into_executor());
 ```
@@ -197,7 +197,7 @@ Three properties are deliberate, because the body is the conversation:
 `blockPrivateHosts` is off by default, because a local hook endpoint is an
 ordinary thing to want. On, it refuses an endpoint whose host resolves to
 localhost or a private range. Both of those live in
-`coderex_core::hook_security` — `UrlValidator`, `SsrfGuard`, `EnvInterpolator`
+`codape_core::hook_security` — `UrlValidator`, `SsrfGuard`, `EnvInterpolator`
 and `env_var_references` — which existed for this purpose and had no caller
 until now.
 
@@ -273,7 +273,7 @@ Callers that only gate read `stop`; callers that want to tell the two apart read
 `failed`.
 
 Note this is **stricter than Claude's default**. Claude's `onFailure` defaults
-to `continue` for `command` hooks; CodeRex chooses fail-closed because the
+to `continue` for `command` hooks; Codape chooses fail-closed because the
 checklist asks for it. A PreToolUse hook that exits non-zero, prints nothing, or
 prints non-JSON will deny the tool rather than silently allowing it.
 
@@ -285,7 +285,7 @@ list; the test that used to name reserved events now asserts that none is
 reserved.
 
 - `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`,
-  `PermissionDenied` — `coderex_core::tool_scheduler`.
+  `PermissionDenied` — `codape_core::tool_scheduler`.
 
 A `PostToolUse` hook may return **`updatedToolOutput`** (or
 `updated_tool_output`): a string that replaces the tool's output before the
@@ -294,12 +294,12 @@ auditing hook can redact, reformat or annotate a result. The first hook that
 supplies one wins; hooks without it leave the result unchanged.
 - `UserPromptSubmit`, `SessionStart`, `TurnEnd`, `Stop`, `PreCompact`,
   `PostCompact`, `Notification`, `Elicitation`, `ElicitationResult` —
-  `coderex_core::engine`.
+  `codape_core::engine`.
 - `SubagentStart`, `SubagentStop`, `TeammateIdle` —
-  `coderex_agents::manager`.
+  `codape_agents::manager`.
 - `WorktreeCreate` — the `EnterWorktree` tool.
 - `TaskCompleted` — the `TaskUpdate` tool.
-- `CwdChanged` — `coderex_tools::RegistryToolDispatcher::set_cwd`.
+- `CwdChanged` — `codape_tools::RegistryToolDispatcher::set_cwd`.
 - `Setup` — the REPL when `/init` succeeds.
 - `FileChanged` — the session's file watcher, in the TUI and in a headless
   one-shot run.
@@ -350,9 +350,9 @@ not read as a decision.
 **What is watched.**
 
 1. The settings files by default, when they exist: the user settings
-   (`~/.coderex/settings.json`) and the project settings
-   (`.coderex/settings.json`). The REPL's own `HookFileWatcher` (the `hot-reload` feature, a default feature of
-   `coderex-cli`) watches those files and reports both the path and the kind
+   (`~/.codape/settings.json`) and the project settings
+   (`.codape/settings.json`). The REPL's own `HookFileWatcher` (the `hot-reload` feature, a default feature of
+   `codape-cli`) watches those files and reports both the path and the kind
    of change; a build that disables default features compiles the watcher
    out.
 2. A `SessionStart` hook may return absolute paths in `watchPaths`, as a string
@@ -421,7 +421,7 @@ constants, so the firing side and the matching side cannot drift.
   with `stream: true` a best-effort `{"type":"cancel"}` is written first.
 - **Process tree.** `kill_on_drop` only signals the direct child, so the hook
   is spawned into its own process group (Unix) or Job Object (Windows) via
-  `coderex_core::process_tree::ProcessTree`. A timeout, an oversized output, an
+  `codape_core::process_tree::ProcessTree`. A timeout, an oversized output, an
   unparseable answer, or a cancelled call kills the **whole** tree: a hook that
   backgrounds a helper — `sh -c 'some-server & …'`, a wrapper that forks — does
   not leave it running. On Windows, when the sandbox already owns a Job Object,
@@ -443,7 +443,7 @@ constants, so the firing side and the matching side cannot drift.
   best-effort ceiling — macOS rejects `RLIMIT_AS`, does not enforce `RLIMIT_RSS`,
   and current Darwin returns `EINVAL` for `RLIMIT_DATA` too, so it is not a
   guarantee and not a full address-space cap. Windows uses a Job Object through
-  `coderex_core::sandbox` (limits only; see the platform table below).
+  `codape_core::sandbox` (limits only; see the platform table below).
 - **OS sandbox.** A `command` hook is additionally confined with the same
   primitives the shell tools use: `sandbox-exec` on macOS; `bubblewrap` on
   Linux, falling back to Landlock when `bwrap` is unavailable. On Windows the
@@ -472,7 +472,7 @@ constants, so the firing side and the matching side cannot drift.
 ## OS sandbox for command hooks
 
 On macOS and Linux, every `command` hook runs inside the platform sandbox, in
-addition to its resource limits. The layer is `coderex_core::sandbox` — the same
+addition to its resource limits. The layer is `codape_core::sandbox` — the same
 `SandboxHandle`, Seatbelt profile, bubblewrap argument builder and Landlock
 ruleset the Bash and PowerShell tools use — so there is one policy
 implementation, not two.
@@ -549,15 +549,15 @@ missing key means the default policy.
 - An unknown key inside the object is a **load error**, not a silently ignored
   option.
 
-`CODEREX_HOOK_SANDBOX=0` (or `false`/`no`) is the process-wide escape hatch:
+`CODAPE_HOOK_SANDBOX=0` (or `false`/`no`) is the process-wide escape hatch:
 every command hook runs with resource limits but without OS confinement. As
-with `CODEREX_BWRAP`, only an explicit negative switches it off.
+with `CODAPE_BWRAP`, only an explicit negative switches it off.
 
 ### When the platform cannot confine
 
 The sandbox is not pretended. If no backend can confine — Windows has no
 AppContainer runtime, Linux has neither `bwrap` nor
-Landlock (or Landlock is switched off with `CODEREX_LANDLOCK=0`), macOS has no
+Landlock (or Landlock is switched off with `CODAPE_LANDLOCK=0`), macOS has no
 `sandbox-exec` — then:
 
 - On a **gating event** (`PreToolUse`, `UserPromptSubmit`) the hook fails with
@@ -566,7 +566,7 @@ Landlock (or Landlock is switched off with `CODEREX_LANDLOCK=0`), macOS has no
 - On any **other event** there is nowhere to deny, so the reason is logged at
   `warn` and the hook runs with resource limits only.
 
-An explicit opt-out (`sandbox.enabled: false` or `CODEREX_HOOK_SANDBOX=0`) is
+An explicit opt-out (`sandbox.enabled: false` or `CODAPE_HOOK_SANDBOX=0`) is
 not a failure: it is logged and the hook runs. This is the supported way to
 run hooks on a platform without confinement.
 
@@ -600,7 +600,7 @@ row is compiled only on Windows and has not been run here.
 
 Claude runs plugin function-hooks in dedicated `worker_threads` with a
 bidirectional protocol (26 message types plus `SharedArrayBuffer` timestamps).
-CodeRex does not copy the thread: its hooks are already a **separate OS
+Codape does not copy the thread: its hooks are already a **separate OS
 process**, which is stronger isolation than a worker thread — a worker shares
 the address space, a subprocess does not. The two capabilities that protocol
 provides are implemented in process-appropriate form instead:
@@ -617,7 +617,7 @@ provides are implemented in process-appropriate form instead:
   pipe or exhaust its memory.
 
 **OS confinement is applied** to `command` hooks: `sandbox-exec` on macOS and
-bubblewrap-or-Landlock on Linux, reusing `coderex_core::sandbox` (see
+bubblewrap-or-Landlock on Linux, reusing `codape_core::sandbox` (see
 [OS sandbox for command hooks](#os-sandbox-for-command-hooks)). On Windows the
 hook is created suspended and finished like a shell command, so it gets the
 same AppContainer and Job Object. A gating hook whose confinement cannot be

@@ -58,19 +58,19 @@ fn the_binary_writes_the_plugin_type_surface() {
     .expect("settings");
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(workspace.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -82,15 +82,15 @@ fn the_binary_writes_the_plugin_type_surface() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let root = home.path().join("plugin-types");
     for name in [
-        "coderex/index.d.ts",
-        "coderex-tools/index.d.ts",
-        "coderex-mcp/index.d.ts",
+        "codape/index.d.ts",
+        "codape-tools/index.d.ts",
+        "codape-mcp/index.d.ts",
         "tsconfig.json",
     ] {
         assert!(
@@ -99,8 +99,8 @@ fn the_binary_writes_the_plugin_type_surface() {
             root.display()
         );
     }
-    let tools = std::fs::read_to_string(root.join("coderex-tools/index.d.ts")).unwrap();
+    let tools = std::fs::read_to_string(root.join("codape-tools/index.d.ts")).unwrap();
     assert!(tools.contains("Read"), "the tool surface is empty: {tools}");
     let tsconfig = std::fs::read_to_string(root.join("tsconfig.json")).unwrap();
-    assert!(tsconfig.contains("coderex"), "{tsconfig}");
+    assert!(tsconfig.contains("codape"), "{tsconfig}");
 }

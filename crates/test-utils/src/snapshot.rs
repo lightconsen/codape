@@ -3,7 +3,7 @@
 //! Wraps [`insta`] with convenience functions for asserting on
 //! [`EngineEvent`] collections in tests.
 
-use coderex_core::types::EngineEvent;
+use codape_core::types::EngineEvent;
 
 /// Assert that a single event matches a snapshot.
 ///

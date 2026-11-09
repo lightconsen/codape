@@ -1,4 +1,4 @@
-//! CodeRex event stream — the line-delimited wire protocol and session state.
+//! Codape event stream — the line-delimited wire protocol and session state.
 //!
 //! # What this crate is
 //!
@@ -33,13 +33,13 @@
 //! # Where the socket protocol lives
 //!
 //! The WebSocket JSON protocol an out-of-process client speaks to the daemon
-//! is `coderex-server` (`crates/server`); see `docs/server-protocol.md`. This
+//! is `codape-server` (`crates/server`); see `docs/server-protocol.md`. This
 //! crate never opens a socket.
 //!
 //! # Emitting a turn
 //!
 //! ```
-//! use coderex_events::protocol::{
+//! use codape_events::protocol::{
 //!     AssistantFrame, MessageBody, MessageSink, ProtocolMessage, ResultFrame, text_block,
 //! };
 //!

@@ -1,16 +1,16 @@
 //! McpAuth tool — the interactive half of MCP OAuth.
 //!
-//! This is the only thing in CodeRex that can obtain a *first* token: it opens
+//! This is the only thing in Codape that can obtain a *first* token: it opens
 //! the authorization URL, listens for the callback on localhost, and exchanges
 //! the code with PKCE (RFC 7636). Everything after that — expiry, refresh,
-//! persistence — belongs to `coderex_mcp::oauth`.
+//! persistence — belongs to `codape_mcp::oauth`.
 //!
 //! Two things it needs from the user and cannot supply itself: a browser to
 //! visit the URL, and a click to approve. When the browser cannot be opened,
 //! the tool returns the URL, the PKCE verifier and the `state` it generated so
 //! the flow can be finished by hand — it does not sit waiting for a callback
 //! that can never arrive. The hand-off is persisted under
-//! `~/.coderex/mcp_oauth_pending.json`, because the finishing call is usually a
+//! `~/.codape/mcp_oauth_pending.json`, because the finishing call is usually a
 //! different invocation: it accepts either a pasted full redirect URL (whose
 //! `code` and `state` are parsed and the state checked against the pending
 //! flow) or a bare `code` with the `code_verifier` from the first call.
@@ -26,7 +26,7 @@
 use crate::context::{ToolError, ToolOutput};
 use crate::tool::{Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier};
 use async_trait::async_trait;
-use coderex_config::secret_store::TokenPersistence;
+use codape_config::secret_store::TokenPersistence;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ impl Tool for McpAuthTool {
                 "required": ["server_url"],
                 "properties": {
                     "server_url": { "type": "string", "description": "MCP server URL to authenticate with" },
-                    "client_id": { "type": "string", "description": "OAuth client ID (default: coderex-cli)" },
+                    "client_id": { "type": "string", "description": "OAuth client ID (default: codape-cli)" },
                     "scope": { "type": "string", "description": "OAuth scope (default: mcp)" },
                     "redirect_url": { "type": "string", "description": "The full URL the browser was redirected to after approval. Its code and state are parsed and the state is verified against the pending flow." },
                     "code": { "type": "string", "description": "Authorization code, when finishing by hand after the browser callback did not arrive" },
@@ -84,7 +84,7 @@ impl Tool for McpAuthTool {
         _ctx: ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         // The real sign-in path prefers the OS keychain and falls back to a
-        // private file; the store is shared with `coderex_mcp::oauth`.
+        // private file; the store is shared with `codape_mcp::oauth`.
         let persistence = TokenPersistence::new(default_token_path());
         authenticate_with(input, &persistence).await
     }
@@ -93,7 +93,7 @@ impl Tool for McpAuthTool {
 /// Run the flow, writing any token it obtains to `token_path`.
 ///
 /// Split out from [`Tool::execute`] so a test can aim the write at a temporary
-/// file instead of the user's real `~/.coderex/mcp_tokens.json`. An explicit
+/// file instead of the user's real `~/.codape/mcp_tokens.json`. An explicit
 /// path is file-only and never consults the developer's keychain.
 #[cfg(test)]
 async fn authenticate(input: ToolInput, token_path: &Path) -> Result<ToolOutput, ToolError> {
@@ -196,7 +196,7 @@ async fn authenticate_with(
     } else {
         (stored_client_id, stored_client_secret)
     };
-    let client_id = client_id.unwrap_or_else(|| "coderex-cli".into());
+    let client_id = client_id.unwrap_or_else(|| "codape-cli".into());
     let auth_method = select_client_auth_method(
         &discovery.token_endpoint_auth_methods_supported,
         client_secret.is_some(),
@@ -228,7 +228,7 @@ async fn authenticate_with(
     // code intercepted from the redirect is useless without the verifier.
     let fresh_verifier = code_verifier();
     let challenge = code_challenge(&fresh_verifier);
-    let state = format!("coderex-{}", uuid::Uuid::new_v4());
+    let state = format!("codape-{}", uuid::Uuid::new_v4());
 
     let redirect_url = extract_string(&input.arguments, "redirect_url").ok();
     let supplied_code = extract_string(&input.arguments, "code").ok();
@@ -500,7 +500,7 @@ async fn authenticate_with(
             message: "token response missing access_token".into(),
         })?;
 
-    // Persist token locally, in the store `coderex_mcp::oauth` reads back. The
+    // Persist token locally, in the store `codape_mcp::oauth` reads back. The
     // endpoints are persisted too, so a refresh in a later process does not
     // depend on discovery succeeding again.
     let expires_in = token_resp
@@ -700,7 +700,7 @@ const DEFAULT_DISCOVERY_TTL_SECONDS: u64 = 3600;
 
 /// Endpoints advertised by the server's metadata documents.
 ///
-/// Mirrors the fields `coderex_mcp::oauth::OAuthDiscovery` carries. The
+/// Mirrors the fields `codape_mcp::oauth::OAuthDiscovery` carries. The
 /// authorization server metadata may come from a different origin than the
 /// MCP endpoint, named by the resource's `authorization_servers`.
 #[derive(Debug, Default, Clone)]
@@ -776,7 +776,7 @@ impl DiscoveredEndpoints {
     }
 }
 
-/// RFC 9728 Protected Resource Metadata (mirrored from `coderex_mcp::oauth`).
+/// RFC 9728 Protected Resource Metadata (mirrored from `codape_mcp::oauth`).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct ProtectedResourceMetadata {
     #[serde(default)]
@@ -797,7 +797,7 @@ impl ProtectedResourceMetadata {
 
 /// One cached authorization-server document, keyed by normalized issuer.
 ///
-/// Mirrors `coderex_mcp::oauth::IssuerMetadataCache`; both crates write the
+/// Mirrors `codape_mcp::oauth::IssuerMetadataCache`; both crates write the
 /// same `issuer_metadata` map in the shared token store.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct IssuerMetadataEntry {
@@ -854,7 +854,7 @@ impl IssuerMetadataEntry {
 
 /// Pick a client authentication method from what the server advertises.
 ///
-/// Mirrors `coderex_mcp::oauth::select_client_auth_method`: basic wins when a
+/// Mirrors `codape_mcp::oauth::select_client_auth_method`: basic wins when a
 /// secret is available (it keeps the secret out of logs and bodies), `none` is
 /// the public-client default, and `None` means no advertised method fits the
 /// credentials on hand.
@@ -1027,7 +1027,7 @@ fn issuer_matches(value: &serde_json::Value, requested: &str) -> bool {
 /// Fresh discovery metadata already persisted for `server_url`, if any.
 ///
 /// This is the read half of the cache that both `McpAuth` and
-/// `coderex_mcp::oauth::OAuthManager` share through the token store, so a
+/// `codape_mcp::oauth::OAuthManager` share through the token store, so a
 /// second sign-in attempt does not re-probe metadata that is still valid. An
 /// entry with no recorded issuer predates RFC 9728, so it is re-discovered
 /// rather than trusted.
@@ -1770,20 +1770,20 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The token file the MCP client reads: `~/.coderex/mcp_tokens.json`.
+/// The token file the MCP client reads: `~/.codape/mcp_tokens.json`.
 #[must_use]
 pub fn default_token_path() -> PathBuf {
     home::home_dir()
         .unwrap_or_default()
-        .join(".coderex")
+        .join(".codape")
         .join("mcp_tokens.json")
 }
 
-/// Persist an MCP token into the store that `coderex_mcp::oauth::OAuthManager`
+/// Persist an MCP token into the store that `codape_mcp::oauth::OAuthManager`
 /// reads.
 ///
 /// The on-disk shape is `{"states": [...]}`, one object per server carrying the
-/// fields of `McpOAuthState`. `coderex-tools` cannot depend on `coderex-mcp` —
+/// fields of `McpOAuthState`. `codape-tools` cannot depend on `codape-mcp` —
 /// the dependency runs the other way — so the shape is mirrored here instead of
 /// shared. `crates/mcp/src/oauth.rs` is the source of truth: a field added or
 /// renamed there has to change here too. `crates/mcp/tests/mcp_integration.rs`
@@ -1813,7 +1813,7 @@ pub fn persist_token_at(
     )
 }
 
-/// The token store shape shared with `coderex_mcp::oauth`.
+/// The token store shape shared with `codape_mcp::oauth`.
 ///
 /// Kept here rather than imported because the dependency runs `tools <- mcp`.
 /// Every field has a default so a store written by an older version still
@@ -1823,7 +1823,7 @@ struct TokenStore {
     #[serde(default)]
     states: Vec<TokenEntry>,
     /// Authorization-server metadata keyed by normalized issuer, mirroring
-    /// `coderex_mcp::oauth`'s `issuer_metadata` map. Two MCP servers behind the
+    /// `codape_mcp::oauth`'s `issuer_metadata` map. Two MCP servers behind the
     /// same authorization server share the document.
     #[serde(default)]
     issuer_metadata: std::collections::BTreeMap<String, IssuerMetadataEntry>,
@@ -1831,7 +1831,7 @@ struct TokenStore {
 
 /// One server's persisted OAuth state.
 ///
-/// This mirrors `coderex_mcp::oauth::McpOAuthState` field for field except for
+/// This mirrors `codape_mcp::oauth::McpOAuthState` field for field except for
 /// `Default`-able ordering; `crates/mcp/tests/mcp_integration.rs` reads a store
 /// written here through `OAuthManager`, so a field renamed or retyped on one
 /// side breaks a test rather than a sign-in.
@@ -2017,7 +2017,7 @@ fn persist_token_with_endpoints(
 
 /// Persist a completed sign-in together with everything discovery learned.
 ///
-/// This is the write that lets `coderex_mcp::oauth` reuse the authorization
+/// This is the write that lets `codape_mcp::oauth` reuse the authorization
 /// server, endpoints, client credentials and resource indicator without
 /// discovering anything again. Fields discovery did not learn are left as they
 /// were rather than erased.
@@ -2141,7 +2141,7 @@ fn cache_discovery_record_at(
 
 /// Cache discovered authorization-server metadata in the token store.
 ///
-/// This writes the same fields `coderex_mcp::oauth` reads and records when
+/// This writes the same fields `codape_mcp::oauth` reads and records when
 /// *it* discovers metadata, plus an expiry derived from `Cache-Control:
 /// max-age`. Both halves of MCP OAuth then agree on where to authorize, where
 /// to exchange a code or refresh token, and when the document must be fetched
@@ -2192,7 +2192,7 @@ fn cache_discovery(
     entry.scopes_supported = scopes_supported.to_vec();
     entry.discovery_expires_at = discovery_expires_at;
     // The authorization-server cache is keyed by the normalized issuer, the
-    // same key `coderex_mcp::oauth` uses, so a later discovery from either
+    // same key `codape_mcp::oauth` uses, so a later discovery from either
     // crate finds it.
     if let Some(issuer) = issuer {
         let cached = store.issuer_metadata.entry(issuer.clone()).or_default();
@@ -2254,7 +2254,7 @@ async fn register_client(
         "none"
     };
     let body = serde_json::json!({
-        "client_name": "CodeRex",
+        "client_name": "Codape",
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -2515,7 +2515,7 @@ mod tests {
         assert!(
             parsed["state"]
                 .as_str()
-                .is_some_and(|v| v.starts_with("coderex-")),
+                .is_some_and(|v| v.starts_with("codape-")),
             "no state to verify a pasted redirect with: {parsed}"
         );
         assert!(parsed["note"].as_str().unwrap().contains("`code`"));
@@ -2783,7 +2783,7 @@ mod tests {
         assert!(load_pending(&pending_path(&path), &endpoint).is_none());
     }
 
-    /// The helpers here mirror `coderex_mcp::oauth`; this pins the shapes the
+    /// The helpers here mirror `codape_mcp::oauth`; this pins the shapes the
     /// two crates have to agree on.
     #[test]
     fn discovery_helpers_mirror_the_mcp_crate() {
@@ -3090,7 +3090,7 @@ mod tests {
         let query: HashMap<String, String> = auth_url.query_pairs().into_owned().collect();
         assert_eq!(
             query.get("client_id").map(String::as_str),
-            Some("coderex-cli")
+            Some("codape-cli")
         );
         assert_eq!(
             query.get("code_challenge_method").map(String::as_str),
@@ -3137,7 +3137,7 @@ mod tests {
         );
         assert_eq!(
             form_param(&exchange, "client_id").as_deref(),
-            Some("coderex-cli")
+            Some("codape-cli")
         );
         assert_eq!(
             form_param(&exchange, "code_verifier").as_deref(),
@@ -3156,7 +3156,7 @@ mod tests {
             state["protected_resource"]["authorization_servers"],
             serde_json::json!([as_base])
         );
-        assert_eq!(state["client_id"], "coderex-cli");
+        assert_eq!(state["client_id"], "codape-cli");
         assert!(state["client_secret"].is_null(), "{state}");
         assert!(
             store["issuer_metadata"].get(&as_base).is_some(),
@@ -3255,7 +3255,7 @@ mod tests {
             .map(|(_, body)| body)
             .unwrap();
         let body: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["client_name"], "CodeRex");
+        assert_eq!(body["client_name"], "Codape");
         assert_eq!(
             body["redirect_uris"],
             serde_json::json!(["http://127.0.0.1:8765/callback"])
@@ -3549,7 +3549,7 @@ mod tests {
                 name: "McpAuth".into(),
                 arguments: serde_json::json!({
                     "server_url": endpoint,
-                    "redirect_url": "http://localhost:8765/callback?code=abc&state=coderex-wrong",
+                    "redirect_url": "http://localhost:8765/callback?code=abc&state=codape-wrong",
                 }),
             },
             &path,

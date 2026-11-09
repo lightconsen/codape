@@ -1,4 +1,4 @@
-//! In-process JavaScript extension hooks for CodeRex.
+//! In-process JavaScript extension hooks for Codape.
 //!
 //! A *mod* is a `.js`, `.jsx`, `.ts` or `.tsx` file in a mods directory that
 //! declares a global `register(on, options)` function. `.js` files are
@@ -9,7 +9,7 @@
 //! props. `on(event, matcher, hook)` subscribes a
 //! synchronous `hook($, e, next)` to a hook event. When an event fires, the
 //! runtime runs the matching hooks, and merges what they return into a
-//! [`HookFireResult`](coderex_core::hook_executor::HookFireResult).
+//! [`HookFireResult`](codape_core::hook_executor::HookFireResult).
 //!
 //! A hook may call `next(e)` to continue the chain: the matching hooks
 //! registered after it run in order, then the downstream (settings) hook
@@ -28,7 +28,7 @@
 //! `$.session.submit(text)` never calls the engine. It stages text on the
 //! worker; the chain merges what matching hooks submitted (deduplicating
 //! identical consecutive messages) into
-//! [`HookFireResult::pending_prompts`](coderex_core::hook_executor::HookFireResult::pending_prompts),
+//! [`HookFireResult::pending_prompts`](codape_core::hook_executor::HookFireResult::pending_prompts),
 //! and the runtime also pushes them onto a [`ModSubmitQueue`]. The engine
 //! ignores the field; the turn-loop owner (the CLI) drains the queue when the
 //! turn is idle and submits each message as an ordinary user turn, through
@@ -37,7 +37,7 @@
 //! and reported in the hook result's UI.
 //!
 //! The runtime is opt-in. It is constructed only when [`is_enabled`] is true,
-//! which means `CODEREX_MODS` is truthy or `CODEREX_MODS_DIR` is set. The
+//! which means `CODAPE_MODS` is truthy or `CODAPE_MODS_DIR` is set. The
 //! directory defaults to `config_home()/mods`.
 //!
 //! # Isolation
@@ -60,7 +60,7 @@
 //! ceilings and [`MODS_MEMORY_LIMIT_ENV`] for the heap override.
 //!
 //! After [`DEFAULT_TIMEOUT_BREAKER_LIMIT`] wall-clock timeouts (overridable
-//! with `CODEREX_MODS_TIMEOUT_LIMIT`), the runtime's circuit breaker disables
+//! with `CODAPE_MODS_TIMEOUT_LIMIT`), the runtime's circuit breaker disables
 //! mods for the rest of the session: no worker is started again and a gating
 //! `fire` fails closed with an explanatory error. Engine interruption and the
 //! caller backstop both count; ordinary hook errors and heap/stack errors do
@@ -76,7 +76,7 @@
 //! `$.ui.button` and stage it with `$.ui.render`, or stage a short notice with
 //! `$.session.notify(text)`. Both cross the worker boundary as a host-owned
 //! snapshot in
-//! [`HookFireResult`](coderex_core::hook_executor::HookFireResult) `ui`, and
+//! [`HookFireResult`](codape_core::hook_executor::HookFireResult) `ui`, and
 //! the engine emits it as `EngineEvent::ModUi` when non-empty. Notices are
 //! `UiStyle::Notice` text elements, ordered before the same call's rendered
 //! elements. A button's id can be bound with `$.ui.onActivate(id, handler)`,

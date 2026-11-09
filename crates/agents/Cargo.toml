@@ -1,18 +1,19 @@
 [package]
-name = "coderex-agents"
+name = "codape-agents"
 version = "0.1.3"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+homepage.workspace = true
 repository.workspace = true
-description = "Sub-agent types and AgentManager for CodeRex"
+description = "Sub-agent types and AgentManager for Codape"
 
 [lints]
 workspace = true
 
 [dependencies]
-coderex-core = { path = "../core" }
+codape-core = { path = "../core" }
 
 home.workspace = true
 thiserror.workspace = true

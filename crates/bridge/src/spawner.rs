@@ -99,7 +99,7 @@ impl BridgeSessionSpawner {
         let worktree_path = self.worktree_base.join(&config.session_id);
 
         if !worktree_path.exists() {
-            let output = coderex_core::git_hardening::git_command()
+            let output = codape_core::git_hardening::git_command()
                 .args(["worktree", "add", worktree_path.to_str().unwrap(), branch])
                 .current_dir(&self.repo_root)
                 .output()
@@ -133,7 +133,7 @@ impl BridgeSessionSpawner {
     pub fn cleanup_worktree(&self, session_id: &str) -> Result<(), String> {
         let worktree_path = self.worktree_base.join(session_id);
         if worktree_path.exists() {
-            coderex_core::git_hardening::git_command()
+            codape_core::git_hardening::git_command()
                 .args(["worktree", "remove", worktree_path.to_str().unwrap()])
                 .current_dir(&self.repo_root)
                 .output()
@@ -145,7 +145,7 @@ impl BridgeSessionSpawner {
     /// Spawn a session on a remote host via SSH.
     ///
     /// Connects to the remote host using OpenSSH, creates the session
-    /// directory, and verifies that `coderex` is available on the remote.
+    /// directory, and verifies that `codape` is available on the remote.
     ///
     /// The `openssh` crate is Unix-only, so the Windows build refuses SSH
     /// spawning explicitly instead of failing to compile or pretending the
@@ -175,7 +175,7 @@ impl BridgeSessionSpawner {
             .await
             .map_err(|e| format!("ssh connect failed: {e}"))?;
 
-        // `ssh host mkdir -p <dir>` then `ssh host which coderex`.
+        // `ssh host mkdir -p <dir>` then `ssh host which codape`.
         for command in ssh_remote_commands(&session_dir) {
             let output = session
                 .command(&command.program)
@@ -187,7 +187,7 @@ impl BridgeSessionSpawner {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(match command.program.as_str() {
-                    "which" => "coderex not found on remote host".to_string(),
+                    "which" => "codape not found on remote host".to_string(),
                     program => format!("remote {program} failed: {stderr}"),
                 });
             }
@@ -281,7 +281,7 @@ fn ssh_remote_commands(session_dir: &str) -> Vec<RemoteCommand> {
         },
         RemoteCommand {
             program: "which".into(),
-            args: vec!["coderex".into()],
+            args: vec!["codape".into()],
         },
     ]
 }
@@ -431,10 +431,10 @@ mod tests {
     #[test]
     fn ssh_builder_expands_a_leading_tilde() {
         let home = home::home_dir().unwrap();
-        let missing = "~/coderex-no-such-key";
+        let missing = "~/codape-no-such-key";
         let err = resolve_identity_file(Some(missing)).unwrap_err();
 
-        let expected = home.join("coderex-no-such-key");
+        let expected = home.join("codape-no-such-key");
         assert!(err.contains(&expected.display().to_string()), "{err}");
         assert!(!err.contains(missing), "tilde was not expanded: {err}");
     }
@@ -469,18 +469,18 @@ mod tests {
     }
 
     fn init_git_repo(path: &Path) {
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["init", "--quiet"])
             .current_dir(path)
             .output()
             .expect("git init failed");
         std::fs::write(path.join("README"), "root").unwrap();
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["add", "README"])
             .current_dir(path)
             .output()
             .expect("git add failed");
-        coderex_core::git_hardening::git_command()
+        codape_core::git_hardening::git_command()
             .args(["commit", "--quiet", "-m", "init"])
             .env("GIT_AUTHOR_NAME", "test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
@@ -590,19 +590,19 @@ mod tests {
 
     #[test]
     fn ssh_spawn_builds_the_remote_setup_commands() {
-        let session_dir = remote_session_dir("/srv/coderex", "sess_7");
-        assert_eq!(session_dir, "/srv/coderex/sess_7");
+        let session_dir = remote_session_dir("/srv/codape", "sess_7");
+        assert_eq!(session_dir, "/srv/codape/sess_7");
 
         assert_eq!(
             ssh_remote_commands(&session_dir),
             vec![
                 RemoteCommand {
                     program: "mkdir".into(),
-                    args: vec!["-p".into(), "/srv/coderex/sess_7".into()],
+                    args: vec!["-p".into(), "/srv/codape/sess_7".into()],
                 },
                 RemoteCommand {
                     program: "which".into(),
-                    args: vec!["coderex".into()],
+                    args: vec!["codape".into()],
                 },
             ]
         );

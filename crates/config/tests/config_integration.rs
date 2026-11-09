@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use coderex_config::dirs::{DataDirectories, ManagedSettings};
-use coderex_config::{
+use codape_config::dirs::{DataDirectories, ManagedSettings};
+use codape_config::{
     CURRENT_SCHEMA_VERSION, CapabilitySet, ConfigService, FeatureFlags, FlagRegistry,
     RuntimeOverrides, Settings, config_home, percentage_rollout,
 };
@@ -36,7 +36,7 @@ fn unique_name(prefix: &str) -> String {
 
 fn temp_settings_file(settings: &Settings) -> PathBuf {
     let tmp = std::env::temp_dir();
-    let path = tmp.join(format!("{}.json", unique_name("coderex_integ")));
+    let path = tmp.join(format!("{}.json", unique_name("codape_integ")));
     std::fs::write(&path, serde_json::to_string_pretty(settings).unwrap()).unwrap();
     path
 }
@@ -163,7 +163,7 @@ fn settings_json_serde_roundtrip() {
         permissions: None,
         max_budget_usd: Some(15.5),
         telemetry_enabled: Some(false),
-        telemetry: Some(coderex_config::settings::TelemetrySubConfig {
+        telemetry: Some(codape_config::settings::TelemetrySubConfig {
             endpoint: Some("https://telemetry.example.com".into()),
             crash_endpoint: None,
             batch_size: Some(100),
@@ -207,7 +207,7 @@ fn settings_validate_rejects_empty_model() {
     };
     let err = settings.validate().unwrap_err();
     assert!(
-        matches!(err, coderex_config::ConfigError::Validation { ref field, .. } if field == "model")
+        matches!(err, codape_config::ConfigError::Validation { ref field, .. } if field == "model")
     );
 }
 
@@ -219,7 +219,7 @@ fn settings_validate_rejects_negative_budget() {
     };
     let err = settings.validate().unwrap_err();
     assert!(
-        matches!(err, coderex_config::ConfigError::Validation { ref field, .. } if field == "max_budget_usd")
+        matches!(err, codape_config::ConfigError::Validation { ref field, .. } if field == "max_budget_usd")
     );
 }
 
@@ -231,7 +231,7 @@ fn settings_validate_rejects_invalid_permission_mode() {
     };
     let err = settings.validate().unwrap_err();
     assert!(
-        matches!(err, coderex_config::ConfigError::Validation { ref field, .. } if field == "permission_mode")
+        matches!(err, codape_config::ConfigError::Validation { ref field, .. } if field == "permission_mode")
     );
 }
 
@@ -255,7 +255,7 @@ fn config_service_invalid_file_falls_back_to_defaults() {
 #[test]
 fn config_service_unknown_field_falls_back_to_defaults() {
     let tmp = std::env::temp_dir();
-    let path = tmp.join(format!("{}.json", unique_name("coderex_integ_unknown")));
+    let path = tmp.join(format!("{}.json", unique_name("codape_integ_unknown")));
     std::fs::write(
         &path,
         r#"{"model":"test-model","unknown_custom_key":"value"}"#,
@@ -273,7 +273,7 @@ fn config_service_unknown_field_falls_back_to_defaults() {
 #[test]
 fn settings_json_migration_from_v0() {
     let tmp = std::env::temp_dir();
-    let path = tmp.join(format!("{}.json", unique_name("coderex_integ_v0")));
+    let path = tmp.join(format!("{}.json", unique_name("codape_integ_v0")));
     std::fs::write(
         &path,
         r#"{"config_version":0,"model":"old-model","permission_mode":"default"}"#,
@@ -503,7 +503,7 @@ fn flag_registry_apply_experiments() {
 
 #[test]
 fn data_directories_ensure_all_creates_subdirs() {
-    let tmp = std::env::temp_dir().join(unique_name("coderex_dirs"));
+    let tmp = std::env::temp_dir().join(unique_name("codape_dirs"));
     let _ = std::fs::remove_dir_all(&tmp);
 
     let dirs = DataDirectories::new(tmp.clone());
@@ -521,38 +521,38 @@ fn data_directories_ensure_all_creates_subdirs() {
 
 #[test]
 fn data_directories_paths_are_correct() {
-    let dirs = DataDirectories::new(PathBuf::from("/tmp/coderex"));
+    let dirs = DataDirectories::new(PathBuf::from("/tmp/codape"));
 
     assert_eq!(
         dirs.managed_settings_path(),
-        PathBuf::from("/tmp/coderex/managed_settings.json")
+        PathBuf::from("/tmp/codape/managed_settings.json")
     );
     assert_eq!(
         dirs.policy_limits_path(),
-        PathBuf::from("/tmp/coderex/policy_limits.json")
+        PathBuf::from("/tmp/codape/policy_limits.json")
     );
     assert_eq!(
         dirs.sessions_db_path(),
-        PathBuf::from("/tmp/coderex/sessions.db")
+        PathBuf::from("/tmp/codape/sessions.db")
     );
     assert_eq!(
         dirs.project_dir("abc123"),
-        PathBuf::from("/tmp/coderex/projects/abc123")
+        PathBuf::from("/tmp/codape/projects/abc123")
     );
     assert_eq!(
         dirs.crash_log_path(),
-        PathBuf::from("/tmp/coderex/crash.log")
+        PathBuf::from("/tmp/codape/crash.log")
     );
-    assert_eq!(dirs.base_path(), PathBuf::from("/tmp/coderex"));
+    assert_eq!(dirs.base_path(), PathBuf::from("/tmp/codape"));
 }
 
 #[test]
 fn config_home_returns_path() {
     let home = config_home();
     assert!(!home.as_os_str().is_empty());
-    // Should end with .coderex unless CLAUDE_CONFIG_DIR is set
+    // Should end with .codape unless CLAUDE_CONFIG_DIR is set
     if std::env::var("CLAUDE_CONFIG_DIR").is_err() {
-        assert!(home.to_string_lossy().ends_with(".coderex"));
+        assert!(home.to_string_lossy().ends_with(".codape"));
     }
 }
 
@@ -584,7 +584,7 @@ fn managed_settings_new_computes_checksum() {
 
 #[test]
 fn data_directories_idempotent_ensure_all() {
-    let tmp = std::env::temp_dir().join(unique_name("coderex_dirs_idem"));
+    let tmp = std::env::temp_dir().join(unique_name("codape_dirs_idem"));
     let _ = std::fs::remove_dir_all(&tmp);
 
     let dirs = DataDirectories::new(tmp.clone());

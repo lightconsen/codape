@@ -1,6 +1,6 @@
 //! Integration tests for out-of-process WASM compilation and the AOT cache.
 //!
-//! `cargo test -p coderex-plugins` builds `coderex-wasm-compile` next to the
+//! `cargo test -p codape-plugins` builds `codape-wasm-compile` next to the
 //! test binaries and exposes it through `CARGO_BIN_EXE_*`, so these tests
 //! exercise the real compiler process rather than an in-process stand-in.
 //!
@@ -16,13 +16,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use coderex_plugins::wasm_runtime::{PluginWasmInstance, WasmCompilerCommand};
+use codape_plugins::wasm_runtime::{PluginWasmInstance, WasmCompilerCommand};
 
-const TIMEOUT_ENV: &str = "CODEREX_WASM_COMPILE_TIMEOUT_MS";
-const SLEEP_ENV: &str = "CODEREX_WASM_COMPILE_TEST_SLEEP_MS";
-const COUNT_ENV: &str = "CODEREX_WASM_COMPILE_TEST_COUNT_FILE";
-const CHILD_PID_ENV: &str = "CODEREX_WASM_COMPILE_TEST_CHILD_PID_FILE";
-const NO_SANDBOX_ENV: &str = "CODEREX_WASM_COMPILE_TEST_NO_SANDBOX";
+const TIMEOUT_ENV: &str = "CODAPE_WASM_COMPILE_TIMEOUT_MS";
+const SLEEP_ENV: &str = "CODAPE_WASM_COMPILE_TEST_SLEEP_MS";
+const COUNT_ENV: &str = "CODAPE_WASM_COMPILE_TEST_COUNT_FILE";
+const CHILD_PID_ENV: &str = "CODAPE_WASM_COMPILE_TEST_CHILD_PID_FILE";
+const NO_SANDBOX_ENV: &str = "CODAPE_WASM_COMPILE_TEST_NO_SANDBOX";
 
 fn set_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
     // SAFETY: callers hold `ENV_LOCK`, so no other test in this binary mutates
@@ -51,7 +51,7 @@ fn write_module(dir: &Path, name: &str, wat: &str) -> PathBuf {
 }
 
 const fn helper_binary() -> &'static str {
-    env!("CARGO_BIN_EXE_coderex-wasm-compile")
+    env!("CARGO_BIN_EXE_codape-wasm-compile")
 }
 
 fn helper_command() -> WasmCompilerCommand {
@@ -84,13 +84,13 @@ fn injected_command_compiles_serializes_and_deserializes() {
         .arg(&input)
         .arg(&output)
         .status()
-        .expect("failed to spawn coderex-wasm-compile");
+        .expect("failed to spawn codape-wasm-compile");
     assert!(status.success(), "helper exited with {status}");
 
     let serialized = std::fs::read(&output).expect("helper did not write an output file");
     assert!(!serialized.is_empty(), "serialized module is empty");
 
-    coderex_plugins::wasm_runtime::deserialize_compiled_module(&serialized)
+    codape_plugins::wasm_runtime::deserialize_compiled_module(&serialized)
         .expect("the parent must be able to deserialize the helper's output");
 
     let cache = tempfile::tempdir().unwrap();
@@ -116,12 +116,12 @@ fn linux_compiler_is_placed_in_a_memory_cgroup() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("cgroup.controllers"), "memory pids\n").unwrap();
     std::fs::write(root.join("cgroup.subtree_control"), "").unwrap();
-    set_env(coderex_core::sandbox::cgroup::CGROUP_ROOT_ENV, &root);
+    set_env(codape_core::sandbox::cgroup::CGROUP_ROOT_ENV, &root);
 
     let input = write_module(dir.path(), "plugin.wat", NORMAL_MODULE);
     let cache = tempfile::tempdir().unwrap();
     let result = load_with(&input, Some(helper_command()), cache.path());
-    remove_env(coderex_core::sandbox::cgroup::CGROUP_ROOT_ENV);
+    remove_env(codape_core::sandbox::cgroup::CGROUP_ROOT_ENV);
     result.expect("the module compiles");
 
     let groups: Vec<_> = std::fs::read_dir(&root)
@@ -158,9 +158,9 @@ fn linux_compiler_survives_the_seccomp_deny_list() {
     let input = write_module(dir.path(), "plugin.wat", NORMAL_MODULE);
     let cache = tempfile::tempdir().unwrap();
 
-    set_env(coderex_core::sandbox::BWRAP_ENV, "0");
+    set_env(codape_core::sandbox::BWRAP_ENV, "0");
     let result = load_with(&input, Some(helper_command()), cache.path());
-    remove_env(coderex_core::sandbox::BWRAP_ENV);
+    remove_env(codape_core::sandbox::BWRAP_ENV);
     result.expect("a real compile must not be blocked by the deny-list");
 }
 
@@ -196,7 +196,7 @@ fn injected_command_forwards_leading_args() {
 }
 
 /// A host that configures the compiler through the public setter (the path the
-/// CLI takes) gets a working load. `CODEREX_WASM_CACHE_DIR` keeps the entry out
+/// CLI takes) gets a working load. `CODAPE_WASM_CACHE_DIR` keeps the entry out
 /// of the real user cache.
 #[test]
 fn host_injected_global_command_is_used() {
@@ -205,10 +205,10 @@ fn host_injected_global_command_is_used() {
     let input = write_module(dir.path(), "plugin.wat", NORMAL_MODULE);
     let cache = tempfile::tempdir().unwrap();
 
-    coderex_plugins::wasm_runtime::set_compiler_command(helper_command());
-    set_env("CODEREX_WASM_CACHE_DIR", cache.path());
+    codape_plugins::wasm_runtime::set_compiler_command(helper_command());
+    set_env("CODAPE_WASM_CACHE_DIR", cache.path());
     let result = PluginWasmInstance::new(&input);
-    remove_env("CODEREX_WASM_CACHE_DIR");
+    remove_env("CODAPE_WASM_CACHE_DIR");
 
     result.expect("a host-injected compiler command must be used");
 }
@@ -495,7 +495,7 @@ fn the_compiler_child_does_not_inherit_host_secrets() {
         std::fs::set_permissions(&wrapper, permissions).unwrap();
     }
 
-    set_env("CODEREX_TEST_HOST_SECRET", "hunter2-should-not-leak");
+    set_env("CODAPE_TEST_HOST_SECRET", "hunter2-should-not-leak");
     set_env(NO_SANDBOX_ENV, "1");
     let result = load_with(
         &input,
@@ -511,7 +511,7 @@ fn the_compiler_child_does_not_inherit_host_secrets() {
         ),
         dir.path(),
     );
-    remove_env("CODEREX_TEST_HOST_SECRET");
+    remove_env("CODAPE_TEST_HOST_SECRET");
     remove_env(NO_SANDBOX_ENV);
 
     result.expect("the wrapper compiles through the real helper");

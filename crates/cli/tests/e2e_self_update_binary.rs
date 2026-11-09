@@ -1,4 +1,4 @@
-//! `coderex update` against a fake release served over loopback.
+//! `codape update` against a fake release served over loopback.
 //!
 //! These run the real binary — a copy of it, so a successful update replaces
 //! the copy and never the test build — against a tiny HTTP server that
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 
-use coderex_cli::self_update;
+use codape_cli::self_update;
 
 /// What the fake release publishes.
 struct FakeRelease {
@@ -136,11 +136,11 @@ fn route(release: &FakeRelease, path: &str, port: u16) -> (&'static str, Vec<u8>
 /// the copy instead of the artifact under test.
 fn copied_binary() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let source = PathBuf::from(env!("CARGO_BIN_EXE_coderex"));
+    let source = PathBuf::from(env!("CARGO_BIN_EXE_codape"));
     let name = if cfg!(windows) {
-        "coderex.exe"
+        "codape.exe"
     } else {
-        "coderex"
+        "codape"
     };
     let copied = dir.path().join(name);
     std::fs::copy(&source, &copied).expect("copy the binary");
@@ -159,10 +159,10 @@ fn payload() -> (String, Vec<u8>) {
     let name = self_update::asset_name(target);
     #[cfg(unix)]
     {
-        // The archive is `coderex-<target>.tar.gz` and holds
-        // `coderex-<target>`: the extension is on the archive, not the binary.
-        // The release workflow packages it that way (`cp … dist/coderex-$target`
-        // then `tar czf coderex-$target.tar.gz -C dist coderex-$target`), and
+        // The archive is `codape-<target>.tar.gz` and holds
+        // `codape-<target>`: the extension is on the archive, not the binary.
+        // The release workflow packages it that way (`cp … dist/codape-$target`
+        // then `tar czf codape-$target.tar.gz -C dist codape-$target`), and
         // building the fixture with the extension inside the archive is what
         // let a real "holds X, not X.tar.gz" failure through once.
         let script = b"#!/bin/sh\necho fake-new-version\n";
@@ -171,7 +171,7 @@ fn payload() -> (String, Vec<u8>) {
     }
     #[cfg(windows)]
     {
-        let mut bytes = std::fs::read(env!("CARGO_BIN_EXE_coderex")).expect("read the binary");
+        let mut bytes = std::fs::read(env!("CARGO_BIN_EXE_codape")).expect("read the binary");
         bytes.extend_from_slice(b"\nFAKE-NEW-VERSION");
         (name, bytes)
     }
@@ -199,12 +199,12 @@ fn run_update(binary: &Path, server: &FakeServer, args: &[&str]) -> std::process
     Command::new(binary)
         .arg("update")
         .args(args)
-        .env("CODEREX_API_BASE_URL", &server.base)
-        .env("CODEREX_RELEASE_BASE_URL", server.asset_base())
-        .env("CODEREX_DISABLE_UPDATE_CHECK", "1")
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_API_BASE_URL", &server.base)
+        .env("CODAPE_RELEASE_BASE_URL", server.asset_base())
+        .env("CODAPE_DISABLE_UPDATE_CHECK", "1")
+        .env("CODAPE_LOG", "off")
         .output()
-        .expect("run coderex update")
+        .expect("run codape update")
 }
 
 #[test]

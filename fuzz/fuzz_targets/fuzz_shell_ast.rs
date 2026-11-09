@@ -1,6 +1,6 @@
 #![no_main]
 
-use coderex_core::shell_security::analyze_command;
+use codape_core::shell_security::analyze_command;
 use libfuzzer_sys::fuzz_target;
 use std::str;
 

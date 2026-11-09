@@ -27,20 +27,20 @@ pub enum ModelProfile {
 impl ModelProfile {
     const fn runtime_env_keys(self) -> &'static [&'static str] {
         match self {
-            Self::Main => &["CODEREX_MAIN_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL"],
+            Self::Main => &["CODAPE_MAIN_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL"],
             Self::Lightweight => &[
-                "CODEREX_LIGHTWEIGHT_MODEL",
+                "CODAPE_LIGHTWEIGHT_MODEL",
                 "ANTHROPIC_LIGHTWEIGHT_MODEL",
                 "OPENAI_LIGHTWEIGHT_MODEL",
-                "CODEREX_MAIN_MODEL",
+                "CODAPE_MAIN_MODEL",
                 "ANTHROPIC_MODEL",
                 "OPENAI_MODEL",
             ],
             Self::Background => &[
-                "CODEREX_BACKGROUND_MODEL",
+                "CODAPE_BACKGROUND_MODEL",
                 "ANTHROPIC_BACKGROUND_MODEL",
                 "OPENAI_BACKGROUND_MODEL",
-                "CODEREX_MAIN_MODEL",
+                "CODAPE_MAIN_MODEL",
                 "ANTHROPIC_MODEL",
                 "OPENAI_MODEL",
             ],

@@ -48,7 +48,7 @@ fn start_static_provider() -> (Child, String) {
 }
 
 fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -61,12 +61,12 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("HOME", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -76,7 +76,7 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
     let output = child.wait_with_output().expect("wait");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()

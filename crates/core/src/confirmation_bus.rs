@@ -63,7 +63,7 @@ struct BusMessage {
 /// # Example
 ///
 /// ```rust,ignore
-/// use coderex_core::confirmation_bus::ConfirmationBus;
+/// use codape_core::confirmation_bus::ConfirmationBus;
 ///
 /// let bus = ConfirmationBus::new(10);
 ///

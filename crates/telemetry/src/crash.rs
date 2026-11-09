@@ -8,7 +8,7 @@
 //! # What leaves the machine
 //!
 //! The free-form panic payload is conversation-adjacent text, so it is not
-//! uploaded as text unless the user opts in with `CODEREX_CRASH_VERBOSE`. Even
+//! uploaded as text unless the user opts in with `CODAPE_CRASH_VERBOSE`. Even
 //! then the raw text is only ever a *local* copy (`0600`, pruned by age); the
 //! upload re-scrubs it and marks it `redaction_status: "pattern"`.
 //!
@@ -63,9 +63,9 @@ pub const CRASH_PATTERN_MARKER: &str = "pattern";
 /// Present with any value other than `0`/`false`/`no`/empty includes the panic
 /// message (scrubbed at upload). The backtrace is still uploaded as symbols
 /// only; the raw backtrace remains a local copy. [`crate::hipaa_enabled`]
-/// (`CODEREX_HIPAA`) always wins: even when this is set, strict mode sends
+/// (`CODAPE_HIPAA`) always wins: even when this is set, strict mode sends
 /// structured metadata only.
-pub const CRASH_VERBOSE_ENV: &str = "CODEREX_CRASH_VERBOSE";
+pub const CRASH_VERBOSE_ENV: &str = "CODAPE_CRASH_VERBOSE";
 
 /// Maximum number of backtrace frames included in an upload.
 ///
@@ -892,10 +892,10 @@ pub struct CrashReporter {
     pending_dir: PathBuf,
     max_pending_bytes: u64,
     /// Strict (confidentiality) mode, resolved once at construction from
-    /// [`crate::hipaa_enabled`] (`CODEREX_HIPAA`).
+    /// [`crate::hipaa_enabled`] (`CODAPE_HIPAA`).
     strict: bool,
     /// Verbose mode, resolved once at construction from
-    /// [`crash_verbose`] (`CODEREX_CRASH_VERBOSE`). Ignored when `strict` is
+    /// [`crash_verbose`] (`CODAPE_CRASH_VERBOSE`). Ignored when `strict` is
     /// set: strict mode always wins.
     verbose: bool,
 }
@@ -904,8 +904,8 @@ impl CrashReporter {
     /// Create a new crash reporter.
     ///
     /// Structured-only reporting is the default. [`crash_verbose`]
-    /// (`CODEREX_CRASH_VERBOSE`) opts into a raw local copy of the panic text
-    /// (scrubbed at upload), and [`crate::hipaa_enabled`] (`CODEREX_HIPAA`)
+    /// (`CODAPE_CRASH_VERBOSE`) opts into a raw local copy of the panic text
+    /// (scrubbed at upload), and [`crate::hipaa_enabled`] (`CODAPE_HIPAA`)
     /// forces structured-only even when verbose is set.
     pub fn new(pending_dir: PathBuf) -> Self {
         Self {
@@ -925,7 +925,7 @@ impl CrashReporter {
 
     /// Override strict mode explicitly.
     ///
-    /// Production callers use [`Self::new`], which resolves `CODEREX_HIPAA`.
+    /// Production callers use [`Self::new`], which resolves `CODAPE_HIPAA`.
     /// Tests use this so they do not have to mutate process-wide environment
     /// variables.
     #[must_use]
@@ -937,7 +937,7 @@ impl CrashReporter {
     /// Override verbose mode explicitly.
     ///
     /// Production callers use [`Self::new`], which resolves
-    /// `CODEREX_CRASH_VERBOSE`. Tests use this so they do not have to mutate
+    /// `CODAPE_CRASH_VERBOSE`. Tests use this so they do not have to mutate
     /// process-wide environment variables. Strict mode still wins.
     #[must_use]
     pub const fn with_verbose(mut self, verbose: bool) -> Self {
@@ -960,7 +960,7 @@ impl CrashReporter {
     /// The pending file is written with mode `0600` on Unix. By default it
     /// contains only the classification and symbol-only backtrace; raw panic
     /// text and a raw backtrace are written only under
-    /// `CODEREX_CRASH_VERBOSE` (and never under `CODEREX_HIPAA`).
+    /// `CODAPE_CRASH_VERBOSE` (and never under `CODAPE_HIPAA`).
     pub fn install_hook(&self) {
         let pending_dir = self.pending_dir.clone();
         let include_free_form = self.include_free_form();
@@ -1099,8 +1099,8 @@ impl CrashReporter {
 
     /// Build the upload-row shape for a captured report without ingesting it.
     ///
-    /// The modes resolved at construction ([`CODEREX_CRASH_VERBOSE`] and
-    /// [`CODEREX_HIPAA`](crate::HIPAA_ENV)) are applied exactly as
+    /// The modes resolved at construction ([`CODAPE_CRASH_VERBOSE`] and
+    /// [`CODAPE_HIPAA`](crate::HIPAA_ENV)) are applied exactly as
     /// [`Self::ingest_pending`] would apply them: raw text is kept only when
     /// verbose is on and strict mode is off, symbol frames are dropped in
     /// strict mode, and the structured summary is scrubbed. The returned row
@@ -1110,7 +1110,7 @@ impl CrashReporter {
     /// This is the preview path for a pending file: pass the result to
     /// [`crate::preview_crash_payload`].
     ///
-    /// [`CODEREX_CRASH_VERBOSE`]: crate::CRASH_VERBOSE_ENV
+    /// [`CODAPE_CRASH_VERBOSE`]: crate::CRASH_VERBOSE_ENV
     #[must_use]
     pub fn pending_crash_from_report(&self, report: &CrashReport) -> crate::PendingCrash {
         let record = self.crash_record(report, &crate::Scrubber::new());
@@ -1386,7 +1386,7 @@ mod tests {
     use crate::PendingCrash;
 
     fn crash_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("coderex_crash_{}_{}", std::process::id(), name))
+        std::env::temp_dir().join(format!("codape_crash_{}_{}", std::process::id(), name))
     }
 
     fn pending_json_files(dir: &Path) -> usize {
@@ -1683,7 +1683,7 @@ mod tests {
 
     // ── Backtrace symbols ───────────────────────────────────────────────
 
-    const BACKTRACE: &str = "   0: std::panicking::begin_panic_handler\n             at /rustc/abcdef0123456789abcdef0123456789/library/std/src/panicking.rs:123:5\n   1: coderex_core::engine::QueryEngine::submit\n             at /home/somebody/project/crates/core/src/engine.rs:42:9\n   2: <unknown>\n";
+    const BACKTRACE: &str = "   0: std::panicking::begin_panic_handler\n             at /rustc/abcdef0123456789abcdef0123456789/library/std/src/panicking.rs:123:5\n   1: codape_core::engine::QueryEngine::submit\n             at /home/somebody/project/crates/core/src/engine.rs:42:9\n   2: <unknown>\n";
 
     #[test]
     fn symbolization_drops_paths_usernames_and_source_lines() {
@@ -1692,7 +1692,7 @@ mod tests {
             symbols.frames,
             vec![
                 "std::panicking::begin_panic_handler",
-                "coderex_core::engine::QueryEngine::submit",
+                "codape_core::engine::QueryEngine::submit",
             ]
         );
         let rendered = symbols.frames.join("\n");
@@ -1791,7 +1791,7 @@ mod tests {
         assert!(crash.backtrace_symbols.unwrap().contains("QueryEngine"));
     }
 
-    /// `CODEREX_HIPAA` always wins: even with verbose enabled, ingestion stores
+    /// `CODAPE_HIPAA` always wins: even with verbose enabled, ingestion stores
     /// a structured summary, no raw text and no backtrace.
     #[test]
     fn strict_wins_over_verbose() {
@@ -1817,7 +1817,7 @@ mod tests {
         assert!(!crash_verbose_with(Some("no")));
         assert!(!crash_verbose_with(Some("")));
         assert!(!crash_verbose_with(None));
-        assert_eq!(CRASH_VERBOSE_ENV, "CODEREX_CRASH_VERBOSE");
+        assert_eq!(CRASH_VERBOSE_ENV, "CODAPE_CRASH_VERBOSE");
     }
 
     /// A classified report's summary carries the template and fingerprint but

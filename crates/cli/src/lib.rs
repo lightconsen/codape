@@ -1,4 +1,4 @@
-//! CodeRex CLI library — REPL loop, orchestrator, and CLI utilities.
+//! Codape CLI library — REPL loop, orchestrator, and CLI utilities.
 
 pub mod agent_selection;
 pub mod artifacts;

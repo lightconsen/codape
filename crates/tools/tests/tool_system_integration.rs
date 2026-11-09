@@ -7,8 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use coderex_core::tool_executor::ToolExecutor;
-use coderex_tools::{
+use codape_core::tool_executor::ToolExecutor;
+use codape_tools::{
     ExecutionConfig, ExecutionContext, RegistryToolDispatcher, ToolCacheConfig,
     ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
 };
@@ -631,7 +631,7 @@ async fn sandbox_denies_write_outside_allowed_paths() {
     );
 
     // Set a sandbox config that only allows writes within tmp/allowed
-    let sandbox = coderex_core::sandbox::SandboxConfig {
+    let sandbox = codape_core::sandbox::SandboxConfig {
         allowed_read_paths: vec![tmp.path().to_path_buf()],
         allowed_write_paths: vec![tmp.path().join("allowed")],
         allow_network: false,
@@ -720,7 +720,7 @@ fn context_allowlist_restricts_tools() {
 fn deny_rule_blocks_tool_availability() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    registry.add_deny_rule(coderex_tools::ToolDenyRule::for_tools(vec!["Bash".into()]));
+    registry.add_deny_rule(codape_tools::ToolDenyRule::for_tools(vec!["Bash".into()]));
 
     let names = registry.available_tool_names(ExecutionContext::Normal, true);
     assert!(!names.contains(&"Bash".to_string()));

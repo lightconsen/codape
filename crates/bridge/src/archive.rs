@@ -1,6 +1,6 @@
 //! Bridge archive and cleanup — transcript archiving and worktree cleanup.
 
-use coderex_core::process_tree::ProcessTree;
+use codape_core::process_tree::ProcessTree;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -438,9 +438,8 @@ mod tests {
     fn cleanup_terminates_a_tracked_process_tree() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = BridgeCleanupManager::new(dir.path().to_path_buf(), dir.path().to_path_buf());
-        let tree = Arc::new(
-            ProcessTree::create(coderex_core::process_tree::JobLimits::default()).unwrap(),
-        );
+        let tree =
+            Arc::new(ProcessTree::create(codape_core::process_tree::JobLimits::default()).unwrap());
 
         #[cfg(unix)]
         let mut cmd = {

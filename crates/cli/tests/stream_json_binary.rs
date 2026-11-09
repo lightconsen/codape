@@ -1,9 +1,9 @@
 //! `--output-format stream-json` against the real binary and the static mock
 //! provider.
 //!
-//! The unit tests in `coderex-events` cover the frame types; the in-process
+//! The unit tests in `codape-events` cover the frame types; the in-process
 //! REPL test covers the mapping with a mock API client. Neither proves that the
-//! *binary* emits the protocol, so this test runs `coderex -p
+//! *binary* emits the protocol, so this test runs `codape -p
 //! --output-format stream-json` as a child process and parses what a host
 //! would actually receive: one JSON object per line, exactly one `result`.
 
@@ -62,8 +62,8 @@ fn start_static_provider() -> (Child, String) {
     (child, format!("http://{address}"))
 }
 
-fn run_coderex(cwd: &Path, base_url: &str) -> (String, String, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+fn run_codape(cwd: &Path, base_url: &str) -> (String, String, i32) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--output-format",
@@ -78,7 +78,7 @@ fn run_coderex(cwd: &Path, base_url: &str) -> (String, String, i32) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
 
     child
         .stdin
@@ -106,7 +106,7 @@ fn run_coderex(cwd: &Path, base_url: &str) -> (String, String, i32) {
         text
     });
 
-    let status = child.wait().expect("wait for coderex");
+    let status = child.wait().expect("wait for codape");
     let stdout = stdout_reader.join().expect("stdout reader");
     let stderr = stderr_reader.join().expect("stderr reader");
     (stdout, stderr, status.code().unwrap_or(-1))
@@ -128,8 +128,8 @@ fn every_rep_emits_protocol_frames_before_the_result() {
     let (mut provider, base_url) = start_static_provider();
 
     for rep in 0..8 {
-        let (stdout, stderr, code) = run_coderex(workspace.path(), &base_url);
-        assert_eq!(code, 0, "rep {rep}: coderex failed; stderr:\n{stderr}");
+        let (stdout, stderr, code) = run_codape(workspace.path(), &base_url);
+        assert_eq!(code, 0, "rep {rep}: codape failed; stderr:\n{stderr}");
         let frames: Vec<serde_json::Value> = stdout
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -162,7 +162,7 @@ fn stream_json_writes_one_frame_per_line() {
     let (mut provider, base_url) = start_static_provider();
 
     let started = Instant::now();
-    let (stdout, stderr, code) = run_coderex(workspace.path(), &base_url);
+    let (stdout, stderr, code) = run_codape(workspace.path(), &base_url);
     let _ = provider.kill();
     let _ = provider.wait();
 
@@ -170,7 +170,7 @@ fn stream_json_writes_one_frame_per_line() {
         started.elapsed() < Duration::from_secs(60),
         "the binary did not finish"
     );
-    assert_eq!(code, 0, "coderex failed; stderr:\n{stderr}");
+    assert_eq!(code, 0, "codape failed; stderr:\n{stderr}");
     assert!(
         !stdout.trim().is_empty(),
         "stream-json wrote nothing; stderr:\n{stderr}"

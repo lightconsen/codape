@@ -1,4 +1,4 @@
-//! CodeRex memory system — transcript storage, session indexing, long-term memory.
+//! Codape memory system — transcript storage, session indexing, long-term memory.
 
 #![warn(missing_docs)]
 

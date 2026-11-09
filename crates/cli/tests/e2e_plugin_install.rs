@@ -24,18 +24,18 @@ for line in sys.stdin:
     rid = request.get("id")
     if rid is None:
         continue
-    if method == "coderex/initialize":
+    if method == "codape/initialize":
         respond(rid, {"protocolVersion": "1.0"})
-    elif method == "coderex/commands/list":
+    elif method == "codape/commands/list":
         respond(rid, [{"name": "hello", "description": "Say hello"}])
-    elif method == "coderex/skills/list":
+    elif method == "codape/skills/list":
         respond(rid, [])
-    elif method == "coderex/commands/execute":
+    elif method == "codape/commands/execute":
         params = request.get("params") or {}
         args = params.get("args") or []
-        greeting = os.environ.get("CODEREX_PLUGIN_OPTION_GREETING", "")
+        greeting = os.environ.get("CODAPE_PLUGIN_OPTION_GREETING", "")
         respond(rid, "plugin-hello:" + " ".join(str(arg) for arg in args) + "|" + greeting)
-    elif method == "coderex/ping":
+    elif method == "codape/ping":
         respond(rid, {})
     else:
         respond(rid, {})
@@ -119,7 +119,7 @@ fn run(
     prompt: Option<&str>,
     base_url: &str,
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(args)
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
@@ -127,7 +127,7 @@ fn run(
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("HOME", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(if prompt.is_some() {
             Stdio::piped()
         } else {
@@ -136,7 +136,7 @@ fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     if let Some(prompt) = prompt {
         child
             .stdin
@@ -182,7 +182,7 @@ fn an_installed_plugin_process_serves_its_slash_command() {
     );
     let installed = workspace
         .path()
-        .join(".coderex")
+        .join(".codape")
         .join("plugins")
         .join("mock-plugin");
     assert!(installed.join("bin/plugin").exists(), "{installed:?}");
@@ -230,7 +230,7 @@ fn run_with_key(
     key: &str,
     base_url: &str,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(args)
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "mock")
@@ -238,13 +238,13 @@ fn run_with_key(
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("HOME", home)
-        .env("CODEREX_LOG", "off")
-        .env("CODEREX_PLUGIN_PUBLIC_KEY", key)
+        .env("CODAPE_LOG", "off")
+        .env("CODAPE_PLUGIN_PUBLIC_KEY", key)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 /// A directory has no archive signature, so a configured signing key accepts
@@ -262,8 +262,8 @@ fn a_signing_key_enforces_the_trust_on_first_use_pin() {
     .expect("settings");
     let source = write_plugin_source(workspace.path());
     let (mut provider, base_url) = start_static_provider();
-    let plugin_dir = workspace.path().join(".coderex/plugins/mock-plugin");
-    let pins = workspace.path().join(".coderex/plugins/.coderex-pins.json");
+    let plugin_dir = workspace.path().join(".codape/plugins/mock-plugin");
+    let pins = workspace.path().join(".codape/plugins/.codape-pins.json");
 
     // No key: the install is unverified, and it records what it got.
     let first = run(

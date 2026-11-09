@@ -32,7 +32,7 @@ pub struct TelemetryConfig {
     /// Enable strict (HIPAA-style) redaction from configuration.
     ///
     /// The environment variable still wins: `strict` is on when either this
-    /// is set or `CODEREX_HIPAA` says so. Configuration can only add the
+    /// is set or `CODAPE_HIPAA` says so. Configuration can only add the
     /// stricter mode, never remove it, because it is a tightening.
     pub strict: bool,
 }
@@ -225,13 +225,13 @@ impl RateLimiter {
 /// Environment variable that turns on strict (confidentiality) redaction.
 ///
 /// Present with any value other than `0`/`false`/`no`/empty enables the mode,
-/// mirroring `CODEREX_DISABLE_ADOPT`.
-pub const HIPAA_ENV: &str = "CODEREX_HIPAA";
+/// mirroring `CODAPE_DISABLE_ADOPT`.
+pub const HIPAA_ENV: &str = "CODAPE_HIPAA";
 
 /// Whether strict (confidentiality) redaction is requested for this process.
 ///
-/// This is CodeRex's port of the reference's `hipaa` trigger. The reference
-/// reads both an environment variable and a settings lookup; CodeRex's settings
+/// This is Codape's port of the reference's `hipaa` trigger. The reference
+/// reads both an environment variable and a settings lookup; Codape's settings
 /// layer is not reachable from this crate, so the environment variable is the
 /// whole trigger. See `docs/telemetry.md`.
 #[must_use]
@@ -349,7 +349,7 @@ impl TelemetryUploader {
 
     /// Whether strict (HIPAA-style) redaction is in force.
     ///
-    /// True when the settings file asked for it or `CODEREX_HIPAA` is set.
+    /// True when the settings file asked for it or `CODAPE_HIPAA` is set.
     #[must_use]
     pub const fn is_strict(&self) -> bool {
         self.strict
@@ -596,9 +596,9 @@ fn build_event_payload(
 /// `panic_message_sha256`) and a symbol-only backtrace (`backtrace_frames`,
 /// frame count, symbol length/hash). It never sends `panic_info`, a raw
 /// `backtrace`, or any free-form message text. Strict mode
-/// (`CODEREX_HIPAA`) additionally drops the symbols.
+/// (`CODAPE_HIPAA`) additionally drops the symbols.
 ///
-/// Only `CODEREX_CRASH_VERBOSE` (without strict mode) adds `panic_info` — the
+/// Only `CODAPE_CRASH_VERBOSE` (without strict mode) adds `panic_info` — the
 /// stored raw text scrubbed again here — and marks the payload
 /// `redaction_status: "pattern"`. The raw backtrace is never uploaded; verbose
 /// payloads still use symbols only.
@@ -694,7 +694,7 @@ fn sanitize_location(location: &str, scrubber: &Scrubber) -> String {
 
 /// Preview the exact JSON payload that would be uploaded for `crash`.
 ///
-/// This resolves `CODEREX_CRASH_VERBOSE` and `CODEREX_HIPAA` at call time, so
+/// This resolves `CODAPE_CRASH_VERBOSE` and `CODAPE_HIPAA` at call time, so
 /// it matches a newly constructed uploader in the same process. Pass the same
 /// row the uploader would read (`TelemetryStore::pending_crashes`) and the
 /// returned value is the element of the upload's `crashes` array.
@@ -783,7 +783,7 @@ mod tests {
     }
 
     /// Settings are a second trigger for strict redaction, alongside
-    /// `CODEREX_HIPAA`. Either one turns it on; neither can turn it off.
+    /// `CODAPE_HIPAA`. Either one turns it on; neither can turn it off.
     #[test]
     fn a_strict_config_turns_on_strict_redaction() {
         let dir = tempfile::tempdir().unwrap();
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn hipaa_env_name_matches_the_documented_trigger() {
-        assert_eq!(HIPAA_ENV, "CODEREX_HIPAA");
+        assert_eq!(HIPAA_ENV, "CODAPE_HIPAA");
     }
 
     fn pending_event_with(payload: serde_json::Value) -> crate::PendingEvent {
@@ -1382,7 +1382,7 @@ mod tests {
         let crash = pending_crash_with(
             "panicked at src/main.rs:10:5:\nfailed for bob@example.com carrying A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
             Some(
-                "   0: coderex_core::engine::run\n             at /home/bob/project/crates/core/src/engine.rs:42:9\n   1: at file.rs:12:9",
+                "   0: codape_core::engine::run\n             at /home/bob/project/crates/core/src/engine.rs:42:9\n   1: at file.rs:12:9",
             ),
         );
         let payload = build_crash_payload(&scrubber, &crash, true, false);
@@ -1402,7 +1402,7 @@ mod tests {
         );
         assert_eq!(
             payload["backtrace_frames"],
-            serde_json::json!(["coderex_core::engine::run"])
+            serde_json::json!(["codape_core::engine::run"])
         );
 
         let rendered = payload.to_string();
@@ -1416,7 +1416,7 @@ mod tests {
         }
         for expected in [
             "failed for",
-            "coderex_core::engine::run",
+            "codape_core::engine::run",
             "<SECRET>",
             "<EMAIL>",
         ] {
@@ -1443,7 +1443,7 @@ mod tests {
     /// match the marker (no free-form key anywhere).
     #[test]
     fn symbolized_crash_payload_has_symbols_and_no_paths() {
-        let backtrace = "   0: std::panicking::begin_panic_handler\n             at /rustc/abcdef0123456789abcdef0123456789/library/std/src/panicking.rs:123:5\n   1: coderex_core::engine::QueryEngine::submit\n             at /home/somebody/project/crates/core/src/engine.rs:42:9\n";
+        let backtrace = "   0: std::panicking::begin_panic_handler\n             at /rustc/abcdef0123456789abcdef0123456789/library/std/src/panicking.rs:123:5\n   1: codape_core::engine::QueryEngine::submit\n             at /home/somebody/project/crates/core/src/engine.rs:42:9\n";
         let crash = pending_classified_crash(
             "[strict-crash-summary] type=&str; thread=main; location=src/main.rs:10:5; template=index_out_of_bounds; message_len=42; message_sha256=aaa; message=omitted; backtrace=omitted",
             "index_out_of_bounds",
@@ -1511,7 +1511,7 @@ mod tests {
         );
         crash.backtrace_symbols = Some(
             serde_json::to_string(&vec![
-                "coderex_core::engine::run".to_string(),
+                "codape_core::engine::run".to_string(),
                 "/home/bob/private.rs:1:1".to_string(),
                 "std::thread::spawn::<user@example.com>".to_string(),
             ])
@@ -1541,7 +1541,7 @@ mod tests {
         assert_eq!(payload["panic_message_sha256"], serde_json::json!(""));
         assert_eq!(
             payload["backtrace_frames"],
-            serde_json::json!(["coderex_core::engine::run"])
+            serde_json::json!(["codape_core::engine::run"])
         );
         assert_eq!(payload["backtrace_frame_count"], serde_json::json!(9));
         assert_eq!(payload["redaction_status"], serde_json::json!("symbolized"));
@@ -1553,7 +1553,7 @@ mod tests {
     fn preview_shows_the_exact_scrubbed_wire_payload() {
         let crash = pending_crash_with(
             "panicked at src/main.rs:10:5:\nfailed for bob@example.com carrying A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
-            Some("   0: coderex_core::engine::run\n             at /home/bob/x.rs:1:1\n"),
+            Some("   0: codape_core::engine::run\n             at /home/bob/x.rs:1:1\n"),
         );
 
         let preview = preview_crash_payload_with(&crash, true, false);
@@ -1576,7 +1576,7 @@ mod tests {
             "panicked at src/main.rs:10:5:\nuser said something private",
             "index_out_of_bounds",
             r#"{"panic_container_len":3,"panic_index":7}"#,
-            Some("   0: coderex_core::engine::run\n"),
+            Some("   0: codape_core::engine::run\n"),
         );
         let preview = preview_crash_payload_with(&crash, true, true);
 
@@ -1586,10 +1586,7 @@ mod tests {
         assert!(preview.get("backtrace").is_none(), "{preview}");
         let rendered = preview.to_string();
         assert!(!rendered.contains("user said"), "{rendered}");
-        assert!(
-            !rendered.contains("coderex_core::engine::run"),
-            "{rendered}"
-        );
+        assert!(!rendered.contains("codape_core::engine::run"), "{rendered}");
         // The strict allowlist must accept every key we produce.
         assert_ne!(
             preview["redaction_status"],
@@ -1607,7 +1604,7 @@ mod tests {
             None,
         );
         let uploader = TelemetryUploader::new(
-            std::path::PathBuf::from("/tmp/coderex-preview.db"),
+            std::path::PathBuf::from("/tmp/codape-preview.db"),
             TelemetryConfig::default(),
         )
         .with_mode_for_test(false, true);
@@ -1622,7 +1619,7 @@ mod tests {
     fn legacy_row_default_never_uploads_free_form() {
         let crash = pending_crash_with(
             "panicked at src/old.rs:3:1:\nuser said something private",
-            Some("   0: coderex_core::engine::run\n             at /home/bob/secret.rs:3:1\n"),
+            Some("   0: codape_core::engine::run\n             at /home/bob/secret.rs:3:1\n"),
         );
         let payload = build_crash_payload(&Scrubber::new(), &crash, false, false);
         let rendered = payload.to_string();

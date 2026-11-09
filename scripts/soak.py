@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Long-session soak driver.
 
-Runs the real `coderex` TUI in a pseudo-terminal against the static provider,
+Runs the real `codape` TUI in a pseudo-terminal against the static provider,
 submits N prompts that each perform one Bash tool call, and samples resident
 memory, open file descriptors and the session directory. The provider emits a
 unique marker per turn, so a turn is complete when that marker appears rather
@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / "target/debug/coderex"
+BIN = ROOT / "target/debug/codape"
 PROVIDER = ROOT / "target/debug/static-anthropic-server"
 RESPONSES = ROOT / "tests/responses.json"
 
@@ -57,7 +57,7 @@ def build() -> None:
             "build",
             "--locked",
             "--bin",
-            "coderex",
+            "codape",
             "--bin",
             "static-anthropic-server",
         ],
@@ -185,8 +185,8 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     build()
     provider, base_url = start_provider()
-    work = Path(tempfile.mkdtemp(prefix="coderex-soak-"))
-    home = Path(tempfile.mkdtemp(prefix="coderex-soak-home-"))
+    work = Path(tempfile.mkdtemp(prefix="codape-soak-"))
+    home = Path(tempfile.mkdtemp(prefix="codape-soak-home-"))
     (work / "src").mkdir()
     (work / "src/lib.rs").write_text("pub fn add(a: i32, b: i32) -> i32 { a + b }\n")
     (home / "settings.json").write_text(
@@ -200,7 +200,7 @@ def main() -> int:
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_MODEL": "claude-sonnet-4-6",
             "CLAUDE_CONFIG_DIR": str(home),
-            "CODEREX_LOG": "off",
+            "CODAPE_LOG": "off",
             "TERM": "xterm-256color",
         }
     )
@@ -218,9 +218,9 @@ def main() -> int:
     samples: list[dict[str, object]] = []
     failure: str | None = None
     try:
-        output, ready = read_until(fd, output, "CodeRex", time.time() + 30)
+        output, ready = read_until(fd, output, "Codape", time.time() + 30)
         if not ready:
-            raise SystemExit("coderex did not render its startup banner")
+            raise SystemExit("codape did not render its startup banner")
 
         for turn in range(1, TURNS + 1):
             marker = f"soak-turn-ok-{turn}"
@@ -236,7 +236,7 @@ def main() -> int:
                         "turn": turn,
                         "rss_kb": rss_kb(pid),
                         "fds": fd_count(pid),
-                        "session_bytes": session_dir_size(work / ".coderex"),
+                        "session_bytes": session_dir_size(work / ".codape"),
                     }
                 )
 

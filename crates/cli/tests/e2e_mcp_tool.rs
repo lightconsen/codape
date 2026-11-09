@@ -143,7 +143,7 @@ fn write_mock_server() -> PathBuf {
     // Outside the workspace: the MCP spawn path deliberately refuses a
     // command that resolves inside the session's working directory.
     let path = std::env::temp_dir().join(format!(
-        "coderex_mock_mcp_e2e_{}_{}.py",
+        "codape_mock_mcp_e2e_{}_{}.py",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -160,14 +160,14 @@ fn write_mock_server() -> PathBuf {
     path
 }
 
-fn run_coderex(dir: &Path, base_url: &str, extra_args: &[&str]) -> std::process::Output {
+fn run_codape(dir: &Path, base_url: &str, extra_args: &[&str]) -> std::process::Output {
     let config_home = tempfile::tempdir().expect("config home");
     std::fs::write(
         config_home.path().join("settings.json"),
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -180,12 +180,12 @@ fn run_coderex(dir: &Path, base_url: &str, extra_args: &[&str]) -> std::process:
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -214,7 +214,7 @@ fn configured_workspace() -> (tempfile::TempDir, PathBuf) {
 fn assert_echoed(output: &std::process::Output) {
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -232,7 +232,7 @@ fn assert_echoed(output: &std::process::Output) {
 fn a_model_tool_call_runs_in_the_configured_mcp_server() {
     let (dir, script) = configured_workspace();
     let (mut provider, base_url) = start_static_provider();
-    let output = run_coderex(dir.path(), &base_url, &[]);
+    let output = run_codape(dir.path(), &base_url, &[]);
     let _ = provider.kill();
     let _ = provider.wait();
     assert_echoed(&output);
@@ -282,19 +282,19 @@ fn an_mcp_tool_hook_can_block_the_tool() {
     .unwrap();
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -308,7 +308,7 @@ fn an_mcp_tool_hook_can_block_the_tool() {
     let _ = std::fs::remove_file(&script);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let content = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
@@ -343,19 +343,19 @@ fn an_mcp_image_result_reaches_the_provider_as_an_image_block() {
     let record = dir.path().join("requests.jsonl");
     let (mut provider, base_url) = start_static_provider_recording(Some(&record));
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -369,7 +369,7 @@ fn an_mcp_image_result_reaches_the_provider_as_an_image_block() {
     let _ = std::fs::remove_file(&script);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let requests = std::fs::read_to_string(&record).unwrap_or_default();
@@ -394,7 +394,7 @@ fn the_mcp_sandbox_escape_hatch_lifts_the_confinement() {
         let dir = tempfile::tempdir().expect("workspace");
         let script = write_mock_server();
         let probe_path = format!(
-            "/var/tmp/coderex-mcp-probe-{}-{}",
+            "/var/tmp/codape-mcp-probe-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -423,7 +423,7 @@ fn the_mcp_sandbox_escape_hatch_lifts_the_confinement() {
         )
         .unwrap();
         let (mut provider, base_url) = start_static_provider();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
         command
             .args([
                 "-p",
@@ -436,19 +436,19 @@ fn the_mcp_sandbox_escape_hatch_lifts_the_confinement() {
             .env("ANTHROPIC_BASE_URL", &base_url)
             .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
             .env("CLAUDE_CONFIG_DIR", config_home.path())
-            .env("CODEREX_LOG", "off")
+            .env("CODAPE_LOG", "off")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         match env {
             Some(value) => {
-                command.env("CODEREX_MCP_SANDBOX", value);
+                command.env("CODAPE_MCP_SANDBOX", value);
             }
             None => {
-                command.env_remove("CODEREX_MCP_SANDBOX");
+                command.env_remove("CODAPE_MCP_SANDBOX");
             }
         }
-        let mut child = command.spawn().expect("spawn coderex");
+        let mut child = command.spawn().expect("spawn codape");
         child
             .stdin
             .take()
@@ -462,7 +462,7 @@ fn the_mcp_sandbox_escape_hatch_lifts_the_confinement() {
         let _ = std::fs::remove_file(&probe_path);
         assert!(
             output.status.success(),
-            "coderex failed: {}",
+            "codape failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).into_owned()
@@ -476,7 +476,7 @@ fn the_mcp_sandbox_escape_hatch_lifts_the_confinement() {
     let unconfined = run_with_sandbox(Some("0"));
     assert!(
         unconfined.contains("write-ok"),
-        "CODEREX_MCP_SANDBOX=0 did not lift the confinement:\n{unconfined}"
+        "CODAPE_MCP_SANDBOX=0 did not lift the confinement:\n{unconfined}"
     );
 }
 
@@ -503,7 +503,7 @@ fn an_mcp_prompt_is_fetched_and_shown_to_the_model() {
     .unwrap();
     let (mut provider, base_url) = start_static_provider();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -515,12 +515,12 @@ fn an_mcp_prompt_is_fetched_and_shown_to_the_model() {
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -535,7 +535,7 @@ fn an_mcp_prompt_is_fetched_and_shown_to_the_model() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
@@ -578,19 +578,19 @@ fn a_server_command_inside_the_workspace_is_refused() {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("seed config");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", &base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "warn")
+        .env("CODAPE_LOG", "warn")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()

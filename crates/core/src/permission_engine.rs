@@ -18,7 +18,7 @@ use thiserror::Error;
 /// reads. So the engine asks this with the call's own arguments; the tool and
 /// the registry that know the tool's shape answer.
 ///
-/// `coderex-tools` installs a registry-backed one through
+/// `codape-tools` installs a registry-backed one through
 /// `install_rule_exemptions`.
 pub type RuleExemptionsResolver =
     dyn Fn(&str, &serde_json::Value) -> ToolRuleExemptions + Send + Sync;
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn pending_store_persist_and_load() {
-        let dir = std::env::temp_dir().join("coderex_perm_test");
+        let dir = std::env::temp_dir().join("codape_perm_test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pending.json");
 
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn pending_store_load_nonexistent_is_ok() {
-        let dir = std::env::temp_dir().join("coderex_perm_test2");
+        let dir = std::env::temp_dir().join("codape_perm_test2");
         let path = dir.join("nonexistent.json");
         let mut store = PendingPermissionStore::new(Some(path));
         store.load().unwrap();
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn orphaned_recovery_loads_pending() {
-        let dir = std::env::temp_dir().join("coderex_perm_recovery");
+        let dir = std::env::temp_dir().join("codape_perm_recovery");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("recovery.json");
 

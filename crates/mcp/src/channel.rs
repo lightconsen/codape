@@ -196,11 +196,11 @@ pub struct JsonRpcChannel {
     /// Working directory for the server, when configured.
     cwd: Option<std::path::PathBuf>,
     /// Sandbox policy for the server, when one applies.
-    sandbox_config: Option<coderex_core::sandbox::SandboxConfig>,
+    sandbox_config: Option<codape_core::sandbox::SandboxConfig>,
     /// The sandbox handle. It owns the child's Job Object (Windows), the
     /// Seatbelt profile (macOS) and the memory cgroup (Linux), so it must live
     /// exactly as long as the process.
-    sandbox: Option<coderex_core::sandbox::SandboxHandle>,
+    sandbox: Option<codape_core::sandbox::SandboxHandle>,
     /// Whether the channel is initialized.
     initialized: bool,
     /// Answers requests the server makes of the client, when one was supplied.
@@ -232,8 +232,8 @@ impl std::fmt::Debug for JsonRpcChannel {
 /// it a distinct profile path. On the other platforms the handle is not backed
 /// by a per-thread file, so the call is made directly.
 fn create_sandbox_handle(
-    config: &coderex_core::sandbox::SandboxConfig,
-) -> Result<coderex_core::sandbox::SandboxHandle, String> {
+    config: &codape_core::sandbox::SandboxConfig,
+) -> Result<codape_core::sandbox::SandboxHandle, String> {
     #[cfg(target_os = "macos")]
     {
         std::thread::scope(|scope| {
@@ -327,7 +327,7 @@ impl JsonRpcChannel {
     pub fn set_sandbox(
         &mut self,
         cwd: Option<std::path::PathBuf>,
-        config: Option<coderex_core::sandbox::SandboxConfig>,
+        config: Option<codape_core::sandbox::SandboxConfig>,
     ) {
         self.cwd = cwd;
         self.sandbox_config = config;
@@ -449,7 +449,7 @@ impl JsonRpcChannel {
         // checkout deciding what the client launches; refuse it rather than
         // run it.
         let cwd = std::env::current_dir().unwrap_or_default();
-        if coderex_core::sandbox::resolves_inside_cwd(&self.command, &cwd) {
+        if codape_core::sandbox::resolves_inside_cwd(&self.command, &cwd) {
             return Err(format!(
                 "refusing to spawn '{}': it resolves inside the working directory {}",
                 self.command,
@@ -463,7 +463,7 @@ impl JsonRpcChannel {
         // binary only fails inside it — the protocol error that surfaces then
         // reads as "the server started but exposed no tools", which hides the
         // real problem.
-        if coderex_core::sandbox::resolve_program(&self.command, &cwd).is_none() {
+        if codape_core::sandbox::resolve_program(&self.command, &cwd).is_none() {
             return Err(format!(
                 "'{}' could not be started: no such command on PATH or at that path",
                 self.command
@@ -490,7 +490,7 @@ impl JsonRpcChannel {
         // stays the program.
         let (program, args) = match sandbox
             .as_ref()
-            .and_then(coderex_core::sandbox::SandboxHandle::sandboxed_program)
+            .and_then(codape_core::sandbox::SandboxHandle::sandboxed_program)
         {
             Some((wrapper, mut prefix)) => {
                 prefix.push(self.command.clone());
@@ -506,7 +506,7 @@ impl JsonRpcChannel {
         // session's credentials. Its own configured environment is layered on
         // afterwards and always wins, so a server that genuinely needs a
         // variable gets it by naming it in its configuration.
-        for key in coderex_core::sandbox::credential_scrub_keys() {
+        for key in codape_core::sandbox::credential_scrub_keys() {
             if !self.env.contains_key(&key) {
                 cmd.env_remove(&key);
             }
@@ -610,7 +610,7 @@ impl JsonRpcChannel {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "coderex",
+                "name": "codape",
                 "version": "0.1.0"
             }
         });
@@ -1005,7 +1005,7 @@ mod tests {
     /// otherwise leave its tool list stale with no trace of why.
     #[test]
     fn a_notification_with_no_handler_is_logged() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let channel = JsonRpcChannel::new("echo", vec![], HashMap::new());
         channel.dispatch_notification("notifications/tools/list_changed", None);
         assert!(
@@ -1044,7 +1044,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_message_that_is_neither_a_response_nor_a_request_is_logged() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let mut channel = channel_reading(
             "{\"jsonrpc\":\"2.0\",\"something\":true}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n",
         );
@@ -1062,7 +1062,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_response_for_a_forgotten_request_is_logged() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let mut channel = channel_reading(
             "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n",
         );
@@ -1290,7 +1290,7 @@ mod tests {
         // SAFETY: edition 2024 marks `set_var` unsafe because another thread
         // could read the environment concurrently. This test names a variable
         // no other test in this crate reads.
-        unsafe { std::env::set_var(key, "coderex-test-secret") };
+        unsafe { std::env::set_var(key, "codape-test-secret") };
 
         let mut channel = JsonRpcChannel::new(
             "sh",
@@ -1348,7 +1348,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_refuses_a_command_inside_the_working_directory() {
         let cwd = std::env::current_dir().unwrap();
-        let name = format!("coderex_planted_mcp_{}", std::process::id());
+        let name = format!("codape_planted_mcp_{}", std::process::id());
         let planted = cwd.join(&name);
         std::fs::write(&planted, b"#!/bin/sh\nexit 0\n").unwrap();
 
@@ -1381,8 +1381,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_stdio_channel_is_sandboxed() {
-        if !coderex_core::sandbox::bubblewrap_in_force()
-            && !coderex_core::sandbox::landlock_in_force()
+        if !codape_core::sandbox::bubblewrap_in_force()
+            && !codape_core::sandbox::landlock_in_force()
         {
             eprintln!("skipping: neither bubblewrap nor Landlock is in force");
             return;
@@ -1411,7 +1411,7 @@ mod tests {
         let mut channel = JsonRpcChannel::new("sh", vec!["-c".to_string(), script], HashMap::new());
         channel.set_sandbox(
             Some(allowed.clone()),
-            Some(coderex_core::sandbox::SandboxConfig {
+            Some(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![allowed.clone()],
                 allowed_write_paths: vec![allowed.clone()],
                 allowed_exec_paths: vec![
@@ -1419,7 +1419,7 @@ mod tests {
                     std::path::PathBuf::from("/usr/bin"),
                 ],
                 additional_working_dirs: vec![allowed.clone()],
-                ..coderex_core::sandbox::SandboxConfig::default()
+                ..codape_core::sandbox::SandboxConfig::default()
             }),
         );
 
@@ -1452,11 +1452,11 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[tokio::test]
     async fn windows_stdio_channel_is_sandboxed() {
-        if !coderex_core::sandbox::app_container_available() {
+        if !codape_core::sandbox::app_container_available() {
             assert!(
-                std::env::var("CODEREX_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
+                std::env::var("CODAPE_REQUIRE_APP_CONTAINER").as_deref() != Ok("1"),
                 "AppContainer is unavailable on this runner but \
-                 CODEREX_REQUIRE_APP_CONTAINER=1"
+                 CODAPE_REQUIRE_APP_CONTAINER=1"
             );
             return;
         }
@@ -1479,12 +1479,12 @@ mod tests {
             JsonRpcChannel::new("cmd.exe", vec!["/C".to_string(), script], HashMap::new());
         channel.set_sandbox(
             Some(allowed.clone()),
-            Some(coderex_core::sandbox::SandboxConfig {
+            Some(codape_core::sandbox::SandboxConfig {
                 allowed_read_paths: vec![allowed.clone()],
                 allowed_write_paths: vec![allowed.clone()],
                 allowed_exec_paths: Vec::new(),
                 additional_working_dirs: vec![allowed.clone()],
-                ..coderex_core::sandbox::SandboxConfig::default()
+                ..codape_core::sandbox::SandboxConfig::default()
             }),
         );
 

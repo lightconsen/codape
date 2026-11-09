@@ -60,7 +60,7 @@ impl Tool for WriteTool {
         if let Some(config) = ctx
             .extra
             .get("sandbox_config")
-            .and_then(|v| v.downcast_ref::<coderex_core::sandbox::SandboxConfig>())
+            .and_then(|v| v.downcast_ref::<codape_core::sandbox::SandboxConfig>())
         {
             let allowed_write = &config.allowed_write_paths;
             if !crate::sandbox_policy::is_path_allowed(&path_buf, allowed_write) {
@@ -91,7 +91,7 @@ impl Tool for WriteTool {
         if let Some(config) = ctx
             .extra
             .get("sandbox_config")
-            .and_then(|value| value.downcast_ref::<coderex_core::sandbox::SandboxConfig>())
+            .and_then(|value| value.downcast_ref::<codape_core::sandbox::SandboxConfig>())
             && !crate::sandbox_policy::is_path_allowed(&actual, &config.allowed_write_paths)
         {
             return Err(ToolError::PermissionDenied {
@@ -165,7 +165,7 @@ mod tests {
         std::fs::write(&target, "v1").unwrap();
 
         let store = std::sync::Arc::new(
-            coderex_core::checkpoints::CheckpointStore::new(&tmp.path().join("history")).unwrap(),
+            codape_core::checkpoints::CheckpointStore::new(&tmp.path().join("history")).unwrap(),
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert(

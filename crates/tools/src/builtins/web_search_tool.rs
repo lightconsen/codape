@@ -13,17 +13,17 @@
 //! in order and only reports failure when all of them fail. Configuration
 //! comes from (highest precedence first):
 //!
-//! 1. `CODEREX_SEARCH_BACKENDS` — a comma-separated list, parsed by
+//! 1. `CODAPE_SEARCH_BACKENDS` — a comma-separated list, parsed by
 //!    [`SearchBackendSpec::parse_list`]. An entry that fails to parse is
 //!    skipped with a warning rather than silently replacing the default.
-//! 2. `CODEREX_SEARCH_BACKEND` — a single entry, same syntax as one element of
+//! 2. `CODAPE_SEARCH_BACKEND` — a single entry, same syntax as one element of
 //!    the list above. Kept for scripts that only need to override one.
 //! 3. The built-in default: `duckduckgo`.
 //!
 //! Syntax per entry: `kind` or `kind:endpoint`. For example
 //!
 //! ```text
-//! CODEREX_SEARCH_BACKENDS=json:https://search.internal/api,duckduckgo
+//! CODAPE_SEARCH_BACKENDS=json:https://search.internal/api,duckduckgo
 //! ```
 //!
 //! tries an internal JSON endpoint first and falls back to DuckDuckGo. A
@@ -38,10 +38,10 @@ use async_trait::async_trait;
 const MAX_RESULTS: usize = 10;
 
 /// Environment variable naming the ordered backend list.
-pub const SEARCH_BACKENDS_ENV: &str = "CODEREX_SEARCH_BACKENDS";
+pub const SEARCH_BACKENDS_ENV: &str = "CODAPE_SEARCH_BACKENDS";
 
 /// Environment variable naming a single backend, when a list is overkill.
-pub const SEARCH_BACKEND_ENV: &str = "CODEREX_SEARCH_BACKEND";
+pub const SEARCH_BACKEND_ENV: &str = "CODAPE_SEARCH_BACKEND";
 
 /// The kind of backend an entry describes.
 #[derive(Debug, Clone, PartialEq, Eq)]

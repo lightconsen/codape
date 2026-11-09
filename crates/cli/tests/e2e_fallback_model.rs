@@ -151,7 +151,7 @@ async fn the_primary_404_retries_once_on_the_fallback_model() {
 
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(models.len() >= 2, "no retry happened: {models:?}");
@@ -165,7 +165,7 @@ async fn the_primary_404_retries_once_on_the_fallback_model() {
 }
 
 fn run(cwd: &Path, base_url: &str, config_home: &Path) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--model",
@@ -178,12 +178,12 @@ fn run(cwd: &Path, base_url: &str, config_home: &Path) -> std::process::Output {
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "primary-model")
         .env("CLAUDE_CONFIG_DIR", config_home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()

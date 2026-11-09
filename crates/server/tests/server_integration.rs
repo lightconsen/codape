@@ -7,15 +7,15 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use coderex_server::{DaemonServer, ServerConfig, WsEvent};
+use codape_server::{DaemonServer, ServerConfig, WsEvent};
 
 /// A model that answers with fixed text, so the server's query path is
 /// exercised without a provider.
 struct ScriptedModel(&'static str);
 
 #[async_trait::async_trait]
-impl coderex_core::api_client::ApiClient for ScriptedModel {
-    fn clone_box(&self) -> Box<dyn coderex_core::api_client::ApiClient> {
+impl codape_core::api_client::ApiClient for ScriptedModel {
+    fn clone_box(&self) -> Box<dyn codape_core::api_client::ApiClient> {
         Box::new(Self(self.0))
     }
 
@@ -23,15 +23,15 @@ impl coderex_core::api_client::ApiClient for ScriptedModel {
         &self,
         _system: &str,
         _messages: &[serde_json::Value],
-        _model: &coderex_core::types::ModelId,
+        _model: &codape_core::types::ModelId,
         _max_tokens: u32,
-        _tools: &[coderex_core::tool_executor::ToolInfo],
-    ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError> {
-        Ok(coderex_core::api_client::ApiResponse {
+        _tools: &[codape_core::tool_executor::ToolInfo],
+    ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError> {
+        Ok(codape_core::api_client::ApiResponse {
             content: self.0.to_string(),
             tool_calls: Vec::new(),
             thinking: None,
-            usage: coderex_core::types::UsageSummary {
+            usage: codape_core::types::UsageSummary {
                 input_tokens: 5,
                 output_tokens: 5,
                 cache_read_tokens: 0,
@@ -45,20 +45,20 @@ impl coderex_core::api_client::ApiClient for ScriptedModel {
         &self,
         system: &str,
         messages: &[serde_json::Value],
-        model: &coderex_core::types::ModelId,
+        model: &codape_core::types::ModelId,
         max_tokens: u32,
-        tools: &[coderex_core::tool_executor::ToolInfo],
+        tools: &[codape_core::tool_executor::ToolInfo],
     ) -> std::pin::Pin<
-        Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+        Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
     > {
         let response = self
             .create_message(system, messages, model, max_tokens, tools)
             .await
             .expect("the scripted model answers");
         Box::pin(futures::stream::iter(vec![
-            coderex_core::api_client::StreamEvent::TextDelta(response.content),
-            coderex_core::api_client::StreamEvent::StopReason(response.stop_reason),
-            coderex_core::api_client::StreamEvent::StreamEnd,
+            codape_core::api_client::StreamEvent::TextDelta(response.content),
+            codape_core::api_client::StreamEvent::StopReason(response.stop_reason),
+            codape_core::api_client::StreamEvent::StreamEnd,
         ]))
     }
 }
@@ -81,7 +81,7 @@ async fn start_server_recording_handles(
     delay: Duration,
 ) -> (
     SocketAddr,
-    std::sync::Arc<std::sync::Mutex<Vec<coderex_core::engine::InterruptHandle>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<codape_core::engine::InterruptHandle>>>,
 ) {
     let handles = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorder = std::sync::Arc::clone(&handles);
@@ -90,18 +90,18 @@ async fn start_server_recording_handles(
         config,
         std::sync::Arc::new(move || {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut engine = coderex_core::engine::QueryEngine::new(
+            let mut engine = codape_core::engine::QueryEngine::new(
                 Box::new(SlowScriptedModel { answer, delay }),
-                coderex_core::types::ModelId::sonnet(),
-                coderex_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
-                coderex_core::permission_engine::PermissionEngine::new(
-                    coderex_core::permissions::PermissionChecker::new(
-                        coderex_core::permissions::PermissionMode::BypassPermissions,
+                codape_core::types::ModelId::sonnet(),
+                codape_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
+                codape_core::permission_engine::PermissionEngine::new(
+                    codape_core::permissions::PermissionChecker::new(
+                        codape_core::permissions::PermissionMode::BypassPermissions,
                     ),
                 ),
                 tx,
             );
-            engine.set_tool_executor(Box::new(coderex_core::tool_executor::NoOpToolExecutor));
+            engine.set_tool_executor(Box::new(codape_core::tool_executor::NoOpToolExecutor));
             if let Ok(mut recorded) = recorder.lock() {
                 recorded.push(engine.interrupt_handle());
             }
@@ -121,8 +121,8 @@ struct SlowScriptedModel {
 }
 
 #[async_trait::async_trait]
-impl coderex_core::api_client::ApiClient for SlowScriptedModel {
-    fn clone_box(&self) -> Box<dyn coderex_core::api_client::ApiClient> {
+impl codape_core::api_client::ApiClient for SlowScriptedModel {
+    fn clone_box(&self) -> Box<dyn codape_core::api_client::ApiClient> {
         Box::new(Self {
             answer: self.answer,
             delay: self.delay,
@@ -133,15 +133,15 @@ impl coderex_core::api_client::ApiClient for SlowScriptedModel {
         &self,
         _system: &str,
         _messages: &[serde_json::Value],
-        _model: &coderex_core::types::ModelId,
+        _model: &codape_core::types::ModelId,
         _max_tokens: u32,
-        _tools: &[coderex_core::tool_executor::ToolInfo],
-    ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError> {
-        Ok(coderex_core::api_client::ApiResponse {
+        _tools: &[codape_core::tool_executor::ToolInfo],
+    ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError> {
+        Ok(codape_core::api_client::ApiResponse {
             content: self.answer.to_string(),
             tool_calls: Vec::new(),
             thinking: None,
-            usage: coderex_core::types::UsageSummary {
+            usage: codape_core::types::UsageSummary {
                 input_tokens: 5,
                 output_tokens: 5,
                 cache_read_tokens: 0,
@@ -155,11 +155,11 @@ impl coderex_core::api_client::ApiClient for SlowScriptedModel {
         &self,
         system: &str,
         messages: &[serde_json::Value],
-        model: &coderex_core::types::ModelId,
+        model: &codape_core::types::ModelId,
         max_tokens: u32,
-        tools: &[coderex_core::tool_executor::ToolInfo],
+        tools: &[codape_core::tool_executor::ToolInfo],
     ) -> std::pin::Pin<
-        Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+        Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
     > {
         let response = self
             .create_message(system, messages, model, max_tokens, tools)
@@ -171,7 +171,7 @@ impl coderex_core::api_client::ApiClient for SlowScriptedModel {
             async move {
                 match step {
                     0 => Some((
-                        coderex_core::api_client::StreamEvent::TextDelta(answer),
+                        codape_core::api_client::StreamEvent::TextDelta(answer),
                         step + 1,
                     )),
                     1 => {
@@ -179,11 +179,11 @@ impl coderex_core::api_client::ApiClient for SlowScriptedModel {
                         // disconnect has to land in.
                         tokio::time::sleep(delay).await;
                         Some((
-                            coderex_core::api_client::StreamEvent::StopReason("end_turn".into()),
+                            codape_core::api_client::StreamEvent::StopReason("end_turn".into()),
                             step + 1,
                         ))
                     }
-                    2 => Some((coderex_core::api_client::StreamEvent::StreamEnd, step + 1)),
+                    2 => Some((codape_core::api_client::StreamEvent::StreamEnd, step + 1)),
                     _ => None,
                 }
             }
@@ -194,7 +194,7 @@ impl coderex_core::api_client::ApiClient for SlowScriptedModel {
 /// Start a server with an engine factory, returning the address.
 async fn start_server_with_factory(
     config: ServerConfig,
-    factory: coderex_server::session::EngineFactory,
+    factory: codape_server::session::EngineFactory,
 ) -> SocketAddr {
     start_on_free_port(config, Some(factory)).await
 }
@@ -204,20 +204,20 @@ async fn start_server_with(config: ServerConfig, answer: Option<&'static str>) -
     let factory = answer.map(|answer| {
         std::sync::Arc::new(move || {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut engine = coderex_core::engine::QueryEngine::new(
+            let mut engine = codape_core::engine::QueryEngine::new(
                 Box::new(ScriptedModel(answer)),
-                coderex_core::types::ModelId::sonnet(),
-                coderex_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
-                coderex_core::permission_engine::PermissionEngine::new(
-                    coderex_core::permissions::PermissionChecker::new(
-                        coderex_core::permissions::PermissionMode::BypassPermissions,
+                codape_core::types::ModelId::sonnet(),
+                codape_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
+                codape_core::permission_engine::PermissionEngine::new(
+                    codape_core::permissions::PermissionChecker::new(
+                        codape_core::permissions::PermissionMode::BypassPermissions,
                     ),
                 ),
                 tx,
             );
-            engine.set_tool_executor(Box::new(coderex_core::tool_executor::NoOpToolExecutor));
+            engine.set_tool_executor(Box::new(codape_core::tool_executor::NoOpToolExecutor));
             (engine, rx)
-        }) as coderex_server::session::EngineFactory
+        }) as codape_server::session::EngineFactory
     });
 
     start_on_free_port(config, factory).await
@@ -226,7 +226,7 @@ async fn start_server_with(config: ServerConfig, answer: Option<&'static str>) -
 /// Start a server on the first free port in the test range.
 async fn start_on_free_port(
     config: ServerConfig,
-    factory: Option<coderex_server::session::EngineFactory>,
+    factory: Option<codape_server::session::EngineFactory>,
 ) -> SocketAddr {
     for port in 19000..20000 {
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -481,8 +481,8 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
     struct HistoryEcho;
 
     #[async_trait::async_trait]
-    impl coderex_core::api_client::ApiClient for HistoryEcho {
-        fn clone_box(&self) -> Box<dyn coderex_core::api_client::ApiClient> {
+    impl codape_core::api_client::ApiClient for HistoryEcho {
+        fn clone_box(&self) -> Box<dyn codape_core::api_client::ApiClient> {
             Box::new(Self)
         }
 
@@ -490,16 +490,16 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
             &self,
             _system: &str,
             messages: &[serde_json::Value],
-            _model: &coderex_core::types::ModelId,
+            _model: &codape_core::types::ModelId,
             _max_tokens: u32,
-            _tools: &[coderex_core::tool_executor::ToolInfo],
-        ) -> Result<coderex_core::api_client::ApiResponse, coderex_core::api_client::ApiError>
+            _tools: &[codape_core::tool_executor::ToolInfo],
+        ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError>
         {
-            Ok(coderex_core::api_client::ApiResponse {
+            Ok(codape_core::api_client::ApiResponse {
                 content: format!("history={}", messages.len()),
                 tool_calls: Vec::new(),
                 thinking: None,
-                usage: coderex_core::types::UsageSummary::default(),
+                usage: codape_core::types::UsageSummary::default(),
                 stop_reason: "end_turn".into(),
             })
         }
@@ -508,20 +508,20 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
             &self,
             system: &str,
             messages: &[serde_json::Value],
-            model: &coderex_core::types::ModelId,
+            model: &codape_core::types::ModelId,
             max_tokens: u32,
-            tools: &[coderex_core::tool_executor::ToolInfo],
+            tools: &[codape_core::tool_executor::ToolInfo],
         ) -> std::pin::Pin<
-            Box<dyn futures::Stream<Item = coderex_core::api_client::StreamEvent> + Send + 'static>,
+            Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
         > {
             let response = self
                 .create_message(system, messages, model, max_tokens, tools)
                 .await
                 .expect("history echo answers");
             Box::pin(futures::stream::iter(vec![
-                coderex_core::api_client::StreamEvent::TextDelta(response.content),
-                coderex_core::api_client::StreamEvent::StopReason(response.stop_reason),
-                coderex_core::api_client::StreamEvent::StreamEnd,
+                codape_core::api_client::StreamEvent::TextDelta(response.content),
+                codape_core::api_client::StreamEvent::StopReason(response.stop_reason),
+                codape_core::api_client::StreamEvent::StreamEnd,
             ]))
         }
     }
@@ -535,20 +535,20 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
         persist_path: None,
         allow_anonymous: false,
     };
-    let factory: coderex_server::session::EngineFactory = std::sync::Arc::new(|| {
+    let factory: codape_server::session::EngineFactory = std::sync::Arc::new(|| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut engine = coderex_core::engine::QueryEngine::new(
+        let mut engine = codape_core::engine::QueryEngine::new(
             Box::new(HistoryEcho),
-            coderex_core::types::ModelId::sonnet(),
-            coderex_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
-            coderex_core::permission_engine::PermissionEngine::new(
-                coderex_core::permissions::PermissionChecker::new(
-                    coderex_core::permissions::PermissionMode::BypassPermissions,
+            codape_core::types::ModelId::sonnet(),
+            codape_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
+            codape_core::permission_engine::PermissionEngine::new(
+                codape_core::permissions::PermissionChecker::new(
+                    codape_core::permissions::PermissionMode::BypassPermissions,
                 ),
             ),
             tx,
         );
-        engine.set_tool_executor(Box::new(coderex_core::tool_executor::NoOpToolExecutor));
+        engine.set_tool_executor(Box::new(codape_core::tool_executor::NoOpToolExecutor));
         (engine, rx)
     });
     let addr = start_server_with_factory(config, factory).await;
@@ -638,7 +638,7 @@ async fn a_disconnect_stops_the_query_that_was_running() {
 /// is a leak that outlives the process.
 #[tokio::test]
 async fn the_session_store_never_holds_the_key() {
-    let db = std::env::temp_dir().join(format!("coderex_store_{}.db", std::process::id()));
+    let db = std::env::temp_dir().join(format!("codape_store_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
 
     let config = ServerConfig {

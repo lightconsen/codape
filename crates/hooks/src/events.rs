@@ -2,9 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The hook events CodeRex knows the names of.
+/// The hook events Codape knows the names of.
 ///
-/// A name here is not a promise that anything fires it. The events CodeRex
+/// A name here is not a promise that anything fires it. The events Codape
 /// actually fires are listed by [`HookEvent::is_triggered`], and every other
 /// variant is a reserved name: settings may use it, and
 /// [`HookRegistry`](crate::HookRegistry) reports it as inert on load rather
@@ -21,7 +21,7 @@ pub enum HookEvent {
     UserPromptSubmit,
     /// When a session starts.
     ///
-    /// Fired once by `coderex_core::engine` before the session's first turn.
+    /// Fired once by `codape_core::engine` before the session's first turn.
     SessionStart,
     /// During initial setup.
     ///
@@ -29,16 +29,16 @@ pub enum HookEvent {
     /// product's setup action. The registry dispatch is synchronous, so the
     /// REPL queues the command in `sync_command_state` and fires this hook
     /// from its async entry points (`execute_command` and the TUI loop) via
-    /// [`QueryEngine::fire_lifecycle_hook`](coderex_core::engine::QueryEngine::fire_lifecycle_hook).
+    /// [`QueryEngine::fire_lifecycle_hook`](codape_core::engine::QueryEngine::fire_lifecycle_hook).
     Setup,
     /// When a sub-agent starts.
     ///
-    /// Fired by `coderex_agents::manager::AgentManager::spawn_agent` once the
+    /// Fired by `codape_agents::manager::AgentManager::spawn_agent` once the
     /// sub-agent is created and about to run.
     SubagentStart,
     /// When a notification is emitted.
     ///
-    /// Fired by `coderex_core::engine` when the agent surfaces an advisory
+    /// Fired by `codape_core::engine` when the agent surfaces an advisory
     /// notification to the person, such as a provider outage.
     Notification,
     /// When permission is requested.
@@ -47,7 +47,7 @@ pub enum HookEvent {
     PermissionDenied,
     /// When the working directory changes.
     ///
-    /// Fired by `coderex_tools::RegistryToolDispatcher::set_cwd` when the
+    /// Fired by `codape_tools::RegistryToolDispatcher::set_cwd` when the
     /// session's working directory moves (for example into a worktree).
     CwdChanged,
     /// When a file changes.
@@ -70,7 +70,7 @@ pub enum HookEvent {
     Stop,
     /// When a sub-agent stops.
     ///
-    /// Fired by `coderex_agents::manager::AgentManager` when a sub-agent
+    /// Fired by `codape_agents::manager::AgentManager` when a sub-agent
     /// finishes (or is stopped / completed) — the counterpart to
     /// [`SubagentStart`](Self::SubagentStart).
     SubagentStop,
@@ -82,7 +82,7 @@ pub enum HookEvent {
     TaskCompleted,
     /// When a teammate goes idle.
     ///
-    /// Fired by `coderex_agents::manager::AgentManager` where a teammate
+    /// Fired by `codape_agents::manager::AgentManager` where a teammate
     /// reports idleness — after a turn completes, and via `mark_idle`.
     TeammateIdle,
     /// When an elicitation is requested.
@@ -107,28 +107,28 @@ impl HookEvent {
             // The events core fires are named by core's `hook_events`
             // constants, so the firing side and the matching side cannot
             // drift apart.
-            Self::PreToolUse => coderex_core::hook_events::PRE_TOOL_USE,
-            Self::PostToolUse => coderex_core::hook_events::POST_TOOL_USE,
-            Self::PostToolUseFailure => coderex_core::hook_events::POST_TOOL_USE_FAILURE,
-            Self::UserPromptSubmit => coderex_core::hook_events::USER_PROMPT_SUBMIT,
+            Self::PreToolUse => codape_core::hook_events::PRE_TOOL_USE,
+            Self::PostToolUse => codape_core::hook_events::POST_TOOL_USE,
+            Self::PostToolUseFailure => codape_core::hook_events::POST_TOOL_USE_FAILURE,
+            Self::UserPromptSubmit => codape_core::hook_events::USER_PROMPT_SUBMIT,
             Self::SessionStart => "SessionStart",
             Self::Setup => "Setup",
             Self::SubagentStart => "SubagentStart",
             Self::Notification => "Notification",
-            Self::PermissionRequest => coderex_core::hook_events::PERMISSION_REQUEST,
-            Self::PermissionDenied => coderex_core::hook_events::PERMISSION_DENIED,
+            Self::PermissionRequest => codape_core::hook_events::PERMISSION_REQUEST,
+            Self::PermissionDenied => codape_core::hook_events::PERMISSION_DENIED,
             Self::CwdChanged => "CwdChanged",
             Self::FileChanged => "FileChanged",
             Self::WorktreeCreate => "WorktreeCreate",
-            Self::PreCompact => coderex_core::hook_events::PRE_COMPACT,
-            Self::PostCompact => coderex_core::hook_events::POST_COMPACT,
-            Self::Stop => coderex_core::hook_events::STOP,
+            Self::PreCompact => codape_core::hook_events::PRE_COMPACT,
+            Self::PostCompact => codape_core::hook_events::POST_COMPACT,
+            Self::Stop => codape_core::hook_events::STOP,
             Self::SubagentStop => "SubagentStop",
             Self::TaskCompleted => "TaskCompleted",
             Self::TeammateIdle => "TeammateIdle",
             Self::Elicitation => "Elicitation",
             Self::ElicitationResult => "ElicitationResult",
-            Self::TurnEnd => coderex_core::hook_events::TURN_END,
+            Self::TurnEnd => codape_core::hook_events::TURN_END,
         }
     }
 }
@@ -138,7 +138,7 @@ impl HookEvent {
     ///
     /// On `PreToolUse` a `stop` denies the tool; on `UserPromptSubmit` it
     /// refuses the prompt. Those are the only events where the caller consults
-    /// [`HookFireResult::stop`](coderex_core::hook_executor::HookFireResult::stop),
+    /// [`HookFireResult::stop`](codape_core::hook_executor::HookFireResult::stop),
     /// so they are the only events where a hook that *cannot answer* has a
     /// fail-closed response available (deny). Elsewhere a failed hook can only
     /// be recorded, not turned into a denial.
@@ -175,26 +175,26 @@ impl HookEvent {
 }
 
 impl HookEvent {
-    /// Whether CodeRex fires this event anywhere.
+    /// Whether Codape fires this event anywhere.
     ///
     /// The firing sites, so this list can be checked against the code:
     ///
     /// - `UserPromptSubmit`, `SessionStart`, `TurnEnd`, `Stop`, `PreCompact`,
     ///   `PostCompact`, `Notification`, `Elicitation`, `ElicitationResult` —
-    ///   `coderex_core::engine`
+    ///   `codape_core::engine`
     /// - `PreToolUse`, `PostToolUse`, `PostToolUseFailure`,
     ///   `PermissionRequest`, `PermissionDenied` —
-    ///   `coderex_core::tool_scheduler`
+    ///   `codape_core::tool_scheduler`
     /// - `SubagentStart`, `SubagentStop`, `TeammateIdle` —
-    ///   `coderex_agents::manager`
+    ///   `codape_agents::manager`
     /// - `WorktreeCreate` — the `EnterWorktree` tool
     /// - `TaskCompleted` — the `TaskUpdate` tool
-    /// - `CwdChanged` — `coderex_tools::RegistryToolDispatcher::set_cwd`
+    /// - `CwdChanged` — `codape_tools::RegistryToolDispatcher::set_cwd`
     /// - `Setup` — the REPL, when `/init` succeeds
     /// - `FileChanged` — the REPL's TUI loop, when its settings watcher reports a
     ///   settings-file change (not the headless one-shot path)
     ///
-    /// Every name CodeRex accepts is fired somewhere; there are no reserved
+    /// Every name Codape accepts is fired somewhere; there are no reserved
     /// names left. A test pins the list so adding a variant without a firing
     /// site is a deliberate change rather than a silently inert hook.
     #[must_use]
@@ -436,8 +436,8 @@ mod tests {
     use std::str::FromStr;
     use strum::IntoEnumIterator;
 
-    /// The events CodeRex fires, and only those. Anything else in the enum is
-    /// a name CodeRex knows but never fires, which a configured hook has to be
+    /// The events Codape fires, and only those. Anything else in the enum is
+    /// a name Codape knows but never fires, which a configured hook has to be
     /// warned about.
     #[test]
     fn only_the_wired_events_report_as_triggered() {
@@ -475,7 +475,7 @@ mod tests {
         );
     }
 
-    /// Nothing is reserved: every name CodeRex accepts has a firing site.
+    /// Nothing is reserved: every name Codape accepts has a firing site.
     /// Adding a variant without one must update this test deliberately rather
     /// than shipping an inert hook name.
     #[test]
@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(gating, vec!["PreToolUse", "UserPromptSubmit"]);
     }
 
-    /// A gating event must also be one CodeRex actually fires — otherwise the
+    /// A gating event must also be one Codape actually fires — otherwise the
     /// gate is a promise about a hook that can never run.
     #[test]
     fn every_gating_event_is_triggered() {
@@ -552,7 +552,7 @@ mod tests {
     /// A mismatch means the hook is configured but never runs.
     #[test]
     fn core_fired_events_match_enum_names() {
-        use coderex_core::hook_events as core_events;
+        use codape_core::hook_events as core_events;
 
         let fired = [
             HookEvent::PreToolUse,

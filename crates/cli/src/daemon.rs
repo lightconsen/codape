@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Path to the daemon PID file.
 #[must_use]
 pub fn pid_file_path() -> PathBuf {
-    let mut path = coderex_config::config_home();
+    let mut path = codape_config::config_home();
     path.push("daemon.pid");
     path
 }
@@ -30,7 +30,7 @@ pub fn read_pid() -> Option<u32> {
 /// Write the current process PID to `path`.
 ///
 /// Split out so the tests can use a directory of their own: the tests used to
-/// share the developer's real `~/.coderex/daemon.pid`, and running in parallel
+/// share the developer's real `~/.codape/daemon.pid`, and running in parallel
 /// meant one test deleting the file another was reading.
 fn write_pid_file_at(path: &std::path::Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {

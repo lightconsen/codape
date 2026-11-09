@@ -7,10 +7,10 @@
 
 use std::path::PathBuf;
 
-use coderex_bridge::teleport::{TeleportError, TeleportManager, TeleportRendezvous};
-use coderex_core::state::SessionState;
-use coderex_core::types::Message;
-use coderex_server::teleport::TeleportService;
+use codape_bridge::teleport::{TeleportError, TeleportManager, TeleportRendezvous};
+use codape_core::state::SessionState;
+use codape_core::types::Message;
+use codape_server::teleport::TeleportService;
 
 fn session() -> SessionState {
     let mut state = SessionState::new(PathBuf::from("/work/shared"));

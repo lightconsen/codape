@@ -4,13 +4,13 @@
 //! engine behavior: mock API client, stub tool executor, temp
 //! directory, and an event collector.
 
-use coderex_core::api_client::ApiClient;
-use coderex_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
-use coderex_core::permission_engine::PermissionEngine;
-use coderex_core::permissions::{PermissionChecker, PermissionMode};
-use coderex_core::state::SessionState;
-use coderex_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
-use coderex_core::types::{EngineEvent, ModelId, ToolResult};
+use codape_core::api_client::ApiClient;
+use codape_core::engine::{QueryEngine, SubmitOptions, TerminalReason};
+use codape_core::permission_engine::PermissionEngine;
+use codape_core::permissions::{PermissionChecker, PermissionMode};
+use codape_core::state::SessionState;
+use codape_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
+use codape_core::types::{EngineEvent, ModelId, ToolResult};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 /// # Example
 ///
 /// ```rust,no_run
-/// use coderex_test_utils::TestRig;
+/// use codape_test_utils::TestRig;
 ///
 /// # async fn example() {
 /// let mut rig = TestRig::new().await;

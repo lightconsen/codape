@@ -1,15 +1,15 @@
 //! Install-path test for archive signatures with the signing key supplied
-//! through `CODEREX_PLUGIN_PUBLIC_KEY`.
+//! through `CODAPE_PLUGIN_PUBLIC_KEY`.
 //!
 //! `std::env::set_var` is unsafe in Rust 2024 and this crate denies unsafe
 //! code, so the environment cannot be changed inside the test process. The
 //! parent test therefore runs the child test in a subprocess and sets the
 //! variable on that process, which is the same path the CLI takes at startup.
 
-use coderex_plugins::plugins::PluginManager;
+use codape_plugins::plugins::PluginManager;
 use ed25519_dalek::Signer as _;
 
-const CHILD_ENV: &str = "CODEREX_SIGNATURE_TEST_CHILD";
+const CHILD_ENV: &str = "CODAPE_SIGNATURE_TEST_CHILD";
 const SIGNING_KEY_BYTES: [u8; 32] = [7u8; 32];
 
 fn archive_with(manifest_json: &str) -> Vec<u8> {
@@ -112,11 +112,11 @@ fn run_child(
         .arg("child_installs_from_files")
         .arg("--nocapture")
         .env(CHILD_ENV, "1")
-        .env("CODEREX_PLUGIN_PUBLIC_KEY", public_key)
-        .env("CODEREX_TEST_ARCHIVE", archive)
-        .env("CODEREX_TEST_INSTALL", install_dir);
+        .env("CODAPE_PLUGIN_PUBLIC_KEY", public_key)
+        .env("CODAPE_TEST_ARCHIVE", archive)
+        .env("CODAPE_TEST_INSTALL", install_dir);
     if let Some(signature) = signature {
-        command.env("CODEREX_TEST_SIGNATURE", signature);
+        command.env("CODAPE_TEST_SIGNATURE", signature);
     }
     command.output().unwrap()
 }
@@ -138,9 +138,9 @@ async fn child_installs_from_files() {
         return;
     }
 
-    let archive_path = std::env::var("CODEREX_TEST_ARCHIVE").expect("archive path");
-    let install_dir = std::env::var("CODEREX_TEST_INSTALL").expect("install dir");
-    let signature_path = std::env::var("CODEREX_TEST_SIGNATURE").ok();
+    let archive_path = std::env::var("CODAPE_TEST_ARCHIVE").expect("archive path");
+    let install_dir = std::env::var("CODAPE_TEST_INSTALL").expect("install dir");
+    let signature_path = std::env::var("CODAPE_TEST_SIGNATURE").ok();
 
     let archive = std::fs::read(archive_path).unwrap();
     let signature = signature_path.map(|path| std::fs::read_to_string(path).unwrap());
@@ -148,7 +148,7 @@ async fn child_installs_from_files() {
     let mut manager = PluginManager::new();
     assert!(
         manager.set_public_key_from_env(),
-        "CODEREX_PLUGIN_PUBLIC_KEY was not picked up"
+        "CODAPE_PLUGIN_PUBLIC_KEY was not picked up"
     );
 
     manager

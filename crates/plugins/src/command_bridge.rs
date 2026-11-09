@@ -4,7 +4,7 @@
 //! as a `SlashCommand` in the `CommandRegistry`.
 
 use crate::plugins::PluginManager;
-use coderex_commands::registry::{CommandRegistry, CommandResult, SlashCommand};
+use codape_commands::registry::{CommandRegistry, CommandResult, SlashCommand};
 use std::sync::Arc;
 
 /// Bridges plugin-discovered commands into a `CommandRegistry`.
@@ -33,7 +33,7 @@ impl PluginCommandBridge {
                 let c_name = cmd_info.name.clone();
 
                 let handler = Arc::new(
-                    move |_ctx: &coderex_commands::registry::CommandContext, args: &[String]| {
+                    move |_ctx: &codape_commands::registry::CommandContext, args: &[String]| {
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 pm.execute_command(&p_name, &c_name, args).await
@@ -77,7 +77,7 @@ impl PluginCommandBridge {
                 let c_name = cmd_info.name.clone();
 
                 let handler = Arc::new(
-                    move |_ctx: &coderex_commands::registry::CommandContext, args: &[String]| {
+                    move |_ctx: &codape_commands::registry::CommandContext, args: &[String]| {
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
                                 pm.execute_command(&p_name, &c_name, args).await

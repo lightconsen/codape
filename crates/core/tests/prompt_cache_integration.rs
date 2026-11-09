@@ -4,11 +4,11 @@
 //! actual HTTP body the Anthropic client sends, so the four-breakpoint cap
 //! and their placement are checked on the wire.
 
-use coderex_core::api_client::{AnthropicApiClient, ApiClient, ApiConfig};
-use coderex_core::provider::Provider;
-use coderex_core::providers::OpenAiCompatibleProvider;
-use coderex_core::tool_executor::ToolInfo;
-use coderex_core::types::ModelId;
+use codape_core::api_client::{AnthropicApiClient, ApiClient, ApiConfig};
+use codape_core::provider::Provider;
+use codape_core::providers::OpenAiCompatibleProvider;
+use codape_core::tool_executor::ToolInfo;
+use codape_core::types::ModelId;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -148,7 +148,7 @@ async fn a_long_request_carries_exactly_four_breakpoints() {
         message("user", "five"),
     ];
 
-    let body = send_anthropic(messages, &tools(), "you are CodeRex", true).await;
+    let body = send_anthropic(messages, &tools(), "you are Codape", true).await;
 
     assert_eq!(count_markers(&body), 4, "{body:#}");
     assert!(

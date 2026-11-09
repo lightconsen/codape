@@ -19,7 +19,7 @@ run-eval --flow smoke --approve-harness      # pin the harness
 run-eval --flow smoke --variant baseline     # measure where you are
 #   … change the thing you are measuring …
 run-eval --flow smoke --variant v1           # measure the change
-open .coderex/hillclimb/smoke/report.html    # did it help?
+open .codape/hillclimb/smoke/report.html    # did it help?
 ```
 
 `v2` is another variant of the same harness, not another program. That is the
@@ -31,7 +31,7 @@ point of the design: everything a run does is data, declared in `flow.json`.
 {
   "name": "artifact-publish",
   "description": "can the agent publish a page and read it back",
-  "command": "coderex --headless --prompt {prompt} --model {model} --cwd {cwd}",
+  "command": "codape --headless --prompt {prompt} --model {model} --cwd {cwd}",
   "reps": 3,
   "concurrency": 2,
   "timeout_s": 300,
@@ -63,7 +63,7 @@ the thing being measured is duration or cost. The report marks those
 ## What the layout looks like
 
 ```
-.coderex/hillclimb/<flow>/
+.codape/hillclimb/<flow>/
   flow.json          the harness
   _state.json        the approved harness hash
   report.html        generated
@@ -101,7 +101,7 @@ picks up where it stopped, and a variant can be extended case by case. Use
 ## Options
 
 ```
---flow DIR          the flow to run (under .coderex/hillclimb/)
+--flow DIR          the flow to run (under .codape/hillclimb/)
 --flow-dir PATH     the flow's directory, wherever it is checked in
 --variant ID        'baseline' or 'v<N>'
 --model ID          passed to the command as {model}
@@ -119,13 +119,13 @@ picks up where it stopped, and a variant can be extended case by case. Use
 ## The checked-in smoke flow
 
 `evals/flows/smoke/` is a minimal flow that lives in the repository rather
-than under `.coderex/hillclimb/`. `--flow-dir` points the runner at it
+than under `.codape/hillclimb/`. `--flow-dir` points the runner at it
 directly, and the flow name is taken from `flow.json` when `--flow` is not
 given:
 
 ```bash
-cargo build -p coderex-cli --bin coderex --bin static-anthropic-server
-cargo run -p coderex-evals --bin run-eval -- \
+cargo build -p codape-cli --bin codape --bin static-anthropic-server
+cargo run -p codape-evals --bin run-eval -- \
   --flow-dir evals/flows/smoke \
   --variant baseline \
   --approve-harness \
@@ -136,7 +136,7 @@ It needs no network and no API key. Each case's command is
 `evals/flows/smoke/run-case.sh`, which starts the repository's
 `static-anthropic-server` fixture on a free loopback port with
 `tests/responses.json`, points `ANTHROPIC_BASE_URL` at it, and runs the real
-`coderex` binary:
+`codape` binary:
 
 - `hello-from-fixture` exercises a streamed text turn through the fixture.
 - `local-status-command` runs `/status`, which needs no provider call at all.
@@ -150,7 +150,7 @@ the `eval-report` artifact (on failure too).
 
 ## The live-provider flow (opt-in)
 
-`evals/flows/live/` drives the real `coderex` binary against a real
+`evals/flows/live/` drives the real `codape` binary against a real
 Anthropic-compatible provider. It is checked in beside the smoke flow, but it
 is never part of the default `eval-runner` or the offline `evals` job, and the
 smoke flow is unchanged.
@@ -171,11 +171,11 @@ Inputs (environment):
 | `ANTHROPIC_API_KEY` | yes | The script refuses to run without it, before building or calling a provider. |
 | `ANTHROPIC_BASE_URL` | no | Anthropic-compatible endpoint. If unset, the CLI uses its own default; the script prints a note. |
 | `ANTHROPIC_MODEL` | no | Passed to the CLI as `--model`. If unset, the CLI's configured default is used. |
-| `CODEREX_BIN` | no | An already-built binary; otherwise the script builds `coderex` in debug mode. |
-| `CODEREX_LIVE_EVAL_FROM_SETTINGS` | no | `1` takes base URL, key and model from the settings file and ignores an inherited `ANTHROPIC_*` environment. Use it when the shell already exports another harness's provider: a base URL and a key from different providers cannot be mixed, and the failure looks like the provider's 400, not like a misconfiguration. |
-| `CODEREX_SETTINGS` | no | Settings file to read in that mode. Defaults to `~/.coderex/settings.json`, then `~/.claude/settings.ds.json`. |
+| `CODAPE_BIN` | no | An already-built binary; otherwise the script builds `codape` in debug mode. |
+| `CODAPE_LIVE_EVAL_FROM_SETTINGS` | no | `1` takes base URL, key and model from the settings file and ignores an inherited `ANTHROPIC_*` environment. Use it when the shell already exports another harness's provider: a base URL and a key from different providers cannot be mixed, and the failure looks like the provider's 400, not like a misconfiguration. |
+| `CODAPE_SETTINGS` | no | Settings file to read in that mode. Defaults to `~/.codape/settings.json`, then `~/.claude/settings.ds.json`. |
 
-Without `CODEREX_LIVE_EVAL_FROM_SETTINGS`, a missing `ANTHROPIC_API_KEY` is
+Without `CODAPE_LIVE_EVAL_FROM_SETTINGS`, a missing `ANTHROPIC_API_KEY` is
 filled from the same settings files (key from `api_key` /
 `env.ANTHROPIC_API_KEY` / `env.ANTHROPIC_AUTH_TOKEN`, base from
 `provider.base_url` / `env.ANTHROPIC_BASE_URL`, model from `model` /
@@ -191,7 +191,7 @@ The flow has two cases, each with `reps: 1` and `concurrency: 1`:
 
 `run-case.sh` invokes the same binary a person runs, with
 `--print --brief --dangerously-skip-permissions`, and inherits the provider
-environment. It sets `CODEREX_SKIP_ENV_SOURCE=1` so a developer's local
+environment. It sets `CODAPE_SKIP_ENV_SOURCE=1` so a developer's local
 `export_env.*.sh` cannot silently redirect the run.
 
 Outputs:
@@ -212,7 +212,7 @@ and `evals/flows/live/baseline/results.jsonl` is the committed record of that
 run (it holds only the pass/fail record and the model's output tail — no
 credential). Earlier attempts that pointed at a different gateway in the
 same shell failed with that gateway's own 400, which is what
-`CODEREX_LIVE_EVAL_FROM_SETTINGS=1` exists to avoid.
+`CODAPE_LIVE_EVAL_FROM_SETTINGS=1` exists to avoid.
 
 In CI it is the `live-provider-eval` job (plus the
 `live-provider-eval-preflight` credential check) in

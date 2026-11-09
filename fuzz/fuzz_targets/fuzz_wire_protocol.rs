@@ -1,6 +1,6 @@
 #![no_main]
 
-use coderex_core::wire_protocol::{decode_event, decode_request, encode_event, encode_request};
+use codape_core::wire_protocol::{decode_event, decode_request, encode_event, encode_request};
 use libfuzzer_sys::fuzz_target;
 use std::str;
 

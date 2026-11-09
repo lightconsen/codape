@@ -5,11 +5,11 @@
 //! `scripts/record-cassettes.sh` refreshes those recordings against a real
 //! Anthropic-compatible endpoint.
 
-use coderex_core::api_client::{AnthropicApiClient, ApiConfig};
-use coderex_core::permissions::PermissionMode;
-use coderex_core::types::ModelId;
-use coderex_test_utils::{TestRig, TestRigBuilder};
-use coderex_tools::{
+use codape_core::api_client::{AnthropicApiClient, ApiConfig};
+use codape_core::permissions::PermissionMode;
+use codape_core::types::ModelId;
+use codape_test_utils::{TestRig, TestRigBuilder};
+use codape_tools::{
     ExecutionConfig, ExecutionContext, RegistryToolDispatcher, ToolExecutor, ToolRegistry,
     register_builtin_tools,
 };
@@ -102,11 +102,11 @@ pub async fn live_rig() -> TestRig {
 
 /// Collect all text from TextDelta events.
 #[must_use]
-pub fn collect_text(events: &[coderex_core::types::EngineEvent]) -> String {
+pub fn collect_text(events: &[codape_core::types::EngineEvent]) -> String {
     events
         .iter()
         .filter_map(|e| match e {
-            coderex_core::types::EngineEvent::TextDelta(t) => Some(t.as_str()),
+            codape_core::types::EngineEvent::TextDelta(t) => Some(t.as_str()),
             _ => None,
         })
         .collect()
@@ -115,11 +115,11 @@ pub fn collect_text(events: &[coderex_core::types::EngineEvent]) -> String {
 /// Check if any event matches a tool call by name.
 #[must_use]
 #[allow(dead_code)]
-pub fn has_tool_call(events: &[coderex_core::types::EngineEvent], name: &str) -> bool {
+pub fn has_tool_call(events: &[codape_core::types::EngineEvent], name: &str) -> bool {
     events.iter().any(|e| {
         matches!(
             e,
-            coderex_core::types::EngineEvent::ToolCallStart { name: n, .. }
+            codape_core::types::EngineEvent::ToolCallStart { name: n, .. }
                 if n.eq_ignore_ascii_case(name)
         )
     })
@@ -128,9 +128,9 @@ pub fn has_tool_call(events: &[coderex_core::types::EngineEvent], name: &str) ->
 /// Check if a tool call completed successfully.
 #[must_use]
 #[allow(dead_code)]
-pub fn has_tool_call_success(events: &[coderex_core::types::EngineEvent], name: &str) -> bool {
+pub fn has_tool_call_success(events: &[codape_core::types::EngineEvent], name: &str) -> bool {
     events.iter().any(|e| match e {
-        coderex_core::types::EngineEvent::ToolCallEnd { result, .. } => {
+        codape_core::types::EngineEvent::ToolCallEnd { result, .. } => {
             result.tool_call_id.contains(name) || !result.is_error
         }
         _ => false,

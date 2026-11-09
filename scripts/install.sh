@@ -1,16 +1,16 @@
 #!/bin/sh
-# CodeRex installer — cross-platform shell script.
+# Codape installer — cross-platform shell script.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/lightconsen/coderex/main/scripts/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/lightconsen/coderex/main/scripts/install.sh | sh -s -- v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/lightconsen/codape/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/lightconsen/codape/main/scripts/install.sh | sh -s -- v0.1.0
 
 set -e
 
-REPO="lightconsen/coderex"
-BINARY="coderex"
-RELEASE_BASE_URL="${CODEREX_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
-API_URL="${CODEREX_API_BASE_URL:-https://api.github.com/repos/$REPO}"
+REPO="lightconsen/codape"
+BINARY="codape"
+RELEASE_BASE_URL="${CODAPE_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download}"
+API_URL="${CODAPE_API_BASE_URL:-https://api.github.com/repos/$REPO}"
 
 # Determine version
 if [ -n "$1" ]; then

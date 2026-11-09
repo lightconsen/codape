@@ -7,17 +7,17 @@ use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
-use coderex_core::api_client::{
+use codape_core::api_client::{
     AnthropicApiClient, ApiClient, ApiConfig, ApiError, ApiResponse, RequestContext, StreamEvent,
 };
-use coderex_core::budget::{BudgetThresholds, TokenBudget};
-use coderex_core::cost::{CostTracker, ModelPricing, pricing_for_model};
-use coderex_core::model_router::ModelRouter;
-use coderex_core::provider::{Provider, ProviderCapabilities, ProviderError, ProviderErrorKind};
-use coderex_core::provider_router::ProviderRouter;
-use coderex_core::providers::OpenAiCompatibleProvider;
-use coderex_core::tool_executor::ToolInfo;
-use coderex_core::types::{ModelId, UsageSummary};
+use codape_core::budget::{BudgetThresholds, TokenBudget};
+use codape_core::cost::{CostTracker, ModelPricing, pricing_for_model};
+use codape_core::model_router::ModelRouter;
+use codape_core::provider::{Provider, ProviderCapabilities, ProviderError, ProviderErrorKind};
+use codape_core::provider_router::ProviderRouter;
+use codape_core::providers::OpenAiCompatibleProvider;
+use codape_core::tool_executor::ToolInfo;
+use codape_core::types::{ModelId, UsageSummary};
 use futures::{Stream, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -755,7 +755,7 @@ fn custom_pricing_override() {
 }
 
 #[tokio::test]
-async fn anthropic_client_sends_coderex_identity_headers_and_metadata() {
+async fn anthropic_client_sends_codape_identity_headers_and_metadata() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -780,13 +780,13 @@ async fn anthropic_client_sends_coderex_identity_headers_and_metadata() {
     let captured = handle.await.expect("server join");
 
     assert_eq!(
-        captured.headers.get("x-coderex-client").map(String::as_str),
+        captured.headers.get("x-codape-client").map(String::as_str),
         Some("cli")
     );
     assert_eq!(
         captured
             .headers
-            .get("x-coderex-session-id")
+            .get("x-codape-session-id")
             .map(String::as_str),
         Some("sess-test")
     );
@@ -882,7 +882,7 @@ async fn anthropic_compatible_profile_forwards_structured_tools() {
 }
 
 #[tokio::test]
-async fn openai_provider_sends_coderex_identity_headers_and_metadata() {
+async fn openai_provider_sends_codape_identity_headers_and_metadata() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -918,20 +918,20 @@ async fn openai_provider_sends_coderex_identity_headers_and_metadata() {
     let captured = handle.await.expect("server join");
 
     assert_eq!(
-        captured.headers.get("x-coderex-client").map(String::as_str),
+        captured.headers.get("x-codape-client").map(String::as_str),
         Some("cli")
     );
     assert_eq!(
         captured
             .headers
-            .get("x-coderex-session-id")
+            .get("x-codape-session-id")
             .map(String::as_str),
         Some("sess-openai")
     );
     assert_eq!(
         captured
             .headers
-            .get("x-coderex-agent-id")
+            .get("x-codape-agent-id")
             .map(String::as_str),
         Some("agent-openai")
     );
@@ -1167,14 +1167,14 @@ async fn provider_router_forwards_request_context_to_provider_headers() {
     assert_eq!(
         captured
             .headers
-            .get("x-coderex-session-id")
+            .get("x-codape-session-id")
             .map(String::as_str),
         Some("sess-router")
     );
     assert_eq!(
         captured
             .headers
-            .get("x-coderex-agent-id")
+            .get("x-codape-agent-id")
             .map(String::as_str),
         Some("agent-router")
     );

@@ -1,4 +1,4 @@
-//! Interactive PTY E2E runner for `coderex`.
+//! Interactive PTY E2E runner for `codape`.
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 /// JSON scenario consumed by the interactive E2E runner.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Scenario {
-    /// Working directory used for the spawned `coderex` process.
+    /// Working directory used for the spawned `codape` process.
     pub cwd: PathBuf,
-    /// Model passed to `coderex --model`.
+    /// Model passed to `codape --model`.
     #[serde(default = "default_model")]
     pub model: String,
     /// Terminal row count.
@@ -32,7 +32,7 @@ pub struct Scenario {
     /// Extra environment variables for the spawned session.
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Extra CLI args passed through to `coderex`.
+    /// Extra CLI args passed through to `codape`.
     #[serde(default)]
     pub args: Vec<String>,
     /// Optional embedded test server.
@@ -50,7 +50,7 @@ pub enum ServerConfig {
     Static {
         /// Path to the JSON response map.
         responses_file: PathBuf,
-        /// Model exposed to `coderex`.
+        /// Model exposed to `codape`.
         model: Option<String>,
     },
 }
@@ -458,11 +458,11 @@ impl PtySession {
             })
             .context("failed to open PTY")?;
 
-        let coderex = sibling_binary("coderex")?;
+        let codape = sibling_binary("codape")?;
         let mut cmd = CommandBuilder::new(
-            coderex
+            codape
                 .to_str()
-                .ok_or_else(|| anyhow::anyhow!("coderex binary path is not UTF-8"))?,
+                .ok_or_else(|| anyhow::anyhow!("codape binary path is not UTF-8"))?,
         );
         if !persist_session {
             cmd.arg("--no-session-persistence");
@@ -473,7 +473,7 @@ impl PtySession {
             cmd.arg(arg);
         }
         cmd.cwd(cwd);
-        cmd.env("CODEREX_LOG", "off");
+        cmd.env("CODAPE_LOG", "off");
         // A config home of its own, seeded with a decision already recorded:
         // an untouched one makes the CLI ask for telemetry consent on stdin
         // before it draws anything, and there is no one to answer.
@@ -491,7 +491,7 @@ impl PtySession {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .context("failed to spawn coderex in PTY")?;
+            .context("failed to spawn codape in PTY")?;
         let master = pair.master;
         let mut reader = master
             .try_clone_reader()
@@ -726,7 +726,7 @@ fn unique_config_home() -> Result<PathBuf> {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     let path = std::env::temp_dir().join(format!(
-        "coderex-e2e-config-{}-{}",
+        "codape-e2e-config-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));

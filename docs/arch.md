@@ -1,4 +1,4 @@
-# CodeRex Architecture
+# Codape Architecture
 
 ## 1. Workspace Layout (15 crates)
 
@@ -61,7 +61,7 @@ Commands (user-facing slash commands) are separate from Tools (LLM-facing functi
 
 ```
 Bootstrap -> LoadSettings -> BuildCapabilities -> LoadCommands
- |              |                                  (scan .coderex/commands/)
+ |              |                                  (scan .codape/commands/)
  |              +-- RuntimeOverrides (CLI flags, env vars)
  |
  +-- tracing init, signal handlers
@@ -71,12 +71,12 @@ LoadSkills -> InitPlugins -> ReconcileMarketplaces -> InitMcp
    |             |                |                      +-- .mcp.json -> McpManager.start_all()
    |             |                +-- MarketplaceReconciler.reconcile()
    |             +-- PluginManager.discover() + load()
-   +-- scan .coderex/skills/
+   +-- scan .codape/skills/
 
 InitMemory -> InitRemoteServices -> Ready
     |             |
-    |             +-- Bridge transport (if CODEREX_BRIDGE_URL set)
-    +-- .coderex/ directory setup
+    |             +-- Bridge transport (if CODAPE_BRIDGE_URL set)
+    +-- .codape/ directory setup
 ```
 
 ## 4. Key Abstractions
@@ -107,7 +107,7 @@ InitMemory -> InitRemoteServices -> Ready
 
 - TranscriptStore: JSONL append, read_all, skip-first-prompt
 - SessionIndex: SQLite (sessions.db), create/update/list/recent
-- LongTermStore: ~/.coderex/memory/ file-based, fuzzy search
+- LongTermStore: ~/.codape/memory/ file-based, fuzzy search
 
 ## 5. Notable Patterns
 

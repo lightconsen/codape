@@ -117,19 +117,19 @@ fn run(cwd: &Path, base_url: &str) -> std::process::Output {
     )
     .expect("seed config");
 
-    Command::new(env!("CARGO_BIN_EXE_coderex"))
+    Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "--json-schema", "schema.json", "hello"])
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "test")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run coderex")
+        .expect("run codape")
 }
 
 #[tokio::test]
@@ -152,7 +152,7 @@ async fn the_schema_instruction_reaches_the_provider_request() {
     let bodies = server.await.expect("server task");
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let turn = bodies

@@ -1,6 +1,6 @@
 #![no_main]
 
-use coderex_core::stream_utils::{Utf8ChunkDecoder, find_sse_message_boundary};
+use codape_core::stream_utils::{Utf8ChunkDecoder, find_sse_message_boundary};
 use libfuzzer_sys::fuzz_target;
 use std::str;
 

@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The panel is rendered as text — a titled box in the terminal, and the same
-//! box in a scrollable message in the TUI. CodeRex plugins are out-of-process,
+//! box in a scrollable message in the TUI. Codape plugins are out-of-process,
 //! so this is the UI surface they get: a structured, styled block rather than
 //! a widget tree. Anything that is not a `ui` object is passed through
 //! unchanged, so a plugin that prints JSON still prints JSON.

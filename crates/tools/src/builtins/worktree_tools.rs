@@ -1,7 +1,7 @@
 //! EnterWorktree / ExitWorktree baseline tools.
 //!
 //! These tools drive an injected `WorktreeHandle` without depending on
-//! `coderex-core` directly (to avoid a dependency cycle).
+//! `codape-core` directly (to avoid a dependency cycle).
 
 use crate::context::{ToolError, ToolOutput};
 use crate::tool::{Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier};
@@ -129,7 +129,7 @@ impl Tool for ExitWorktreeTool {
 mod tests {
     use super::*;
     use crate::context::ExecutionContext;
-    use coderex_core::hook_executor::{HookExecutor, HookFireResult};
+    use codape_core::hook_executor::{HookExecutor, HookFireResult};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::{Arc, Mutex};

@@ -16,7 +16,7 @@ use crate::events::{HookAction, HookError, HookEvent, HookResult};
 use crate::sandbox::HookSandboxConfig;
 use crate::stream::{HookMessage, HookRequestHandler, HookStreamEvent};
 use crate::{sandbox, stream};
-use coderex_core::hook_executor::{HookExecutor, HookFireResult};
+use codape_core::hook_executor::{HookExecutor, HookFireResult};
 
 /// The largest single stdout line the streaming protocol accepts.
 const MAX_HOOK_LINE_BYTES: usize = 1024 * 1024;
@@ -132,12 +132,12 @@ impl HttpHook {
     ///
     /// Returns the reason the hook cannot be used as configured.
     pub fn validate(&self) -> Result<(), HookError> {
-        coderex_core::hook_security::UrlValidator::new()
+        codape_core::hook_security::UrlValidator::new()
             .validate(&self.url)
             .map_err(|e| HookError::InvalidHttpHook(e.to_string()))?;
 
         for (header, value) in &self.headers {
-            for name in coderex_core::hook_security::env_var_references(value) {
+            for name in codape_core::hook_security::env_var_references(value) {
                 if !self.allowed_env_vars.contains(&name) {
                     return Err(HookError::InvalidHttpHook(format!(
                         "header '{header}' references ${name}, which is not in allowedEnvVars"
@@ -501,7 +501,7 @@ pub struct HookSettings {
 
 /// Extract the raw hook entries from either accepted document shape.
 ///
-/// `Settings.hooks` in `coderex-config` holds the bare array — the value under
+/// `Settings.hooks` in `codape-config` holds the bare array — the value under
 /// the `hooks` key of `settings.json` — while a whole settings object is
 /// `{"hooks": [...]}`. The install API accepts either so the caller does not
 /// have to know which it has.
@@ -877,7 +877,7 @@ impl HookRegistry {
     ///
     /// The hooks crate cannot reach a model client or the MCP server registry,
     /// so the session that owns them supplies one implementation — the same
-    /// injection shape as `coderex_tools::install_rule_exemptions`. This must
+    /// injection shape as `codape_tools::install_rule_exemptions`. This must
     /// be called before [`into_executor`](Self::into_executor), since that
     /// consumes the registry.
     ///
@@ -1233,7 +1233,7 @@ impl HookRegistry {
 
     /// Report hooks whose event nothing ever fires.
     ///
-    /// A hook on an event CodeRex does not fire matches nothing and runs
+    /// A hook on an event Codape does not fire matches nothing and runs
     /// never. That is indistinguishable from a working hook until someone
     /// notices it did not run, so it is said out loud at load.
     fn warn_about_inert_hooks(hooks: &[HookEntry]) {
@@ -1247,7 +1247,7 @@ impl HookRegistry {
                 Ok(event) => tracing::warn!(
                     event = %event,
                     command = %hook.command,
-                    "hook configured for an event CodeRex does not fire — it will never run"
+                    "hook configured for an event Codape does not fire — it will never run"
                 ),
                 Err(unknown) => tracing::warn!(
                     event = %unknown,
@@ -1640,7 +1640,7 @@ async fn execute_hook_with_timeout(
 /// process running past a timeout, an oversized output, or the dropped future
 /// of a cancelled call. On Unix the tree is the child's process group; on
 /// Windows it is a Job Object.
-struct HookTree(Option<coderex_core::process_tree::ProcessTree>);
+struct HookTree(Option<codape_core::process_tree::ProcessTree>);
 
 impl HookTree {
     /// Kill every process in the tree. Signals the group before the parent is
@@ -1749,8 +1749,8 @@ async fn execute_hook(
         None
     } else {
         Some(
-            coderex_core::process_tree::ProcessTree::create(
-                coderex_core::process_tree::JobLimits::default(),
+            codape_core::process_tree::ProcessTree::create(
+                codape_core::process_tree::JobLimits::default(),
             )
             .map_err(|error| {
                 HookError::SpawnFailed(format!("could not create the hook's Job Object: {error}"))
@@ -1759,8 +1759,8 @@ async fn execute_hook(
     };
     #[cfg(not(target_os = "windows"))]
     let tree = Some(
-        coderex_core::process_tree::ProcessTree::create(
-            coderex_core::process_tree::JobLimits::default(),
+        codape_core::process_tree::ProcessTree::create(
+            codape_core::process_tree::JobLimits::default(),
         )
         .map_err(|error| {
             HookError::SpawnFailed(format!(
@@ -2082,7 +2082,7 @@ async fn execute_http_hook(
     };
 
     if http.block_private_hosts {
-        coderex_core::hook_security::SsrfGuard::guard(&http.url)
+        codape_core::hook_security::SsrfGuard::guard(&http.url)
             .map_err(|e| HookError::InvalidHttpHook(e.to_string()))?;
     }
 
@@ -2096,7 +2096,7 @@ async fn execute_http_hook(
 
     let mut request = client.post(&http.url).json(input);
     for (name, value) in &http.headers {
-        let value = coderex_core::hook_security::EnvInterpolator::interpolate(value)
+        let value = codape_core::hook_security::EnvInterpolator::interpolate(value)
             .map_err(|e| HookError::RequestFailed(format!("header '{name}': {e}")))?;
         request = request.header(name, value);
     }
@@ -2299,9 +2299,9 @@ fn build_hook_env(hook: &HookConfig, input: &HookInput) -> HashMap<String, Strin
     let mut env = std::env::vars().collect::<HashMap<_, _>>();
 
     // Inject hook metadata
-    env.insert("CODEREX_HOOK_EVENT".to_string(), input.event.clone());
+    env.insert("CODAPE_HOOK_EVENT".to_string(), input.event.clone());
     if let Some(ref session_id) = input.session_id {
-        env.insert("CODEREX_SESSION_ID".to_string(), session_id.clone());
+        env.insert("CODAPE_SESSION_ID".to_string(), session_id.clone());
     }
 
     // Inject hook-specific env
@@ -2357,7 +2357,7 @@ mod tests {
     /// would hide that the hook's intent was half-understood.
     #[test]
     fn a_non_string_path_entry_is_logged() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let paths = parse_absolute_paths(&serde_json::json!(["/tmp/a", 7]), "watch");
         assert!(paths.is_empty());
         assert!(
@@ -2371,7 +2371,7 @@ mod tests {
     /// directory the watcher happens to hold), so the field is dropped loudly.
     #[test]
     fn a_relative_path_entry_is_logged() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let paths = parse_absolute_paths(&serde_json::json!(["relative/dir"]), "watch");
         assert!(paths.is_empty());
         assert!(
@@ -2385,7 +2385,7 @@ mod tests {
     /// from a working hook unless it is said at load.
     #[test]
     fn an_inert_hook_is_announced() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let entry = HookEntry {
             config: tiered("NoSuchEvent", "echo hi", HookTier::Core, 0),
             modifiers: HookModifiers::default(),
@@ -2402,7 +2402,7 @@ mod tests {
     /// that carries one has it announced with the event it is running for.
     #[test]
     fn a_status_message_is_announced() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let entry = HookEntry {
             config: tiered("PreToolUse", "echo hi", HookTier::Core, 0),
             modifiers: HookModifiers {
@@ -2421,7 +2421,7 @@ mod tests {
     /// A dry-run hook says it would have run, with its event, and does not.
     #[tokio::test]
     async fn a_dry_run_hook_is_announced() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let mut hook = tiered("SessionStart", "echo hi", HookTier::Core, 0);
         hook.dry_run = true;
         let input = HookInput {
@@ -2442,7 +2442,7 @@ mod tests {
     /// the excerpt is what makes the failure actionable.
     #[tokio::test]
     async fn a_nonzero_exit_logs_the_stderr_excerpt() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let hook = tiered(
             "SessionStart",
             "printf 'boom\n' >&2; exit 3",
@@ -2468,7 +2468,7 @@ mod tests {
     /// that only logs is a valid hook, and the note must reach the log.
     #[tokio::test]
     async fn a_streaming_hook_log_line_is_captured() {
-        let capture = coderex_test_utils::capture_logs();
+        let capture = codape_test_utils::capture_logs();
         let mut hook = tiered(
             "SessionStart",
             r#"echo '{"type":"log","message":"working on it"}'; echo '{"action":"continue"}'"#,
@@ -2693,7 +2693,7 @@ mod tests {
 
     #[test]
     fn watch_paths_accepts_a_single_string() {
-        let path = absolute("coderex-watch-one");
+        let path = absolute("codape-watch-one");
         let line = serde_json::json!({
             "action": "continue",
             "watchPaths": path,
@@ -2705,8 +2705,8 @@ mod tests {
 
     #[test]
     fn watch_paths_accepts_an_array() {
-        let first = absolute("coderex-watch-a");
-        let second = absolute("coderex-watch-b");
+        let first = absolute("codape-watch-a");
+        let second = absolute("codape-watch-b");
         let line = serde_json::json!({
             "action": "continue",
             "watchPaths": [first, second],
@@ -2721,7 +2721,7 @@ mod tests {
     /// nothing, because the hook cannot tell which happened.
     #[test]
     fn watch_paths_rejects_the_whole_field_when_any_path_is_relative() {
-        let good = absolute("coderex-watch-good");
+        let good = absolute("codape-watch-good");
         let line = serde_json::json!({
             "action": "continue",
             "watchPaths": [good, "relative/path"],
@@ -2737,7 +2737,7 @@ mod tests {
 
     #[test]
     fn watch_paths_rejects_non_string_entries() {
-        let good = absolute("coderex-watch-good");
+        let good = absolute("codape-watch-good");
         let line = serde_json::json!({
             "action": "continue",
             "watchPaths": [good, 7],
@@ -2751,8 +2751,8 @@ mod tests {
     /// against the old host contract is not silently inert.
     #[test]
     fn parse_hook_output_line_watch_paths_legacy_spelling() {
-        let first = absolute("coderex-watch-src");
-        let second = absolute("coderex-watch-lib");
+        let first = absolute("codape-watch-src");
+        let second = absolute("codape-watch-lib");
         let line = serde_json::json!({
             "action": "continue",
             "watch_paths": [first, second],
@@ -2795,8 +2795,8 @@ mod tests {
 
     #[test]
     fn hook_config_accepts_watch_as_a_string_or_array() {
-        let one = absolute("coderex-static-watch-one");
-        let two = absolute("coderex-static-watch-two");
+        let one = absolute("codape-static-watch-one");
+        let two = absolute("codape-static-watch-two");
 
         let string_form = serde_json::json!({
             "event": "FileChanged",
@@ -2818,12 +2818,12 @@ mod tests {
         let config: HookConfig = serde_json::from_value(serde_json::json!({
             "event": "FileChanged",
             "command": "echo {}",
-            "watch": absolute("coderex-static-watch-direct"),
+            "watch": absolute("codape-static-watch-direct"),
         }))
         .unwrap();
         assert_eq!(
             config.watch,
-            Some(vec![absolute("coderex-static-watch-direct")])
+            Some(vec![absolute("codape-static-watch-direct")])
         );
     }
 
@@ -2846,7 +2846,7 @@ mod tests {
     /// that hook can never observe, so it is not advertised to the watcher.
     #[test]
     fn static_watch_is_collected_only_from_file_changed_hooks() {
-        let path = absolute("coderex-static-watch-scope");
+        let path = absolute("codape-static-watch-scope");
         let settings = serde_json::json!([
             {"event": "SessionStart", "command": "echo {}", "watch": path},
             {"event": "FileChanged", "command": "echo {}", "watch": path},
@@ -2972,8 +2972,8 @@ mod tests {
             context: None,
         };
         let env = build_hook_env(&hook, &input);
-        assert_eq!(env.get("CODEREX_HOOK_EVENT").unwrap(), "SessionStart");
-        assert_eq!(env.get("CODEREX_SESSION_ID").unwrap(), "sess_123");
+        assert_eq!(env.get("CODAPE_HOOK_EVENT").unwrap(), "SessionStart");
+        assert_eq!(env.get("CODAPE_SESSION_ID").unwrap(), "sess_123");
         assert_eq!(env.get("MY_VAR").unwrap(), "my_val");
     }
 
@@ -3264,7 +3264,7 @@ mod tests {
     #[tokio::test]
     async fn a_hook_cannot_raise_its_own_limits() {
         let target =
-            std::env::temp_dir().join(format!("coderex-hook-limit-engine-{}", std::process::id()));
+            std::env::temp_dir().join(format!("codape-hook-limit-engine-{}", std::process::id()));
         let hook = HookConfig {
             watch: None,
             event: "Test".to_string(),

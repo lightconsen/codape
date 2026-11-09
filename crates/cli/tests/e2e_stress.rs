@@ -2,13 +2,13 @@
 
 mod e2e_harness;
 
-use coderex_commands::registry::{CommandContext, CommandRegistry};
-use coderex_core::types::ModelId;
+use codape_commands::registry::{CommandContext, CommandRegistry};
+use codape_core::types::ModelId;
 
 // Stress: Large message list rendering (simulates 1000+ messages)
 #[test]
 fn stress_large_message_list() {
-    use coderex_ui::message_list::{Message, MessageRole, MessageView};
+    use codape_ui::message_list::{Message, MessageRole, MessageView};
     use compact_str::CompactString;
 
     let mut view = MessageView::new(100);
@@ -37,7 +37,7 @@ fn stress_large_message_list() {
 // Stress: Message virtualization with scrolling
 #[test]
 fn stress_virtualization_scroll() {
-    use coderex_ui::message_list::{Message, MessageRole, MessageView};
+    use codape_ui::message_list::{Message, MessageRole, MessageView};
     use compact_str::CompactString;
 
     let mut view = MessageView::new(100);
@@ -78,7 +78,7 @@ fn stress_virtualization_scroll() {
 #[test]
 fn stress_command_registry_many_lookups() {
     let mut reg = CommandRegistry::new();
-    coderex_commands::registry::register_all_commands(&mut reg);
+    codape_commands::registry::register_all_commands(&mut reg);
 
     let ctx = CommandContext::new(
         "/src".into(),
@@ -97,7 +97,7 @@ fn stress_command_registry_many_lookups() {
 // Stress: Notification center with many notifications
 #[test]
 fn stress_notification_center_many() {
-    use coderex_ui::notification_center::NotificationCenter;
+    use codape_ui::notification_center::NotificationCenter;
 
     let mut center = NotificationCenter::new();
 
@@ -116,14 +116,14 @@ fn stress_notification_center_many() {
 // Stress: Theme manager with many themes
 #[test]
 fn stress_theme_manager_many_themes() {
-    use coderex_ui::themes::ThemeManager;
+    use codape_ui::themes::ThemeManager;
     use ratatui::style::Color;
 
     let mut mgr = ThemeManager::new();
 
     // Register 100 custom themes
     for i in 0..100 {
-        let theme = coderex_ui::themes::Theme {
+        let theme = codape_ui::themes::Theme {
             name: format!("theme-{i}"),
             background: Color::Reset,
             foreground: Color::Reset,
@@ -168,7 +168,7 @@ fn stress_theme_manager_many_themes() {
 // Stress: Input buffer with many operations
 #[test]
 fn stress_input_buffer_many_operations() {
-    use coderex_ui::input::{InputAction, InputBuffer};
+    use codape_ui::input::{InputAction, InputBuffer};
 
     let mut buf = InputBuffer::new();
 
@@ -196,7 +196,7 @@ fn stress_input_buffer_many_operations() {
 // Stress: Vim state with many operations
 #[test]
 fn stress_vim_many_operations() {
-    use coderex_ui::vim::VimState;
+    use codape_ui::vim::VimState;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let mut state = VimState::new();
@@ -229,7 +229,7 @@ fn stress_vim_many_operations() {
 // Stress: Message selector with many messages
 #[test]
 fn stress_message_selector_many() {
-    use coderex_ui::selector::MessageSelector;
+    use codape_ui::selector::MessageSelector;
 
     let mut selector = MessageSelector::new(1000);
 
@@ -249,7 +249,7 @@ fn stress_message_selector_many() {
 // Stress: Search state with many matches
 #[test]
 fn stress_search_many_matches() {
-    use coderex_ui::search::SearchState;
+    use codape_ui::search::SearchState;
 
     let mut state = SearchState::new();
     state.set_query("test");
@@ -272,7 +272,7 @@ fn stress_search_many_matches() {
 // Stress: Undo stack with many entries
 #[test]
 fn stress_undo_stack_many_entries() {
-    use coderex_ui::vim::VimState;
+    use codape_ui::vim::VimState;
 
     let mut state = VimState::new();
 
@@ -295,7 +295,7 @@ fn stress_undo_stack_many_entries() {
 // Stress: Overlay stack with many pushes
 #[test]
 fn stress_overlay_stack_many() {
-    use coderex_ui::overlay::{Overlay, OverlayStack};
+    use codape_ui::overlay::{Overlay, OverlayStack};
 
     let mut stack = OverlayStack::new();
 
@@ -322,9 +322,9 @@ fn stress_overlay_stack_many() {
 // Stress: Export many messages
 #[test]
 fn stress_export_many_messages() {
-    use coderex_core::types::Message;
-    use coderex_ui::export::{ExportFormat, export_messages};
-    use coderex_ui::selector::MessageSelector;
+    use codape_core::types::Message;
+    use codape_ui::export::{ExportFormat, export_messages};
+    use codape_ui::selector::MessageSelector;
 
     let messages: Vec<Message> = (0..1000)
         .map(|i| {

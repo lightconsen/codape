@@ -1,11 +1,11 @@
 //! Mock Anthropic API server for E2E testing.
 //!
-//! Returns predetermined `tool_use` SSE blocks so the `coderex` engine
+//! Returns predetermined `tool_use` SSE blocks so the `codape` engine
 //! executes real tools.  Run alongside the E2E suite:
 //!
 //!   cargo run --bin mock-anthropic-server -- --port 9876 &
 //!   ANTHROPIC_API_KEY=mock ANTHROPIC_BASE_URL=http://127.0.0.1:9876 \
-//!       cargo test -p coderex-cli --test e2e_code_agent
+//!       cargo test -p codape-cli --test e2e_code_agent
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

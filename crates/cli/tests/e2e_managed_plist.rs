@@ -105,7 +105,7 @@ fn run_prompt_with_format(
     prompt: &str,
     stream_json: bool,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_coderex"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codape"));
     command.arg("-p");
     if stream_json {
         command.args(["--output-format", "stream-json"]);
@@ -116,19 +116,19 @@ fn run_prompt_with_format(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     match plist {
         Some(path) => {
-            command.env("CODEREX_MANAGED_SETTINGS_PLIST_PATH", path);
+            command.env("CODAPE_MANAGED_SETTINGS_PLIST_PATH", path);
         }
         None => {
-            command.env_remove("CODEREX_MANAGED_SETTINGS_PLIST_PATH");
+            command.env_remove("CODAPE_MANAGED_SETTINGS_PLIST_PATH");
         }
     }
-    let mut child = command.spawn().expect("spawn coderex");
+    let mut child = command.spawn().expect("spawn codape");
     child
         .stdin
         .take()
@@ -166,7 +166,7 @@ fn a_managed_plist_can_enable_bypass_that_user_settings_cannot() {
     );
 
     let managed_dir = tempfile::tempdir().expect("managed");
-    let plist = managed_dir.path().join("dev.coderex.plist");
+    let plist = managed_dir.path().join("dev.codape.plist");
     write_plist(&plist);
     let with = workspace();
     let (mut provider, base_url) = start_static_provider();
@@ -175,7 +175,7 @@ fn a_managed_plist_can_enable_bypass_that_user_settings_cannot() {
     let _ = provider.wait();
     assert!(
         allowed.status.success(),
-        "coderex failed with the managed plist: {}",
+        "codape failed with the managed plist: {}",
         String::from_utf8_lossy(&allowed.stderr)
     );
     assert!(
@@ -191,7 +191,7 @@ fn a_managed_plist_can_enable_bypass_that_user_settings_cannot() {
 fn a_managed_plist_can_allow_a_command() {
     let home = config_home();
     let managed_dir = tempfile::tempdir().expect("managed");
-    let plist = managed_dir.path().join("dev.coderex.plist");
+    let plist = managed_dir.path().join("dev.codape.plist");
     std::fs::write(
         &plist,
         r#"<?xml version="1.0" encoding="UTF-8"?>

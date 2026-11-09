@@ -10,7 +10,7 @@ PROMPT="${1:-hello}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
-CODEREX_BIN="${CODEREX_BIN:-$TARGET_DIR/debug/coderex}"
+CODAPE_BIN="${CODAPE_BIN:-$TARGET_DIR/debug/codape}"
 
 if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
     echo "ANTHROPIC_API_KEY must be set for the live eval flow." >&2
@@ -21,10 +21,10 @@ fi
 # the working directory the harness gives this script.
 printf 'live-tool-ok\n' > live-eval.txt
 
-if [[ ! -x "$CODEREX_BIN" ]]; then
+if [[ ! -x "$CODAPE_BIN" ]]; then
     cargo build --quiet \
         --manifest-path "$REPO_ROOT/Cargo.toml" \
-        -p coderex-cli --bin coderex
+        -p codape-cli --bin codape
 fi
 
 model_args=()
@@ -32,16 +32,16 @@ if [[ -n "${ANTHROPIC_MODEL:-}" ]]; then
     model_args=(--model "$ANTHROPIC_MODEL")
 fi
 
-# CODEREX_SKIP_ENV_SOURCE keeps a developer's local export_env.*.sh out of the
+# CODAPE_SKIP_ENV_SOURCE keeps a developer's local export_env.*.sh out of the
 # run: the flow is driven by the environment the caller provided.
 #
 # Bash 3.2 (macOS) treats an empty `"${array[@]}"` under `set -u` as unbound,
 # so the two shapes are spelled out instead of relying on a newer bash.
 if [[ ${#model_args[@]} -gt 0 ]]; then
-    CODEREX_SKIP_ENV_SOURCE=1 \
-        "$CODEREX_BIN" --print --brief --dangerously-skip-permissions \
+    CODAPE_SKIP_ENV_SOURCE=1 \
+        "$CODAPE_BIN" --print --brief --dangerously-skip-permissions \
         "${model_args[@]}" "$PROMPT"
 else
-    CODEREX_SKIP_ENV_SOURCE=1 \
-        "$CODEREX_BIN" --print --brief --dangerously-skip-permissions "$PROMPT"
+    CODAPE_SKIP_ENV_SOURCE=1 \
+        "$CODAPE_BIN" --print --brief --dangerously-skip-permissions "$PROMPT"
 fi

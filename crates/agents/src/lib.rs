@@ -1,4 +1,4 @@
-//! CodeRex sub-agent system — types, spawning, and management.
+//! Codape sub-agent system — types, spawning, and management.
 
 #![warn(missing_docs)]
 

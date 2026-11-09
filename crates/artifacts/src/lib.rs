@@ -1,4 +1,4 @@
-//! CodeRex artifacts — publishing pages, and the data behind them.
+//! Codape artifacts — publishing pages, and the data behind them.
 //!
 //! An artifact is a page the model publishes and a person can open: an HTML
 //! file plus whatever it needs, addressable by URL, kept as versions so what
@@ -6,7 +6,7 @@
 //! the database is where the shape matters most — see [`db`] for the
 //! collection/document path rule.
 //!
-//! The reference publishes to a hosted service. CodeRex has no such service,
+//! The reference publishes to a hosted service. Codape has no such service,
 //! so publishing writes to a local store and serves from a local origin: the
 //! contract a caller sees (slugs, versions, the action vocabulary, the limits,
 //! the transcript markers) is the same, the host is not.

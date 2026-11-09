@@ -1,6 +1,6 @@
 //! MCP result adapter — converts MCP `tools/call` JSON responses into `ToolResult`.
 
-use coderex_core::types::{ImageBlock, ToolResult};
+use codape_core::types::{ImageBlock, ToolResult};
 use serde_json::Value;
 
 /// Largest image, in decoded bytes, that is forwarded to the model.

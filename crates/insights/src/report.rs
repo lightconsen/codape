@@ -21,7 +21,7 @@ pub fn render(aggregate: &Aggregate, findings: &[Finding], sessions: &[SessionFa
     html.push_str(
         "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>CodeRex Insights</title><style>",
+         <title>Codape Insights</title><style>",
     );
     html.push_str(
         ":root{--bg:#f8fafc;--ink:#334155;--head:#0f172a;--muted:#64748b;--line:#e2e8f0;\
@@ -49,7 +49,7 @@ pub fn render(aggregate: &Aggregate, findings: &[Finding], sessions: &[SessionFa
          </style></head><body><div class=\"container\">",
     );
 
-    html.push_str("<h1>CodeRex Insights</h1>");
+    html.push_str("<h1>Codape Insights</h1>");
     let _ = write!(
         html,
         "<p class=\"muted\">{} session(s), {} message(s). Generated {}.</p>",
@@ -61,7 +61,7 @@ pub fn render(aggregate: &Aggregate, findings: &[Finding], sessions: &[SessionFa
     if aggregate.sessions == 0 {
         html.push_str(
             "<p>No sessions were found to read. Insights reads the transcripts under the \
-             workspace's <code>.coderex/transcripts</code>.</p></div></body></html>",
+             workspace's <code>.codape/transcripts</code>.</p></div></body></html>",
         );
         return html;
     }
@@ -219,7 +219,7 @@ mod tests {
     fn the_report_is_self_contained() {
         let html = report();
         assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.contains("<title>CodeRex Insights</title>"), "{html}");
+        assert!(html.contains("<title>Codape Insights</title>"), "{html}");
         // No external fetches: it has to open offline.
         assert!(!html.contains("http://"), "{html}");
         assert!(!html.contains("https://"), "{html}");

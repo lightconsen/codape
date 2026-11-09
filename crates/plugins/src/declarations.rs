@@ -2,7 +2,7 @@
 //!
 //! A plugin manifest may declare `types` — `.d.ts` files it ships. Those are
 //! the plugin's own declarations. This module produces the *other* half: the
-//! declarations CodeRex itself exports so a plugin author has typed access to
+//! declarations Codape itself exports so a plugin author has typed access to
 //! the builtin tools, the engine facts a hook receives, and the configured MCP
 //! servers.
 //!
@@ -68,7 +68,7 @@ pub fn builtin_tools_declaration_with_results(
         .collect();
     let names: BTreeSet<&str> = inputs.keys().chain(outputs.keys()).copied().collect();
 
-    let mut declaration = String::from("declare module 'coderex-tools' {\n");
+    let mut declaration = String::from("declare module 'codape-tools' {\n");
     declaration.push_str("  interface BuiltinToolInputs {\n");
     for name in &names {
         let rendered = inputs
@@ -93,7 +93,7 @@ pub fn builtin_tools_declaration_with_results(
 /// hook signature shape.
 #[must_use]
 pub fn engine_declaration() -> String {
-    let mut declaration = String::from("declare module 'coderex' {\n");
+    let mut declaration = String::from("declare module 'codape' {\n");
     declaration.push_str("  /** How tool approvals are resolved for the session. */\n");
     declaration.push_str("  type PermissionMode =\n");
     declaration.push_str("    | 'default'\n");
@@ -103,7 +103,7 @@ pub fn engine_declaration() -> String {
     declaration.push_str("    | 'plan'\n");
     declaration.push_str("    | 'auto';\n\n");
 
-    declaration.push_str("  /** The hook events CodeRex knows the name of. */\n");
+    declaration.push_str("  /** The hook events Codape knows the name of. */\n");
     declaration.push_str("  type HookEvent =\n");
     for event in HOOK_EVENTS {
         let _ = writeln!(declaration, "    | '{event}'");
@@ -166,7 +166,7 @@ pub fn engine_declaration() -> String {
 /// connection state.
 #[must_use]
 pub fn mcp_declaration() -> String {
-    let mut declaration = String::from("declare module 'coderex-mcp' {\n");
+    let mut declaration = String::from("declare module 'codape-mcp' {\n");
     declaration.push_str("  /** Transport used to reach an MCP server. */\n");
     declaration.push_str("  type McpTransport = 'stdio' | 'sse' | 'http';\n\n");
 
@@ -231,7 +231,7 @@ pub fn tsconfig_declaration(declaration_dirs: &[String]) -> String {
     rendered
 }
 
-/// The canonical spellings of the hook events CodeRex knows.
+/// The canonical spellings of the hook events Codape knows.
 const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PostToolUse",
@@ -563,7 +563,7 @@ mod tests {
             )],
         );
 
-        assert!(declaration.starts_with("declare module 'coderex-tools' {"));
+        assert!(declaration.starts_with("declare module 'codape-tools' {"));
         assert!(declaration.contains("interface BuiltinToolInputs {"));
         assert!(declaration.contains("interface BuiltinToolResults {"));
         let bash = declaration.find("Bash:").unwrap();
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn engine_declaration_describes_the_hook_context() {
         let declaration = engine_declaration();
-        assert!(declaration.starts_with("declare module 'coderex' {"));
+        assert!(declaration.starts_with("declare module 'codape' {"));
         assert!(declaration.contains("interface HookContext {"));
         assert!(declaration.contains("sessionId: string;"));
         assert!(declaration.contains("cwd: string;"));
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn mcp_declaration_describes_a_configured_server() {
         let declaration = mcp_declaration();
-        assert!(declaration.starts_with("declare module 'coderex-mcp' {"));
+        assert!(declaration.starts_with("declare module 'codape-mcp' {"));
         assert!(declaration.contains("interface McpServer {"));
         assert!(declaration.contains("name: string;"));
         assert!(declaration.contains("command?: string;"));
@@ -616,16 +616,13 @@ mod tests {
     #[test]
     fn tsconfig_lists_sorted_unique_directories() {
         let declaration = tsconfig_declaration(&[
-            "coderex".to_string(),
+            "codape".to_string(),
             "acme".to_string(),
-            "coderex".to_string(),
-            "coderex-tools".to_string(),
+            "codape".to_string(),
+            "codape-tools".to_string(),
         ]);
         let parsed: Value = serde_json::from_str(&declaration).unwrap();
-        assert_eq!(
-            parsed["include"],
-            json!(["acme", "coderex", "coderex-tools"])
-        );
+        assert_eq!(parsed["include"], json!(["acme", "codape", "codape-tools"]));
         assert_eq!(parsed["compilerOptions"]["strict"], json!(true));
         assert_eq!(parsed["compilerOptions"]["noEmit"], json!(true));
     }

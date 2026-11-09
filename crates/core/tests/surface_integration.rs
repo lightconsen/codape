@@ -3,10 +3,10 @@
 
 use std::sync::Arc;
 
-use coderex_core::surface::{
+use codape_core::surface::{
     SurfaceCapabilities, SurfaceDescriptor, SurfaceError, SurfaceId, SurfaceRegistry, UiSurface,
 };
-use coderex_core::ui_protocol::{UiElement, UiStyle};
+use codape_core::ui_protocol::{UiElement, UiStyle};
 
 #[derive(Debug)]
 struct TextSurface(SurfaceDescriptor);

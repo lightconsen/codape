@@ -1,10 +1,10 @@
-//! Adapter that implements `coderex_core::tool_executor::ToolExecutor` by
+//! Adapter that implements `codape_core::tool_executor::ToolExecutor` by
 //! dispatching through the in-crate `ToolRegistry` and `ToolExecutor`.
 //!
 //! This is the wiring point between the engine's abstract
-//! `ToolExecutor` trait (in `coderex-core`) and the concrete registry
-//! and execution pipeline in `coderex-tools`, so the engine can run
-//! real tools without pulling `coderex-tools` into its dependency
+//! `ToolExecutor` trait (in `codape-core`) and the concrete registry
+//! and execution pipeline in `codape-tools`, so the engine can run
+//! real tools without pulling `codape-tools` into its dependency
 //! graph.
 
 use crate::builtins::chrome::{CHROME_CLIENT_KEY, ChromeClient};
@@ -20,13 +20,13 @@ use crate::tool::{
     Backgrounding, HOOK_EXECUTOR_KEY, JOB_SESSION_ID_KEY, RuleContentField, SESSION_CWD_KEY,
     SharedState, ToolCapabilities, ToolContext, ToolInput,
 };
-use coderex_config::FeatureFlags;
-use coderex_core::hook_executor::HookExecutor;
-use coderex_core::permissions::RuleSubject;
-use coderex_core::tool_executor::{
+use codape_config::FeatureFlags;
+use codape_core::hook_executor::HookExecutor;
+use codape_core::permissions::RuleSubject;
+use codape_core::tool_executor::{
     PathVerifier, ToolDispatchOutcome, ToolExecutor as CoreToolExecutor,
 };
-use coderex_core::types::ToolResult;
+use codape_core::types::ToolResult;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,7 +61,7 @@ pub struct RegistryToolDispatcher {
     /// name the flag it needs (see [`crate::required_feature_flag`]); the
     /// generic gate is "any known flag is on".
     feature_flags: Arc<parking_lot::RwLock<FeatureFlags>>,
-    sandbox_override: Option<coderex_core::sandbox::SandboxConfig>,
+    sandbox_override: Option<codape_core::sandbox::SandboxConfig>,
     task_store: Option<Arc<TaskStore>>,
     /// The session's todo list, held for the life of this dispatcher and
     /// shared by every clone of it. `TodoWrite` writes here and the next call
@@ -90,7 +90,7 @@ pub struct RegistryToolDispatcher {
     /// Mutating edit tools snapshot through it before they write, so `/rewind`
     /// can undo the file half of a truncated turn.
     checkpoint_store:
-        Arc<parking_lot::RwLock<Option<Arc<coderex_core::checkpoints::CheckpointStore>>>>,
+        Arc<parking_lot::RwLock<Option<Arc<codape_core::checkpoints::CheckpointStore>>>>,
     /// Re-check a path after a tool has opened it.
     path_verifier: Arc<parking_lot::RwLock<Option<PathVerifier>>>,
     /// Subject forms the pre-dispatch permission check saw, by call id.
@@ -127,7 +127,7 @@ impl RegistryToolDispatcher {
         if enabled {
             // `apply_comma_list` logs (and skips) a name it does not know;
             // `KNOWN_FLAGS` is by construction all names it does know.
-            let _ = flags.apply_comma_list(&coderex_config::flags::KNOWN_FLAGS.join(","));
+            let _ = flags.apply_comma_list(&codape_config::flags::KNOWN_FLAGS.join(","));
         }
         self.set_feature_flags(flags);
     }
@@ -206,7 +206,7 @@ impl RegistryToolDispatcher {
     ///
     /// Edit tools snapshot their targets through it before they write, so
     /// `/rewind` can restore the files a truncated turn touched.
-    pub fn set_checkpoint_store(&self, store: Arc<coderex_core::checkpoints::CheckpointStore>) {
+    pub fn set_checkpoint_store(&self, store: Arc<codape_core::checkpoints::CheckpointStore>) {
         *self.checkpoint_store.write() = Some(store);
     }
 
@@ -264,7 +264,7 @@ impl RegistryToolDispatcher {
     }
 
     /// Set a custom sandbox config that overrides the default per-tool policy.
-    pub fn set_sandbox_override(&mut self, config: Option<coderex_core::sandbox::SandboxConfig>) {
+    pub fn set_sandbox_override(&mut self, config: Option<codape_core::sandbox::SandboxConfig>) {
         self.sandbox_override = config;
     }
 
@@ -352,7 +352,7 @@ fn subject_key(value: &str) -> String {
 
 #[async_trait::async_trait]
 impl CoreToolExecutor for RegistryToolDispatcher {
-    fn list_tools(&self) -> Vec<coderex_core::tool_executor::ToolInfo> {
+    fn list_tools(&self) -> Vec<codape_core::tool_executor::ToolInfo> {
         // What the model is told about is what it can call. `all_descriptors`
         // is every registered tool, including disabled ones; a tool the model
         // is shown but cannot use is an invitation to waste a turn discovering
@@ -424,7 +424,7 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                             .map(str::to_string)
                     })
                     .unwrap_or_else(|| d.name.clone());
-                coderex_core::tool_executor::ToolInfo {
+                codape_core::tool_executor::ToolInfo {
                     name: d.name.clone(),
                     description,
                     input_schema: advertised_schema(d.input_schema, caps),
@@ -437,7 +437,7 @@ impl CoreToolExecutor for RegistryToolDispatcher {
         &self,
         tool_name: &str,
         input: &Value,
-    ) -> Vec<coderex_core::permissions::RuleSubject> {
+    ) -> Vec<codape_core::permissions::RuleSubject> {
         let Some(tool) = self.registry.get_tool_arc(tool_name) else {
             tracing::debug!(tool = %tool_name, "rule_subjects: no such tool");
             return Vec::new();
@@ -764,7 +764,7 @@ impl CoreToolExecutor for RegistryToolDispatcher {
 /// This is the generic "feature flags are on" gate the registry understands;
 /// individual tools layer their own named flag on top.
 fn flags_any_enabled(flags: &FeatureFlags) -> bool {
-    coderex_config::flags::KNOWN_FLAGS
+    codape_config::flags::KNOWN_FLAGS
         .iter()
         .any(|name| flags.is_enabled(name))
 }
@@ -825,21 +825,21 @@ pub fn rule_content_subjects(
     field: Option<RuleContentField>,
     input: &Value,
     cwd: &std::path::Path,
-) -> Vec<coderex_core::permissions::RuleSubject> {
+) -> Vec<codape_core::permissions::RuleSubject> {
     if matches!(field, Some(RuleContentField::Scalar("command"))) {
         let Some(command) = scalar_argument(input, "command") else {
             return Vec::new();
         };
         let command = command.to_string_lossy().to_string();
-        let analysis = coderex_core::shell_security::analyze_command(&command);
-        let mut subjects: Vec<coderex_core::permissions::RuleSubject> =
+        let analysis = codape_core::shell_security::analyze_command(&command);
+        let mut subjects: Vec<codape_core::permissions::RuleSubject> =
             if analysis.segments.is_empty() {
-                vec![coderex_core::permissions::RuleSubject::single(command)]
+                vec![codape_core::permissions::RuleSubject::single(command)]
             } else {
                 analysis
                     .segments
                     .into_iter()
-                    .map(coderex_core::permissions::RuleSubject::single)
+                    .map(codape_core::permissions::RuleSubject::single)
                     .collect()
             };
         if let Some(reason) = analysis.opaque {
@@ -853,7 +853,7 @@ pub fn rule_content_subjects(
     // Each file is its own subject; a multi-file allow must cover every one.
     rule_content_arguments(field, input)
         .into_iter()
-        .map(|path| coderex_core::permissions::RuleSubject::new(subject_forms(&path, cwd)))
+        .map(|path| codape_core::permissions::RuleSubject::new(subject_forms(&path, cwd)))
         .collect()
 }
 
@@ -1141,7 +1141,7 @@ mod tests {
             Ok(ToolOutput {
                 output: "[image: image/png, 4 bytes decoded]".into(),
                 is_display: false,
-                images: vec![coderex_core::types::ImageBlock {
+                images: vec![codape_core::types::ImageBlock {
                     media_type: "image/png".into(),
                     data: "AAAA".into(),
                 }],
@@ -1988,19 +1988,19 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl coderex_core::hook_executor::HookExecutor for RecordingHooks {
+    impl codape_core::hook_executor::HookExecutor for RecordingHooks {
         async fn fire_hook(
             &self,
             event_name: &str,
             input: &str,
             context: &HashMap<String, String>,
-        ) -> coderex_core::hook_executor::HookFireResult {
+        ) -> codape_core::hook_executor::HookFireResult {
             self.fired.lock().unwrap().push((
                 event_name.to_string(),
                 input.to_string(),
                 context.clone(),
             ));
-            coderex_core::hook_executor::HookFireResult::default()
+            codape_core::hook_executor::HookFireResult::default()
         }
     }
 
@@ -2011,7 +2011,7 @@ mod tests {
     async fn set_cwd_fires_cwd_changed() {
         let dispatcher = dispatcher_with_webfetch_and_echo();
         let hooks = Arc::new(RecordingHooks::default());
-        let typed: Arc<dyn coderex_core::hook_executor::HookExecutor> = hooks.clone();
+        let typed: Arc<dyn codape_core::hook_executor::HookExecutor> = hooks.clone();
         dispatcher.set_hooks(typed);
 
         dispatcher.set_cwd(PathBuf::from("/tmp/moved"));
@@ -2055,7 +2055,7 @@ mod tests {
         );
 
         let hooks = Arc::new(RecordingHooks::default());
-        dispatcher.set_hooks(hooks.clone() as Arc<dyn coderex_core::hook_executor::HookExecutor>);
+        dispatcher.set_hooks(hooks.clone() as Arc<dyn codape_core::hook_executor::HookExecutor>);
         dispatcher.refire_cwd_changed(PathBuf::from("/tmp"));
 
         for _ in 0..50 {
@@ -2082,7 +2082,7 @@ mod tests {
     async fn set_cwd_to_the_same_directory_fires_nothing() {
         let dispatcher = dispatcher_with_webfetch_and_echo();
         let hooks = Arc::new(RecordingHooks::default());
-        let typed: Arc<dyn coderex_core::hook_executor::HookExecutor> = hooks.clone();
+        let typed: Arc<dyn codape_core::hook_executor::HookExecutor> = hooks.clone();
         dispatcher.set_hooks(typed);
 
         dispatcher.set_cwd(PathBuf::from("/tmp"));
@@ -2106,7 +2106,7 @@ mod subject_tests {
     use crate::tool::RuleContentField;
     use serde_json::json;
 
-    fn forms(subjects: &[coderex_core::permissions::RuleSubject]) -> Vec<Vec<String>> {
+    fn forms(subjects: &[codape_core::permissions::RuleSubject]) -> Vec<Vec<String>> {
         subjects
             .iter()
             .map(|subject| subject.forms.clone())
@@ -2314,18 +2314,18 @@ mod subject_tests {
             &json!({"file_path": "link/../secret.txt"}),
             root.path(),
         );
-        let mut checker = coderex_core::permissions::PermissionChecker::new(
-            coderex_core::permissions::PermissionMode::Default,
+        let mut checker = codape_core::permissions::PermissionChecker::new(
+            codape_core::permissions::PermissionMode::Default,
         );
-        let spec = coderex_core::permissions::PermissionRuleSpec::parse(
+        let spec = codape_core::permissions::PermissionRuleSpec::parse(
             "Write(./secret/**)",
-            coderex_core::permissions::PermissionAction::Allow,
+            codape_core::permissions::PermissionAction::Allow,
         )
         .unwrap();
         checker
             .add_spec(
                 &spec,
-                &coderex_core::permissions::RuleCompileContext {
+                &codape_core::permissions::RuleCompileContext {
                     cwd: root.path(),
                     home: None,
                 },
@@ -2375,7 +2375,7 @@ mod toctou_dispatch_tests {
     use crate::context::ExecutionContext;
     use crate::executor::{ExecutionConfig, ToolExecutor as InnerExecutor};
     use crate::registry::ToolRegistry;
-    use coderex_core::permissions::{RuleSubject, RuleSubject as Subject};
+    use codape_core::permissions::{RuleSubject, RuleSubject as Subject};
 
     fn dispatcher(cwd: &std::path::Path) -> RegistryToolDispatcher {
         let mut registry = ToolRegistry::new();

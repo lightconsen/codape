@@ -54,20 +54,20 @@ fn start_static_provider() -> (Child, String) {
 /// Write two transcripts through the store, the way an earlier session would
 /// have, with no index beside them.
 fn seed_transcripts(dir: &Path) {
-    let store = coderex_memory::transcript::TranscriptStore::new(dir.join(".coderex/transcripts"));
+    let store = codape_memory::transcript::TranscriptStore::new(dir.join(".codape/transcripts"));
     store
         .rewrite(
             "alpha",
             &[
-                coderex_core::types::Message::user("investigate the oauth refresh bug"),
-                coderex_core::types::Message::assistant("found it in the token rotation"),
+                codape_core::types::Message::user("investigate the oauth refresh bug"),
+                codape_core::types::Message::assistant("found it in the token rotation"),
             ],
         )
         .expect("alpha transcript");
     store
         .rewrite(
             "beta",
-            &[coderex_core::types::Message::user(
+            &[codape_core::types::Message::user(
                 "revert the schema change",
             )],
         )
@@ -81,20 +81,20 @@ fn run_backfill(dir: &Path, base_url: &str) -> std::process::Output {
         r#"{"config_version": 4, "telemetry_enabled": false}"#,
     )
     .expect("settings");
-    let child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args(["-p", "/backfill-sessions"])
         .current_dir(dir)
         .env("ANTHROPIC_API_KEY", "mock")
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
-        .env("CODEREX_LOG", "off")
-        .env("CODEREX_DISABLE_ADOPT", "1")
+        .env("CODAPE_LOG", "off")
+        .env("CODAPE_DISABLE_ADOPT", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child.wait_with_output().expect("wait")
 }
 
@@ -103,7 +103,7 @@ fn backfill_writes_a_searchable_index_for_existing_transcripts() {
     let dir = tempfile::tempdir().expect("workspace");
     seed_transcripts(dir.path());
     assert!(
-        !dir.path().join(".coderex/sessions.db").exists(),
+        !dir.path().join(".codape/sessions.db").exists(),
         "the fixture already has an index"
     );
     let (mut provider, base_url) = start_static_provider();
@@ -119,10 +119,10 @@ fn backfill_writes_a_searchable_index_for_existing_transcripts() {
         "the command did not report what it wrote:\n{stdout}"
     );
 
-    let db = dir.path().join(".coderex/sessions.db");
+    let db = dir.path().join(".codape/sessions.db");
     assert!(db.exists(), "no index was written at {}", db.display());
 
-    let index = coderex_memory::session_index::SessionIndex::open(&db).expect("open the index");
+    let index = codape_memory::session_index::SessionIndex::open(&db).expect("open the index");
     // `project_path` is the session's working directory as the CLI resolved
     // it (macOS `/var` is really `/private/var`), so list everything rather
     // than re-deriving the string.

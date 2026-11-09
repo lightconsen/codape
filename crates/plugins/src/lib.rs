@@ -1,4 +1,4 @@
-//! CodeRex plugin and skill system.
+//! Codape plugin and skill system.
 
 #![warn(missing_docs)]
 

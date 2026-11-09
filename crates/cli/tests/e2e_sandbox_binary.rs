@@ -54,8 +54,8 @@ fn run(cwd: &Path, base_url: &str, prompt: &str, api_key: &str) -> std::process:
 
 /// Run the binary with extra environment variables.
 ///
-/// The sandbox switches (`CODEREX_REQUIRE_SANDBOX`, `CODEREX_BWRAP`,
-/// `CODEREX_LANDLOCK`) are environment-only, so a binary-level test is the
+/// The sandbox switches (`CODAPE_REQUIRE_SANDBOX`, `CODAPE_BWRAP`,
+/// `CODAPE_LANDLOCK`) are environment-only, so a binary-level test is the
 /// only way to exercise them without changing the host's installation.
 fn run_with_env(
     cwd: &Path,
@@ -71,7 +71,7 @@ fn run_with_env(
     )
     .expect("seed config");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_coderex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
             "-p",
             "--dangerously-skip-permissions",
@@ -83,13 +83,13 @@ fn run_with_env(
         .env("ANTHROPIC_BASE_URL", base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", config_home.path())
-        .env("CODEREX_LOG", "off")
+        .env("CODAPE_LOG", "off")
         .envs(extra.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn coderex");
+        .expect("spawn codape");
     child
         .stdin
         .take()
@@ -104,7 +104,7 @@ fn run_with_env(
 fn a_destructive_shell_command_cannot_touch_a_path_outside_the_workspace() {
     let dir = tempfile::tempdir().expect("workspace");
     // Exactly the path the static provider's destructive command targets.
-    let victim = PathBuf::from("/tmp/coderex-benchmark-should-not-run");
+    let victim = PathBuf::from("/tmp/codape-benchmark-should-not-run");
     std::fs::create_dir_all(&victim).unwrap();
     std::fs::write(victim.join("sentinel"), "keep").unwrap();
     let (mut provider, base_url) = start_static_provider();
@@ -120,7 +120,7 @@ fn a_destructive_shell_command_cannot_touch_a_path_outside_the_workspace() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
@@ -142,7 +142,7 @@ fn a_destructive_shell_command_cannot_touch_a_path_outside_the_workspace() {
 fn the_shell_child_does_not_see_the_provider_credential() {
     let dir = tempfile::tempdir().expect("workspace");
     let (mut provider, base_url) = start_static_provider();
-    let key = "sk-coderex-e2e-secret";
+    let key = "sk-codape-e2e-secret";
 
     let output = run(dir.path(), &base_url, "print the provider key", key);
 
@@ -150,7 +150,7 @@ fn the_shell_child_does_not_see_the_provider_credential() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -177,7 +177,7 @@ fn the_sandbox_denies_network_access_for_shell_commands() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -233,9 +233,9 @@ fn requiring_a_sandbox_refuses_to_run_when_no_backend_is_available() {
         "write a sandbox marker",
         "mock-e2e-key",
         &[
-            ("CODEREX_REQUIRE_SANDBOX", "1"),
-            ("CODEREX_BWRAP", "0"),
-            ("CODEREX_LANDLOCK", "0"),
+            ("CODAPE_REQUIRE_SANDBOX", "1"),
+            ("CODAPE_BWRAP", "0"),
+            ("CODAPE_LANDLOCK", "0"),
         ],
     );
 
@@ -243,7 +243,7 @@ fn requiring_a_sandbox_refuses_to_run_when_no_backend_is_available() {
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -252,7 +252,7 @@ fn requiring_a_sandbox_refuses_to_run_when_no_backend_is_available() {
         "the shell ran even though isolation was required:\n{stdout}"
     );
     assert!(
-        stdout.contains("CODEREX_REQUIRE_SANDBOX") || stdout.contains("refusing to run unconfined"),
+        stdout.contains("CODAPE_REQUIRE_SANDBOX") || stdout.contains("refusing to run unconfined"),
         "the refusal did not name its reason:\n{stdout}"
     );
 }
@@ -270,14 +270,14 @@ fn without_the_requirement_the_same_command_runs() {
         &base_url,
         "write a sandbox marker",
         "mock-e2e-key",
-        &[("CODEREX_BWRAP", "0"), ("CODEREX_LANDLOCK", "0")],
+        &[("CODAPE_BWRAP", "0"), ("CODAPE_LANDLOCK", "0")],
     );
 
     let _ = provider.kill();
     let _ = provider.wait();
     assert!(
         output.status.success(),
-        "coderex failed: {}",
+        "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(

@@ -2,7 +2,7 @@
 # Record the LLM responses used by the provider-backed E2E suites.
 #
 # The suites run against `llm-cassette`; in record mode it proxies to the
-# endpoint in your CodeRex settings and writes one JSON cassette per request
+# endpoint in your Codape settings and writes one JSON cassette per request
 # under crates/cli/tests/cassettes/. Those recordings are committed, and every
 # later run (local and CI) replays them without a provider, key or network.
 #
@@ -20,8 +20,8 @@
 # CASSETTE_STRICT=1. --prune replays every suite with tracing; a suite whose
 # replay fails is left untouched.
 #
-# The endpoint and key are read from $CODEREX_SETTINGS, defaulting to
-# ~/.coderex/settings.json and falling back to ~/.claude/settings.ds.json when
+# The endpoint and key are read from $CODAPE_SETTINGS, defaulting to
+# ~/.codape/settings.json and falling back to ~/.claude/settings.ds.json when
 # the former has no provider configured. They are only exported to the test
 # process; the script never prints them.
 
@@ -59,9 +59,9 @@ case "${1:-}" in
       rm -f crates/cli/tests/cassettes/*/_missing_*.json
       for suite in live_basic_chat live_bash_tool live_file_read \
                    e2e_code_agent e2e_equivalence code_agent_benchmark; do
-        CODEREX_CASSETTE_TRACE=1 cargo test -q -p coderex-cli --test "$suite" >/dev/null 2>&1 || true
+        CODAPE_CASSETTE_TRACE=1 cargo test -q -p codape-cli --test "$suite" >/dev/null 2>&1 || true
       done
-      CODEREX_CASSETTE_TRACE=1 cargo test -q -p coderex-cli --test interactive_tui interactive_live >/dev/null 2>&1 || true
+      CODAPE_CASSETTE_TRACE=1 cargo test -q -p codape-cli --test interactive_tui interactive_live >/dev/null 2>&1 || true
       count=$(find crates/cli/tests/cassettes -name '_missing_*.json' | wc -l | tr -d ' ')
       echo "pass $pass: $count request(s) without a recording"
       [ "$count" = "0" ] && exit 0
@@ -72,12 +72,12 @@ case "${1:-}" in
     ;;
 esac
 
-# Prefer an explicit file, then CodeRex's own settings, then the Claude Code
+# Prefer an explicit file, then Codape's own settings, then the Claude Code
 # settings that commonly hold a proxy provider (ANTHROPIC_* in `env`).
-if [ -n "${CODEREX_SETTINGS:-}" ]; then
-  settings="$CODEREX_SETTINGS"
+if [ -n "${CODAPE_SETTINGS:-}" ]; then
+  settings="$CODAPE_SETTINGS"
 else
-  settings="$HOME/.coderex/settings.json"
+  settings="$HOME/.codape/settings.json"
   if ! grep -q "ANTHROPIC_BASE_URL\|base_url" "$settings" 2>/dev/null; then
     alt="$HOME/.claude/settings.ds.json"
     if [ -r "$alt" ] && grep -q "ANTHROPIC_BASE_URL" "$alt"; then
@@ -87,7 +87,7 @@ else
 fi
 if [ ! -r "$settings" ]; then
   echo "error: cannot read $settings" >&2
-  echo "point CODEREX_SETTINGS at the settings file that holds your provider" >&2
+  echo "point CODAPE_SETTINGS at the settings file that holds your provider" >&2
   exit 1
 fi
 
@@ -117,9 +117,9 @@ if [ -z "$base_url" ] || [ -z "$api_key" ]; then
   exit 1
 fi
 
-export CODEREX_CASSETTE_MODE=record
-export CODEREX_CASSETTE_UPSTREAM="$base_url"
-export CODEREX_CASSETTE_API_KEY="$api_key"
+export CODAPE_CASSETTE_MODE=record
+export CODAPE_CASSETTE_UPSTREAM="$base_url"
+export CODAPE_CASSETTE_API_KEY="$api_key"
 
 if [ "${1:-}" = "--fresh" ]; then
   rm -rf crates/cli/tests/cassettes
@@ -129,7 +129,7 @@ mkdir -p crates/cli/tests/cassettes
 run() {
   echo "== recording $1"
   shift
-  cargo test -p coderex-cli "$@" -- --test-threads=1
+  cargo test -p codape-cli "$@" -- --test-threads=1
 }
 
 run live_basic_chat --test live_basic_chat

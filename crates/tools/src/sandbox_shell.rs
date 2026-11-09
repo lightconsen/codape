@@ -2,7 +2,7 @@
 //!
 //! The sandbox is a property of *the shell tool*, not of one particular shell:
 //! the reference wraps "the Bash tool / the PowerShell tool" with the same layer
-//! and picks the shell by platform. CodeRex had the wrapping inside the Bash
+//! and picks the shell by platform. Codape had the wrapping inside the Bash
 //! tool only, so the PowerShell tool never read the policy the dispatcher handed
 //! it — and on Windows, where PowerShell *is* the shell, nothing was confined at
 //! all.
@@ -14,7 +14,7 @@
 
 use crate::context::ToolError;
 use crate::tool::ToolContext;
-use coderex_core::sandbox::{SandboxConfig, SandboxHandle};
+use codape_core::sandbox::{SandboxConfig, SandboxHandle};
 use tokio::process::Command;
 
 /// The policy the dispatcher put in the context, if any.
@@ -33,7 +33,7 @@ pub fn sandbox_config<'a>(ctx: &'a ToolContext<'_>) -> Option<&'a SandboxConfig>
 /// shell" into "run whatever the repository shipped", so a program that resolves
 /// inside the working directory is refused rather than run.
 pub fn guard_program_origin(program: &str, cwd: &std::path::Path) -> Result<(), ToolError> {
-    if coderex_core::sandbox::resolves_inside_cwd(program, cwd) {
+    if codape_core::sandbox::resolves_inside_cwd(program, cwd) {
         return Err(ToolError::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
@@ -356,7 +356,7 @@ mod tests {
 
         // `PATH` is process-wide, so this test asks the resolver directly rather
         // than mutating it under the other tests.
-        assert!(coderex_core::sandbox::resolves_inside_cwd(
+        assert!(codape_core::sandbox::resolves_inside_cwd(
             "./sh",
             dir.path()
         ));

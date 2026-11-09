@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust
-//! use coderex_core::shell_security::BashAst;
+//! use codape_core::shell_security::BashAst;
 //!
 //! let ast = BashAst::parse("rm -rf /tmp/*");
 //! assert!(ast.is_dangerous());

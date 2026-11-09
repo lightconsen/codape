@@ -252,7 +252,7 @@ impl TrustedDeviceRegistry {
                 data.extend_from_slice(user.as_bytes());
             }
             if data.is_empty() {
-                data.extend_from_slice(b"coderex-default-device");
+                data.extend_from_slice(b"codape-default-device");
             }
             data
         };

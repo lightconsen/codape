@@ -3,23 +3,23 @@
 `/teleport` moves a conversation. It has two halves:
 
 - **Directory switching** — `/teleport <directory>` saves the session into
-  `<directory>/.coderex/teleport_state.json`, changes the working directory, and
+  `<directory>/.codape/teleport_state.json`, changes the working directory, and
   loads whatever session that directory holds. This works offline, with no
   service involved.
 - **Sharing** — `/teleport --share` produces a token, and `/teleport --join
   <token>` restores the session behind it. On its own the token refers to a file
-  under `~/.coderex/teleport/shared`, which only works on the same machine.
+  under `~/.codape/teleport/shared`, which only works on the same machine.
   Point both machines at a rendezvous service and the token works across them.
 
 ## The rendezvous service
 
 ```bash
 # On a host both machines can reach:
-coderex teleport-service --port 8787            # keeps shares for a week
-coderex teleport-service --port 8787 --ttl-secs 3600
+codape teleport-service --port 8787            # keeps shares for a week
+codape teleport-service --port 8787 --ttl-secs 3600
 
 # On each machine:
-export CODEREX_TELEPORT_URL=http://teleport.internal:8787
+export CODAPE_TELEPORT_URL=http://teleport.internal:8787
 ```
 
 Then in one session `/teleport --share` prints a token, and on the other

@@ -1,4 +1,4 @@
-# CodeRex — 实施任务清单
+# Codape — 实施任务清单
 
 > 每个任务尽可能小、可测试、功能完备。后序任务依赖前序。
 > 标记 `[ ]` 为未实现，`[x]` 为已实现。
@@ -51,7 +51,7 @@
 ## Phase 1: 配置系统
 
 ### 1.1 配置目录与文件加载 (crate: `config`)
-- [x] 实现 `~/.coderex/` 目录路径解析（兼容 `CLAUDE_CONFIG_DIR` 环境变量覆盖）
+- [x] 实现 `~/.codape/` 目录路径解析（兼容 `CLAUDE_CONFIG_DIR` 环境变量覆盖）
 - [x] 实现 `settings.json` 读取与解析为 `Settings` 结构体
 - [x] 实现三级配置合并：built-in defaults → user config → project config
 - [x] 定义 `RuntimeOverrides` 结构体
@@ -71,7 +71,7 @@
 - [x] 配置 `tracing-subscriber`（JSON 输出、环境变量控制级别）
 - [x] 安装 panic hook（打印 backtrace、写入 crash log）
 - [x] 实现 `StartupPhase` 枚举与启动阶段事件发射
-- **测试**：集成到 main.rs，CODEREX_LOG 环境变量控制
+- **测试**：集成到 main.rs，CODAPE_LOG 环境变量控制
 - **依赖**：1.1
 
 ### 1.4 FeatureFlags 完整性 (crate: `config`)
@@ -111,7 +111,7 @@
 ## Phase 2: 存储层
 
 ### 2.1 JSONL Transcript Store (crate: `memory`)
-- [x] 实现 `TranscriptStore`：按 `~/.coderex/projects/<project_hash>/<session_id>.jsonl` 追加写入
+- [x] 实现 `TranscriptStore`：按 `~/.codape/projects/<project_hash>/<session_id>.jsonl` 追加写入
 - [x] 实现 `append(message)` 方法
 - [x] 实现 `read_all(session_id)` 迭代器
 - [x] 实现 `SKIP_FIRST_PROMPT_PATTERN` 正则跳过机制
@@ -119,7 +119,7 @@
 - **依赖**：0.2
 
 ### 2.2 SQLite Session Meta Index (crate: `memory`)
-- [x] 创建 `~/.coderex/sessions.db` 与 schema（sessions 表、索引）
+- [x] 创建 `~/.codape/sessions.db` 与 schema（sessions 表、索引）
 - [x] 实现 `SessionIndex::create(session_id, project_path, ...)` 插入
 - [x] 实现 `SessionIndex::update_last_active(session_id, ...)` 更新
 - [x] 实现 `SessionIndex::list_by_project(project_path)` 查询
@@ -128,7 +128,7 @@
 - **依赖**：2.1
 
 ### 2.3 长期记忆存储 (crate: `memory`)
-- [x] 实现 `LongTermStore`：`~/.coderex/memory/` 目录下的文件存储
+- [x] 实现 `LongTermStore`：`~/.codape/memory/` 目录下的文件存储
 - [x] 实现 `read()` / `write(topic, content)` 接口
 - [x] 实现 `search(query)` 模糊匹配
 - **测试**：5 tests — 写入/读取、更新、缺失主题、搜索匹配、搜索排序
@@ -594,7 +594,7 @@
 - [x] 定义 `AgentManager` 结构体
 - [x] 实现 `spawn_agent(type, prompt, options) -> TaskHandle`
 - [x] 实现 fork 继承上下文
-- [x] 实现**缓存感知 fork**：`ForkedContext` 携带父会话的对话前缀（`conversation_prefix` / `fork_point`）与 `CacheSafeParams`（model / system prompt / 工具集），`fork_messages()` 逐字节复用父前缀（而非重算）并在 fork 点后追加子任务，`prefix_fingerprint()` 做漂移检测，`is_cache_safe()` 判定参数是否仍命中父前缀缓存；`SpawnOptions.parent_prefix` / `parent_cache_safe_params` 供调用方注入（CodeRex 消息无稳定 uuid，fork 点用下标而非 id）
+- [x] 实现**缓存感知 fork**：`ForkedContext` 携带父会话的对话前缀（`conversation_prefix` / `fork_point`）与 `CacheSafeParams`（model / system prompt / 工具集），`fork_messages()` 逐字节复用父前缀（而非重算）并在 fork 点后追加子任务，`prefix_fingerprint()` 做漂移检测，`is_cache_safe()` 判定参数是否仍命中父前缀缓存；`SpawnOptions.parent_prefix` / `parent_cache_safe_params` 供调用方注入（Codape 消息无稳定 uuid，fork 点用下标而非 id）
 - [x] 实现自定义工具白名单
 - [x] 实现 `SendMessage` 到指定 agent
 - **测试**：
@@ -627,7 +627,7 @@
 
 ### 10.6 后台作业记录与 adopt (crate: `core`)
 - [x] `crates/core/src/job_record.rs`：`JobKind { Agent, Shell, Workflow, Cron }`、`JobState { Running, Interrupted, Done, Failed }`、`JobRecord { id, kind, description, cwd, session_id, pid, started_at_ms, updated_at_ms, state }`
-- [x] `JobStore`：每个作业一个 JSON 文件，路径 `<cwd>/.coderex/jobs/<id>.json`；**原子写**（同目录临时文件 + `rename`）；`write` / `load` / `list` / `remove` / `prune_done`；id 只允许 `[A-Za-z0-9_-]`，杜绝 `../` 逃逸
+- [x] `JobStore`：每个作业一个 JSON 文件，路径 `<cwd>/.codape/jobs/<id>.json`；**原子写**（同目录临时文件 + `rename`）；`write` / `load` / `list` / `remove` / `prune_done`；id 只允许 `[A-Za-z0-9_-]`，杜绝 `../` 逃逸
 - [x] **纯函数** `adopt(records, now_ms, session_id) -> AdoptOutcome`，五个桶 `resumable` / `interrupted` / `stale` / `foreign` / `terminal`，分类是全函数（每条记录恰好落一个桶）
   - `STALE_THRESHOLD_MS = 120_000`：超过即 stale
   - `CLOCK_SKEW_ALLOWANCE_MS = 60_000`：**非对称**上界，仅放宽"未来"方向；标称时间戳比本地时钟超前不超过 60s 仍可信，落后不受此容忍影响
@@ -636,15 +636,15 @@
 - [x] `JobStore::mark_interrupted(&outcome, now_ms)`：把 `interrupted` 里仍标 `Running` 的记录改写为 `Interrupted`（首个接管它的会话负责改写；已 `Interrupted` 的不重复报），返回每条一次 `TaskNotification` —— **宁可报告，绝不留 phantom running**
 - [x] `AdoptOutcome::notifications()`：`interrupted` 桶的纯函数视图，无存储时（如无头）也能报告
 - [x] 总入口 `adopt_for_session(store, now_ms, session_id) -> Result<StartupAdopt, JobStoreError>`；`adopt_and_reconcile` 是不看开关的纯核心
-- [x] 开关 `CODEREX_DISABLE_ADOPT`（对应参照物 `CLAUDE_DISABLE_ADOPT`）：非空且非 `0`/`false`/`no` 即整体停用。参照物**没有 adopt 时的同意弹窗**——它沿用此前已授予的同意并**披露**而非询问——所以这里是开关而不是对话框
+- [x] 开关 `CODAPE_DISABLE_ADOPT`（对应参照物 `CLAUDE_DISABLE_ADOPT`）：非空且非 `0`/`false`/`no` 即整体停用。参照物**没有 adopt 时的同意弹窗**——它沿用此前已授予的同意并**披露**而非询问——所以这里是开关而不是对话框
 - **测试**：
   - 可收养性矩阵（fresh / foreign / stale / 未来时间戳在 skew 内 / 超出 skew / 终态豁免老化 / 已 Interrupted）单元测试，含两个边界（阈值恰等、skew 恰等）（`crates/core/src/job_record.rs`）
   - 存储往返：write → load → list → remove → prune_done；原子写不留临时文件；并发写/读不产生解码失败；损坏文件被跳过而不是让 adopt 整体失败；非法 id 被拒（`crates/core/tests/job_record_integration.rs`）
   - **interrupted 记录被上报而不是丢掉**：写入一条 `Running` 记录 → `adopt_and_reconcile` → 得到一条 notification，且磁盘上该记录变为 `Interrupted`（不再是 `Running`）
   - 变异验证：去掉 skew 上界 → `future_timestamp_within_skew_is_trusted` 必须失败；去掉 foreign 判定 → `foreign_record_is_not_adopted` 必须失败
 - **依赖**：10.2
-- **说明（为什么不需要 roster 索引）**：参照物在每作业 `state.json` 旁另存 `roster.json` 索引，是因为它的守护进程要在每次重启时扫描一棵大小未知的作业树。CodeRex 的作业目录由一个会话写入、只装少量文件，`list()` 直接读目录即可；再加一份索引等于引入第二个事实来源，会与它索引的文件互相矛盾。故**不设索引**。
-- **说明（cron 的真相）**：持久化 cron 定义**已经存在**——`CronScheduler`（`crates/tools/src/cron_scheduler.rs`）把 `durable` 作业写入 `~/.coderex/scheduled_tasks.json`，`repl.rs:941` 会话启动时 `load()`，随后 `spawn_runner()` 在同一个 scheduler 上重新调度。也就是说参照物 `adoptCron` 想做的事（按存储去重后重排）在这里由 `CronScheduler` 自己完成，**adopt 不去重排、也不会重复登记**：它把 cron 记录归入 `resumable` 仅供披露。`CronCreate` 目前不写 `JobRecord`，所以实践中该桶通常为空——如实成陈述，不假造生产者。
+- **说明（为什么不需要 roster 索引）**：参照物在每作业 `state.json` 旁另存 `roster.json` 索引，是因为它的守护进程要在每次重启时扫描一棵大小未知的作业树。Codape 的作业目录由一个会话写入、只装少量文件，`list()` 直接读目录即可；再加一份索引等于引入第二个事实来源，会与它索引的文件互相矛盾。故**不设索引**。
+- **说明（cron 的真相）**：持久化 cron 定义**已经存在**——`CronScheduler`（`crates/tools/src/cron_scheduler.rs`）把 `durable` 作业写入 `~/.codape/scheduled_tasks.json`，`repl.rs:941` 会话启动时 `load()`，随后 `spawn_runner()` 在同一个 scheduler 上重新调度。也就是说参照物 `adoptCron` 想做的事（按存储去重后重排）在这里由 `CronScheduler` 自己完成，**adopt 不去重排、也不会重复登记**：它把 cron 记录归入 `resumable` 仅供披露。`CronCreate` 目前不写 `JobRecord`，所以实践中该桶通常为空——如实成陈述，不假造生产者。
 
 ---
 
@@ -1184,6 +1184,6 @@
 
 ### 24.3 Enterprise 发行 (feature flags)
 - [x] 配置 `enterprise` feature：remote managed settings、org policy、trusted device
-- [x] 企业模块 feature-gated：`coderex-config/enterprise`、`coderex-cli/enterprise`
+- [x] 企业模块 feature-gated：`codape-config/enterprise`、`codape-cli/enterprise`
 - [x] orchestrator 按 feature 条件编译企业阶段
 - **依赖**：24.2, 20.1, 19.1, 20.3

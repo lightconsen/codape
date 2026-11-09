@@ -10,7 +10,7 @@
 //! Everything else is in the flow: the command each case runs and what it must
 //! do are declared in `flow.json` beside it.
 
-use coderex_evals::{HarnessError, RunOptions, Variant, run};
+use codape_evals::{HarnessError, RunOptions, Variant, run};
 
 fn main() {
     if let Err(error) = main_result() {
@@ -143,7 +143,7 @@ fn print_help() {
          \n\
          usage: run-eval (--flow DIR | --flow-dir PATH) --variant ID [options]\n\
          \n\
-         \x20 --flow DIR          the flow to run (under .coderex/hillclimb/)\n\
+         \x20 --flow DIR          the flow to run (under .codape/hillclimb/)\n\
          \x20 --flow-dir PATH     the flow's directory, wherever it is checked in\n\
          \x20 --variant ID        'baseline' or 'v<N>'\n\
          \x20 --model ID          passed to the command as {{model}}\n\

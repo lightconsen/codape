@@ -9,9 +9,9 @@
 //! 4.6 memory load (new session reads previous state)
 
 use chrono::Utc;
-use coderex_memory::long_term::{LongTermStore, MemoryKey};
-use coderex_memory::session_index::{SessionIndex, SessionMeta};
-use coderex_memory::session_memory::{FactCategory, SessionFact, SessionMemoryStore};
+use codape_memory::long_term::{LongTermStore, MemoryKey};
+use codape_memory::session_index::{SessionIndex, SessionMeta};
+use codape_memory::session_memory::{FactCategory, SessionFact, SessionMemoryStore};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -422,8 +422,8 @@ fn session_memory_load_nonexistent_returns_empty() {
 
 #[tokio::test]
 async fn session_memory_backend_trait_object_roundtrip() {
-    use coderex_core::session_memory::SessionMemoryBackend;
-    use coderex_memory::session_memory_backend::StoreSessionMemoryBackend;
+    use codape_core::session_memory::SessionMemoryBackend;
+    use codape_memory::session_memory_backend::StoreSessionMemoryBackend;
 
     let dir = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(SessionMemoryStore::new(dir.path().join("session")));

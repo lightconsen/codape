@@ -334,7 +334,7 @@ def rekey_from_missing(args: argparse.Namespace) -> int:
     `rekey --template` cannot express "the main turn's ceiling moved but the
     side queries' did not": the template is one request, and a blanket
     `--set` would rewrite conversations it has nothing to do with. A replay
-    with `CODEREX_CASSETTE_TRACE=1` records the exact current request for
+    with `CODAPE_CASSETTE_TRACE=1` records the exact current request for
     every conversation that missed, as `_missing_<new-key>.json` in the
     suite's directory. Each of those has a key the client now computes, so
     the work is to find the recording it describes and rename it.
@@ -503,7 +503,7 @@ def rekey(args: argparse.Namespace) -> int:
     parameter, or raising `max_tokens`, therefore changes the key and makes
     replay miss even though the conversation is unchanged. Re-recording would
     answer the same conversations again; this instead rewrites the named fields
-    from a request observed during replay (`CODEREX_CASSETTE_TRACE=1` writes it
+    from a request observed during replay (`CODAPE_CASSETTE_TRACE=1` writes it
     as `_missing_<key>.json`) and renames each cassette to the key the client
     now computes.
 
@@ -604,13 +604,13 @@ def rekey(args: argparse.Namespace) -> int:
 
 def run_suite(suite: str, trace: Path, rewriting_digests: bool = False) -> bool:
     environment = dict(os.environ)
-    environment.pop("CODEREX_CASSETTE_MODE", None)
-    environment["CODEREX_CASSETTE_TRACE"] = str(trace)
+    environment.pop("CODAPE_CASSETTE_MODE", None)
+    environment["CODAPE_CASSETTE_TRACE"] = str(trace)
     if rewriting_digests:
         # The old digest is expected to disagree while every one is rewritten.
-        environment["CODEREX_CASSETTE_DIGEST_BACKFILL"] = "1"
+        environment["CODAPE_CASSETTE_DIGEST_BACKFILL"] = "1"
     for binary, name_filter in SUITES[suite]:
-        command = ["cargo", "test", "-p", "coderex-cli", "--test", binary]
+        command = ["cargo", "test", "-p", "codape-cli", "--test", binary]
         if name_filter:
             command.append(name_filter)
         command.extend(["--", "--test-threads=1"])

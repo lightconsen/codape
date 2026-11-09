@@ -35,13 +35,13 @@
 //! > empty, a path separator, a `.` or `..`, a control character, a character
 //! > outside ASCII — is refused.
 //!
-//! A UUID, which is what [`coderex_core::state::SessionState`] generates,
+//! A UUID, which is what [`codape_core::state::SessionState`] generates,
 //! satisfies this as-is. The rule is a refusal, not a rewrite: an id that does
 //! not satisfy it is reported rather than mangled into one that does, because
 //! two ids that sanitize to the same name would be the same transcript.
 
 use chrono::{DateTime, Utc};
-use coderex_core::types::{Message, Role};
+use codape_core::types::{Message, Role};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::fs::{File, OpenOptions};
@@ -543,7 +543,7 @@ pub struct PruneResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::Message;
+    use codape_core::types::Message;
 
     fn temp_store() -> (TranscriptStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -559,8 +559,8 @@ mod tests {
 
         let messages = store.read_all("session_1").unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, coderex_core::types::Role::User);
-        if let coderex_core::types::MessageContent::Text(s) = &messages[0].content {
+        assert_eq!(messages[0].role, codape_core::types::Role::User);
+        if let codape_core::types::MessageContent::Text(s) = &messages[0].content {
             assert_eq!(s, "hello world");
         } else {
             panic!("expected text content");
@@ -578,9 +578,9 @@ mod tests {
 
         let messages = store.read_all("session_2").unwrap();
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, coderex_core::types::Role::User);
-        assert_eq!(messages[1].role, coderex_core::types::Role::Assistant);
-        assert_eq!(messages[2].role, coderex_core::types::Role::User);
+        assert_eq!(messages[0].role, codape_core::types::Role::User);
+        assert_eq!(messages[1].role, codape_core::types::Role::Assistant);
+        assert_eq!(messages[2].role, codape_core::types::Role::User);
     }
 
     #[test]
@@ -603,8 +603,8 @@ mod tests {
 
         let messages = store.read_all_skip_first_prompt("session_3").unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, coderex_core::types::Role::User);
-        assert_eq!(messages[1].role, coderex_core::types::Role::Assistant);
+        assert_eq!(messages[0].role, codape_core::types::Role::User);
+        assert_eq!(messages[1].role, codape_core::types::Role::Assistant);
     }
 
     #[test]
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn read_all_preserves_message_roundtrip() {
         let (store, _tmp) = temp_store();
-        let original = Message::tool(coderex_core::types::ToolResult {
+        let original = Message::tool(codape_core::types::ToolResult {
             tool_call_id: "tc_1".into(),
             output: "file content".into(),
             is_error: false,
@@ -632,7 +632,7 @@ mod tests {
 
         let messages = store.read_all("session_rt").unwrap();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, coderex_core::types::Role::Tool);
+        assert_eq!(messages[0].role, codape_core::types::Role::Tool);
     }
 
     #[test]
@@ -659,9 +659,9 @@ mod tests {
         let messages = store.read_all("session_b").unwrap();
         assert_eq!(messages.len(), 2);
         let boundary = &messages[1];
-        assert!(matches!(boundary.role, coderex_core::types::Role::System));
-        if let coderex_core::types::MessageContent::Text(s) = &boundary.content {
-            assert!(s.contains("<coderex_compact_boundary>"));
+        assert!(matches!(boundary.role, codape_core::types::Role::System));
+        if let codape_core::types::MessageContent::Text(s) = &boundary.content {
+            assert!(s.contains("<codape_compact_boundary>"));
         } else {
             panic!("expected text content");
         }
@@ -680,8 +680,8 @@ mod tests {
 
         let messages = store.read_all("session_t").unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, coderex_core::types::Role::Assistant);
-        assert_eq!(messages[1].role, coderex_core::types::Role::User);
+        assert_eq!(messages[0].role, codape_core::types::Role::Assistant);
+        assert_eq!(messages[1].role, codape_core::types::Role::User);
     }
 
     #[test]
@@ -697,10 +697,10 @@ mod tests {
         let messages = store.read_all("session_p").unwrap();
         assert_eq!(messages.len(), 2);
         // Should be "c" and "d" — messages at index 2 and 3
-        if let coderex_core::types::MessageContent::Text(s) = &messages[0].content {
+        if let codape_core::types::MessageContent::Text(s) = &messages[0].content {
             assert_eq!(s, "c");
         }
-        if let coderex_core::types::MessageContent::Text(s) = &messages[1].content {
+        if let codape_core::types::MessageContent::Text(s) = &messages[1].content {
             assert_eq!(s, "d");
         }
     }
@@ -728,8 +728,8 @@ mod tests {
 
         let messages = store.read_all("session_corrupt").unwrap();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, coderex_core::types::Role::User);
-        assert_eq!(messages[1].role, coderex_core::types::Role::User);
+        assert_eq!(messages[0].role, codape_core::types::Role::User);
+        assert_eq!(messages[1].role, codape_core::types::Role::User);
     }
 
     #[test]
@@ -768,7 +768,7 @@ mod tests {
 
         let messages = store.read_all("session_r").unwrap();
         assert_eq!(messages.len(), 2);
-        if let coderex_core::types::MessageContent::Text(s) = &messages[0].content {
+        if let codape_core::types::MessageContent::Text(s) = &messages[0].content {
             assert_eq!(s, "rewritten");
         }
     }
@@ -874,7 +874,7 @@ mod tests {
 
         let messages = store.read_all_decrypted("enc_sess_1", &cipher).unwrap();
         assert_eq!(messages.len(), 2);
-        if let coderex_core::types::MessageContent::Text(s) = &messages[0].content {
+        if let codape_core::types::MessageContent::Text(s) = &messages[0].content {
             assert_eq!(s, "secret hello");
         } else {
             panic!("expected text");
@@ -1008,10 +1008,7 @@ mod tests {
         // expects.
         let messages = store.read_all("sess_entries").unwrap();
         assert_eq!(messages.len(), 2);
-        assert!(matches!(
-            messages[1].role,
-            coderex_core::types::Role::System
-        ));
+        assert!(matches!(messages[1].role, codape_core::types::Role::System));
     }
 
     #[test]
@@ -1025,7 +1022,7 @@ mod tests {
             format!(
                 "{}\n",
                 serde_json::to_string(&Message::system(
-                    "<coderex_compact_boundary>\nremoved\n</coderex_compact_boundary>"
+                    "<codape_compact_boundary>\nremoved\n</codape_compact_boundary>"
                 ))
                 .unwrap()
             ),
@@ -1063,7 +1060,7 @@ mod tests {
         let messages = store.read_all("sess_both_forms").unwrap();
         assert_eq!(messages.len(), 2);
         for message in messages {
-            assert!(matches!(message.role, coderex_core::types::Role::System));
+            assert!(matches!(message.role, codape_core::types::Role::System));
         }
     }
 

@@ -1,10 +1,10 @@
-//! Plugin tool executor — implements `coderex_core::tool_executor::ToolExecutor`.
+//! Plugin tool executor — implements `codape_core::tool_executor::ToolExecutor`.
 //!
 //! Dispatches tool calls to plugin processes via `PluginManager`.
 
 use crate::plugins::PluginManager;
-use coderex_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
-use coderex_core::types::ToolResult;
+use codape_core::tool_executor::{ToolDispatchOutcome, ToolExecutor};
+use codape_core::types::ToolResult;
 use serde_json::Value;
 use std::sync::Arc;
 

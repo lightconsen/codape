@@ -77,8 +77,8 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--no-session-persistence` | | Disable session transcript saving (clears memory stores) |
 | `--disable-slash-commands` | | Disable slash commands in the REPL: clears `CommandRegistry`, skips the REPL's built-in command branches in both interactive and headless paths, and stops macro expansion |
 | `--max-budget-usd USD` | | Maximum budget for this session |
-| `--time-budget SECS` | | Wall-clock budget for the run (`CODEREX_TIME_BUDGET`). In headless mode the model is told how much of it remains at 25, 50, 75 and 90 percent, with what to do with the remaining time. The clock never ends a turn; it only informs it |
-| `--require-artifact PATH` | | A path the request requires as output (`CODEREX_REQUIRE_ARTIFACTS`, colon-separated). When a headless turn ends without it — absent, empty, or an empty directory — the model is sent back for it, up to three times. Paths the instruction itself names with an output verb are added automatically, and paths that existed before the run are treated as inputs |
+| `--time-budget SECS` | | Wall-clock budget for the run (`CODAPE_TIME_BUDGET`). In headless mode the model is told how much of it remains at 25, 50, 75 and 90 percent, with what to do with the remaining time. The clock never ends a turn; it only informs it |
+| `--require-artifact PATH` | | A path the request requires as output (`CODAPE_REQUIRE_ARTIFACTS`, colon-separated). When a headless turn ends without it — absent, empty, or an empty directory — the model is sent back for it, up to three times. Paths the instruction itself names with an output verb are added automatically, and paths that existed before the run are treated as inputs |
 | `--api-key KEY` | | API key (overrides environment and config) |
 | `--no-telemetry` | | Disable telemetry for this session |
 | `--mcp-config PATH` | | MCP config file path |
@@ -147,25 +147,25 @@ values.
 
 ### Telemetry inspection
 
-`coderex telemetry preview-crash` loads the newest pending crash from
+`codape telemetry preview-crash` loads the newest pending crash from
 `<config-home>/crashes/pending/` (or the file given as its argument), converts
 it with the same modes ingestion uses, and prints the exact wire payload:
 
 ```bash
-coderex telemetry preview-crash
-coderex telemetry preview-crash /path/to/crash_1729.json
-CODEREX_CRASH_VERBOSE=1 coderex telemetry preview-crash
-CODEREX_HIPAA=1 coderex telemetry preview-crash
+codape telemetry preview-crash
+codape telemetry preview-crash /path/to/crash_1729.json
+CODAPE_CRASH_VERBOSE=1 codape telemetry preview-crash
+CODAPE_HIPAA=1 codape telemetry preview-crash
 ```
 
 The file is read, not consumed: nothing is ingested, deleted, or uploaded.
-`CODEREX_HIPAA` wins over `CODEREX_CRASH_VERBOSE`, matching the uploader. See
+`CODAPE_HIPAA` wins over `CODAPE_CRASH_VERBOSE`, matching the uploader. See
 `docs/telemetry.md` for the payload fields and redaction markers.
 
 ### Positional Arguments
 
 ```
-coderex [OPTIONS] [COMMAND] [PROMPT...]
+codape [OPTIONS] [COMMAND] [PROMPT...]
 ```
 
 A positional `PROMPT` argument runs in non-interactive mode (same as `--print`). Multiple words are joined into a single prompt.
@@ -174,7 +174,7 @@ A positional `PROMPT` argument runs in non-interactive mode (same as `--print`).
 
 ### `--betas FLAGS`
 
-A comma-separated list applied on top of `CODEREX_FEATURE_FLAGS`:
+A comma-separated list applied on top of `CODAPE_FEATURE_FLAGS`:
 
 - `+name` enables, `-name` disables, and a bare `name` enables.
 - The result is stored as the session's `FeatureFlags`, and its
@@ -225,7 +225,7 @@ Requirements:
 
 - `gh` must be installed and on `PATH`.
 - `gh` must be authenticated, via `gh auth login` or `GH_TOKEN` in the
-  environment. The variable is inherited by the child process; CodeRex does
+  environment. The variable is inherited by the child process; Codape does
   not read or rewrite it.
 - The URL must have the shape
   `https://<host>/<owner>/<repo>/pull/<number>` (GitHub Enterprise hosts are
@@ -242,18 +242,18 @@ The rendered `<pr_context>` block contains the title, description (max 4,000
 characters), a changed-file summary (max 200 files), commit subjects (max 100),
 and the diff (max 60,000 characters), with explicit truncation markers. A
 missing `gh`, auth failure, invalid URL, parse failure, or failed command
-stops startup with the CLI's message; CodeRex does not continue without the
+stops startup with the CLI's message; Codape does not continue without the
 context.
 
 ### `--tmux`
 
 - **Outside tmux** (`$TMUX` unset): requires `tmux` on `PATH` and an
-  interactive terminal. CodeRex starts `tmux new-session -s coderex-<pid>`
+  interactive terminal. Codape starts `tmux new-session -s codape-<pid>`
   with the current executable and the original arguments minus `--tmux`.
-  The child gets `CODEREX_TMUX_ACTIVE=1`; together with `$TMUX` this prevents
-  a re-exec loop. When the tmux client exits, CodeRex exits with its status.
-- **Inside tmux** (`$TMUX` set, or `CODEREX_TMUX_ACTIVE` set): no nested
-  session is created. CodeRex renames the window to `coderex: <directory>`,
+  The child gets `CODAPE_TMUX_ACTIVE=1`; together with `$TMUX` this prevents
+  a re-exec loop. When the tmux client exits, Codape exits with its status.
+- **Inside tmux** (`$TMUX` set, or `CODAPE_TMUX_ACTIVE` set): no nested
+  session is created. Codape renames the window to `codape: <directory>`,
   sets the pane title, and turns `automatic-rename` off.
 - If `tmux` is not available, `--tmux` fails with an actionable message.
 
@@ -269,7 +269,7 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 6. **Fork session** — `--fork-session` loads transcript messages into the engine session.
 7. **Replay messages** — `--replay-user-messages` loads user messages from the most recent transcript.
 8. **Add directories** — `--add-dir` reads directory listings into `session_effects.extra_context`.
-9. **Beta flags** — `--betas` parses `+name`/`-name`/`name` over `CODEREX_FEATURE_FLAGS`, stores the result as the session `FeatureFlags`, and derives the session `CapabilitySet`. Unknown names fail startup.
+9. **Beta flags** — `--betas` parses `+name`/`-name`/`name` over `CODAPE_FEATURE_FLAGS`, stores the result as the session `FeatureFlags`, and derives the session `CapabilitySet`. Unknown names fail startup.
 10. **PR context** — `--from-pr` is fetched during orchestrator startup and prepended to the initial prompt (headless) or added to `session_effects.extra_context` (interactive).
 12. **tmux** — `--tmux` is applied before any startup phase; outside tmux it re-launches the binary in a new session.
 13. **JSON schema** — `--json-schema` is parsed and passed to `SubmitOptions`.
@@ -285,10 +285,10 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - **`Arc<Store>`** — Shared mutable state via `Arc<SessionMemoryStore>` and `Arc<LongTermStore>` wired at startup.
 - **Graceful shutdown** — Ctrl+C via `crossterm` raw mode guard, SIGTERM/SIGHUP via `tokio::signal::unix`, TUI cleanup on exit.
 - **Telemetry** — SQLite-backed crash telemetry store with pending crash report ingestion at startup.
-- **Crash recovery** — Session state snapshot (`.coderex/recovery.json`) written periodically, restored via `/recover`.
-- **Daemon management** — PID file (`~/.coderex/daemon.pid`) with `serve-stop`/`serve-status` subcommands.
+- **Crash recovery** — Session state snapshot (`.codape/recovery.json`) written periodically, restored via `/recover`.
+- **Daemon management** — PID file (`~/.codape/daemon.pid`) with `serve-stop`/`serve-status` subcommands.
 - **Config hot-reload** — the REPL's `HookFileWatcher` (default `hot-reload` feature) reports the changed settings-file paths and the event kind; the TUI loop and the headless watcher fire the `FileChanged` hook.
-- **Update check** — GitHub Releases API comparison with `CARGO_PKG_VERSION`, 24h cadence, `/update-check` command. `coderex update` downloads the archive for this platform, verifies it against the release's `SHA256SUMS`, and replaces the binary atomically; `--check` only reports. See `docs/self-update.md`.
+- **Update check** — GitHub Releases API comparison with `CARGO_PKG_VERSION`, 24h cadence, `/update-check` command. `codape update` downloads the archive for this platform, verifies it against the release's `SHA256SUMS`, and replaces the binary atomically; `--check` only reports. See `docs/self-update.md`.
 
 ## Implemented Features
 
@@ -296,20 +296,20 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - TUI REPL with Vim mode (normal/insert), ratatui rendering, status line, message list.
 - Streaming API integration with real-time token display.
 - Tool execution with permission dialogs and AI-powered permission explanations.
-- Session transcript persistence to `.coderex/transcripts/`.
-- Settings loading from `~/.coderex/settings.json` and `.coderex/settings.json`.
+- Session transcript persistence to `.codape/transcripts/`.
+- Settings loading from `~/.codape/settings.json` and `.codape/settings.json`.
 - Tracing setup with JSON formatter option and `--debug-file` file appender.
 - Welcome screen with T-Rex ASCII art.
 - Ctrl+C interrupt handling.
 - Non-interactive headless mode (`--print` or positional prompt): reads input, runs a single turn, prints response, exits.
 - Crash telemetry: SQLite store ingests pending panic hooks at startup.
 - Session resume (`--resume ID` or `--continue`): loads transcript, continues conversation.
-- WebSocket server daemon (`coderex serve`): writes PID file on start, removes on exit.
-- Daemon management: `coderex serve-stop` sends SIGTERM, `coderex serve-status` reports liveness.
-- Crash recovery: `.coderex/recovery.json` snapshot, `/recover` command.
-- Config hot-reload: `HookFileWatcher` is behind the default `hot-reload` feature (`default = ["core", "hot-reload"]`). The TUI loop fires `FileChanged` from it; a headless run installs its own watcher task and joins it on exit. `coderex-config` no longer ships a watcher of its own — the REPL one is the only consumer.
+- WebSocket server daemon (`codape serve`): writes PID file on start, removes on exit.
+- Daemon management: `codape serve-stop` sends SIGTERM, `codape serve-status` reports liveness.
+- Crash recovery: `.codape/recovery.json` snapshot, `/recover` command.
+- Config hot-reload: `HookFileWatcher` is behind the default `hot-reload` feature (`default = ["core", "hot-reload"]`). The TUI loop fires `FileChanged` from it; a headless run installs its own watcher task and joins it on exit. `codape-config` no longer ships a watcher of its own — the REPL one is the only consumer.
 - Multi-workspace: `/workspace [path]` switches CWD, validates directory.
-- Update check: non-blocking GitHub release comparison on startup, `/update-check` command; `coderex update` installs a verified release.
+- Update check: non-blocking GitHub release comparison on startup, `/update-check` command; `codape update` installs a verified release.
 - Signal handling: SIGTERM (graceful shutdown, cleanup PID/recovery), SIGHUP (config reload trigger).
 - Auto-dream: background session consolidation (`/auto-dream enable|disable|status`).
 - Team memory sync: cross-repo memory sharing (`/team-memory upsert|read|list|delete|sync`).

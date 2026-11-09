@@ -4,7 +4,7 @@
 //! structured state (current work, key decisions, open questions, file
 //! changes) has no durable carrier across compactions. This trait lets the
 //! engine persist such state through an injectable backend without core
-//! depending on the memory crate (`coderex-memory` depends on core, so the
+//! depending on the memory crate (`codape-memory` depends on core, so the
 //! implementation lives there and is wired by the binary).
 
 use async_trait::async_trait;

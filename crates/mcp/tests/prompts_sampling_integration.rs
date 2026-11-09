@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use coderex_mcp::channel::METHOD_NOT_FOUND;
-use coderex_mcp::config::{McpConfig, McpServerConfig};
-use coderex_mcp::elicitation::{
+use codape_mcp::channel::METHOD_NOT_FOUND;
+use codape_mcp::config::{McpConfig, McpServerConfig};
+use codape_mcp::elicitation::{
     McpRequestRouter, SamplingContent, SamplingHandler, SamplingRequest, SamplingResult,
     SamplingRole,
 };
-use coderex_mcp::manager::McpManager;
-use coderex_mcp::server::McpServer;
+use codape_mcp::manager::McpManager;
+use codape_mcp::server::McpServer;
 
 static MOCK_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -156,7 +156,7 @@ for line in sys.stdin:
 fn mock_server_path() -> std::path::PathBuf {
     let id = MOCK_ID.fetch_add(1, Ordering::SeqCst);
     let path = std::env::temp_dir().join(format!(
-        "coderex_prompt_sample_server_{}_{id}.py",
+        "codape_prompt_sample_server_{}_{id}.py",
         std::process::id()
     ));
     std::fs::write(&path, MOCK_SERVER).unwrap();
@@ -205,7 +205,7 @@ impl SamplingHandler for FixedSampling {
     async fn sample(
         &self,
         request: &SamplingRequest,
-    ) -> Result<SamplingResult, coderex_mcp::channel::JsonRpcError> {
+    ) -> Result<SamplingResult, codape_mcp::channel::JsonRpcError> {
         self.requests.lock().unwrap().push(request.clone());
         Ok(SamplingResult {
             role: SamplingRole::Assistant,
@@ -224,7 +224,7 @@ impl SamplingHandler for FixedSampling {
 #[tokio::test]
 async fn a_server_without_the_prompts_capability_is_not_asked() {
     let log = std::env::temp_dir().join(format!(
-        "coderex_prompt_methods_{}_{}.log",
+        "codape_prompt_methods_{}_{}.log",
         std::process::id(),
         MOCK_ID.fetch_add(1, Ordering::SeqCst)
     ));
@@ -266,7 +266,7 @@ async fn prompts_are_discovered_and_resolved_over_stdio() {
     assert!(server.supports_prompts());
 
     let list = server.discover_prompts().await.expect("prompts/list");
-    let prompts = coderex_mcp::prompts::parse_prompt_list(&list).expect("parse");
+    let prompts = codape_mcp::prompts::parse_prompt_list(&list).expect("parse");
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0].name, "greet");
     assert_eq!(
@@ -281,7 +281,7 @@ async fn prompts_are_discovered_and_resolved_over_stdio() {
         .get_prompt("greet", &arguments)
         .await
         .expect("prompts/get");
-    let parsed = coderex_mcp::prompts::parse_prompt_result(&result).expect("parse");
+    let parsed = codape_mcp::prompts::parse_prompt_result(&result).expect("parse");
     assert_eq!(parsed.description.as_deref(), Some("Greet someone"));
     assert_eq!(parsed.messages.len(), 1);
     assert_eq!(
@@ -421,7 +421,7 @@ async fn sampling_without_a_handler_is_refused_with_the_opt_in() {
     let text = response["content"][0]["text"].as_str().unwrap_or_default();
     assert!(text.starts_with("refused:"), "{text}");
     assert!(
-        text.contains("CODEREX_MCP_SAMPLING"),
+        text.contains("CODAPE_MCP_SAMPLING"),
         "the refusal names the opt-in: {text}"
     );
     assert!(response["isError"].as_bool().unwrap_or(false));
@@ -435,7 +435,7 @@ fn an_unhandled_inbound_request_gets_method_not_found() {
     // fallback; it must say so rather than leave the server waiting.
     let router = McpRequestRouter::new(None, None);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let handler: &dyn coderex_mcp::channel::InboundRequestHandler = &router;
+    let handler: &dyn codape_mcp::channel::InboundRequestHandler = &router;
     let error = runtime
         .block_on(handler.handle(
             "sampling/createMessage",
@@ -447,7 +447,7 @@ fn an_unhandled_inbound_request_gets_method_not_found() {
         .expect_err("sampling is disabled");
     assert_eq!(error.code, METHOD_NOT_FOUND);
     assert!(
-        error.message.contains("CODEREX_MCP_SAMPLING"),
+        error.message.contains("CODAPE_MCP_SAMPLING"),
         "{}",
         error.message
     );

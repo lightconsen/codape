@@ -1,4 +1,4 @@
-# Contributing to CodeRex
+# Contributing to Codape
 
 Thanks for helping. This file covers the build, the test suites and review
 expectations. The project has a single integration branch, `main`; open a pull
@@ -34,7 +34,7 @@ prerequisites first. It builds the release profile by default and starts with
 
 Some suites need extra setup:
 
-- `cargo test -p coderex-cli --test interactive_e2e_tool` drives the TUI
+- `cargo test -p codape-cli --test interactive_e2e_tool` drives the TUI
   through a real PTY. Source `export_env.local.sh` first: it points at the
   repository's mock Anthropic server, so no API key is needed
   (`source export_env.local.sh`).

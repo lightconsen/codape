@@ -1919,7 +1919,7 @@ pub struct QueryEngine {
     /// Optional coordinator state for multi-phase workflows.
     coordinator: Option<crate::coordinator::CoordinatorState>,
     /// Optional persistent session memory that survives compaction.
-    /// Implemented by `coderex-memory`; absent → no memory work happens.
+    /// Implemented by `codape-memory`; absent → no memory work happens.
     session_memory: Option<Arc<dyn crate::session_memory::SessionMemoryBackend>>,
     /// Optional compaction backend (the local/remote dual-track seam).
     /// Absent → the built-in local LLM summary path is used.
@@ -2212,7 +2212,7 @@ impl QueryEngine {
     fn build_request_context(&self, turn_number: u32, options: &SubmitOptions) -> RequestContext {
         RequestContext {
             session_id: Some(self.session.session_id.to_string()),
-            device_id: std::env::var("CODEREX_DEVICE_ID").ok(),
+            device_id: std::env::var("CODAPE_DEVICE_ID").ok(),
             turn_id: Some(turn_number.to_string()),
             agent_id: options.agent_id.clone(),
             request_id: None,
@@ -2285,7 +2285,7 @@ impl QueryEngine {
     /// `max_tokens` with no text and no tool call at all — a turn that is
     /// discarded, and, when it was the last one, a run reported as `success`.
     /// 32K leaves room for reasoning plus a long tool call while staying well
-    /// inside the output ceiling of every model CodeRex targets, and a 120 s
+    /// inside the output ceiling of every model Codape targets, and a 120 s
     /// request timeout still bounds a stream that genuinely runs long.
     pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
@@ -10035,11 +10035,11 @@ mod tests {
 
         let temp = std::env::temp_dir();
         let static_path = temp
-            .join("coderex-static-watch")
+            .join("codape-static-watch")
             .to_string_lossy()
             .into_owned();
         let session_path = temp
-            .join("coderex-session-watch")
+            .join("codape-session-watch")
             .to_string_lossy()
             .into_owned();
         let duplicate = static_path.clone();
@@ -10299,7 +10299,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("coderex_compact_boundary"));
+        assert!(lines[1].contains("codape_compact_boundary"));
     }
 
     // ─── Provider stop reasons ─────────────────────────────────────────────
@@ -11203,7 +11203,7 @@ mod tests {
         let (mut engine, _rx, _session) = make_test_engine();
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![
-            Message::system("You are CodeRex. Follow the repository conventions."),
+            Message::system("You are Codape. Follow the repository conventions."),
             Message::user("the request"),
         ];
         turn.set_history_range(1, 2);
@@ -11233,7 +11233,7 @@ mod tests {
         assert!(
             matches!(
                 &turn.messages[0].content,
-                crate::types::MessageContent::Text(text) if text.starts_with("You are CodeRex")
+                crate::types::MessageContent::Text(text) if text.starts_with("You are Codape")
             ),
             "the first message is no longer the system prompt"
         );
@@ -11289,7 +11289,7 @@ mod tests {
         // Preamble injected by `build_context`, then the system prompt.
         turn.messages = vec![
             Message::user("<system-reminder>CLAUDE.md contents</system-reminder>"),
-            Message::system("You are CodeRex."),
+            Message::system("You are Codape."),
             Message::user("Fix the failing parser test"),
         ];
         turn.set_history_range(2, 3);

@@ -160,7 +160,7 @@ impl Default for CompactConfig {
 impl CompactConfig {
     /// Ceiling on the response reserve the compaction line leaves room for.
     ///
-    /// Claude's arithmetic uses `min(maxOutputTokens, 20 000)`; CodeRex does
+    /// Claude's arithmetic uses `min(maxOutputTokens, 20 000)`; Codape does
     /// not model per-model output caps, so the ceiling is the reserve.
     pub const MAX_OUTPUT_RESERVE_TOKENS: usize = 20_000;
 

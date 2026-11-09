@@ -117,7 +117,7 @@ pub enum ClaimOutcome {
 ///
 /// `{env_id}` and `{assignment_id}` are substituted by
 /// [`HttpControlPlaneClient`]. The template matches the control-plane server
-/// in `coderex-server`; deployments with a different route can override it
+/// in `codape-server`; deployments with a different route can override it
 /// with [`HttpControlPlaneClient::with_claim_path`].
 pub const DEFAULT_CLAIM_PATH_TEMPLATE: &str =
     "/api/environments/{env_id}/assignments/{assignment_id}/claim";
@@ -888,7 +888,7 @@ mod tests {
                 "spawn_mode": "ssh",
                 "ssh": {
                     "host": "deploy@remote.example",
-                    "remote_path": "/srv/coderex",
+                    "remote_path": "/srv/codape",
                     "identity_file": "/home/deploy/.ssh/id_ed25519"
                 }
             }],
@@ -907,7 +907,7 @@ mod tests {
             assignment.spawn_mode,
             SpawnMode::Ssh {
                 host: "deploy@remote.example".into(),
-                remote_path: "/srv/coderex".into(),
+                remote_path: "/srv/codape".into(),
                 identity_file: Some("/home/deploy/.ssh/id_ed25519".into()),
             }
         );

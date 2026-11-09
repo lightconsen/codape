@@ -1,20 +1,20 @@
 # Context Compaction
 
-CodeRex compacts client-side: it rewrites the message list before a request is
+Codape compacts client-side: it rewrites the message list before a request is
 sent. Compaction thresholds are derived from the model's context window, so
 resolving that window correctly is the difference between compacting early and
 hitting a hard context-length error.
 
 ## Context Window Resolution
 
-`coderex_core::types::ContextWindowResolver` resolves a window from an ordered
+`codape_core::types::ContextWindowResolver` resolves a window from an ordered
 chain. The first source that yields a positive value wins.
 
 | Priority | Source | How it is supplied |
 |---|---|---|
-| 1 (highest) | Environment | `CODEREX_CONTEXT_WINDOW`, `CODEREX_CONTEXT_WINDOW_<SANITIZED_MODEL>` |
+| 1 (highest) | Environment | `CODAPE_CONTEXT_WINDOW`, `CODAPE_CONTEXT_WINDOW_<SANITIZED_MODEL>` |
 | 2 | Settings | `context_window` in `settings.json` |
-| 3 | Client data | `~/.coderex/context_windows.json` (or `$CLAUDE_CONFIG_DIR/context_windows.json`) |
+| 3 | Client data | `~/.codape/context_windows.json` (or `$CLAUDE_CONFIG_DIR/context_windows.json`) |
 | 4 | Experiment / feature flag | `FeatureFlags` context-window values |
 | 5 | Built-in model table | `MODEL_CONTEXT_WINDOWS` |
 | 6 (lowest) | Unknown floor | `UNKNOWN_CONTEXT_WINDOW` (32,000) |
@@ -32,23 +32,23 @@ compaction. A window of zero is never used.
 The global environment variable applies to every model:
 
 ```sh
-export CODEREX_CONTEXT_WINDOW=128000
+export CODAPE_CONTEXT_WINDOW=128000
 ```
 
 The per-model form appends the sanitized model name:
 
 ```sh
 # claude-sonnet-4-6 -> CLAUDE_SONNET_4_6
-export CODEREX_CONTEXT_WINDOW_CLAUDE_SONNET_4_6=200000
+export CODAPE_CONTEXT_WINDOW_CLAUDE_SONNET_4_6=200000
 
 # my-gateway-alias -> MY_GATEWAY_ALIAS
-export CODEREX_CONTEXT_WINDOW_MY_GATEWAY_ALIAS=128000
+export CODAPE_CONTEXT_WINDOW_MY_GATEWAY_ALIAS=128000
 ```
 
 Sanitization upper-cases the name and replaces every non-alphanumeric character
 with `_`. Lookup tries the raw name, the lower-cased name, and a normalized name
 with common provider/router prefixes removed, so
-`CODEREX_CONTEXT_WINDOW_CLAUDE_SONNET_4_6` also matches
+`CODAPE_CONTEXT_WINDOW_CLAUDE_SONNET_4_6` also matches
 `anthropic/claude-sonnet-4-6`. Sanitization is lossy (`a.b` and `a-b` collide),
 so prefer conventional model ids for per-model environment variables.
 
@@ -75,8 +75,8 @@ names, and non-positive defaults are rejected by settings validation.
 
 ### Client Data
 
-`~/.coderex/context_windows.json` uses the same shape. The config directory is
-`$CLAUDE_CONFIG_DIR` when set, otherwise `~/.coderex`:
+`~/.codape/context_windows.json` uses the same shape. The config directory is
+`$CLAUDE_CONFIG_DIR` when set, otherwise `~/.codape`:
 
 ```json
 {
@@ -95,10 +95,10 @@ it can never disable compaction.
 Context-window experiments use the existing `FeatureFlags` mechanism. The
 `context_window_overrides` flag gates participation; values are supplied by
 experiment configuration (programmatically through `FeatureFlags`, or through
-`CODEREX_FEATURE_FLAGS` for local testing):
+`CODAPE_FEATURE_FLAGS` for local testing):
 
 ```sh
-export CODEREX_FEATURE_FLAGS="context_window_overrides,context_window_default=64000,context_window=my-gateway:128000"
+export CODAPE_FEATURE_FLAGS="context_window_overrides,context_window_default=64000,context_window=my-gateway:128000"
 ```
 
 Supported assignment forms:
@@ -158,7 +158,7 @@ record the source alongside the lines.
 Every provider enforces the window on its side and says so in its error
 (`prompt is too long: 213462 tokens > 200000 maximum`,
 `input length and max_tokens exceed context limit: 195000 + 8192 > 200000`,
-`context_length_exceeded`, …). `coderex_core::context_overflow::detect` parses
+`context_length_exceeded`, …). `codape_core::context_overflow::detect` parses
 those messages, and the engine adopts the reported size for the rest of the
 session (`QueryEngine::context_window`, `learn_context_window`).
 

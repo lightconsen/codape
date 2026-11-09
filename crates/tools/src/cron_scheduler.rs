@@ -1,8 +1,8 @@
 //! CronScheduler — in-memory cron job scheduler with file persistence.
 
 use chrono::{Datelike, Local, Timelike};
-use coderex_core::job_record::{JobKind, JobRecord, JobState, JobStore};
-use coderex_core::task::now_ms;
+use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
+use codape_core::task::now_ms;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -79,7 +79,7 @@ pub struct CronScheduler {
     jobs: RwLock<HashMap<String, CronJob>>,
     storage_path: RwLock<Option<PathBuf>>,
     /// Set by the session so durable definitions get a `JobRecord` under
-    /// `<cwd>/.coderex/jobs`. Without it, cron scheduling works as before and
+    /// `<cwd>/.codape/jobs`. Without it, cron scheduling works as before and
     /// writes no records.
     job_context: RwLock<Option<JobContext>>,
 }

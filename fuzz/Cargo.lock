@@ -383,12 +383,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "coderex-commands"
+name = "codape-commands"
 version = "0.1.0"
 dependencies = [
- "coderex-config",
- "coderex-core",
- "coderex-insights",
+ "codape-config",
+ "codape-core",
+ "codape-insights",
  "compact_str",
  "serde",
  "serde_json",
@@ -399,13 +399,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "coderex-config"
+name = "codape-config"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "bitflags",
  "chrono",
- "coderex-core",
+ "codape-core",
  "home",
  "once_cell",
  "plist",
@@ -422,7 +422,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "coderex-core"
+name = "codape-core"
 version = "0.1.0"
 dependencies = [
  "async-stream",
@@ -457,22 +457,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "coderex-fuzz"
+name = "codape-fuzz"
 version = "0.0.0"
 dependencies = [
- "coderex-config",
- "coderex-core",
- "coderex-plugins",
+ "codape-config",
+ "codape-core",
+ "codape-plugins",
  "libfuzzer-sys",
  "serde_json",
 ]
 
 [[package]]
-name = "coderex-insights"
+name = "codape-insights"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "coderex-core",
+ "codape-core",
  "home",
  "serde",
  "serde_json",
@@ -481,13 +481,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "coderex-plugins"
+name = "codape-plugins"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "coderex-commands",
- "coderex-core",
+ "codape-commands",
+ "codape-core",
  "dashmap",
  "ed25519-dalek",
  "flate2",

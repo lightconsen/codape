@@ -5,7 +5,7 @@ use crate::tool::{
     Backgrounding, Tool, ToolCapabilities, ToolContext, ToolDescriptor, ToolInput, ToolTier,
 };
 use async_trait::async_trait;
-use coderex_agents::ParentContextSnapshot;
+use codape_agents::ParentContextSnapshot;
 use std::sync::Arc;
 
 /// Provider for the parent conversation snapshot used to build a cache-safe
@@ -13,9 +13,9 @@ use std::sync::Arc;
 /// that moment.
 pub type ParentContextProvider = dyn Fn() -> Option<ParentContextSnapshot> + Send + Sync + 'static;
 
-/// Spawn a sub-agent running coderex with the given prompt.
+/// Spawn a sub-agent running codape with the given prompt.
 pub struct AgentTool {
-    manager: Option<Arc<tokio::sync::Mutex<coderex_agents::manager::AgentManager>>>,
+    manager: Option<Arc<tokio::sync::Mutex<codape_agents::manager::AgentManager>>>,
     session_id: String,
     cwd: String,
     parent_context: Option<Arc<ParentContextProvider>>,
@@ -54,7 +54,7 @@ impl AgentTool {
     #[must_use]
     pub fn with_manager(
         mut self,
-        manager: Arc<tokio::sync::Mutex<coderex_agents::manager::AgentManager>>,
+        manager: Arc<tokio::sync::Mutex<codape_agents::manager::AgentManager>>,
     ) -> Self {
         self.manager = Some(manager);
         self
@@ -78,7 +78,7 @@ impl AgentTool {
     ///
     /// When present, every spawn records the parent's messages and the
     /// request components that make a prefix-cache hit safe, so the child's
-    /// [`coderex_agents::ForkedContext`] is cache-aware instead of starting a
+    /// [`codape_agents::ForkedContext`] is cache-aware instead of starting a
     /// fresh prefix.
     #[must_use]
     pub fn with_parent_context_provider<P>(mut self, provider: P) -> Self
@@ -112,7 +112,7 @@ impl Tool for AgentTool {
                     "prompt": { "type": "string" },
                     "agent": {
                         "type": "string",
-                        "description": "Name of a custom agent defined in ~/.coderex/agents/*.json. Takes precedence over subagent_type. An unknown name is an error that lists the configured names."
+                        "description": "Name of a custom agent defined in ~/.codape/agents/*.json. Takes precedence over subagent_type. An unknown name is an error that lists the configured names."
                     },
                     "subagent_type": {
                         "type": "string",
@@ -221,12 +221,12 @@ impl Tool for AgentTool {
         let retry_policy = parse_retry_policy(&input.arguments)?;
 
         if let Some(ref manager) = self.manager {
-            use coderex_agents::manager::SpawnOptions;
-            use coderex_agents::types::AgentType;
+            use codape_agents::manager::SpawnOptions;
+            use codape_agents::types::AgentType;
 
             let builtin_type = match subagent_type {
                 "explore" | "research" => AgentType::Explore {
-                    thoroughness: coderex_agents::types::Thoroughness::Medium,
+                    thoroughness: codape_agents::types::Thoroughness::Medium,
                 },
                 "plan" => AgentType::Plan,
                 "verification" | "verify" => AgentType::Verification,
@@ -357,7 +357,7 @@ impl Tool for AgentTool {
 /// shorthand used only when no full policy was supplied.
 fn parse_retry_policy(
     args: &serde_json::Value,
-) -> Result<Option<coderex_agents::RetryPolicy>, ToolError> {
+) -> Result<Option<codape_agents::RetryPolicy>, ToolError> {
     if let Some(value) = args.get("retry_policy") {
         let policy =
             serde_json::from_value(value.clone()).map_err(|error| ToolError::InvalidInput {
@@ -369,7 +369,7 @@ fn parse_retry_policy(
     Ok(args
         .get("max_retries")
         .and_then(serde_json::Value::as_u64)
-        .map(|max_retries| coderex_agents::RetryPolicy {
+        .map(|max_retries| codape_agents::RetryPolicy {
             max_retries: u32::try_from(max_retries).unwrap_or(u32::MAX),
             ..Default::default()
         }))
@@ -460,18 +460,18 @@ mod tests {
         let tool = AgentTool::new();
         assert_eq!(
             tool.capabilities().rule_exemptions(),
-            coderex_core::permissions::ToolRuleExemptions::NONE
+            codape_core::permissions::ToolRuleExemptions::NONE
         );
         assert_eq!(
             tool.rule_exemptions_for(&serde_json::json!({ "prompt": "do something" })),
-            coderex_core::permissions::ToolRuleExemptions::NONE
+            codape_core::permissions::ToolRuleExemptions::NONE
         );
     }
 
-    fn manager_with_reviewer() -> Arc<tokio::sync::Mutex<coderex_agents::AgentManager>> {
-        let mut manager = coderex_agents::AgentManager::standalone();
+    fn manager_with_reviewer() -> Arc<tokio::sync::Mutex<codape_agents::AgentManager>> {
+        let mut manager = codape_agents::AgentManager::standalone();
         manager.enable_test_mode();
-        manager.register_custom_agent(coderex_agents::CustomAgentDef {
+        manager.register_custom_agent(codape_agents::CustomAgentDef {
             name: "reviewer".into(),
             system_prompt: "You review code carefully.".into(),
             allowed_tools: vec!["Read".into(), "Grep".into()],
@@ -483,7 +483,7 @@ mod tests {
     }
 
     fn tool_with_manager(
-        manager: Arc<tokio::sync::Mutex<coderex_agents::AgentManager>>,
+        manager: Arc<tokio::sync::Mutex<codape_agents::AgentManager>>,
     ) -> AgentTool {
         AgentTool::new()
             .with_manager(manager)
@@ -590,7 +590,7 @@ mod tests {
             .as_ref()
             .expect("retry policy lost");
         assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.on_failure, coderex_agents::FailureAction::Retry);
+        assert_eq!(policy.on_failure, codape_agents::FailureAction::Retry);
         assert_eq!(policy.escalation_prompt.as_deref(), Some("try again"));
     }
 
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(policy.max_retries, 1);
         assert_eq!(
             policy.on_failure,
-            coderex_agents::FailureAction::EscalateToParent
+            codape_agents::FailureAction::EscalateToParent
         );
         assert!(policy.escalation_prompt.is_none());
     }
@@ -612,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn agent_tool_records_cache_safe_parent_prefix() {
         let manager = manager_with_reviewer();
-        let snapshot = coderex_agents::ParentContextSnapshot::new(
+        let snapshot = codape_agents::ParentContextSnapshot::new(
             vec![
                 serde_json::json!({"role": "user", "content": "first"}),
                 serde_json::json!({"role": "assistant", "content": "answer"}),

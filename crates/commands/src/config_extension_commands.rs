@@ -17,7 +17,7 @@ fn config_home() -> std::path::PathBuf {
     TEST_CONFIG_HOME.with(|h| {
         h.borrow()
             .clone()
-            .unwrap_or_else(coderex_config::settings::config_home)
+            .unwrap_or_else(codape_config::settings::config_home)
     })
 }
 
@@ -61,12 +61,12 @@ fn list_dir_items(path: &std::path::Path) -> Vec<String> {
 
 /// Built-in theme names.
 ///
-/// Kept in sync with `coderex_ui::themes::ThemeManager::new`. The commands
+/// Kept in sync with `codape_ui::themes::ThemeManager::new`. The commands
 /// crate does not depend on the UI crate, so the list is repeated here rather
 /// than pulling ratatui into every command build.
 const BUILTIN_THEMES: [&str; 4] = ["dark", "light", "high-contrast", "tokyo-night"];
 
-/// Theme names installed as `~/.coderex/themes/*.json`.
+/// Theme names installed as `~/.codape/themes/*.json`.
 ///
 /// `ThemeManager` keys a theme by the JSON `name`, not by the file name, so a
 /// file called `mine.json` may install `my-theme`. Files without a non-empty
@@ -189,7 +189,7 @@ fn generated_declarations(root: &std::path::Path) -> Vec<GeneratedDeclaration> {
 /// Resolve `/plugin types <name>` against the listed declarations.
 ///
 /// The canonical name is accepted, and so is a relative path
-/// (`coderex-tools/index.d.ts`). No path is joined here: the requested name is
+/// (`codape-tools/index.d.ts`). No path is joined here: the requested name is
 /// only ever matched against an already-listed file, so `..` cannot escape
 /// the type root.
 fn find_declaration(
@@ -340,7 +340,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 match args[0].as_str() {
                     "list" => {
                         if available.is_empty() {
-                            CommandResult::success("No hooks installed in ~/.coderex/hooks/")
+                            CommandResult::success("No hooks installed in ~/.codape/hooks/")
                         } else {
                             CommandResult::success(format!(
                                 "Installed hooks:\n{}",
@@ -417,7 +417,7 @@ pub fn register(registry: &mut CommandRegistry) {
 
             if args.is_empty() {
                 if installed.is_empty() {
-                    CommandResult::success("No plugins installed.\nInstall plugins in ~/.coderex/plugins/\nUse /plugin install <name> to install from marketplace.")
+                    CommandResult::success("No plugins installed.\nInstall plugins in ~/.codape/plugins/\nUse /plugin install <name> to install from marketplace.")
                 } else {
                     CommandResult::success(format!("Installed plugins:\n{}", installed.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")))
                 }
@@ -514,7 +514,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 let count = entries.len();
                 if count == 0 {
                     CommandResult::success(format!(
-                        "Memory: 0 entries\nMemory files found: {memory_files:?}\nUse /memory search <query> to search.\nMemory stored in ~/.coderex/memory/"
+                        "Memory: 0 entries\nMemory files found: {memory_files:?}\nUse /memory search <query> to search.\nMemory stored in ~/.codape/memory/"
                     ))
                 } else {
                     CommandResult::success(format!(
@@ -554,7 +554,7 @@ pub fn register(registry: &mut CommandRegistry) {
 
             // Scan multiple skill directories
             let skill_dirs = [
-                home.join("skills"), // ~/.coderex/skills/
+                home.join("skills"), // ~/.codape/skills/
             ];
 
             let mut all_skills: Vec<String> = Vec::new();
@@ -566,7 +566,7 @@ pub fn register(registry: &mut CommandRegistry) {
             if args.is_empty() {
                 if all_skills.is_empty() {
                     CommandResult::success(
-                        "Skills:\n  No skills loaded.\nPlace skill scripts in ~/.coderex/skills/",
+                        "Skills:\n  No skills loaded.\nPlace skill scripts in ~/.codape/skills/",
                     )
                 } else {
                     CommandResult::success(format!(
@@ -604,16 +604,16 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|_ctx: &CommandContext, args: &[String]| {
-            // Look for task files in .coderex/tasks/ and cwd
+            // Look for task files in .codape/tasks/ and cwd
             let home = config_home();
             let tasks_path = home.join("tasks");
             let task_files = list_dir_items(&tasks_path);
 
             if args.is_empty() {
                 if task_files.is_empty() {
-                    CommandResult::success("Tasks:\n  No tasks registered.\nUse TaskCreate to create tasks.\nTask files can be placed in ~/.coderex/tasks/")
+                    CommandResult::success("Tasks:\n  No tasks registered.\nUse TaskCreate to create tasks.\nTask files can be placed in ~/.codape/tasks/")
                 } else {
-                    CommandResult::success(format!("Task files in ~/.coderex/tasks/:\n{}", task_files.iter().map(|t| format!("  {t}")).collect::<Vec<_>>().join("\n")))
+                    CommandResult::success(format!("Task files in ~/.codape/tasks/:\n{}", task_files.iter().map(|t| format!("  {t}")).collect::<Vec<_>>().join("\n")))
                 }
             } else {
                 match args[0].as_str() {
@@ -663,7 +663,7 @@ pub fn register(registry: &mut CommandRegistry) {
                     CommandResult::success("No active plan.\nUse /plan create to generate one.")
                 } else {
                     CommandResult::success(format!(
-                        "Plan files found in ~/.coderex/plans/:\n{}",
+                        "Plan files found in ~/.codape/plans/:\n{}",
                         plan_files.join("\n")
                     ))
                 }
@@ -675,7 +675,7 @@ pub fn register(registry: &mut CommandRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coderex_core::types::ModelId;
+    use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
@@ -708,7 +708,7 @@ mod tests {
         assert!(tmp.path().join("settings.json").exists());
     }
 
-    /// A theme installed as `~/.coderex/themes/*.json` is listed by its JSON
+    /// A theme installed as `~/.codape/themes/*.json` is listed by its JSON
     /// name and accepted by `/theme` — the loader keys themes by `name`, not
     /// by the file stem.
     #[test]
@@ -830,11 +830,11 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         set_test_config_home(home.path().to_path_buf());
         let types_root = home.path().join("plugin-types");
-        std::fs::create_dir_all(types_root.join("coderex-tools")).unwrap();
+        std::fs::create_dir_all(types_root.join("codape-tools")).unwrap();
         std::fs::create_dir_all(types_root.join("acme")).unwrap();
         std::fs::write(
-            types_root.join("coderex-tools/index.d.ts"),
-            "declare module 'coderex-tools' {}",
+            types_root.join("codape-tools/index.d.ts"),
+            "declare module 'codape-tools' {}",
         )
         .unwrap();
         std::fs::write(
@@ -852,12 +852,12 @@ mod tests {
 
         let listing = reg.execute("plugin", &ctx(), &["types".into()]);
         assert!(!listing.output.starts_with("Error:"), "{listing:?}");
-        for name in ["acme", "coderex-tools", "tsconfig"] {
+        for name in ["acme", "codape-tools", "tsconfig"] {
             assert!(listing.output.contains(name), "{listing:?}");
         }
 
-        let printed = reg.execute("plugin", &ctx(), &["types".into(), "coderex-tools".into()]);
-        assert_eq!(printed.output, "declare module 'coderex-tools' {}");
+        let printed = reg.execute("plugin", &ctx(), &["types".into(), "codape-tools".into()]);
+        assert_eq!(printed.output, "declare module 'codape-tools' {}");
 
         let by_path = reg.execute(
             "plugin",

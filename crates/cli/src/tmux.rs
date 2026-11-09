@@ -9,7 +9,7 @@
 //!   and carry on in the pane that already exists.
 //!
 //! Re-exec loops are prevented twice over: `$TMUX` marks the child as already
-//! inside tmux, and `CODEREX_TMUX_ACTIVE` is set in the child's environment so
+//! inside tmux, and `CODAPE_TMUX_ACTIVE` is set in the child's environment so
 //! a stale or unset `$TMUX` cannot cause another wrap.
 
 use anyhow::{Context, Result, bail};
@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Set in the re-executed child, so it never wraps itself again.
-pub const TMUX_CHILD_ENV: &str = "CODEREX_TMUX_ACTIVE";
+pub const TMUX_CHILD_ENV: &str = "CODAPE_TMUX_ACTIVE";
 
 /// The title applied to the window and pane when already inside tmux.
-pub const WINDOW_TITLE: &str = "coderex";
+pub const WINDOW_TITLE: &str = "codape";
 
 /// Apply `--tmux`, if set.
 ///
@@ -54,7 +54,7 @@ pub fn apply(enabled: bool) -> Result<()> {
     };
 
     let program = std::env::current_exe()
-        .context("could not resolve the coderex executable to re-launch inside tmux")?;
+        .context("could not resolve the codape executable to re-launch inside tmux")?;
     let cwd = std::env::current_dir().context("could not resolve the working directory")?;
     let args = strip_tmux_flag(std::env::args_os().skip(1));
     let plan = RelaunchPlan::new(tmux, program, args, cwd, std::process::id());
@@ -129,7 +129,7 @@ impl RelaunchPlan {
             program,
             args: strip_tmux_flag(args),
             cwd,
-            session_name: format!("coderex-{pid}"),
+            session_name: format!("codape-{pid}"),
         }
     }
 
@@ -274,7 +274,7 @@ mod tests {
     fn relaunch_argv_runs_the_program_without_the_flag() {
         let plan = RelaunchPlan::new(
             PathBuf::from("/usr/bin/tmux"),
-            PathBuf::from("/usr/local/bin/coderex"),
+            PathBuf::from("/usr/local/bin/codape"),
             vec![
                 OsString::from("--tmux"),
                 OsString::from("--model"),
@@ -285,8 +285,8 @@ mod tests {
         );
         let argv = plan.argv();
         assert_eq!(argv[0], OsString::from("new-session"));
-        assert!(argv.contains(&OsString::from("coderex-77")));
-        assert!(argv.contains(&OsString::from("/usr/local/bin/coderex")));
+        assert!(argv.contains(&OsString::from("codape-77")));
+        assert!(argv.contains(&OsString::from("/usr/local/bin/codape")));
         assert!(!argv.contains(&OsString::from("--tmux")));
         assert!(argv.contains(&OsString::from("sonnet")));
     }
@@ -300,7 +300,7 @@ mod tests {
 
     #[test]
     fn title_uses_the_directory_name() {
-        assert_eq!(title_for(Path::new("/work/project")), "coderex: project");
+        assert_eq!(title_for(Path::new("/work/project")), "codape: project");
         assert_eq!(title_for(Path::new("/")), WINDOW_TITLE);
     }
 
@@ -353,7 +353,7 @@ mod tests {
         );
         let status = plan.command().status().unwrap();
         assert!(status.success());
-        set_titles_with(&tmux, "coderex: work").unwrap();
+        set_titles_with(&tmux, "codape: work").unwrap();
 
         // SAFETY: as above.
         unsafe {
@@ -365,7 +365,7 @@ mod tests {
 
         let recorded = std::fs::read_to_string(&log).unwrap();
         assert!(
-            recorded.contains("new-session -s coderex-9"),
+            recorded.contains("new-session -s codape-9"),
             "tmux was not asked to start a session: {recorded}"
         );
         assert!(
@@ -377,7 +377,7 @@ mod tests {
             "the flag was passed through and would wrap again: {recorded}"
         );
         assert!(
-            recorded.contains("rename-window coderex: work"),
+            recorded.contains("rename-window codape: work"),
             "window title was not set: {recorded}"
         );
     }

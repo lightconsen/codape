@@ -1,6 +1,6 @@
-# CodeRex Test Strategy
+# Codape Test Strategy
 
-CodeRex has three test tiers.
+Codape has three test tiers.
 
 | Tier | What | Speed | Determinism | Command |
 |------|------|-------|-------------|---------|
@@ -15,7 +15,7 @@ CodeRex has three test tiers.
 Every crate has inline unit tests in `src/` files:
 
 ```bash
-cargo test -p coderex-core
+cargo test -p codape-core
 cargo test --workspace --lib
 ```
 
@@ -25,7 +25,7 @@ Integration tests live in each crate's `tests/` directory and verify
 cross-module contracts without spawning the full CLI binary.
 
 ```bash
-cargo test -p coderex-core --test engine_integration
+cargo test -p codape-core --test engine_integration
 cargo test --workspace --tests
 ```
 
@@ -63,13 +63,13 @@ against a real endpoint:
 scripts/record-cassettes.sh --fresh
 ```
 
-The script reads the endpoint and key from `$CODEREX_SETTINGS`
-(`~/.coderex/settings.json` by default), runs the suites with
-`CODEREX_CASSETTE_MODE=record`, and never prints the key. Commit the updated
+The script reads the endpoint and key from `$CODAPE_SETTINGS`
+(`~/.codape/settings.json` by default), runs the suites with
+`CODAPE_CASSETTE_MODE=record`, and never prints the key. Commit the updated
 `crates/cli/tests/cassettes/` files.
 
 If a replay cannot find a recording, the cassette returns HTTP 404 with a
-`cassette_missing` error. When `CODEREX_CASSETTE_TRACE` is set, the unmatched
+`cassette_missing` error. When `CODAPE_CASSETTE_TRACE` is set, the unmatched
 canonical request is also written to
 `crates/cli/tests/cassettes/<suite>/_missing_<key>.json` for inspection; normal
 runs do not create these files.
@@ -128,7 +128,7 @@ recordings, unmatched-request markers and suite/tree sizes. Malformed files and
 credential-like strings always fail; the other findings are warnings, and
 `CASSETTE_STRICT=1` turns them into failures (for CI).
 
-`--prune` replays every suite with `CODEREX_CASSETTE_TRACE` set, collects the
+`--prune` replays every suite with `CODAPE_CASSETTE_TRACE` set, collects the
 keys each suite actually requested, and deletes `.json` files those suites did
 not use, plus `_missing_*.json` markers. It refuses to prune a suite whose
 replay failed. Use `--dry-run` to list the deletions first. Prune on the
@@ -150,13 +150,13 @@ call was compacted away, a detector that fires on a legitimate poll) only show
 up in real ones.
 
 The corpus is **not** committed: it is private conversation data and it is
-large. The test reads `CODEREX_REAL_SESSIONS_DIR` (default
+large. The test reads `CODAPE_REAL_SESSIONS_DIR` (default
 `~/.claude/projects`), keeps the longest 20 sessions with at least a dozen
 assistant turns, and prints the counts it used. On a machine without the corpus
 — CI included — every test prints why it skipped and passes.
 
 ```bash
-cargo test -p coderex-cli --test real_session_corpus -- --nocapture
+cargo test -p codape-cli --test real_session_corpus -- --nocapture
 ```
 
 ### What the E2E suites cover
@@ -175,7 +175,7 @@ cargo test -p coderex-cli --test real_session_corpus -- --nocapture
 ### Unit Test
 
 Add `#[cfg(test)]` at the bottom of the source file and run
-`cargo test -p coderex-core <name>`.
+`cargo test -p codape-core <name>`.
 
 ### Integration Test
 

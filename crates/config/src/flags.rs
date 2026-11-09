@@ -1,7 +1,7 @@
 //! Feature flags and capability sets.
 
 use bitflags::bitflags;
-use coderex_core::types::ContextWindowOverrides;
+use codape_core::types::ContextWindowOverrides;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -49,7 +49,7 @@ pub const KNOWN_FLAGS: &[&str] = &[
 ///   the reference; the CLI installs it on the session engine.
 /// - `tool_use_summaries` now makes the engine ask a
 ///   `ModelProfile::Lightweight` model for a one-line summary of each tool use
-///   and emit it as [`coderex_core::types::EngineEvent::ToolUseSummary`],
+///   and emit it as [`codape_core::types::EngineEvent::ToolUseSummary`],
 ///   falling back to `ToolCall::activity_summary()` when the summarizer fails.
 /// - `team_collaboration` now makes the CLI install a
 ///   `core::team_context::TeamContext` on the session engine, which reads its
@@ -85,7 +85,7 @@ impl fmt::Display for UnknownFeatureFlags {
 
 impl std::error::Error for UnknownFeatureFlags {}
 
-/// All feature flags supported by CodeRex.
+/// All feature flags supported by Codape.
 #[derive(Debug, Clone, Default)]
 pub struct FeatureFlags {
     /// Execute tool calls as they arrive in a streamed response.
@@ -97,7 +97,7 @@ pub struct FeatureFlags {
     /// Ask the lightweight model for a one-line summary of each tool use.
     ///
     /// When on, the engine emits an
-    /// [`EngineEvent::ToolUseSummary`](coderex_core::types::EngineEvent::ToolUseSummary)
+    /// [`EngineEvent::ToolUseSummary`](codape_core::types::EngineEvent::ToolUseSummary)
     /// before each tool call and uses that summary as the activity label. A
     /// failed summarization falls back to `ToolCall::activity_summary()`.
     pub tool_use_summaries: bool,
@@ -251,12 +251,12 @@ impl FeatureFlags {
         }
     }
 
-    /// Parse feature flags from the `CODEREX_FEATURE_FLAGS` environment variable.
+    /// Parse feature flags from the `CODAPE_FEATURE_FLAGS` environment variable.
     ///
     /// Delegates to `from_str` with the env var value.
     #[must_use]
     pub fn from_env() -> Self {
-        std::env::var("CODEREX_FEATURE_FLAGS")
+        std::env::var("CODAPE_FEATURE_FLAGS")
             .map_or_else(|_| Self::default(), |val| Self::parse(&val))
     }
 
@@ -367,7 +367,7 @@ impl FeatureFlags {
     /// Apply per-project flag overrides on top of base flags.
     ///
     /// Project-level flags take precedence over global flags for the current
-    /// project context (based on `.coderex/flags.json` in the project root).
+    /// project context (based on `.codape/flags.json` in the project root).
     #[must_use]
     pub fn with_project_overrides(&self, project_overrides: &HashMap<String, bool>) -> Self {
         let mut flags = self.clone();
@@ -842,7 +842,7 @@ mod tests {
     #[test]
     fn load_project_flags_from_file() {
         let tmp = std::env::temp_dir();
-        let path = tmp.join("coderex_test_project_flags.json");
+        let path = tmp.join("codape_test_project_flags.json");
         std::fs::write(&path, r#"{"voice_mode":true,"workflow_scripts":true}"#).unwrap();
 
         let flags = FeatureFlags::load_project_flags(&path);
@@ -862,7 +862,7 @@ mod tests {
     #[test]
     fn flag_registry_load_project_flags() {
         let tmp = std::env::temp_dir();
-        let path = tmp.join("coderex_test_registry_flags.json");
+        let path = tmp.join("codape_test_registry_flags.json");
         std::fs::write(&path, r#"{"voice_mode":true,"workflow_scripts":true}"#).unwrap();
 
         let registry = FlagRegistry::new();
