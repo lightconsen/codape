@@ -2393,6 +2393,83 @@ score, but they do show that a single pass is not a reliable pass — the same
 lesson the five-task batch recorded earlier. Including `qemu-startup`, the
 best-of-runs total is now **73/75**.
 
+### 2026-11-10 — eight-task reliability repeats, **6/8 in each of three runs**
+
+Eight of the ten tasks from the revalidation above were run three more times
+each, to measure repeatability rather than to find new passes. The two dropped
+were `extract-moves-from-video` and `play-zork`: both exhaust their time budget
+by design and their limiting factor (a network lottery, a 3 600 s game) is
+already recorded. Same binary and model as the revalidation (Codape v0.2.0
+`x86_64-unknown-linux-musl`, `deepseek-v4.1-flash`), same `0.1.1-analysis`
+dataset, 1 800 s agent budget, 300 turns, two trials in parallel. Run ids
+`tb-reliability-r1-20261110`, `-r2-`, `-r3-`; wall clock 44, 28 and 35 minutes.
+
+| Task | r1 | r2 | r3 | pass@1 | Verdict |
+|---|---|---|---|---|---|
+| `hello-world` | ✅ 31 s / 4 s | ✅ 18 s / 4 s | ✅ 8 s / 4 s | 3/3 | stable |
+| `fix-permissions` | ✅ 50 s / 46 s | ✅ 64 s / 13 s | ✅ 44 s / 46 s | 3/3 | stable |
+| `processing-pipeline` | ✅ 428 s / 36 s | ✅ 320 s / 6 s | ✅ 152 s / 8 s | 3/3 | stable |
+| `fibonacci-server` | ✅ 227 s / 13 s | ✅ 185 s / 12 s | ✅ 282 s / 12 s | 3/3 | stable |
+| `sqlite-with-gcov` | ✅ 875 s / 5 s | ✅ 384 s / 4 s | ✅ 280 s / 4 s | 3/3 | stable with a 1 800 s budget |
+| `qemu-startup` | ✅ 885 s / 4 s | ✅ 1 029 s / 21 s | ✅ 1 315 s / 5 s | 3/3 | stable, needs the larger budget |
+| `pytorch-model-cli.easy` | ❌ test_timeout | ❌ test_timeout | ❌ 5/6 | 0/3 | model verdict stable, only one trial scored |
+| `swe-bench-fsspec` | ❌ test_timeout | ❌ test_timeout | ❌ test_timeout | 0/3 | fixture cannot apply the gold patch |
+
+Overall pass@1 for the subset is **18/24 (75 %)**, and **no task changed
+verdict between repeats**. That is the useful part: this eight-task subset is
+not a coin flip, and its 75 % is a property of these tasks, not of run-to-run
+luck.
+
+Two of the earlier failures turned out to be budget facts, now confirmed by
+repetition. `sqlite-with-gcov` used 280–875 s and passed all three times; the
+900 s `agent_timeout` in the revalidation was the budget cutting a solvable
+task. `qemu-startup` used 885–1 315 s, so the same 900 s budget would have been
+marginal for it too; the larger budget is what makes both stable.
+
+**`pytorch-model-cli.easy` failed for the same model reason every time, but
+only r3 was actually scored.** The r3 implementation normalises with
+`x = 2·pixel/255 − 1` (the comment in its own source says so) although the
+instruction specifies `p/255`. It matched the single provided image — so
+`test_prediction_file_content` passed — but 15 of the first 50 MNIST images
+still differed (image 0 predicted 7, expected 2), the identical signature to
+the revalidation run, and `test_cli_tool_output` failed. r1 reached the
+assertions too: `test_prediction_file_content` FAILED, and the run was still
+executing `test_cli_tool_output` when the cap hit. r2 never reached pytest at
+all — the fixture caps the test phase at 120 s (`max_test_timeout_sec`), and
+`pip install` of torch and torchvision consumed the whole budget. Only r3 got
+a complete test run. The failure mode is consistent across all three; the
+harness scored one of the three.
+
+**`swe-bench-fsspec` is a deterministic fixture defect, not an agent
+failure.** All three repeats ended in `test_timeout`. The cause is the same in
+each: the fixture's `run-tests.sh` applies the gold patch with
+`patch --fuzz=5 -p1 -i /app/test_patch.diff`, and the agent independently
+writes its own `test_open_async` into `fsspec/implementations/tests/test_dirfs.py`
+— the same file and the same test the gold patch adds. `patch` therefore
+reports `Reversed (or previously applied) patch detected! Assume -R? [n]` and
+blocks on stdin until the 120 s cap kills the phase. The agent's source change
+delegates `open_async()` to the wrapped filesystem, which is the intended fix;
+writing the matching test is what prevents the fixture from grading it. This is
+the patch-hygiene failure class recorded for `pytest-6202`, now reproducible
+3/3.
+
+One supplementary run tested that reading directly. The same task was run
+against a copy of the fixture whose patch step is `patch --fuzz=5 -p1 -N`
+(ignore an already-applied patch), run id
+`tb-fsspec-patchforward-20261110`. It resolved: agent 327 s, test 26 s, and
+all 134 tests in `test_dirfs.py` passed, including the gold `test_open_async`.
+That run is **not** part of the table or the pass@1 above — the fixture differs
+from the dataset's — but it is the only trial of this task with a model
+verdict, and it shows the fix was correct. Counting it, the agent-side result
+on this eight-task subset is 7/8; `pytorch-model-cli.easy` remains the one
+genuine model failure.
+
+Two cautions for reading the number. First, n=3 cannot distinguish 75 % from a
+range; what it does show is that these specific tasks are stable. Second, two
+of the three failure classes here are harness-side — a 120 s test cap that
+cannot fit the test's own setup, and a `patch` invocation that cannot tolerate
+an agent writing the expected test. Neither is a capability signal.
+
 ### Scoreboard so far
 
 75 distinct tasks attempted (94 % of the 80 in the dataset), 73 resolved

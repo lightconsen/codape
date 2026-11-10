@@ -7,7 +7,9 @@ and which ones would need a new runner before a score means anything.
 
 The short version: **Terminal-Bench is the only benchmark with a full recorded
 score** (73 of 75 attempted tasks resolved — see
-[terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
+[terminal-bench.md](terminal-bench.md)), and an eight-task subset was run three
+times on 2026-11-10 to measure repeatability: 6/8 in each repeat, 18/24 (75 %)
+overall. SWE-bench's runner now runs end-to-end
 on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
 each (see [SWE-bench run history](#swe-bench-run-history)), but no sampled
 Verified or Multilingual score yet. ProgramBench has a runner and one solved
@@ -18,7 +20,7 @@ Everything else below needs work first.
 
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
-| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; a 2026-11-10 single-attempt revalidation was 5/10 — [terminal-bench.md](terminal-bench.md) |
+| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; 2026-11-10 revalidation 5/10; eight-task reliability, three repeats: **6/8, 6/8, 6/8** — [terminal-bench.md](terminal-bench.md) |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subsets only — 3/3 (`verified-3repo-20261110-112457`), 2/3 (`verified-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
