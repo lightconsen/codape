@@ -58,7 +58,43 @@ DATASETS = {
         "file": "data/test-00000-of-00001.parquet",
         "instances": 300,
     },
+    "multilingual": {
+        "repo": "SWE-bench/SWE-bench_Multilingual",
+        "revision": "846e647b9f33c0b51b739d005d13d85493c9af09",
+        "file": "data/test-00000-of-00001.parquet",
+        "instances": 300,
+    },
 }
+
+# swebench 5.x is data-driven: every dataset row carries the evaluation script,
+# log parser, image, and eval type, so a non-Python variant needs no
+# runner-side MAP_REPO_VERSION_TO_SPECS table. This table is the one piece the
+# runner still owns: it labels a row's parser with a language and rejects a
+# pinned revision that names a parser the runner does not know. The values were
+# taken from the pinned Multilingual rows and checked against the harness's
+# PARSER_REGISTRY.
+MULTILINGUAL_LANGUAGE_BY_PARSER = {
+    "parse_log_ant": "Java",
+    "parse_log_cargo": "Rust",
+    "parse_log_doctest": "C++",
+    "parse_log_googletest": "C++",
+    "parse_log_gotest": "Go",
+    "parse_log_gradle_custom": "Java",
+    "parse_log_immutable_js": "JavaScript/TypeScript",
+    "parse_log_jekyll": "Ruby",
+    "parse_log_jest": "JavaScript/TypeScript",
+    "parse_log_jq": "C",
+    "parse_log_karma": "JavaScript/TypeScript",
+    "parse_log_maven": "Java",
+    "parse_log_micropython_test": "Python",
+    "parse_log_phpunit": "PHP",
+    "parse_log_redis": "C",
+    "parse_log_rspec_transformed_json": "Ruby",
+    "parse_log_ruby_unit": "Ruby",
+    "parse_log_tap": "JavaScript/TypeScript",
+    "parse_log_vitest": "JavaScript/TypeScript",
+}
+MULTILINGUAL_LANGUAGES = tuple(sorted(set(MULTILINGUAL_LANGUAGE_BY_PARSER.values())))
 
 # Codape release installed inside the container when no --codape-binary is
 # given. v0.2.0 is the first release published under the codape asset names;
@@ -240,6 +276,54 @@ def select_instances(rows: list[dict[str, Any]], instance_ids: list[str] | None,
     # writer. That is the reproducible subset promised by --limit.
     ordered = sorted(rows, key=lambda row: row["instance_id"])
     return ordered[: (1 if limit is None else limit)]
+
+
+def language_for(instance: dict[str, Any], alias: str) -> str:
+    """Return the language recorded for an instance, or reject an unknown one.
+
+    Verified and Lite are Python-only. Multilingual names a parser per row; the
+    table above turns it into a language and doubles as a contract check.
+    """
+    if alias != "multilingual":
+        return "Python"
+    parser = instance.get("log_parser")
+    try:
+        return MULTILINGUAL_LANGUAGE_BY_PARSER[parser]
+    except KeyError:
+        raise BenchError(
+            f"{instance.get('instance_id', '<unknown>')}: multilingual row names "
+            f"log_parser {parser!r}, which this runner does not map to a language; "
+            "update MULTILINGUAL_LANGUAGE_BY_PARSER for the pinned revision"
+        ) from None
+
+
+def validate_instances(rows: list[dict[str, Any]], alias: str) -> None:
+    """Check the columns the data-driven 5.x harness will read.
+
+    These failures otherwise surface after the image pull and a paid model
+    call, or inside the official evaluator with a less obvious message.
+    """
+    from swebench.harness.log_parsers import PARSER_REGISTRY  # inside the venv
+
+    for row in rows:
+        instance_id = row.get("instance_id") or "<missing instance_id>"
+        for field in ("image", "base_commit", "problem_statement"):
+            if not row.get(field):
+                raise BenchError(f"{instance_id}: dataset row has no {field} field")
+        if not str(row.get("eval_script") or "").strip():
+            raise BenchError(
+                f"{instance_id}: dataset row has no eval_script; "
+                f"swebench=={SWEBENCH_VERSION} grades from that column"
+            )
+        parser = row.get("log_parser")
+        if not parser:
+            raise BenchError(f"{instance_id}: dataset row has no log_parser")
+        if parser not in PARSER_REGISTRY:
+            raise BenchError(
+                f"{instance_id}: dataset row names log_parser {parser!r}, "
+                f"which swebench=={SWEBENCH_VERSION} does not implement"
+            )
+        language_for(row, alias)
 
 
 def build_prompt(instance: dict[str, Any], extra_instructions: str | None = None) -> str:
@@ -734,6 +818,8 @@ def run_one_instance(
     record = {
         "instance_id": instance_id,
         "image": image,
+        "language": language_for(instance, args.dataset),
+        "log_parser": instance.get("log_parser"),
         "patch_bytes": len(patch.encode("utf-8")),
         "elapsed_sec": elapsed,
         "agent_returncode": agent["returncode"],
@@ -817,7 +903,15 @@ def find_report(report_dir: Path, model_name: str, run_id: str) -> Path | None:
     return candidates[-1] if candidates else None
 
 
-def summarize(args: argparse.Namespace, run_dir: Path, records: list[dict[str, Any]], report_path: Path | None, timings: dict[str, Any], predictions_path: Path) -> dict[str, Any]:
+def summarize(
+    args: argparse.Namespace,
+    run_dir: Path,
+    records: list[dict[str, Any]],
+    report_path: Path | None,
+    timings: dict[str, Any],
+    predictions_path: Path,
+    selected: list[dict[str, Any]],
+) -> dict[str, Any]:
     report = None
     if report_path is not None:
         try:
@@ -847,6 +941,7 @@ def summarize(args: argparse.Namespace, run_dir: Path, records: list[dict[str, A
         "dataset": args.dataset,
         "dataset_revision": args._dataset["revision"],
         "dataset_repo": args._dataset["repo"],
+        "languages": sorted({language_for(row, args.dataset) for row in selected}),
         "split": "test",
         "run_id": args.run_id,
         "model_name_or_path": args.model_name,
@@ -880,6 +975,8 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"dataset     : {summary['dataset_repo']} @ {summary['dataset_revision']}")
     print(f"run id      : {summary['run_id']}")
     print(f"model       : {summary['model_name_or_path']}")
+    if summary.get("languages"):
+        print(f"languages   : {', '.join(summary['languages'])}")
     print(f"instances   : {', '.join(summary['instances']) or '(none)'}")
     if summary["pass_at_1"] is not None:
         print(
@@ -922,6 +1019,8 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
     print("SWE-bench dry run; nothing will be downloaded or executed.")
     print(f"pinned package : swebench=={SWEBENCH_VERSION}")
     print(f"dataset        : {spec['repo']} @ {spec['revision']} ({spec['alias']})")
+    if spec["alias"] == "multilingual":
+        print(f"languages      : {', '.join(MULTILINGUAL_LANGUAGES)}")
     print(f"dataset URL    : {dataset_url(spec)}")
     print(f"dataset cache  : {parquet} ({'cached' if parquet.exists() else 'not cached'})")
     print(f"venv cache     : {cache_dir / f'venv-swebench-{SWEBENCH_VERSION}'}")
@@ -1048,7 +1147,12 @@ Notes:
     name only. They are never written to a repository file.
 """,
     )
-    parser.add_argument("--dataset", choices=sorted(DATASETS), default="verified", help="Dataset alias (default: verified)")
+    parser.add_argument(
+        "--dataset",
+        choices=sorted(DATASETS),
+        default="verified",
+        help="Dataset alias: verified (500), lite (300), or multilingual (300; default: verified)",
+    )
     parser.add_argument("--dataset-revision", help="Override the pinned Hugging Face revision (advanced)")
     parser.add_argument("--instance", dest="instances", action="append", metavar="ID", help="Instance ID; repeatable")
     parser.add_argument("--limit", type=positive_int, help="Number of instances from the sorted dataset (default: 1)")
@@ -1131,10 +1235,14 @@ def main(argv: list[str] | None = None) -> int:
             existing = read_predictions(predictions_path)
             instance_ids = list(existing)
             selected = select_instances(rows, instance_ids, None)
+            validate_instances(selected, args.dataset)
+            all_selected = selected
             generation_records: list[dict[str, Any]] = []
             generation_elapsed = None
         else:
             selected = select_instances(rows, args.instances, args.limit)
+            validate_instances(selected, args.dataset)
+            all_selected = selected
             instance_ids = [row["instance_id"] for row in selected]
             if args.resume:
                 existing = read_predictions(predictions_path) if predictions_path.exists() else {}
@@ -1197,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
             "evaluation_returncode": returncode,
             "total_elapsed_sec": (generation_elapsed or 0.0) + eval_elapsed,
         }
-        summary = summarize(args, run_dir, generation_records, report_path, timings, predictions_path)
+        summary = summarize(args, run_dir, generation_records, report_path, timings, predictions_path, all_selected)
         print_summary(summary)
         if returncode != 0:
             print("warning: the official harness exited non-zero; inspect evaluation.log", file=sys.stderr)

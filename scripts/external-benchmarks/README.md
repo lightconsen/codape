@@ -4,7 +4,7 @@ Runners that measure Codape on two public, Docker-based agent benchmarks:
 
 | Benchmark | What it measures | Harness pinned here |
 |---|---|---|
-| [SWE-bench](https://www.swebench.com/) | Fixing real GitHub issues in Python repositories. Each instance is graded by the project's own tests: `FAIL_TO_PASS` must start passing and `PASS_TO_PASS` must keep passing. | `swebench==5.0.2`, SWE-bench Verified (or Lite) at a pinned dataset revision |
+| [SWE-bench](https://www.swebench.com/) | Fixing real GitHub issues in Python repositories (Verified, Lite) and in nine languages (Multilingual). Each instance is graded by the project's own tests: `FAIL_TO_PASS` must start passing and `PASS_TO_PASS` must keep passing. | `swebench==5.0.2`, a pinned dataset revision |
 | [Terminal-Bench](https://www.tbench.ai/) | Completing end-to-end tasks in a Linux terminal container (files, processes, services, scripts). Each task is graded by task-specific tests. | `terminal-bench==0.2.18`, `terminal-bench-core==0.1.1` |
 
 Both runners use the official harness to grade. Codape only generates the work
@@ -76,6 +76,7 @@ Change these only on purpose: they define what a recorded score means.
 | SWE-bench harness | `5.0.2` | `swebench/run_swebench.py` |
 | SWE-bench Verified revision | `78f471bf655a3137b2e8a75af1501690ec009ec3` | same |
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` | same |
+| SWE-bench Multilingual revision | `846e647b9f33c0b51b739d005d13d85493c9af09` | same |
 | Codape in SWE-bench containers | `v0.2.0`, `x86_64-unknown-linux-musl` | same |
 | Terminal-Bench harness | `0.2.18` | `terminal-bench/run_terminal_bench.py` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` | same |
@@ -111,6 +112,8 @@ export ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
 scripts/external-benchmarks/swebench/run.sh --dataset verified --limit 1
 # or a named, exactly reproducible instance
 scripts/external-benchmarks/swebench/run.sh --instance astropy__astropy-12907
+# non-Python: C, C++, Go, Java, JS/TS, PHP, Ruby, Rust (and Python)
+scripts/external-benchmarks/swebench/run.sh --dataset multilingual --limit 1
 ```
 
 A one-task Terminal-Bench run:
@@ -156,6 +159,20 @@ For each selected instance the runner:
    and prints `pass@1 = resolved_instances / total_instances` plus elapsed
    time.
 
+### Why there is no non-Python spec table
+
+Older `swebench` releases kept a `MAP_REPO_VERSION_TO_SPECS` table in the
+harness: per repository and version, the install/test commands and log parser.
+`swebench==5.0.2` is data-driven instead. Every dataset row carries its own
+`eval_script`, `log_parser`, `eval_type`, and `image`, and `make_test_spec`
+reads them directly, so Multilingual needs no new build recipes in this runner.
+What the runner still owns is a language table
+(`MULTILINGUAL_LANGUAGE_BY_PARSER`): it labels each row for reporting and
+rejects a pinned revision whose parser it does not recognize. Before spending a
+model call, `validate_instances` also checks that every selected row has an
+image, base commit, problem statement, evaluation script, and a log parser
+implemented by the pinned harness.
+
 Subset selection is deterministic: `--instance` keeps the order given, and
 `--limit N` sorts by `instance_id` and takes the first N. Re-running the same
 flags on the pinned revision selects the same instances.
@@ -164,7 +181,7 @@ Useful options:
 
 | Option | Meaning |
 |---|---|
-| `--dataset verified\|lite` | Verified (500) or Lite (300); default Verified |
+| `--dataset verified\|lite\|multilingual` | Verified (500), Lite (300), or Multilingual (300 across nine languages); default Verified |
 | `--limit N` | First N instances after sorting by ID |
 | `--instance ID` | Repeatable; exact subset, order preserved |
 | `--timeout SEC` | Per-instance Codape timeout (default 1800) |
@@ -309,6 +326,12 @@ tools for release notes and research; keep them out of required checks.
   the pinned Verified Parquet, and the official predictions loader accepted this
   runner's JSONL. `--limit 1` on that revision selects
   `astropy__astropy-12907`, matching the README example.
+- The pinned Multilingual Parquet: `make_test_spec` builds all 300 rows, the 19
+  `log_parser` values it uses are all in the harness's `PARSER_REGISTRY`, and
+  `validate_instances` passes for Verified (500), Lite (300), and Multilingual
+  (300). `--dataset multilingual --dry-run --limit 1` prints the nine
+  languages. A one-instance smoke run (`jqlang__jq-2235`) is in progress; its
+  result will be recorded in `docs/benchmark.md`.
 - The Terminal-Bench adapter was imported and instantiated against the real
   `terminal-bench==0.2.18` package: factory import, Jinja setup rendering for
   both release and local-binary modes, command construction, env quoting, and
@@ -325,6 +348,6 @@ tools for release notes and research; keep them out of required checks.
   Verified score are recorded in
   [`docs/benchmark.md`](../../docs/benchmark.md#swe-bench-run-history).
 
-Not verified: the 12-repository subset (an estimated 40–60 GB of images) or the
-full 500-instance Verified set. The runs above are named pipeline checks, not
-capability scores.
+Not verified: the 12-repository subset (an estimated 40–60 GB of images), the
+full 500-instance Verified set, or an end-to-end Multilingual instance. The runs
+above are named pipeline checks, not capability scores.

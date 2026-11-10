@@ -19,9 +19,10 @@ Everything else below needs work first.
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — [terminal-bench.md](terminal-bench.md) |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subset only — 3/3 (`verified-3repo-20261110-112457`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | No |
+| [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | No — alias and validation ready; a one-instance smoke run is in progress |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
-The first three are research instruments: Docker, network, paid model tokens,
+The first four are research instruments: Docker, network, paid model tokens,
 hours of wall clock. They are manual tools for release notes, deliberately kept
 out of required checks — the reasoning is in
 [`scripts/external-benchmarks/README.md`](../scripts/external-benchmarks/README.md#why-this-is-not-in-ci).
@@ -51,6 +52,7 @@ locations in the external README.
 | SWE-bench harness | `swebench==5.0.2` |
 | SWE-bench Verified revision | `78f471bf655a3137b2e8a75af1501690ec009ec3` |
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` |
+| SWE-bench Multilingual revision | `846e647b9f33c0b51b739d005d13d85493c9af09` |
 | Terminal-Bench harness | `terminal-bench==0.2.18` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` |
 | Codape in containers | `v0.2.0` (`x86_64-unknown-linux-musl` for SWE-bench) |
@@ -121,19 +123,51 @@ The SWE-bench family shares one dataset shape (`instance_id`, `problem_statement
 harness. Adding a variant is therefore mostly a matter of pinning its dataset
 revision in `DATASETS` in
 [`run_swebench.py`](../scripts/external-benchmarks/swebench/run_swebench.py) —
-currently only `verified` and `lite` are there. What that does **not** solve is
-grading: each variant needs its own environment specs and, for the non-Python
-ones, its own container images.
+`verified`, `lite`, and `multilingual` are there. What that does **not** solve
+is the images: each instance still pulls its own container, and Multimodal
+additionally needs browser plumbing.
 
 | Variant | Size | Notes | Work needed |
 |---|---|---|---|
 | Full | 2 294 | The original test split, 12 Python repositories. Superseded by Verified for headline numbers. | Alias only |
-| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 42 repositories, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias plus harness support for the non-Python spec table; unverified |
+| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 41 repositories in the pinned revision, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias added; no runner-side non-Python spec table is needed (see below). End-to-end run pending |
 | [Multimodal v2](https://www.swebench.com/multimodal.html) | 480 (v2 removed flaky/ungradeable tests from the original 517) | Issues contain screenshots, mockups, and diagrams; graded in a browser-driven environment. | Alias plus image/browser setup; Codape reads images, but the container plumbing is new work |
 
 Multilingual is the variant with the most information per unit of effort for
 this project: it is the only SWE-bench shape that exercises a Rust or Go
 toolchain inside the graded container.
+
+### The non-Python spec table lives in the dataset
+
+Older `swebench` releases shipped `MAP_REPO_VERSION_TO_SPECS`, a harness table
+of install/test commands and log parsers keyed by repository and version. That
+is what the earlier version of this file meant by "harness support for the
+non-Python spec table". `swebench==5.0.2` no longer has it: each parquet row
+carries `eval_script`, `log_parser`, `eval_type`, and `image`, and the official
+`make_test_spec` reads those fields. The pinned Multilingual revision builds
+all 300 specs this way; the 19 parsers it names are all present in the
+harness's `PARSER_REGISTRY`.
+
+The runner therefore adds an alias and a small language table, not a second set
+of build recipes: `MULTILINGUAL_LANGUAGE_BY_PARSER` labels each row for the
+summary and rejects an unknown parser before any model call. It also validates
+the selected rows' required columns. A full Multilingual score still requires
+the images (one per instance) and paid model calls, so the alias being present
+is not the same as a recorded result.
+
+Composition of the pinned revision, by the language the runner records:
+
+| Language | Instances |
+|---|---|
+| C | 25 |
+| C++ | 12 |
+| Go | 42 |
+| Java | 43 |
+| JavaScript/TypeScript | 43 |
+| PHP | 43 |
+| Python | 5 |
+| Ruby | 44 |
+| Rust | 43 |
 
 ## Benchmarks that need a new runner
 
