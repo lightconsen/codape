@@ -72,22 +72,36 @@ CODAPE_TARGET = "x86_64-unknown-linux-musl"
 # file or in a process argument (only the variable *name* is passed to docker).
 PASSTHROUGH_ENV = (
     "ANTHROPIC_API_KEY",
+    # Claude Code and this repository's own test harnesses export the token
+    # under AUTH_TOKEN; Codape accepts either spelling as the API key.
+    "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
     "CODAPE_API_KEY",
+    "CODAPE_AUTH_TOKEN",
     "CODAPE_BASE_URL",
     "CODAPE_MODEL",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
     "CODAPE_CUSTOM_HEADERS",
+    # Codape assumes a conservative 32K window for a model it does not know.
+    # A model with a larger real window then spends most of the task
+    # compacting instead of working.
+    "CODAPE_CONTEXT_WINDOW",
     # Raises the per-request output ceiling, which a reasoning model can
     # otherwise spend entirely on thinking and end the run having emitted
     # nothing. A raised value is clamped to half the model's context window.
     "CODAPE_MAX_TOKENS",
 )
 
-API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODAPE_API_KEY", "OPENAI_API_KEY")
+API_KEY_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODAPE_API_KEY",
+    "CODAPE_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+)
 MODEL_ENV = ("ANTHROPIC_MODEL", "CODAPE_MODEL", "OPENAI_MODEL")
 
 DEFAULT_AGENT_TIMEOUT = 1800
@@ -433,7 +447,10 @@ def reexec_in_venv(cache_dir: Path) -> None:
     target = venv_python(cache_dir)
     if os.environ.get("CODAPE_BENCH_VENV") == str(target):
         return
-    if Path(sys.executable).resolve() == target.resolve():
+    # Compare sys.prefix, not sys.executable: on Linux `venv/bin/python` is a
+    # symlink to the system interpreter, so resolving both sides makes them
+    # look equal and skips the re-exec, leaving pyarrow unimportable.
+    if Path(sys.prefix).resolve() == target.parent.parent.resolve():
         return
     env = os.environ.copy()
     env["CODAPE_BENCH_VENV"] = str(target)

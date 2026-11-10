@@ -5,17 +5,19 @@ that hand it a machine and grade the state of that machine afterwards. This file
 records which of those exist, which ones this repository can actually run today,
 and which ones would need a new runner before a score means anything.
 
-The short version: **Terminal-Bench is the only benchmark with a recorded score**
-(72 of 75 attempted tasks resolved — see [terminal-bench.md](terminal-bench.md)).
-SWE-bench has a complete runner in this repository that has never been run
-end-to-end. Everything else below needs work first.
+The short version: **Terminal-Bench is the only benchmark with a full recorded
+score** (72 of 75 attempted tasks resolved — see
+[terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
+and has two small recorded subsets (see
+[SWE-bench run history](#swe-bench-run-history)), but no Verified score yet.
+Everything else below needs work first.
 
 ## What runs today
 
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — [terminal-bench.md](terminal-bench.md) |
-| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | No |
+| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subset only — 3/3 (`verified-3repo-20261110-112457`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | No |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
@@ -56,6 +58,61 @@ locations in the external README.
 Do not compare runs that differ in model ID, harness version, or dataset
 revision. Re-running the same named subset is the only variance measurement
 worth quoting.
+
+## SWE-bench run history
+
+The runner is exercised end-to-end, but only on named subsets. Neither entry
+below is a SWE-bench Verified score: both were chosen by hand from the
+12-repository list, not sampled at random, and the issues are public.
+
+### 2026-11-10 — pipeline check, 1 instance (1/1 resolved)
+
+- run-id: `verified-requests-1142-20261110-111435`
+- instance: `psf__requests-1142`
+- model: `deepseek-v4.1-flash` through an Anthropic-compatible gateway
+- result: **1/1 resolved** by the official `swebench==5.0.2` harness;
+  `error_instances: 0`, `empty_patches: 0`
+- timings: generation 305 s (including the image pull), evaluation 19 s,
+  total 324 s
+- patch: 868 548 bytes, of which the real fix is
+  `requests/models.py:prepare_content_length`; the rest is `build/lib/` output
+  from the agent running `setup.py build`
+
+This run only establishes that generation, patch extraction, and official
+grading work on Linux against the pinned image.
+
+### 2026-11-10 — 3-repository subset (3/3 resolved)
+
+- run-id: `verified-3repo-20261110-112457`
+- instances: `pallets__flask-5014`, `pytest-dev__pytest-6202`,
+  `pylint-dev__pylint-6528`
+- model: `deepseek-v4.1-flash` through the same gateway
+- result: **3/3 resolved**; `unresolved_ids: []`, `error_instances: 0`,
+  `empty_patches: 0`
+- timings: generation 2 508 s, evaluation 70 s, total 2 578 s (43 minutes)
+
+| Instance | Agent time | Patch bytes | Agent outcome |
+|---|---|---|---|
+| `pallets__flask-5014` | 123.7 s | 1 338 | `success` |
+| `pytest-dev__pytest-6202` | 1 369.9 s | 621 503 | `success` |
+| `pylint-dev__pylint-6528` | 813.5 s | 2 969 | `success` |
+
+The pytest patch also modified `testing/test_collection.py` and downloaded four
+`.whl` files into `/testbed`; both were captured by `git add -A`. The official
+test patch still applied and the instance resolved, but patch hygiene is a
+failure mode to watch when the subset gets larger. The flask and pylint patches
+contain only source changes.
+
+What these runs do **not** establish:
+
+- A Verified pass@1. Three hand-picked instances are a smoke test; the 95 %
+  Wilson interval on 3/3 starts around 0.44.
+- Contamination resistance. All three issues are public, so their fixes may be
+  in the model's training data.
+- Scale. The 12-repository subset needs an estimated 40–60 GB of image storage
+  and was not attempted here; the full 500-instance set was not attempted
+  either. The runner generates instances serially, so a full set is a
+  multi-day job on one machine.
 
 ## SWE-bench variants: an alias, not a runner
 

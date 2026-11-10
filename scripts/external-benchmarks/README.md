@@ -43,16 +43,29 @@ scripts/external-benchmarks/
 - A model endpoint. Codape is configured only through environment variables:
 
   ```bash
-  export ANTHROPIC_API_KEY=...                     # or CODAPE_API_KEY / OPENAI_API_KEY
+  export ANTHROPIC_API_KEY=...                     # or ANTHROPIC_AUTH_TOKEN,
+                                                   # CODAPE_API_KEY / CODAPE_AUTH_TOKEN / OPENAI_API_KEY
   export ANTHROPIC_BASE_URL=https://...            # optional, for a gateway
   export ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+  export CODAPE_CONTEXT_WINDOW=131072              # optional: the endpoint's real window
+  export CODAPE_MAX_TOKENS=32000                   # optional: raise the output ceiling
+  export CODAPE_CUSTOM_HEADERS='x-example: value'  # optional: one `Name: value` per line
   ```
 
   `CODAPE_*` variables take precedence over `ANTHROPIC_*`, which take
   precedence over `OPENAI_*` (`CODAPE_MODEL`, `CODAPE_BASE_URL`,
-  `CODAPE_API_KEY`, and the matching `ANTHROPIC_*` / `OPENAI_*` names). Keys are
-  read from the environment, forwarded to containers by variable *name* only
+  `CODAPE_API_KEY`, and the matching `ANTHROPIC_*` / `OPENAI_*` names).
+  `ANTHROPIC_AUTH_TOKEN` and `CODAPE_AUTH_TOKEN` are accepted in the same slot
+  as the API key, matching Codape's own provider precedence. Keys are read from
+  the environment, forwarded to containers by variable *name* only
   (`docker exec -e ANTHROPIC_API_KEY`), and never written to a repository file.
+
+  `CODAPE_CUSTOM_HEADERS` and `CODAPE_CONTEXT_WINDOW` are forwarded too. The
+  latter matters when the endpoint's real context window is larger than
+  Codape's conservative 32K default for an unknown model; without it the agent
+  spends much of a task compacting instead of working. Both runners forward
+  `CODAPE_MAX_TOKENS` for the same reason: a reasoning model can otherwise
+  spend the whole per-request ceiling on thinking.
 
 ## Version pins
 
@@ -254,8 +267,9 @@ modes). `target/` is gitignored.
   SWE-bench prompt tells the agent not to look up the issue online; a model can
   still reproduce a memorized fix. Treat scores as upper bounds on
   generalization.
-- **Subset scores.** A 1-instance result is 0 or 1; it validates the pipeline,
-  not capability. Report the instance IDs and run ID with any number.
+- **Subset scores.** A 1-instance result is 0 or 1; a 3-instance result is only
+  slightly less coarse. Both validate the pipeline, not capability. Report the
+  instance IDs and run ID with any number.
 - **Non-determinism.** Even with the same pins and subset, model sampling and
   provider behavior vary. Re-run the same named subset for variance; do not
   compare runs with different model IDs, harness versions, or dataset
@@ -303,6 +317,14 @@ tools for release notes and research; keep them out of required checks.
   reads stdin, accepts the flags used here, and returns a `result` frame; with
   an unreachable API it returned `is_error: true` with exit status 0, which is
   why both the exit status and the frame are checked.
+- End-to-end SWE-bench generation and official grading on Linux against the
+  pinned images: `psf__requests-1142` on its own (1/1 resolved) and the
+  three-repository subset `pallets__flask-5014`, `pytest-dev__pytest-6202`,
+  `pylint-dev__pylint-6528` (3/3 resolved), both on 2026-11-10. Run IDs,
+  timings, patch sizes, and the reasons these are pipeline checks rather than a
+  Verified score are recorded in
+  [`docs/benchmark.md`](../../docs/benchmark.md#swe-bench-run-history).
 
-Not verified: a full benchmark run. That needs Docker, network, an API key, and
-paid model calls.
+Not verified: the 12-repository subset (an estimated 40–60 GB of images) or the
+full 500-instance Verified set. The runs above are named pipeline checks, not
+capability scores.
