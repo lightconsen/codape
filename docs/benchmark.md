@@ -124,8 +124,18 @@ contain only source changes.
 Astropy is the unresolved instance: the agent's patch made two new
 `test_cds_grammar` cases pass, but `test_cds_grammar_fail[km/s.Mpc-1]` still
 reports `DID NOT RAISE <class 'ValueError'>`, and PASS_TO_PASS
-`test_cds_grammar_fail[/s.Mpc]` fails the same way. That is a genuine agent
-failure, not infrastructure.
+`test_cds_grammar_fail[/s.Mpc]` fails the same way. The agent widened the
+grammar to accept products after `/` and a leading `/`, while the test requires
+the opposite: slash chains are valid (`km/s/Mpc` means `km / (s Mpc)`) but an
+unparenthesized product in the denominator must be rejected.
+
+The miss is implementable, not an impossible task. A corrected grammar patch —
+one extra nonterminal that allows chained divisions in the denominator but not
+products, plus the regenerated `cds_parsetab.py` — was replayed without model
+calls and resolved 1/1 in the official harness
+(`verified-astropy14369-grammarfix-20261110-140245`): 3/3 FAIL_TO_PASS and
+732/732 PASS_TO_PASS. It is a failure of reading the negative test contract and
+verifying both directions, not of coding ability.
 
 ### 2026-11-10 — Lite batch 1 (2/3 resolved)
 
