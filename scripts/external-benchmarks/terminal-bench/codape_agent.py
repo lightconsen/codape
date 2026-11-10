@@ -19,7 +19,7 @@ Usage with ``tb`` (see run_terminal_bench.py for the wrapper):
     tb run \
       --dataset terminal-bench-core==0.1.1 \
       --agent-import-path codape_agent:CodapeAgent \
-      --agent-kwarg version=v0.1.3 \
+      --agent-kwarg version=v0.2.0 \
       --model claude-sonnet-4-5-20250929
 """
 
@@ -59,7 +59,7 @@ LOGS_STREAM_PATH = f"{LOGS_DIR}/codape-stream.jsonl"
 # container itself and polls it over loopback.
 NO_PROXY = "localhost,127.0.0.1,::1,host.docker.internal"
 
-DEFAULT_VERSION = "v0.1.3"
+DEFAULT_VERSION = "v0.2.0"
 DEFAULT_MAX_TURNS = 200
 DEFAULT_TIMEOUT_SEC = 1800
 
@@ -424,7 +424,7 @@ class CodapeAgent(AbstractInstalledAgent):
 def parse_result_summary(text: str) -> dict | None:
     """Return error status and usage from the last Codape result frame.
 
-    Codape 0.1.3 does not populate usage in headless stream-json today, so
+    Codape 0.2.0 does not populate usage in headless stream-json today, so
     ``usage`` is normally ``None``. ``is_error`` is meaningful now: the CLI
     exits 0 after an API failure but sets it on the result frame.
     """

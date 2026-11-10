@@ -51,7 +51,7 @@ locations in the external README.
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` |
 | Terminal-Bench harness | `terminal-bench==0.2.18` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` |
-| Codape in containers | `v0.1.3` (`x86_64-unknown-linux-musl` for SWE-bench) |
+| Codape in containers | `v0.2.0` (`x86_64-unknown-linux-musl` for SWE-bench) |
 
 Do not compare runs that differ in model ID, harness version, or dataset
 revision. Re-running the same named subset is the only variance measurement
@@ -127,5 +127,5 @@ Three things to keep attached to any number reported from these benchmarks:
 
 Cost is unbounded by default. Bound it with `--max-turns` and `--timeout`, use a
 cheap model for plumbing checks, and estimate spend from the provider's billing
-dashboard: Codape 0.1.3 emits a `result` frame but does not populate `usage`, so
+dashboard: Codape 0.2.0 emits a `result` frame but does not populate `usage`, so
 both runners print `tokens/cost: unavailable` rather than inventing numbers.

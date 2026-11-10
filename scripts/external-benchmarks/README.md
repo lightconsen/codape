@@ -63,14 +63,20 @@ Change these only on purpose: they define what a recorded score means.
 | SWE-bench harness | `5.0.2` | `swebench/run_swebench.py` |
 | SWE-bench Verified revision | `78f471bf655a3137b2e8a75af1501690ec009ec3` | same |
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` | same |
-| Codape in SWE-bench containers | `v0.1.3`, `x86_64-unknown-linux-musl` | same |
+| Codape in SWE-bench containers | `v0.2.0`, `x86_64-unknown-linux-musl` | same |
 | Terminal-Bench harness | `0.2.18` | `terminal-bench/run_terminal_bench.py` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` | same |
-| Codape in Terminal-Bench containers | `v0.1.3` | same and `codape_agent.py` |
+| Codape in Terminal-Bench containers | `v0.2.0` | same and `codape_agent.py` |
 
 The Codape release downloaded inside containers is verified against the
 release's `SHA256SUMS`; a missing entry or checksum mismatch aborts that
 instance rather than running an unverified binary.
+
+`v0.2.0` is the oldest pin that works: it is the first release published under
+the `codape-*` asset names. `v0.1.3` and earlier still ship `coderex-*`
+archives, while the installers ask for `codape-<target>.tar.gz`, so pinning one
+of those fails with a 404 at container setup — before any model call, which is
+why it went unnoticed until a run was actually attempted.
 
 ## Quick start: verify locally, then smoke-test
 
@@ -235,7 +241,7 @@ modes). `target/` is gitignored.
   paid and unbounded by default: bound them with `--max-turns` and `--timeout`,
   and use a cheap model for plumbing checks. Terminal-Bench builds an image per
   task and also needs network inside the container to download Codape.
-- **Token/cost reporting.** Codape 0.1.3 exits 0 and emits a `result` frame but
+- **Token/cost reporting.** Codape 0.2.0 exits 0 and emits a `result` frame but
   does **not** populate `usage` or `total_cost_usd` in headless stream-json. Both
   runners therefore print `tokens/cost: unavailable` and `summary.json` records
   `null`; they do not invent numbers. The parsers already read those fields if a

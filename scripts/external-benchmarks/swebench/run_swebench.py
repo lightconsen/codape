@@ -61,8 +61,10 @@ DATASETS = {
 }
 
 # Codape release installed inside the container when no --codape-binary is
-# given. v0.1.3 is the newest release that publishes a Linux x86_64 musl build.
-CODAPE_RELEASE_VERSION = "v0.1.3"
+# given. v0.2.0 is the first release published under the codape asset names;
+# v0.1.3 and older still ship `coderex-*` archives, so the installer below
+# (which asks for `codape-<target>.tar.gz`) 404s on them.
+CODAPE_RELEASE_VERSION = "v0.2.0"
 CODAPE_TARGET = "x86_64-unknown-linux-musl"
 
 # Variables forwarded from the host into Codape inside the container. The
@@ -250,7 +252,7 @@ commits. Do not try to look up the issue or its reference patch online.
 def parse_stream_json_usage(text: str) -> dict[str, Any] | None:
     """Extract cumulative usage/cost from Codape stream-json output, if any.
 
-    Codape 0.1.3 does not currently put ``usage`` or ``total_cost_usd`` in
+    Codape 0.2.0 does not put ``usage`` or ``total_cost_usd`` in
     its result frame, so the normal answer is ``None``. The parser is
     forward-compatible: it reads the result frame rather than inventing data.
     """
@@ -849,7 +851,7 @@ def summarize(args: argparse.Namespace, run_dir: Path, records: list[dict[str, A
         "predictions": str(predictions_path),
         "notes": [
             "pass@1 is resolved_instances / total_instances from the official report.",
-            "Codape 0.1.3 does not expose usage/total_cost_usd in headless stream-json; token_usage is null unless the binary emits it.",
+            "Codape 0.2.0 does not expose usage/total_cost_usd in headless stream-json; token_usage is null unless the binary emits it.",
         ],
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
