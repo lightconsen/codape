@@ -6,28 +6,30 @@ records which of those exist, which ones this repository can actually run today,
 and which ones would need a new runner before a score means anything.
 
 The short version: **Terminal-Bench is the only benchmark with a full recorded
-score** (72 of 75 attempted tasks resolved — see
+score** (73 of 75 attempted tasks resolved — see
 [terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
 on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
 each (see [SWE-bench run history](#swe-bench-run-history)), but no sampled
-Verified or Multilingual score yet. Everything else below needs work first.
+Verified or Multilingual score yet. ProgramBench has a runner and a single-task
+pipeline check, not a score. Everything else below needs work first.
 
 ## What runs today
 
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
-| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — [terminal-bench.md](terminal-bench.md) |
+| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; a 2026-11-10 single-attempt revalidation was 5/10 — [terminal-bench.md](terminal-bench.md) |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subsets only — 3/3 (`verified-3repo-20261110-112457`), 2/3 (`verified-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
+| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | Not scored — one-task pipeline check; see [run history](#programbench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
-The first four are research instruments: Docker, network, paid model tokens,
+The first five are research instruments: Docker, network, paid model tokens,
 hours of wall clock. They are manual tools for release notes, deliberately kept
 out of required checks — the reasoning is in
 [`scripts/external-benchmarks/README.md`](../scripts/external-benchmarks/README.md#why-this-is-not-in-ci).
 
-The fifth is different in kind. `scripts/test-code-agent-benchmark.sh` replays
+The sixth is different in kind. `scripts/test-code-agent-benchmark.sh` replays
 recorded LLM cassettes against fixture projects and asserts on the resulting
 file changes, so it is deterministic, key-free, and runs in CI. It measures the
 harness (does a turn edit the right file, does review-only leave sources alone,
@@ -37,6 +39,7 @@ regressions; use the external benchmarks to measure the agent.
 ```bash
 scripts/external-benchmarks/terminal-bench/run.sh --dry-run --limit 1
 scripts/external-benchmarks/swebench/run.sh --dry-run --limit 1
+scripts/external-benchmarks/programbench/run.sh --dry-run
 ```
 
 `--dry-run` needs no Docker, no key, and no downloads. Start there.
@@ -44,7 +47,7 @@ scripts/external-benchmarks/swebench/run.sh --dry-run --limit 1
 ## Pins
 
 A score means nothing without the version it was produced at. These are the pins
-the runners read; they live in the two runners and are listed with their file
+the runners read; they live in the three runners and are listed with their file
 locations in the external README.
 
 | Pin | Value |
@@ -55,7 +58,9 @@ locations in the external README.
 | SWE-bench Multilingual revision | `846e647b9f33c0b51b739d005d13d85493c9af09` |
 | Terminal-Bench harness | `terminal-bench==0.2.18` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` |
-| Codape in containers | `v0.2.0` (`x86_64-unknown-linux-musl` for SWE-bench) |
+| ProgramBench harness | `programbench==1.2.5` |
+| ProgramBench cleanroom image | `task_cleanroom_v6` |
+| Codape in containers | `v0.2.0` (`x86_64-unknown-linux-musl`) |
 
 Do not compare runs that differ in model ID, harness version, or dataset
 revision. Re-running the same named subset is the only variance measurement
@@ -267,6 +272,42 @@ Composition of the pinned revision, by the language the runner records:
 | Ruby | 44 |
 | Rust | 43 |
 
+## ProgramBench run history
+
+ProgramBench is the closest of these benchmarks to Codape's own surface: there
+is no repository and no issue text, only a reference executable and the
+documentation that ships with it. The official package supplies the cleanroom
+image, the hidden behavioural test branches, and the scorer; the runner adds
+the pinned Codape install, the network policy, and submission extraction.
+
+One instance was selected by hand, `abishekvashok__cmatrix.5c082c6` (`cmatrix`,
+C, easy), because it builds with the cleanroom's stock gcc and does not need a
+downloaded model or dataset. It is a pipeline check, not a ProgramBench score.
+
+### 2026-11-10 — `cmatrix` pipeline check (rerun in progress)
+
+- instance: `abishekvashok__cmatrix.5c082c6` (C, easy)
+- model: `deepseek-v4.1-flash` through an Anthropic-compatible gateway
+- image: `programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6`
+- agent budget: 7 200 s, 500 turns, 4 CPUs, 8 GB
+- network: Docker internal network; only `opencode.ai:443` is reachable through
+  the runner's CONNECT proxy
+
+The first attempt, `pb-cmatrix-20261110`, did not produce a score. The runner
+started the task container with `sleep 2h`, the same duration as the agent
+budget; the container exited at the moment the agent timed out, so the
+workspace was gone before submission extraction and the official evaluator
+never ran. The stream shows the agent had written `cmatrix.c` and `compile.sh`,
+built them, and was still comparing behaviour at the two-hour mark (278 turns,
+248 `Bash` calls), so this was an extraction failure, not a model failure.
+
+The runner now starts the container with `sleep infinity`, restarts a stopped
+container before reading the workspace, and tells the agent to begin a first
+complete version early and reserve the last quarter of its budget for building
+and checks. The rerun is `pb-cmatrix-20261110-r2` with the same instance and
+budget; its official `programbench info` score will replace this paragraph when
+the run and evaluation finish.
+
 ## Benchmarks that need a new runner
 
 All of these are Docker-based and all of them grade by running the project's own
@@ -279,16 +320,12 @@ is how an instance is built, started, and scored.
 | [Multi-SWE-bench](https://github.com/multi-swe-bench/multi-swe-bench) | Issue fixing in Java, TypeScript, JavaScript, Go, Rust, C, C++ — 2 456 candidates curated down to 1 632 instances by 68 annotators. NeurIPS 2025 D&B. Also ships `mini` (400, 8 languages) and `flash` (300) subsets. | 1 632 | Own harness (`make install`, `multi-swe-bench eval`) and its own image set; the official `swebench` harness does not grade it |
 | [SWE-rebench v2](https://swe-rebench.com/) | The same shape, but instances are selected by **time window** rather than fixed at publication — the current window (15/05/2026 – 01/07/2026) holds 111 problems from 65 repositories. Trades comparability for contamination resistance: a model cannot have memorized a bug filed after its training cut-off. | Rolling | Own data pipeline and harness; the useful number is `Resolved Rate` at a stated window, so the window must be recorded with the score |
 | [Commit0](https://github.com/commit-0/commit0) | Building a library **from scratch**: 57 Python libraries, given the spec and docs but not the implementation, rebuilt and graded by the project's own unit tests, lint, and type checks. | 57 libraries | Own environment (`pip install commit0`, `commit0 build/test/eval`); there is no starting repository, so the patch-extraction model does not apply |
-| [ProgramBench](https://programbench.com/) | Recovering a program from a **compiled binary plus its documentation** — 200 tasks, hidden behavioral tests, from Meta Superintelligence Labs, Stanford, and Harvard. Leaderboard reports both fully resolved and "almost" (≥ 95 % of behavioral tests). | 200 | Own harness, own DockerHub images, behavioral rather than unit-test grading |
 | [CodeClash](https://codeclash.ai/) | Goal-oriented software engineering rather than tasks: agents start from a high-level objective and evolve a codebase over rounds, scored by relative competition in arenas (Halite, Poker, CoreWar, RobotRumble, Robocode, BattleSnake). Ranked by Elo. | 6 arenas | Own arenas and multi-round protocol; an agent is run repeatedly as a competitor, not once per instance |
 
-Two of these are worth more than the others to this project:
-
-- **ProgramBench** tests the thing Codape is built for (explore a filesystem,
-  run binaries, read docs) with no repository to lean on.
-- **SWE-rebench v2** is the only benchmark here that makes a contamination story
-  plausible, and its result is a percentage at a *dated window*, which is a
-  stronger claim than a fixed-split number.
+**SWE-rebench v2** is the one worth more than the rest here: it is the only
+benchmark in this table that makes a contamination story plausible, and its
+result is a percentage at a *dated window*, which is a stronger claim than a
+fixed-split number.
 
 ## Not a fit
 
@@ -308,7 +345,9 @@ Three things to keep attached to any number reported from these benchmarks:
 - **Contamination.** Every benchmark here is public; SWE-bench Verified is
   human-validated and Terminal-Bench tasks are recent, but neither proves the
   model has not seen the task. The runners tell the agent not to look issues up
-  online; a memorized fix is still reproducible. Treat scores as upper bounds.
+  online, and ProgramBench's runner enforces that rule with a network allowlist
+  rather than prompt text; a memorized fix is still reproducible. Treat scores
+  as upper bounds.
 - **Whose failure it was.** A benchmark score of 0 can mean the agent harness
   broke, or the model declined the task. [terminal-bench.md](terminal-bench.md)
   exists mostly to keep the frame subtype and the test's own verdict apart —
@@ -317,4 +356,4 @@ Three things to keep attached to any number reported from these benchmarks:
 Cost is unbounded by default. Bound it with `--max-turns` and `--timeout`, use a
 cheap model for plumbing checks, and estimate spend from the provider's billing
 dashboard: Codape 0.2.0 emits a `result` frame but does not populate `usage`, so
-both runners print `tokens/cost: unavailable` rather than inventing numbers.
+the runners print `tokens/cost: unavailable` rather than inventing numbers.

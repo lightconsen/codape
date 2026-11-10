@@ -1,13 +1,14 @@
 # External benchmarks
 
-Runners that measure Codape on two public, Docker-based agent benchmarks:
+Runners that measure Codape on three public, Docker-based agent benchmarks:
 
 | Benchmark | What it measures | Harness pinned here |
 |---|---|---|
 | [SWE-bench](https://www.swebench.com/) | Fixing real GitHub issues in Python repositories (Verified, Lite) and in nine languages (Multilingual). Each instance is graded by the project's own tests: `FAIL_TO_PASS` must start passing and `PASS_TO_PASS` must keep passing. | `swebench==5.0.2`, a pinned dataset revision |
 | [Terminal-Bench](https://www.tbench.ai/) | Completing end-to-end tasks in a Linux terminal container (files, processes, services, scripts). Each task is graded by task-specific tests. | `terminal-bench==0.2.18`, `terminal-bench-core==0.1.1` |
+| [ProgramBench](https://programbench.com/) | Rebuilding a program from a compiled reference executable and its documentation, with hidden behavioural tests. The agent must produce source and a `compile.sh`; the grader deletes the reference and builds the submission. | `programbench==1.2.5`, cleanroom `task_cleanroom_v6` |
 
-Both runners use the official harness to grade. Codape only generates the work
+All runners use the official harness to grade. Codape only generates the work
 being graded; the runners do not reimplement test parsing.
 
 These are research instruments, **not CI checks**. See [Why this is not in CI](#why-this-is-not-in-ci).
@@ -20,11 +21,14 @@ scripts/external-benchmarks/
 ├── swebench/
 │   ├── run.sh              # thin wrapper; --help/--dry-run need only stdlib
 │   └── run_swebench.py     # per-instance containers, patch extraction, official eval
-└── terminal-bench/
-    ├── run.sh              # thin wrapper
-    ├── run_terminal_bench.py
-    ├── codape_agent.py    # Terminal-Bench installed-agent adapter
-    └── codape-setup.sh.j2 # in-container Codape installer
+├── terminal-bench/
+│   ├── run.sh              # thin wrapper
+│   ├── run_terminal_bench.py
+│   ├── codape_agent.py    # Terminal-Bench installed-agent adapter
+│   └── codape-setup.sh.j2 # in-container Codape installer
+└── programbench/
+    ├── run.sh              # thin wrapper; --dry-run needs only stdlib
+    └── run_programbench.py # cleanroom container, allowlisted proxy, official eval
 ```
 
 ## Prerequisites
@@ -32,12 +36,15 @@ scripts/external-benchmarks/
 - Docker with a running daemon (Docker Desktop, OrbStack, Colima, or Linux
   Docker). The official SWE-bench images are `linux/amd64`; on Apple Silicon they
   run under emulation and are slower.
-- Python 3.10+ for SWE-bench, Python 3.12+ for Terminal-Bench. `uv` is used when
-  present; otherwise the runner creates a venv with `python -m venv`.
-- Network access. Both runners download a pinned dataset and the benchmark
-  harness; SWE-bench pulls one container image per instance, and Terminal-Bench
-  builds one image per task. On this Mac, `HTTPS_PROXY=http://127.0.0.1:1087` is
-  needed for direct downloads; Docker's own proxy settings control image pulls.
+- Python 3.10+ for SWE-bench, Python 3.12+ for Terminal-Bench and ProgramBench.
+  `uv` is used when present; otherwise the runner creates a venv with
+  `python -m venv`.
+- Network access. All runners download a pinned dataset and the benchmark
+  harness; SWE-bench pulls one container image per instance, Terminal-Bench
+  builds one image per task, and ProgramBench pulls a multi-gigabyte cleanroom
+  image (the `cmatrix` image is 4.19 GB). On this Mac,
+  `HTTPS_PROXY=http://127.0.0.1:1087` is needed
+  for direct downloads; Docker's own proxy settings control image pulls.
 - Disk: budget several gigabytes for the venvs and small runs, and tens of
   gigabytes for a meaningful SWE-bench subset.
 - A model endpoint. Codape is configured only through environment variables:
@@ -63,7 +70,7 @@ scripts/external-benchmarks/
   `CODAPE_CUSTOM_HEADERS` and `CODAPE_CONTEXT_WINDOW` are forwarded too. The
   latter matters when the endpoint's real context window is larger than
   Codape's conservative 32K default for an unknown model; without it the agent
-  spends much of a task compacting instead of working. Both runners forward
+  spends much of a task compacting instead of working. The runners forward
   `CODAPE_MAX_TOKENS` for the same reason: a reasoning model can otherwise
   spend the whole per-request ceiling on thinking.
 
@@ -81,6 +88,9 @@ Change these only on purpose: they define what a recorded score means.
 | Terminal-Bench harness | `0.2.18` | `terminal-bench/run_terminal_bench.py` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` | same |
 | Codape in Terminal-Bench containers | `v0.2.0` | same and `codape_agent.py` |
+| ProgramBench harness | `1.2.5` | `programbench/run_programbench.py` |
+| ProgramBench cleanroom tag | `task_cleanroom_v6` | same |
+| Codape in ProgramBench containers | `v0.2.0`, `x86_64-unknown-linux-musl` | same |
 
 The Codape release downloaded inside containers is verified against the
 release's `SHA256SUMS`; a missing entry or checksum mismatch aborts that
@@ -100,6 +110,7 @@ prints a warning and continues:
 ```bash
 scripts/external-benchmarks/swebench/run.sh --dry-run --limit 1
 scripts/external-benchmarks/terminal-bench/run.sh --dry-run --limit 1
+scripts/external-benchmarks/programbench/run.sh --dry-run
 ```
 
 A one-instance SWE-bench run (expect hundreds of megabytes of image plus paid
@@ -122,6 +133,17 @@ A one-task Terminal-Bench run:
 scripts/external-benchmarks/terminal-bench/run.sh --limit 1
 # or by task ID, once you know one from the downloaded dataset
 scripts/external-benchmarks/terminal-bench/run.sh --task <task-id>
+```
+
+A one-instance ProgramBench run (one cleanroom image, then the official
+behavioural evaluator):
+
+```bash
+scripts/external-benchmarks/programbench/run.sh
+# a specific instance
+scripts/external-benchmarks/programbench/run.sh \
+  --instance abishekvashok__cmatrix.5c082c6 \
+  --timeout 7200 --max-turns 500
 ```
 
 Re-grade an existing predictions file without spending model tokens:
@@ -243,6 +265,67 @@ tasks with `--task`; those are exact. The adapter assumes the task container
 runs as root and can write `/usr/local/bin`, which is the normal
 Terminal-Bench setup.
 
+## ProgramBench runner
+
+ProgramBench gives the agent a compiled reference executable and the
+documentation that ships with it, then asks for an independent reimplementation.
+For each selected instance the runner:
+
+1. Creates the pinned `programbench==1.2.5` venv in the cache directory and
+   loads the instance's metadata from the ProgramBench dataset.
+2. Pulls `programbench/<instance>:task_cleanroom_v6`, starts a disposable
+   container as the unprivileged `agent` user, and copies the pinned Codape
+   binary to `/tmp/codape`. The container runs `sleep infinity`, so its
+   lifetime is independent of the agent timeout; if it has stopped, the runner
+   restarts it before reading the workspace, and a timed-out agent still
+   produces a submission.
+3. Starts `codape-programbench-proxy` on the internal Docker network
+   `codape-programbench-internal`. The proxy accepts only
+   `CONNECT opencode.ai:443`; every other destination gets `403 Forbidden`.
+   The task container is attached only to that internal network, so the agent
+   can reach the model endpoint but not the internet. The proxy itself is also
+   attached to Docker's `bridge` network for its outbound leg.
+4. Runs Codape with `-p --dangerously-skip-permissions
+   --no-session-persistence --no-telemetry --output-format stream-json
+   --max-turns N`, reads the instruction from a file, and writes
+   `/tmp/codape-stream.jsonl` inside the container.
+5. Tars `/workspace` as the submission, excluding `./executable`. The reference
+   binary is execute-only (`---x--x--x`) so the agent cannot read or copy it,
+   and the grader removes it before compiling anyway; including it would make
+   the tar itself fail with `EACCES`.
+6. Runs `programbench eval <run-dir>` with one worker, then `programbench info`
+   so the printed score uses the task's ignored-test and ignored-branch
+   filters. The raw counters are printed as `raw_passed` / `raw_total`; the
+   `info` output is the official view.
+
+`--instance` selects one ProgramBench instance; the default is
+`abishekvashok__cmatrix.5c082c6` (`cmatrix`, C, easy). The pinned dataset
+exposes 201 instances (107 Rust, 46 Go, 33 C, 12 C++, and 3 others; 35 carry no
+difficulty label). The `cmatrix` cleanroom image has gcc, make, cmake, python3,
+cargo/rustc, git, curl, wget, and ncurses headers, but no package-registry
+access. Codape's instruction tells the agent to check the
+toolchain and not rely on downloads; the proxy enforces the network half.
+
+The allowlist is deliberately narrow. If `ANTHROPIC_BASE_URL` points at a host
+other than `opencode.ai`, change `PROXY_ALLOWED_HOST` in the runner; otherwise
+the agent's model calls are refused by the proxy. This is what keeps the
+ProgramBench inference rule — no looking the program up — from being only a
+sentence in the prompt.
+
+Options:
+
+| Option | Meaning |
+|---|---|
+| `--instance ID` | ProgramBench instance (default `abishekvashok__cmatrix.5c082c6`) |
+| `--run-id ID` | Output directory name (default `pb-YYYYmmdd-HHMMSS`) |
+| `--timeout SEC` | Agent timeout (default 5 400) |
+| `--max-turns N` | Codape turn limit (default 400) |
+| `--cpus N` | Container CPU limit, also passed to the evaluator (default 8) |
+| `--memory SIZE` | Container memory limit (default `8g`) |
+| `--model ID` | Model passed to Codape |
+| `--keep-container` | Leave the task container for debugging |
+| `--dry-run` | Print the instance, image, proxy policy, and output path |
+
 ## Outputs
 
 SWE-bench, under `target/external-benchmarks/swebench/<run-id>/`:
@@ -261,33 +344,42 @@ stream-json transcript written to the host-mounted `/installed-agent` directory)
 and aggregate `results.json` (accuracy, resolved/unresolved IDs, failure
 modes). `target/` is gitignored.
 
+ProgramBench, under
+`target/external-benchmarks/programbench/<run-id>/<instance-id>/`:
+`codape-stream.jsonl`, `submission.tar.gz`, `eval.log`, the official
+`<instance>.eval.json`, and the evaluator's build/test artifacts. `target/` is
+gitignored.
+
 ## Cost, contamination, and interpretation
 
-- **Architecture.** SWE-bench pins its official images to `linux/amd64`, so the
-  x86_64 Codape release always matches (under emulation on Apple Silicon).
-  Terminal-Bench builds task images for the host architecture. On an arm64 Mac
-  those are `linux/arm64`, and Codape has no published aarch64 Linux release
-  yet: use an x86_64 host, or build Codape for aarch64 and pass it with
-  `--codape-binary`. The runner warns about this in `--dry-run`, and the
-  installer fails with the same explanation instead of an exec-format error.
+- **Architecture.** SWE-bench pins its official images to `linux/amd64`, and
+  ProgramBench's cleanroom images are also `linux/amd64`, so the x86_64 Codape
+  release matches (under emulation on Apple Silicon). Terminal-Bench builds
+  task images for the host architecture. On an arm64 Mac those are
+  `linux/arm64`, and Codape has no published aarch64 Linux release yet: use an
+  x86_64 host, or build Codape for aarch64 and pass it with `--codape-binary`.
+  The runner warns about this in `--dry-run`, and the installer fails with the
+  same explanation instead of an exec-format error.
 - **Cost.** SWE-bench images commonly occupy 1–5 GB each; a 20-instance run can
   pull tens of gigabytes before evaluation containers start. Model calls are
   paid and unbounded by default: bound them with `--max-turns` and `--timeout`,
   and use a cheap model for plumbing checks. Terminal-Bench builds an image per
   task and also needs network inside the container to download Codape.
+  ProgramBench pulls a multi-gigabyte cleanroom image (4.19 GB for `cmatrix`)
+  and its evaluator may build additional test images.
 - **Token/cost reporting.** Codape 0.2.0 exits 0 and emits a `result` frame but
-  does **not** populate `usage` or `total_cost_usd` in headless stream-json. Both
-  runners therefore print `tokens/cost: unavailable` and `summary.json` records
-  `null`; they do not invent numbers. The parsers already read those fields if a
-  future Codape release emits them. Estimate spend from the provider's billing
-  dashboard.
-- **Contamination.** Both benchmarks are public. Their instructions and, for
-  SWE-bench, the reference patches are on the internet and may be present in
-  model training data. SWE-bench Verified is human-validated and Terminal-Bench
-  tasks are recent, but neither proves the model has not seen the task. The
-  SWE-bench prompt tells the agent not to look up the issue online; a model can
-  still reproduce a memorized fix. Treat scores as upper bounds on
-  generalization.
+  does **not** populate `usage` or `total_cost_usd` in headless stream-json. The
+  runners therefore print `tokens/cost: unavailable`, and where a
+  `summary.json` exists it records `null`; they do not invent numbers. The
+  parsers already read those fields if a future Codape release emits them.
+  Estimate spend from the provider's billing dashboard.
+- **Contamination.** All three benchmarks are public. Their instructions and,
+  for SWE-bench, the reference patches are on the internet and may be present
+  in model training data. SWE-bench Verified is human-validated and
+  Terminal-Bench tasks are recent, but neither proves the model has not seen the
+  task. ProgramBench's rule against looking up the program is enforced by the
+  network allowlist in the runner, not only by the prompt. A model can still
+  reproduce a memorized fix. Treat scores as upper bounds on generalization.
 - **Subset scores.** A 1-instance result is 0 or 1; a 3-instance result is only
   slightly less coarse. Both validate the pipeline, not capability. Report the
   instance IDs and run ID with any number.

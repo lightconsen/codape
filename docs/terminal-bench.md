@@ -2320,26 +2320,98 @@ numbers cannot be attributed to the agents; the call-position and
 deadline-behavior differences are visible in every run of each agent, and
 those are what the two mechanisms change.
 
+### 2026-11-10 — ten-task revalidation on Linux x86_64, **5/10 resolved**
+
+Ten tasks were rerun once each on Codape v0.2.0
+(`x86_64-unknown-linux-musl`), model `deepseek-v4.1-flash`, against the
+`0.1.1-analysis` dataset: the three tasks that had never passed
+(`extract-moves-from-video`, `play-zork`, `qemu-startup`) and seven that had
+passed in at least one earlier run (`hello-world`, `fix-permissions`,
+`processing-pipeline`, `fibonacci-server`, `sqlite-with-gcov`,
+`swe-bench-fsspec`, `pytorch-model-cli.easy`). Budgets were 900 s for the
+first five, 1 800 s for the next four, and 3 600 s for `play-zork`.
+
+| Task | Resolved | `failure_mode` | Agent / test | Verdict |
+|---|---|---|---|---|
+| `hello-world` | ✅ | unset | 11 s / 5 s | 2/2 passed |
+| `fix-permissions` | ✅ | unset | 32 s / 13 s | 1/1 passed |
+| `processing-pipeline` | ✅ | unset | 266 s / 10 s | 9/9 passed |
+| `fibonacci-server` | ✅ | unset | 155 s / 13 s | 6/6 passed |
+| `sqlite-with-gcov` | ❌ | agent_timeout | 902 s / 16 s | 0/3; killed before building |
+| `swe-bench-fsspec` | — | test_timeout | 292 s / 900 s | not scored; test patch prompted |
+| `pytorch-model-cli.easy` | ❌ | unset | 400 s / 135 s | 5/6; wrong input scaling |
+| `extract-moves-from-video` | ❌ | agent_timeout | 1 802 s / 36 s | 0/2; no video |
+| `qemu-startup` | ✅ | unset | 826 s / 5 s | **first pass** |
+| `play-zork` | ❌ | unset | 3 422 s / 8 s | 0/2; not finished |
+
+`qemu-startup` is the substantive gain: the analysis fixture now builds, the
+provider transport error that ended the 2026-11-06 trial did not recur, and the
+agent reached the target in 826 s. The other nine split into four reproduced
+passes and five failures of three different kinds.
+
+**`sqlite-with-gcov` is a budget artifact, not a task verdict.** The agent used
+the whole 900 s in repeated apt version probing and was killed with no
+`sqlite3` built; the test then failed all three assertions on a missing binary.
+The task passed 3/3 in the fourth batch, so it is solvable; this trial says the
+agent chose a slow package path, not that it cannot build SQLite. A rerun with
+a larger budget is the only way to separate those.
+
+**`swe-bench-fsspec` was not scored.** The agent finished in 292 s with the
+right fix — `DirFileSystem.open_async()` delegates to the wrapped filesystem,
+mirroring `open()` — and reported 134 local tests passing. But it also added
+`test_open_async` to `fsspec/implementations/tests/test_dirfs.py`, the same file
+the official test patch modifies. The test phase then ran the patch in a PTY:
+
+```
+patching file fsspec/implementations/tests/test_dirfs.py
+Reversed (or previously applied) patch detected!  Assume -R? [n] EOF
+Apply anyway? [n]
+```
+
+`patch` waited for an answer until the 900 s test timeout. The agent's source
+change is plausible; the trial has no test verdict. This is the patch-hygiene
+failure mode already recorded for pytest-6202, now severe enough to consume the
+whole test budget.
+
+**`pytorch-model-cli.easy` is a clean model result.** The agent extracted the
+weights correctly but replaced the documented `p/255` scaling with
+`[-1,1]` because that scored 92.1 % on MNIST against 65.9 % for raw pixels. The
+test's expected classes are the reference's `x/255` predictions, including its
+mistakes; 15 of the first 50 images then differed (image 0 predicted 7,
+expected 2, and so on). The task text explicitly states `p/255` with no
+normalization. This is instruction adherence, not coding ability.
+
+**`extract-moves-from-video` and `play-zork` failed the same way as before.**
+The first never obtained the video (bot check / network lottery) and timed out.
+The second used 3 422 s, reached 179/350, and wrote `/app/answer.txt` from the
+game's source text rather than completing the run; the test requires the
+bridge message and a 350-point score. Neither is a new class of failure.
+
+This is one attempt per task, while the scoreboard below is best-of-runs. The
+three formerly passing tasks that failed here do not change the best-of-runs
+score, but they do show that a single pass is not a reliable pass — the same
+lesson the five-task batch recorded earlier. Including `qemu-startup`, the
+best-of-runs total is now **73/75**.
+
 ### Scoreboard so far
 
-75 distinct tasks attempted (94 % of the 80 in the dataset), 72 resolved
-(96 % of those attempted), 3 unresolved. Scored by distinct task, taking the
+75 distinct tasks attempted (94 % of the 80 in the dataset), 73 resolved
+(97 % of those attempted), 2 unresolved. Scored by distinct task, taking the
 best result where a task ran more than once — several did, to re-check a fix
 and because the same task ran on more than one model. The 2026-11-04 campaign
-reran all 31 that had never passed, and 27 of them now pass. Four of the six
-that remained at the 2026-11-05 rerun have since passed: `security-vulhub-minio`
-on the prompt/tool-description fix (3/3), `run-pdp11-code` by writing
-`/app/out.txt` inside a 9 000 s budget, `solana-data` once the shell's
-background jobs outlived the call (1 of 2 reruns, 5/5), and `train-fasttext`
-once the hold-out matched the test's format and the model was written before
-the timer (1 of 3 Codape attempts since 2026-11-05; Claude Code also passed
-it). The three that still do not:
+reran all 31 that had never passed, and 27 of them passed then. Other previously
+unresolved tasks have since passed: `security-vulhub-minio` on the
+prompt/tool-description fix (3/3), `run-pdp11-code` by writing `/app/out.txt`
+inside a 9 000 s budget, `solana-data` once the shell's background jobs outlived
+the call (1 of 2 reruns, 5/5), `train-fasttext` once the hold-out matched the
+test's format and the model was written before the timer (1 of 3 Codape
+attempts since 2026-11-05; Claude Code also passed it), and `qemu-startup` on
+2026-11-10 (above). The two that still do not:
 
 | Task | Why it still fails |
 |---|---|
 | `extract-moves-from-video` | YouTube answers a bot check, and the route past it is intermittent: `yt-dlp` tried 308 proxies on 2026-11-05 and every one returned `LOGIN_REQUIRED`. On 2026-11-06, `dev-extract-8` (900 s) got through a local Tor SOCKS port, downloaded the video, OCR'd it and wrote `/app/solution.txt`; existence passed and similarity was 52.22 % against 90 % (343 lines vs the reference's 276, with duplicated on-screen lines and OCR noise). `dev-extract-10` (1 500 s) had its Tor circuit refused and produced only an honest status report. Ten runs, none resolved; the remaining gap is transcription quality plus a network lottery that alone can exceed the task's 360 s budget |
-| `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written |
-| `qemu-startup` | the 2026-11-06 retry produced the task's first trial — the analysis fixture builds — but the agent stopped after 7 turns and 452 s on a provider transport error (`error sending request for url (https://opencode.ai/...)`); the test's `expect` never got a telnet session (`spawn id exp5 not open`), so `/tmp/data.txt` was never written and `test_version` failed. Unresolved on the provider, not the fixture |
+| `play-zork` | the 2026-11-05 run on the defect-14 fix passed five compaction boundaries and continued, so the retry bug is gone — but it still used the full 3 600 s (239 turns, 224 `Bash` calls) building probes, save states and a room map, reached 174/350 at move 415, and was at the Entrance to Hades when the timer fired; `/app/answer.txt` was never written. The 2026-11-10 rerun repeated the shape at 179/350 and filled the file from the game's source rather than from a completed run |
 
 The five never run: `eval-mteb`, `eval-mteb.hard`, `fix-git`, `oom`,
 `super-benchmark-upet`. Most need a dataset download, a multi-GB model, or a
@@ -2347,7 +2419,7 @@ prebuilt third-party image, and `fix-git`'s fixture is gone from GitHub (the
 repository now answers 404). `qemu-startup` used to be on this list because
 the pristine image pins a qemu package withdrawn from bullseye; the analysis
 copy's Dockerfile patch (`bookworm-slim`, `netcat-openbsd`) fixes that, and it
-now has a trial (above).
+now has a resolved trial (above).
 
 An attempt to run them on 2026-11-04 produced no trials: `eval-mteb`,
 `eval-mteb.hard`, `fix-git`, `oom` and `qemu-startup` all failed at
