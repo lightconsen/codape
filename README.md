@@ -192,6 +192,7 @@ cargo clippy --workspace -- -D warnings
 - [Core Engine](docs/core.md)
 - [Tools](docs/tools.md)
 - [Commands](docs/commands.md)
+- [Benchmarks](docs/benchmark.md)
 - [Telemetry and privacy](docs/telemetry.md)
 
 ## License
