@@ -8,9 +8,9 @@ and which ones would need a new runner before a score means anything.
 The short version: **Terminal-Bench is the only benchmark with a full recorded
 score** (72 of 75 attempted tasks resolved — see
 [terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
-and has two small recorded subsets (see
-[SWE-bench run history](#swe-bench-run-history)), but no Verified score yet.
-Everything else below needs work first.
+and has several small recorded subsets, including one C instance from
+Multilingual (see [SWE-bench run history](#swe-bench-run-history)), but no
+Verified score yet. Everything else below needs work first.
 
 ## What runs today
 
@@ -19,7 +19,7 @@ Everything else below needs work first.
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — [terminal-bench.md](terminal-bench.md) |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subset only — 3/3 (`verified-3repo-20261110-112457`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | No |
-| [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | No — alias and validation ready; a one-instance smoke run is in progress |
+| [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
 The first four are research instruments: Docker, network, paid model tokens,
@@ -105,16 +105,32 @@ test patch still applied and the instance resolved, but patch hygiene is a
 failure mode to watch when the subset gets larger. The flask and pylint patches
 contain only source changes.
 
+### 2026-11-10 — Multilingual pipeline check, 1 instance (1/1 resolved)
+
+- run-id: `multilingual-jq2235-20261110-123314`
+- instance: `jqlang__jq-2235` (C; `parse_log_jq`)
+- model: `deepseek-v4.1-flash` through the same gateway
+- result: **1/1 resolved**; `error_instances: 0`, `empty_patches: 0`
+- timings: generation 740.6 s, evaluation 41.4 s, total 781.9 s
+- patch: 1 679 bytes in `src/main.c`, adding `--raw-output0` option handling
+  and rejecting NUL bytes in raw output
+
+This is the first end-to-end non-Python run. It exercises the data-driven path
+— the row's `eval_script` and `log_parser`, the official `make_test_spec`, and
+the container image — on a C repository. It is not a Multilingual score: one
+instance is 0 or 100 %, and the issue is public.
+
 What these runs do **not** establish:
 
-- A Verified pass@1. Three hand-picked instances are a smoke test; the 95 %
-  Wilson interval on 3/3 starts around 0.44.
-- Contamination resistance. All three issues are public, so their fixes may be
-  in the model's training data.
+- A Verified or Multilingual pass@1. The hand-picked instances are smoke
+  tests; the 95 % Wilson interval on 3/3 starts around 0.44, and one resolved C
+  instance says nothing about the other eight languages.
+- Contamination resistance. All selected issues are public, so their fixes may
+  be in the model's training data.
 - Scale. The 12-repository subset needs an estimated 40–60 GB of image storage
-  and was not attempted here; the full 500-instance set was not attempted
-  either. The runner generates instances serially, so a full set is a
-  multi-day job on one machine.
+  and was not attempted here; neither the full 500-instance Verified set nor
+  the full 300-instance Multilingual set was attempted. The runner generates
+  instances serially, so a full set is a multi-day job on one machine.
 
 ## SWE-bench variants: an alias, not a runner
 
@@ -130,7 +146,7 @@ additionally needs browser plumbing.
 | Variant | Size | Notes | Work needed |
 |---|---|---|---|
 | Full | 2 294 | The original test split, 12 Python repositories. Superseded by Verified for headline numbers. | Alias only |
-| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 41 repositories in the pinned revision, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias added; no runner-side non-Python spec table is needed (see below). End-to-end run pending |
+| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 41 repositories in the pinned revision, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias added; no runner-side non-Python spec table is needed (see below). One-instance pipeline check 1/1 (`multilingual-jq2235-20261110-123314`); no score |
 | [Multimodal v2](https://www.swebench.com/multimodal.html) | 480 (v2 removed flaky/ungradeable tests from the original 517) | Issues contain screenshots, mockups, and diagrams; graded in a browser-driven environment. | Alias plus image/browser setup; Codape reads images, but the container plumbing is new work |
 
 Multilingual is the variant with the most information per unit of effort for

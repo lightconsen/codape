@@ -330,8 +330,12 @@ tools for release notes and research; keep them out of required checks.
   `log_parser` values it uses are all in the harness's `PARSER_REGISTRY`, and
   `validate_instances` passes for Verified (500), Lite (300), and Multilingual
   (300). `--dataset multilingual --dry-run --limit 1` prints the nine
-  languages. A one-instance smoke run (`jqlang__jq-2235`) is in progress; its
-  result will be recorded in `docs/benchmark.md`.
+  languages.
+- The one-instance Multilingual pipeline check `jqlang__jq-2235` (C,
+  `parse_log_jq`) resolved 1/1 on 2026-11-10:
+  `multilingual-jq2235-20261110-123314`, generation 740.6 s, evaluation
+  41.4 s. This tests the data-driven multilingual path, not the other eight
+  languages.
 - The Terminal-Bench adapter was imported and instantiated against the real
   `terminal-bench==0.2.18` package: factory import, Jinja setup rendering for
   both release and local-binary modes, command construction, env quoting, and
@@ -349,5 +353,5 @@ tools for release notes and research; keep them out of required checks.
   [`docs/benchmark.md`](../../docs/benchmark.md#swe-bench-run-history).
 
 Not verified: the 12-repository subset (an estimated 40–60 GB of images), the
-full 500-instance Verified set, or an end-to-end Multilingual instance. The runs
-above are named pipeline checks, not capability scores.
+full 500-instance Verified set, or the full 300-instance Multilingual set. The
+runs above are named pipeline checks, not capability scores.
