@@ -8,17 +8,17 @@ and which ones would need a new runner before a score means anything.
 The short version: **Terminal-Bench is the only benchmark with a full recorded
 score** (72 of 75 attempted tasks resolved — see
 [terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
-and has several small recorded subsets, including one C instance from
-Multilingual (see [SWE-bench run history](#swe-bench-run-history)), but no
-Verified score yet. Everything else below needs work first.
+on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
+each (see [SWE-bench run history](#swe-bench-run-history)), but no sampled
+Verified or Multilingual score yet. Everything else below needs work first.
 
 ## What runs today
 
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — [terminal-bench.md](terminal-bench.md) |
-| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subset only — 3/3 (`verified-3repo-20261110-112457`); see [run history](#swe-bench-run-history) |
-| [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | No |
+| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subsets only — 3/3 (`verified-3repo-20261110-112457`), 2/3 (`verified-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
+| [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
@@ -27,7 +27,7 @@ hours of wall clock. They are manual tools for release notes, deliberately kept
 out of required checks — the reasoning is in
 [`scripts/external-benchmarks/README.md`](../scripts/external-benchmarks/README.md#why-this-is-not-in-ci).
 
-The fourth is different in kind. `scripts/test-code-agent-benchmark.sh` replays
+The fifth is different in kind. `scripts/test-code-agent-benchmark.sh` replays
 recorded LLM cassettes against fixture projects and asserts on the resulting
 file changes, so it is deterministic, key-free, and runs in CI. It measures the
 harness (does a turn edit the right file, does review-only leave sources alone,
@@ -63,9 +63,9 @@ worth quoting.
 
 ## SWE-bench run history
 
-The runner is exercised end-to-end, but only on named subsets. Neither entry
-below is a SWE-bench Verified score: both were chosen by hand from the
-12-repository list, not sampled at random, and the issues are public.
+The runner is exercised end-to-end, but only on named subsets. None of the
+entries below is a SWE-bench Verified or Lite score: each instance was chosen by
+hand rather than sampled, and the issues are public.
 
 ### 2026-11-10 — pipeline check, 1 instance (1/1 resolved)
 
@@ -105,6 +105,60 @@ test patch still applied and the instance resolved, but patch hygiene is a
 failure mode to watch when the subset gets larger. The flask and pylint patches
 contain only source changes.
 
+### 2026-11-10 — Verified batch 1 (2/3 resolved)
+
+- run-id: `verified-batch1-20261110-122725`
+- instances: `django__django-14007`, `astropy__astropy-14369`,
+  `mwaskom__seaborn-3187`
+- model: `deepseek-v4.1-flash` through the same gateway
+- result: **2/3 resolved**; `resolved_ids` are django-14007 and seaborn-3187;
+  `error_instances: 0`, `empty_patches: 0`
+- timings: generation 1 599.8 s, evaluation 67.2 s, total 1 667.0 s
+
+| Instance | Agent time | Patch bytes | Agent outcome |
+|---|---|---|---|
+| `django__django-14007` | 230.2 s | 2 008 | `success` |
+| `astropy__astropy-14369` | 271.8 s | 13 727 | `success` |
+| `mwaskom__seaborn-3187` | 860.5 s | 1 668 | `success` |
+
+Astropy is the unresolved instance: the agent's patch made two new
+`test_cds_grammar` cases pass, but `test_cds_grammar_fail[km/s.Mpc-1]` still
+reports `DID NOT RAISE <class 'ValueError'>`, and PASS_TO_PASS
+`test_cds_grammar_fail[/s.Mpc]` fails the same way. That is a genuine agent
+failure, not infrastructure.
+
+### 2026-11-10 — Lite batch 1 (2/3 resolved)
+
+- run-id: `lite-batch1-20261110-122725`
+- instances: `psf__requests-1963`, `pylint-dev__pylint-5859`,
+  `pytest-dev__pytest-11143`
+- model: `deepseek-v4.1-flash` through the same gateway
+- result: **2/3 resolved**; `resolved_ids` are pylint-5859 and pytest-11143;
+  `error_instances: 0`, `empty_patches: 0`
+- timings: generation 567.3 s, evaluation 65.1 s, total 632.4 s
+
+| Instance | Agent time | Patch bytes | Agent outcome |
+|---|---|---|---|
+| `psf__requests-1963` | 270.1 s | 13 544 | `success` |
+| `pylint-dev__pylint-5859` | 95.9 s | 298 944 | `success` |
+| `pytest-dev__pytest-11143` | 37.2 s | 69 266 | `success` |
+
+Requests is the unresolved instance: all seven FAIL_TO_PASS tests passed, but
+two PASS_TO_PASS tests failed with
+`ssl.SSLCertVerificationError: CERTIFICATE_VERIFY_FAILED: unable to get local
+issuer certificate` against live external HTTPS endpoints. The official report
+counts that as unresolved regardless of cause; whether the pinned image's CA
+bundle or the network path is at fault was not established. A retry of the same
+instance should be the next check before treating it as an agent regression.
+
+The pylint and pytest patch sizes are mostly noise: those images check out
+files as executable, and the runner's `git add -A` staged thousands of
+`old mode 100644 / new mode 100755` entries around a single content hunk (2 064
+entries for pylint, 577 for pytest). The content hunk is what the harness
+graded, and the test patch still applied. The fix — running `git add` with
+`core.fileMode=false` as well as the diff — is in the runner but postdates
+these patches, so new runs should produce small patches.
+
 ### 2026-11-10 — Multilingual pipeline check, 1 instance (1/1 resolved)
 
 - run-id: `multilingual-jq2235-20261110-123314`
@@ -122,9 +176,9 @@ instance is 0 or 100 %, and the issue is public.
 
 What these runs do **not** establish:
 
-- A Verified or Multilingual pass@1. The hand-picked instances are smoke
-  tests; the 95 % Wilson interval on 3/3 starts around 0.44, and one resolved C
-  instance says nothing about the other eight languages.
+- A Verified, Lite, or Multilingual pass@1. The hand-picked instances are smoke
+  tests; the 95 % Wilson lower bound is about 0.44 for 3/3 and 0.21 for 2/3, and
+  one resolved C instance says nothing about the other eight languages.
 - Contamination resistance. All selected issues are public, so their fixes may
   be in the model's training data.
 - Scale. The 12-repository subset needs an estimated 40–60 GB of image storage

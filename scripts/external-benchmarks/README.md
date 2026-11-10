@@ -148,10 +148,13 @@ For each selected instance the runner:
    `codape -p --dangerously-skip-permissions --no-session-persistence
    --no-telemetry --output-format stream-json --max-turns N`, bounded by
    `timeout`.
-5. Extracts the patch with `git add -A` and
+5. Extracts the patch with `git -c core.fileMode=false add -A` and
    `git diff --cached --binary <base_commit>`, so untracked files appear as
    additions, binary changes are included, and commits the agent might make are
-   still captured. `.codape` state is removed first.
+   still captured. `.codape` state is removed first. The `core.fileMode=false`
+   on the add matters: several SWE-bench images check out every file as
+   executable, and staging that bit alone turns a one-hunk fix into thousands of
+   mode-only entries.
 6. Appends a prediction line with `instance_id`, `model_name_or_path`, and
    `model_patch` to the predictions JSONL.
 7. Runs `swebench.harness.run_evaluation` with the pinned local Parquet, the
@@ -321,7 +324,9 @@ tools for release notes and research; keep them out of required checks.
   containing `=`).
 - Pure helpers: deterministic subset selection, prompt construction, predictions
   parsing, report lookup, usage/result-frame parsing, patch extraction
-  (untracked, binary, and agent-committed changes all captured and applicable).
+  (untracked, binary, and agent-committed changes all captured and applicable;
+  `core.fileMode=false` also keeps executable-bit-only changes out of the
+  patch).
 - The official `swebench==5.0.2` loader and `make_test_spec` were run against
   the pinned Verified Parquet, and the official predictions loader accepted this
   runner's JSONL. `--limit 1` on that revision selects
@@ -347,11 +352,21 @@ tools for release notes and research; keep them out of required checks.
 - End-to-end SWE-bench generation and official grading on Linux against the
   pinned images: `psf__requests-1142` on its own (1/1 resolved) and the
   three-repository subset `pallets__flask-5014`, `pytest-dev__pytest-6202`,
-  `pylint-dev__pylint-6528` (3/3 resolved), both on 2026-11-10. Run IDs,
-  timings, patch sizes, and the reasons these are pipeline checks rather than a
-  Verified score are recorded in
+  `pylint-dev__pylint-6528` (3/3 resolved), both on 2026-11-10.
+- The named batches on the same date: Verified
+  `django__django-14007`, `astropy__astropy-14369`, `mwaskom__seaborn-3187`
+  (2/3 resolved; `verified-batch1-20261110-122725`), and Lite
+  `psf__requests-1963`, `pylint-dev__pylint-5859`,
+  `pytest-dev__pytest-11143` (2/3 resolved;
+  `lite-batch1-20261110-122725`). The unresolved astropy instance failed its
+  own FAIL_TO_PASS/PASS_TO_PASS cases; the unresolved requests instance passed
+  all seven FAIL_TO_PASS cases but two PASS_TO_PASS cases hit
+  `CERTIFICATE_VERIFY_FAILED` on live HTTPS endpoints. Neither batch had empty
+  patches or error instances. Run IDs, timings, patch sizes, and the reasons
+  these are pipeline checks rather than scores are recorded in
   [`docs/benchmark.md`](../../docs/benchmark.md#swe-bench-run-history).
 
 Not verified: the 12-repository subset (an estimated 40–60 GB of images), the
-full 500-instance Verified set, or the full 300-instance Multilingual set. The
-runs above are named pipeline checks, not capability scores.
+full 500-instance Verified set, the full 300-instance Lite set, or the full
+300-instance Multilingual set. The runs above are named pipeline checks, not
+capability scores.
