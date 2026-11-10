@@ -11,11 +11,12 @@ score** (73 of 75 attempted tasks resolved — see
 times on 2026-11-10 to measure repeatability: 6/8 in each repeat, 18/24 (75 %)
 overall. SWE-bench's runner now runs end-to-end
 on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
-each and a 24-instance repository-stratified Verified sample on 2026-11-10
-(**21/24**, one instance blocked by the evaluation container's TLS setup — see
-[SWE-bench run history](#swe-bench-run-history)). Multilingual still has no
-sampled score. ProgramBench has a runner and one solved
-instance, but a single instance is a pipeline check, not a benchmark score.
+each, a 24-instance repository-stratified Verified sample on 2026-11-10
+(**21/24**, one instance blocked by the evaluation container's TLS setup), and a
+12-instance, nine-language Multilingual sample on 2026-11-11 (**9/12**) — see
+[SWE-bench run history](#swe-bench-run-history). ProgramBench has a runner and
+one solved instance, but a single instance is a pipeline check, not a benchmark
+score.
 Everything else below needs work first.
 
 ## What runs today
@@ -25,7 +26,7 @@ Everything else below needs work first.
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; 2026-11-10 revalidation 5/10; eight-task reliability, three repeats: **6/8, 6/8, 6/8** — [terminal-bench.md](terminal-bench.md) |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Sample — **21/24** on a 24-instance, 12-repository stratified subset (`swe-verified-24-20261110-b1..b6`); earlier hand-picked subsets 3/3, 2/3; see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
-| [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
+| [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Sample — **9/12** on a 12-instance, 9-language stratified subset (`swe-multilingual-12-20261110-b1..b3`); earlier pipeline check 1/1; see [run history](#swe-bench-run-history) |
 | [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | 1/1 solved (`pb-cmatrix-20261110-r2`) — one instance, not a benchmark score; see [run history](#programbench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
@@ -285,14 +286,83 @@ The gold-patch re-grade is worth repeating whenever a miss looks suspicious:
 it costs one image pull and one evaluation, and it distinguishes a model error
 from a broken evaluation environment without spending model tokens.
 
+### 2026-11-11 — Multilingual sample, 12 instances across 9 languages (**9/12 resolved**)
+
+- run-ids: `swe-multilingual-12-20261110-b1` … `-b3` (three batches of four)
+- sample: 12 instances, at least one per language and four Ruby instances
+  (`faker` ×2, `fastlane` ×2); the exact IDs are in each batch's
+  `predictions.jsonl` under `target/external-benchmarks/swebench/`
+- dataset: `SWE-bench/SWE-bench_Multilingual` @ `846e647b9f33c0b51b739d005d13d85493c9af09`
+- model and protocol: identical to the Verified sample — 1 800 s agent timeout,
+  300 turns, two official-harness workers, each batch's images deleted after
+  grading
+- result: **9/12 resolved (75 %)**; `error_instances: 0`,
+  `empty_patches: 0`, `infra_failure_instances: 0`; 95 % Wilson interval
+  [0.47, 0.91]
+- timings: generation 5 175 s (1.4 h), evaluation 315 s; per batch 42.2, 21.6
+  and 27.7 minutes
+
+| Language | Resolved | Instances |
+|---|---|---|
+| C | 1/1 | `redis__redis-11734` |
+| C++ | 0/1 | `fmtlib__fmt-3750` ❌ |
+| Go | 0/1 | `caddyserver__caddy-6411` ❌ |
+| Java | 1/1 | `apache__lucene-12626` |
+| JavaScript/TypeScript | 1/1 | `babel__babel-16130` |
+| PHP | 1/1 | `laravel__framework-51195` |
+| Python | 1/1 | `micropython__micropython-13039` |
+| Ruby | 3/4 | `faker-ruby__faker-2705`, `faker-ruby__faker-2970`, `fastlane__fastlane-19765` ✅; `fastlane__fastlane-19207` ❌ |
+| Rust | 1/1 | `astral-sh__ruff-15443` |
+
+Except for micropython, every patch was a small source diff between 526 bytes
+(`faker-2970`) and 4 320 bytes (`babel-16130`). The three misses are all
+interpretation errors on top of a plausible-looking change:
+
+**`caddyserver__caddy-6411` (Go) — trimmed every trailing newline instead of
+one.** The model replaced `return string(body), true` in `fileReplacementProvider`
+with `strings.TrimRight(string(body), "\r\n")`, so a file ending in `foo\n\n`
+becomes `foo`. The upstream change removes exactly one `\n` and then at most one
+`\r` (`bytes.TrimSuffix` twice). The FAIL_TO_PASS test reads a fixture named
+`foo_with_multiple_trailing_newlines.txt`, expects `"foo\n"`, and got `"foo"`.
+All PASS_TO_PASS tests still passed; the change was simply too aggressive.
+
+**`fmtlib__fmt-3750` (C++) — reversed the issue's direction.** The model gated
+`loc_writer`'s integer path on `specs.type == none || dec`, i.e. it restricted
+localization to decimal. The issue asks for the opposite: grouping in hex,
+binary and octal under the `L` specifier. `format_test.format_locale` expects
+`"7,5bc,d15"` for `{:Lx}`, a grouped `{:#Lb}`, and `"    30,071"` for
+`{:10Lo}`; the patch produces the ungrouped `"75bcd15"`, `"-0b111010..."`
+and `"     30071"`. The tests that already passed — `format_int_locale`,
+`format_facet_grouping` — kept passing, which is probably why the agent
+concluded it was done.
+
+**`fastlane__fastlane-19207` (Ruby) — changed the calling convention instead of
+escaping the argument.** `zip_command` returns an array of arguments. The
+upstream fix shellescapes `output_path` and `basename` inside that array and
+leaves `Actions.sh(zip_command)` as it was; the model instead splatted the array
+into `Actions.sh(*zip_command)`. Every spec asserts
+`expect(Fastlane::Actions).to receive(:sh).with([...])` — a single array
+argument — so the new shell-escape FAIL_TO_PASS test still fails (nothing was
+escaped) and six PASS_TO_PASS tests regress on the arity change alone. The patch
+also adds a stray `zip-action-fix.patch` copy of itself to the repository.
+
+**`micropython__micropython-13039` is a patch-hygiene warning, not a code
+result.** It resolved, but with a 9.4 MB, 688-file patch: 686 paths under
+`.venv/` and a built binary `tests/unix/ffi_lib.so`. The actual fix is one line
+in `py/objslice.c` (`mp_obj_int_get_checked` → `mp_obj_get_int`). The harness
+applied and graded it correctly, but a patch that sweeps a virtualenv into the
+diff would be rejected by most review processes; the runner should probably
+filter ignored paths before writing `predictions.jsonl`.
+
 What these runs do **not** establish:
 
-- A leaderboard-comparable Verified pass@1. The 24-instance sample above is
-  random and repository-stratified, but small — at 21/24 the 95 % Wilson
-  interval is [0.69, 0.96] — and it is one run of one model. Lite and
-  Multilingual still have no sampled score; the hand-picked instances are smoke
-  tests, and one resolved C instance says nothing about the other eight
-  Multilingual languages.
+- A leaderboard-comparable SWE-bench pass@1. Both samples are random but
+  small — 21/24, Wilson [0.69, 0.96] on Verified; 9/12, Wilson [0.47, 0.91] on
+  Multilingual — and each is one run of one model. Lite still has only a
+  three-instance hand-picked subset.
+- Per-language rates. The Multilingual sample has one instance for each
+  language except Ruby, so a row like "Go 0/1" records what happened once, not
+  how the agent does on Go.
 - Contamination resistance. All selected issues are public, so their fixes may
   be in the model's training data.
 - Scale. The full 500-instance Verified set and the 300-instance Lite and
@@ -314,7 +384,7 @@ additionally needs browser plumbing.
 | Variant | Size | Notes | Work needed |
 |---|---|---|---|
 | Full | 2 294 | The original test split, 12 Python repositories. Superseded by Verified for headline numbers. | Alias only |
-| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 41 repositories in the pinned revision, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias added; no runner-side non-Python spec table is needed (see below). One-instance pipeline check 1/1 (`multilingual-jq2235-20261110-123314`); no score |
+| [Multilingual](https://www.swebench.com/multilingual.html) | 300 tasks, 41 repositories in the pinned revision, 9 languages | C, C++, Go, Java, JS/TS, PHP, Ruby, Rust, Python. Tests Codape's shell/tooling in build systems it was not written against — a genuinely different measurement from the Python-only sets. | Alias added; no runner-side non-Python spec table is needed (see below). 12-instance, 9-language sample **9/12** (`swe-multilingual-12-20261110-b1..b3`); earlier pipeline check 1/1 |
 | [Multimodal v2](https://www.swebench.com/multimodal.html) | 480 (v2 removed flaky/ungradeable tests from the original 517) | Issues contain screenshots, mockups, and diagrams; graded in a browser-driven environment. | Alias plus image/browser setup; Codape reads images, but the container plumbing is new work |
 
 Multilingual is the variant with the most information per unit of effort for
