@@ -11,8 +11,10 @@ score** (73 of 75 attempted tasks resolved — see
 times on 2026-11-10 to measure repeatability: 6/8 in each repeat, 18/24 (75 %)
 overall. SWE-bench's runner now runs end-to-end
 on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
-each (see [SWE-bench run history](#swe-bench-run-history)), but no sampled
-Verified or Multilingual score yet. ProgramBench has a runner and one solved
+each and a 24-instance repository-stratified Verified sample on 2026-11-10
+(**21/24**, one instance blocked by the evaluation container's TLS setup — see
+[SWE-bench run history](#swe-bench-run-history)). Multilingual still has no
+sampled score. ProgramBench has a runner and one solved
 instance, but a single instance is a pipeline check, not a benchmark score.
 Everything else below needs work first.
 
@@ -21,7 +23,7 @@ Everything else below needs work first.
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
 | [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; 2026-11-10 revalidation 5/10; eight-task reliability, three repeats: **6/8, 6/8, 6/8** — [terminal-bench.md](terminal-bench.md) |
-| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subsets only — 3/3 (`verified-3repo-20261110-112457`), 2/3 (`verified-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
+| [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Sample — **21/24** on a 24-instance, 12-repository stratified subset (`swe-verified-24-20261110-b1..b6`); earlier hand-picked subsets 3/3, 2/3; see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
 | [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | 1/1 solved (`pb-cmatrix-20261110-r2`) — one instance, not a benchmark score; see [run history](#programbench-run-history) |
@@ -210,17 +212,93 @@ This is the first end-to-end non-Python run. It exercises the data-driven path
 the container image — on a C repository. It is not a Multilingual score: one
 instance is 0 or 100 %, and the issue is public.
 
+### 2026-11-10/11 — Verified sample, 24 instances across 12 repositories (**21/24 resolved**)
+
+- run-ids: `swe-verified-24-20261110-b1` … `-b6` (six batches of four)
+- sample: 24 instances drawn with seed `20261110`, stratified by repository —
+  two instances from each of ten repositories, three from `django`, one from
+  `flask`; the exact IDs are the keys of each batch's `predictions.jsonl`
+  under `target/external-benchmarks/swebench/`
+- dataset: `SWE-bench/SWE-bench_Verified` @ `78f471bf655a3137b2e8a75af1501690ec009ec3`
+- model: `deepseek-v4.1-flash` through the same gateway
+- protocol: 1 800 s agent timeout, 300 turns, two official-harness workers; each
+  batch's images deleted after grading to stay inside the host's 50 GB disk
+- result: **21/24 resolved (87.5 %)**; `error_instances: 0`,
+  `empty_patches: 0`, `infra_failure_instances: 0`; 95 % Wilson interval
+  [0.69, 0.96]
+- timings: generation 9 367 s (2.6 h), evaluation 475 s; per batch 21.6, 52.4,
+  17.8, 26.5, 18.4 and 27.4 minutes
+
+| Repository | Resolved | Instances |
+|---|---|---|
+| astropy | 2/2 | 14309, 8707 |
+| django | 3/3 | 11951, 14752, 15569 |
+| matplotlib | 2/2 | 25287, 26208 |
+| mwaskom (seaborn) | 1/2 | 3069 ✅, 3187 ❌ |
+| pallets (flask) | 1/1 | 5014 |
+| psf (requests) | 1/2 | 5414 ✅, 1921 ❌ |
+| pydata (xarray) | 1/2 | 4687 ✅, 6938 ❌ |
+| pylint-dev | 2/2 | 6903, 7277 |
+| pytest-dev | 2/2 | 5631, 7982 |
+| scikit-learn | 2/2 | 14983, 25973 |
+| sphinx-doc | 2/2 | 7889, 8551 |
+| sympy | 2/2 | 15017, 24539 |
+
+Every patch was a non-empty source diff; the shortest was 475 bytes
+(`pytest-7982`) and the longest 3 130 bytes (`seaborn-3069`). The three
+unresolved split into two genuine model misses and one environment defect.
+
+**`xarray__xarray-6938` — fixed at the wrong layer.** The model changed
+`Dataset.swap_dims()` to copy an `IndexVariable` before assigning `dims`. The
+graded test,
+`xarray/tests/test_variable.py::TestIndexVariable::test_to_index_variable_copy`,
+calls `IndexVariable.to_index_variable()` directly and asserts the result is a
+different object; the intended change is in `xarray/core/variable.py`. The
+symptom the issue described disappears through `swap_dims`, but the API
+contract the test checks does not. 1 of 431 tests failed; everything else
+passed.
+
+**`mwaskom__seaborn-3187` — a partial fix.** The model suppressed
+matplotlib's offset and scientific notation in
+`seaborn/_core/scales.py`, gated on `isinstance(formatter, ScalarFormatter)`.
+That covers the `Plot` path — `TestLegend::test_legend_has_no_offset` passed —
+but `relplot()` builds its legend through `seaborn/utils.py`, which the model
+did not touch, so
+`TestRelationalPlotter::test_legend_has_no_offset` still reads `2.5` where it
+expects a value above `1e7`. The upstream fix changes both files.
+
+**`psf__requests-1921` — the model's fix works; the container cannot grade
+it.** The model removed `None`-valued keys from the merged settings, and all
+six `FAIL_TO_PASS` tests passed, including the new
+`test_headers_on_session_with_None_are_not_sent`. The instance is still marked
+unresolved because two unrelated `PASS_TO_PASS` tests fail with
+`SSLError: CERTIFICATE_VERIFY_FAILED` against `httpbin.org`
+(`test_mixed_case_scheme_acceptable`, `test_pyopenssl_redirect`). To separate
+the patch from the environment, the dataset's own gold patch was re-graded
+through the official harness (`--eval-only`,
+`gold-requests-1921-20261111`): it also scores **0/1**, with the same three
+failures. The instance is therefore not scoreable in this container, and the
+agent-side result is 22 of the 23 scoreable instances (95.7 %, Wilson
+[0.79, 0.99]).
+
+The gold-patch re-grade is worth repeating whenever a miss looks suspicious:
+it costs one image pull and one evaluation, and it distinguishes a model error
+from a broken evaluation environment without spending model tokens.
+
 What these runs do **not** establish:
 
-- A Verified, Lite, or Multilingual pass@1. The hand-picked instances are smoke
-  tests; the 95 % Wilson lower bound is about 0.44 for 3/3 and 0.21 for 2/3, and
-  one resolved C instance says nothing about the other eight languages.
+- A leaderboard-comparable Verified pass@1. The 24-instance sample above is
+  random and repository-stratified, but small — at 21/24 the 95 % Wilson
+  interval is [0.69, 0.96] — and it is one run of one model. Lite and
+  Multilingual still have no sampled score; the hand-picked instances are smoke
+  tests, and one resolved C instance says nothing about the other eight
+  Multilingual languages.
 - Contamination resistance. All selected issues are public, so their fixes may
   be in the model's training data.
-- Scale. The 12-repository subset needs an estimated 40–60 GB of image storage
-  and was not attempted here; neither the full 500-instance Verified set nor
-  the full 300-instance Multilingual set was attempted. The runner generates
-  instances serially, so a full set is a multi-day job on one machine.
+- Scale. The full 500-instance Verified set and the 300-instance Lite and
+  Multilingual sets were not attempted. The runner generates instances
+  serially, images are 1–5 GB each, and this 50 GB host had to delete every
+  batch's images before pulling the next batch's.
 
 ## SWE-bench variants: an alias, not a runner
 
