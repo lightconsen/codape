@@ -152,14 +152,17 @@ CONTAINER_CONFIG_DIR = "/tmp/codape-config"
 # and `--binary` keeps binary changes applicable. Diffing the index against the
 # instance's base commit also captures changes even if the agent commits.
 #
-# `core.fileMode=false` must also be set on `git add`: some SWE-bench images
-# check out every file as executable, and staging that bit turns a one-hunk fix
-# into thousands of `old mode 100644 / new mode 100755` entries. Setting it on
-# the diff alone is not enough, because the mode change is already in the index
-# by then.
+# Some SWE-bench images check out every file as executable *and* leave the
+# index recording that mode, so a one-hunk fix becomes thousands of
+# `old mode 100644 / new mode 100755` entries. Reset the index to the base
+# commit (mixed reset: the worktree is untouched) before staging, and run both
+# the add and the diff with `core.fileMode=false`. Without the reset, the
+# executable bits are already in the index; without the add setting, staging
+# would put them back.
 PATCH_SCRIPT = r"""set -eu
 cd /testbed
 rm -rf .codape
+git reset -q __BASE__
 git -c core.fileMode=false add -A -- . 2>/dev/null || git -c core.fileMode=false add -A
 git -c core.fileMode=false -c core.quotepath=false diff --cached --no-ext-diff --binary __BASE__
 """
@@ -1081,7 +1084,7 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
         print(f"+ docker exec {container} sh -c '<seed {CONTAINER_CONFIG_DIR}/settings.json with telemetry_enabled=false>'")
         agent = agent_command(container, args.timeout, args.max_turns, args.codape_arg)
         print("+ " + " ".join(agent) + "   (issue text on stdin)")
-        print(f"+ docker exec -w {CONTAINER_WORKDIR} {container} sh -c '<git -c core.fileMode=false add -A; git diff --cached --binary INSTANCE_BASE_COMMIT>'")
+        print(f"+ docker exec -w {CONTAINER_WORKDIR} {container} sh -c '<git reset -q INSTANCE_BASE_COMMIT; git -c core.fileMode=false add -A; git diff --cached --binary INSTANCE_BASE_COMMIT>'")
         print(f"+ write one JSONL line to {predictions}: instance_id, model_name_or_path={args.model_name}, model_patch")
         if not args.keep_containers:
             print(f"+ docker rm -f {container}")

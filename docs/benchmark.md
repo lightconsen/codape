@@ -146,18 +146,26 @@ failure, not infrastructure.
 Requests is the unresolved instance: all seven FAIL_TO_PASS tests passed, but
 two PASS_TO_PASS tests failed with
 `ssl.SSLCertVerificationError: CERTIFICATE_VERIFY_FAILED: unable to get local
-issuer certificate` against live external HTTPS endpoints. The official report
-counts that as unresolved regardless of cause; whether the pinned image's CA
-bundle or the network path is at fault was not established. A retry of the same
-instance should be the next check before treating it as an agent regression.
+issuer certificate` against live external HTTPS endpoints. That is
+environmental, not an agent regression: a comment-only baseline patch
+(`lite-requests1963-comment-baseline-20261110-131751`, 308 bytes, no behavior
+change) reproduced exactly the same two PASS_TO_PASS failures, while failing
+only `test_requests_are_updated_each_time` among the FAIL_TO_PASS cases — the
+one the agent's patch fixed. The official harness still counts the instance as
+unresolved; grading it would require fixing the pinned image's trust store or
+the test's network path.
 
 The pylint and pytest patch sizes are mostly noise: those images check out
 files as executable, and the runner's `git add -A` staged thousands of
 `old mode 100644 / new mode 100755` entries around a single content hunk (2 064
 entries for pylint, 577 for pytest). The content hunk is what the harness
-graded, and the test patch still applied. The fix — running `git add` with
-`core.fileMode=false` as well as the diff — is in the runner but postdates
-these patches, so new runs should produce small patches.
+graded, and the test patch still applied. The fix is in the runner but postdates
+these patches: reset the index to the base commit (mixed reset, worktree
+untouched) and run both `git add` and `git diff` with `core.fileMode=false`.
+The reset is required because the image's index already records mode 755 — the
+requests image, for example, has 118 such entries before the agent runs. After
+the fix, a 308-byte comment-only change to that image extracted as a 308-byte
+patch with zero mode entries, so new runs should produce small patches.
 
 ### 2026-11-10 — Multilingual pipeline check, 1 instance (1/1 resolved)
 
