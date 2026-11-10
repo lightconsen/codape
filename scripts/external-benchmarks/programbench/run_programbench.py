@@ -531,14 +531,18 @@ def summarize_stream(path: Path) -> str:
             frames.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    for frame in reversed(frames):
-        if frame.get("type") == "result":
-            return (
-                f"result subtype={frame.get('subtype', '?')} "
-                f"is_error={frame.get('is_error', '?')} "
-                f"turns={frame.get('num_turns', '?')} "
-                f"duration_ms={frame.get('duration_ms', '?')}"
-            )
+    results = [frame for frame in frames if frame.get("type") == "result"]
+    if results:
+        # Codape emits one result frame per continuation segment; summing them
+        # is the only way to recover the whole run's turns and wall clock.
+        turns = sum(frame.get("num_turns") or 0 for frame in results)
+        duration = sum(frame.get("duration_ms") or 0 for frame in results)
+        last = results[-1]
+        return (
+            f"result frames={len(results)} subtype={last.get('subtype', '?')} "
+            f"is_error={any(frame.get('is_error') for frame in results)} "
+            f"turns={turns} duration_ms={duration}"
+        )
     if not frames:
         return f"no JSON frames; last line: {lines[-1][:400]}"
     last = frames[-1]

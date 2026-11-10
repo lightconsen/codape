@@ -10,8 +10,9 @@ score** (73 of 75 attempted tasks resolved — see
 [terminal-bench.md](terminal-bench.md)). SWE-bench's runner now runs end-to-end
 on Verified, Lite, and Multilingual, with small hand-picked subsets recorded for
 each (see [SWE-bench run history](#swe-bench-run-history)), but no sampled
-Verified or Multilingual score yet. ProgramBench has a runner and a single-task
-pipeline check, not a score. Everything else below needs work first.
+Verified or Multilingual score yet. ProgramBench has a runner and one solved
+instance, but a single instance is a pipeline check, not a benchmark score.
+Everything else below needs work first.
 
 ## What runs today
 
@@ -21,7 +22,7 @@ pipeline check, not a score. Everything else below needs work first.
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Subsets only — 3/3 (`verified-3repo-20261110-112457`), 2/3 (`verified-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Subset only — 1/1 (`multilingual-jq2235-20261110-123314`); see [run history](#swe-bench-run-history) |
-| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | Not scored — one-task pipeline check; see [run history](#programbench-run-history) |
+| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | 1/1 solved (`pb-cmatrix-20261110-r2`) — one instance, not a benchmark score; see [run history](#programbench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
 The first five are research instruments: Docker, network, paid model tokens,
@@ -284,29 +285,48 @@ One instance was selected by hand, `abishekvashok__cmatrix.5c082c6` (`cmatrix`,
 C, easy), because it builds with the cleanroom's stock gcc and does not need a
 downloaded model or dataset. It is a pipeline check, not a ProgramBench score.
 
-### 2026-11-10 — `cmatrix` pipeline check (rerun in progress)
+### 2026-11-10 — `cmatrix` pipeline check, **1/1 solved (official ✅)**
 
+- run-id: `pb-cmatrix-20261110-r2`
 - instance: `abishekvashok__cmatrix.5c082c6` (C, easy)
 - model: `deepseek-v4.1-flash` through an Anthropic-compatible gateway
 - image: `programbench/abishekvashok_1776_cmatrix.5c082c6:task_cleanroom_v6`
 - agent budget: 7 200 s, 500 turns, 4 CPUs, 8 GB
 - network: Docker internal network; only `opencode.ai:443` is reachable through
   the runner's CONNECT proxy
+- agent: 175 assistant turns, 160 `Bash` calls, about 69 minutes
+- submission: `src/cmatrix.c` (16 KB), `compile.sh`, probe scripts; built with
+  the cleanroom's gcc and ncurses
+- raw tests: 768/769
+- official: 506/506 scored tests, score 100, ✅ solved
 
-The first attempt, `pb-cmatrix-20261110`, did not produce a score. The runner
-started the task container with `sleep 2h`, the same duration as the agent
-budget; the container exited at the moment the agent timed out, so the
-workspace was gone before submission extraction and the official evaluator
-never ran. The stream shows the agent had written `cmatrix.c` and `compile.sh`,
-built them, and was still comparing behaviour at the two-hour mark (278 turns,
-248 `Bash` calls), so this was an extraction failure, not a model failure.
+The raw count includes 263 tests the task marks ignored. The only raw failure,
+`test_version_flag`, is one of those: the reference binary reports `compiled
+22:13:51, Jun 11 2026`, while the hidden fixture expects `compiled 20:15:26,
+Mar  5 2026`. The agent copied the only timestamp it could observe, and no
+black-box implementation can match a fixture built from a different binary.
+`programbench info` therefore scores 506/506 and marks the instance ✅, not
+merely "almost".
 
-The runner now starts the container with `sleep infinity`, restarts a stopped
-container before reading the workspace, and tells the agent to begin a first
-complete version early and reserve the last quarter of its budget for building
-and checks. The rerun is `pb-cmatrix-20261110-r2` with the same instance and
-budget; its official `programbench info` score will replace this paragraph when
-the run and evaluation finish.
+The first attempt, `pb-cmatrix-20261110`, produced no score. The runner started
+the task container with `sleep 2h`, the same duration as the agent budget; the
+container exited at the moment the agent timed out, so the workspace was gone
+before submission extraction. The stream shows the agent had written
+`cmatrix.c` and `compile.sh`, built them, and was still comparing behaviour at
+the two-hour mark (278 turns, 248 `Bash` calls) — an extraction failure, not a
+model failure. The runner now starts the container with `sleep infinity`,
+restarts a stopped container before reading the workspace, and gives the agent
+a pacing instruction (first complete version early, last quarter for build and
+checks). The pacing hint means the rerun is not a controlled repetition of the
+first attempt, but neither attempt is a benchmark measurement.
+
+This validates the whole path — cleanroom, allowlisted model access, headless
+agent, submission extraction, official compile, 506 behavioural tests, and
+`info` filtering. It is not a ProgramBench score: one easy instance, chosen
+because it needs no downloaded model or dataset. `cmatrix` is a small, public,
+well-known program, and the network allowlist stops lookup but not
+memorization; treat this as a pipeline pass, not evidence of general
+program-recovery ability.
 
 ## Benchmarks that need a new runner
 
