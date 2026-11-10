@@ -370,13 +370,17 @@ tools for release notes and research; keep them out of required checks.
   patches or error instances. Run IDs, timings, patch sizes, and the reasons
   these are pipeline checks rather than scores are recorded in
   [`docs/benchmark.md`](../../docs/benchmark.md#swe-bench-run-history).
-- A zero-token corrected-grammar replay of the Verified batch's unresolved
-  instance: `astropy__astropy-14369` resolved 1/1
-  (`verified-astropy14369-grammarfix-20261110-140245`, 3/3 FAIL_TO_PASS,
-  732/732 PASS_TO_PASS) with a 12 764-byte patch that restricts the CDS
-  denominator to unit-or-slash-chain and makes division left-associative. This
-  confirms the original miss was an agent reasoning/verification failure, not a
-  task that cannot be implemented.
+- Two zero-token corrected-grammar replays of the Verified batch's unresolved
+  instance, both resolving 1/1 with 3/3 FAIL_TO_PASS and 732/732 PASS_TO_PASS:
+  `verified-astropy14369-grammarfix-20261110-140245` (12 764 bytes) and a
+  best-practice variant with a left-recursive denominator, grammar comments,
+  and a regenerated parser table
+  (`verified-astropy14369-grammarfix-best-20261110-141456`, 13 121 bytes).
+  The best-practice variant also passes all 738 tests in `test_format.py` and
+  leaves the wider units suite at the base failure count (17 pre-existing
+  environment failures; 2 974 passed base versus 2 980 with the test patch).
+  This confirms the original miss was an agent reasoning/verification failure,
+  not a task that cannot be implemented.
 - A comment-only baseline on `psf__requests-1963`
   (`lite-requests1963-comment-baseline-20261110-131751`) reproduced the same
   two `CERTIFICATE_VERIFY_FAILED` PASS_TO_PASS failures with no agent behavior

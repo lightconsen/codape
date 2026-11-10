@@ -137,6 +137,16 @@ calls and resolved 1/1 in the official harness
 732/732 PASS_TO_PASS. It is a failure of reading the negative test contract and
 verifying both directions, not of coding ability.
 
+A best-practice variant models the denominator as a left-recursive list of
+units rather than a right-recursive product, documents the parenthesization
+rule in the grammar, and ships the regenerated parser table
+(`verified-astropy14369-grammarfix-best-20261110-141456`, 13 121 bytes). It
+also resolves 1/1, passes all 738 tests in `test_format.py`, and leaves the
+wider units suite with the same 17 pre-existing environment failures as the
+base: 2 974 passed on the base versus 2 980 with the upstream test patch. Both
+fixes are therefore within the agent's coding ability; the gap is the
+discipline to derive the change from both the positive and the negative tests.
+
 ### 2026-11-10 — Lite batch 1 (2/3 resolved)
 
 - run-id: `lite-batch1-20261110-122725`
