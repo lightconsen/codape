@@ -729,6 +729,59 @@ failure. r3 ended in 2 750 s after 135 turns; r4 spent the full
 two hours and 241 turns probing the reference implementation. The same
 `results_read_failed` branch error as r3 recurred and again cost its 3 tests.
 
+### 2026-11-12 — `caps-log` with the target-sized summary tail: **89, not solved**
+
+- run-id: `pb-nikoladucak__caps-log.2cf2d1e-20261111-r5`
+- instance: `nikoladucak__caps-log.2cf2d1e` (C++, medium)
+- binary: built from the commit that sizes the summary tail from the landing
+  target and labels the summary path on the event; the Micro/Auto stop-at-target
+  change is *not* in this build
+- protocol: as r4 (runner exports `CODAPE_CONTEXT_WINDOW=131072`, fresh session
+  header, 4 CPUs, 8 GB, 7 200 s, 500 turns)
+- agent: 157 reported turns, 160 assistant frames, 4 603 488 ms, exit 0 and a
+  `success` result frame — it finished with about 43 minutes unused
+- submission: sources, `compile.sh` and `executable` placed at the workspace
+  root and committed
+- raw tests: 775/1 232 passed (429 failed, 25 skipped, 3 not run); official
+  score **89** (490 of the same 551 scored tests)
+- eval: the same `results_read_failed` branch, `c0e6b8d64108` (3 `not_run`)
+
+Seven compaction-related events, all `token_threshold`:
+
+| kind | strategy | summary | before | after | target |
+|---|---|---|---|---|---|
+| compacted | Auto | summarized | 72 800 | 39 207 | 57 907 |
+| compacted | Auto | summarized | 78 941 | 49 413 | 62 449 |
+| no_progress | Auto | — | 82 883 | 82 200 | — |
+| backed_off ×3 | — | — | 100 689 / 102 124 / 104 015 | — | retry at ~104 K |
+| compacted | Snip | empty | 87 032 | 54 938 | 69 997 |
+
+Two changes are directly visible. First, the summary path ran and is now
+labelled: r4 reported `effective: Auto` with no way to tell a summary from a
+rule pass; r5 says `summarized`. Those passes kept a target-sized tail —
+39 207 against a 57 907 target, then 49 413 against 62 449 — where r4's rule
+passes landed 15 760–45 564 against 55 509–78 072. The first landing is the
+tail rule doing what it is designed to do (two thirds of the target kept
+verbatim, the rest elided into the summary); the second is within 21 % of its
+target, against r4's 24–60 K undershoot.
+
+Second, the no-progress machinery held. The third Auto pass had little left to
+remove (82 883 → 82 200) because the summary had already elided the bulk of
+the history; instead of retrying the same pass, the engine emitted three
+`backed_off` events and waited for the context to grow, then a `Snip` pass with
+an empty summary recovered 32 K to 54 938. No pass was repeated at the same
+size, and the run kept moving.
+
+The score rose from r3's 71 and r4's 72 to 89, with raw passes up from 717 and
+682 to 775. Against r4 the run gained 105 tests and lost 12; the newly passing
+tests are concentrated in the clusters r3's section named as fidelity gaps —
+`test_config` (25), `test_log_files` (17), `test_config_error_paths` (14),
+`test_git_integration` (12). The trajectory is not a controlled repeat: r5
+finished on its own and had time to place and commit the deliverables at the
+workspace root, while r4 was cut off mid-turn. The compaction events above are
+the direct evidence that the target-sized path behaved differently; the score
+difference is consistent with that but also includes run-to-run agent variance.
+
 ## Benchmarks that need a new runner
 
 All of these are Docker-based and all of them grade by running the project's own
