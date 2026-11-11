@@ -345,6 +345,43 @@ pub const CONTEXT_WINDOW_MODEL_ENV_PREFIX: &str = "CODAPE_CONTEXT_WINDOW_";
 /// File name, relative to the Codape config home, for client-data overrides.
 pub const CONTEXT_WINDOW_CLIENT_DATA_FILE: &str = "context_windows.json";
 
+/// File name, relative to the Codape config home, for learned token ratios.
+pub const TOKEN_RATIO_CLIENT_DATA_FILE: &str = "token_ratios.json";
+
+/// Smallest heuristically estimated request worth learning a ratio from.
+///
+/// Tiny requests are dominated by the fixed scaffolding and by rounding, so
+/// their ratio says more about the prompt template than about the payload.
+pub const MIN_RATIO_SAMPLE_HEURISTIC: usize = 2_000;
+
+/// Smallest provider count worth learning a ratio from.
+pub const MIN_RATIO_SAMPLE_PROVIDER: usize = 1_000;
+
+/// Lower end of the accepted ratio band, as a divisor.
+///
+/// The heuristic counts `chars / 4`; no real tokenizer is four times denser
+/// than that on ordinary payloads, and a ratio below a half means the usage
+/// report is not about the request that was guessed (a cached prefix, a
+/// different history, a partial count). Expressed as integers so the guard
+/// needs no floating-point comparison.
+pub const MIN_TOKEN_RATIO_DIVISOR: u128 = 2;
+/// Upper end of the accepted ratio band, as a multiplier.
+pub const MAX_TOKEN_RATIO_MULTIPLIER: u128 = 4;
+
+/// Whether `provider / heuristic` lies inside the accepted band.
+const fn ratio_within_band(provider: u128, heuristic: u128) -> bool {
+    heuristic > 0
+        && provider.saturating_mul(MIN_TOKEN_RATIO_DIVISOR) >= heuristic
+        && provider <= heuristic.saturating_mul(MAX_TOKEN_RATIO_MULTIPLIER)
+}
+
+/// Total sample weight after which the stored totals are halved.
+///
+/// A model's payload mix drifts; without decay the first sessions of a model's
+/// life would outweigh every later observation. Halving keeps the ratio
+/// responsive while still averaging out per-request noise.
+pub const TOKEN_RATIO_DECAY_TOKENS: u64 = 4_000_000;
+
 /// Built-in per-model context windows, matched by exact name or family prefix.
 ///
 /// Entries are deliberately conservative: a window that is too small costs
@@ -765,6 +802,256 @@ pub fn context_window_client_data_path() -> PathBuf {
             .join(CONTEXT_WINDOW_CLIENT_DATA_FILE);
     }
     PathBuf::from(".codape").join(CONTEXT_WINDOW_CLIENT_DATA_FILE)
+}
+
+/// Path to the client-data token-ratio file.
+///
+/// Located beside [`context_window_client_data_path`] so both learned facts
+/// live in the same directory and obey the same config-home convention.
+#[must_use]
+pub fn token_ratio_client_data_path() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return PathBuf::from(dir).join(TOKEN_RATIO_CLIENT_DATA_FILE);
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        return PathBuf::from(home)
+            .join(".codape")
+            .join(TOKEN_RATIO_CLIENT_DATA_FILE);
+    }
+    PathBuf::from(".codape").join(TOKEN_RATIO_CLIENT_DATA_FILE)
+}
+
+/// How many provider tokens one heuristic token is worth, per model.
+///
+/// Compaction triggers and context windows are stated in the provider's
+/// tokens, while the strategies count `chars / 4`; the two rulers disagree by
+/// a factor that depends on the payload (JSON and code tokenize denser, prose
+/// sparser). Once a response reports usage, that request is anchored on the
+/// measurement itself. A fresh session has no measurement until its first
+/// response, and its first compaction decision is exactly the one with no
+/// measurement to lean on — so the ratios observed earlier are persisted per
+/// model and used until a live measurement replaces them.
+///
+/// Samples are kept as sums rather than an average so repeated observations
+/// weigh equally. Old samples decay (see [`TOKEN_RATIO_DECAY_TOKENS`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedTokenRatio {
+    /// Provider-reported prompt tokens, summed over samples.
+    #[serde(default)]
+    pub provider_tokens: u64,
+    /// Heuristically estimated tokens for the same requests, summed.
+    #[serde(default)]
+    pub heuristic_tokens: u64,
+    /// Number of observations folded into the sums.
+    #[serde(default)]
+    pub samples: u32,
+}
+
+impl LearnedTokenRatio {
+    /// Build a one-request sample, rejecting counts that cannot inform a
+    /// useful ratio.
+    ///
+    /// The minimum sizes keep scaffolding-dominated requests out of the
+    /// *persisted* average. A live measurement skips them (see
+    /// [`Self::from_measurement`]): it describes a real request even when that
+    /// request is small.
+    #[must_use]
+    pub const fn from_sample(provider_tokens: usize, heuristic_tokens: usize) -> Option<Self> {
+        if provider_tokens < MIN_RATIO_SAMPLE_PROVIDER
+            || heuristic_tokens < MIN_RATIO_SAMPLE_HEURISTIC
+        {
+            return None;
+        }
+        Self::from_measurement(provider_tokens, heuristic_tokens)
+    }
+
+    /// Build a translation sample from a live measurement.
+    ///
+    /// Only the band guard applies: the measurement describes the request
+    /// that was just sent, whatever its size, so it may translate that
+    /// request's budgets. A count whose ratio falls outside the band is not
+    /// about this request (a cached prefix, a partial report) and teaches
+    /// nothing.
+    #[must_use]
+    pub const fn from_measurement(provider_tokens: usize, heuristic_tokens: usize) -> Option<Self> {
+        if provider_tokens == 0 || heuristic_tokens == 0 {
+            return None;
+        }
+        if !ratio_within_band(provider_tokens as u128, heuristic_tokens as u128) {
+            return None;
+        }
+        Some(Self {
+            provider_tokens: provider_tokens as u64,
+            heuristic_tokens: heuristic_tokens as u64,
+            samples: 1,
+        })
+    }
+
+    /// Whether the stored sums describe a ratio worth applying.
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.heuristic_tokens > 0
+            && ratio_within_band(self.provider_tokens.into(), self.heuristic_tokens.into())
+    }
+
+    /// The provider-to-heuristic ratio, or `1.0` when the sample is unusable.
+    ///
+    /// Token counts stay far below `2^52`, so `f64` represents them exactly;
+    /// the ratio is for display and tests, never for arithmetic.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn ratio(&self) -> f64 {
+        if self.provider_tokens == 0 {
+            return 1.0;
+        }
+        self.provider_tokens as f64 / self.heuristic_tokens.max(1) as f64
+    }
+
+    /// Translate a budget stated in provider tokens into heuristic units.
+    ///
+    /// Scales in both directions: a denser provider tokenizer (ratio above
+    /// one) shrinks the budget so a strategy trims enough, and a sparser one
+    /// (ratio below one) grows it so a strategy does not trim more than the
+    /// provider would ask for. An unusable sample leaves the budget alone.
+    #[must_use]
+    pub fn translate(&self, budget_tokens: usize) -> usize {
+        if !self.is_usable() {
+            return budget_tokens;
+        }
+        let translated = (budget_tokens as u128).saturating_mul(u128::from(self.heuristic_tokens))
+            / u128::from(self.provider_tokens);
+        usize::try_from(translated).unwrap_or(usize::MAX)
+    }
+
+    /// Fold another sample in, decaying the totals once they get large.
+    pub fn merge(&mut self, sample: Self) {
+        self.provider_tokens = self.provider_tokens.saturating_add(sample.provider_tokens);
+        self.heuristic_tokens = self
+            .heuristic_tokens
+            .saturating_add(sample.heuristic_tokens);
+        self.samples = self.samples.saturating_add(sample.samples);
+        if self.provider_tokens.max(self.heuristic_tokens) > TOKEN_RATIO_DECAY_TOKENS {
+            self.provider_tokens /= 2;
+            self.heuristic_tokens /= 2;
+            self.samples /= 2;
+        }
+    }
+}
+
+/// Learned token ratios for every model that has reported usage.
+///
+/// The same client-data home as the learned context windows: values learned
+/// from an endpoint, never hand-maintained, and never consulted once a live
+/// measurement is available.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenRatioStore {
+    /// Per-model samples, keyed by model name.
+    #[serde(default)]
+    pub models: HashMap<String, LearnedTokenRatio>,
+}
+
+impl TokenRatioStore {
+    /// Parse the JSON file shape, dropping entries that cannot be used.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serde error when the document is not a valid store.
+    pub fn from_json_str(json: &str) -> Result<Self, serde_json::Error> {
+        let mut store: Self = serde_json::from_str(json)?;
+        store
+            .models
+            .retain(|model, ratio| !model.trim().is_empty() && ratio.is_usable());
+        Ok(store)
+    }
+
+    /// Load a store, returning `None` if the file is missing or invalid.
+    #[must_use]
+    pub fn from_json_file(path: &Path) -> Option<Self> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "could not read token ratio file {}: {error}",
+                        path.display()
+                    );
+                }
+                return None;
+            }
+        };
+        match Self::from_json_str(&content) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!("invalid token ratio file {}: {error}", path.display());
+                None
+            }
+        }
+    }
+
+    /// Load the client-data store for the active config home.
+    #[must_use]
+    pub fn load_client_data() -> Self {
+        Self::from_json_file(&token_ratio_client_data_path()).unwrap_or_default()
+    }
+
+    /// Look up a model, falling back to a normalized-name match so an alias
+    /// recorded through one router answers for the same model behind another.
+    #[must_use]
+    pub fn resolve(&self, model: &str) -> Option<LearnedTokenRatio> {
+        if let Some(ratio) = self.models.get(model) {
+            return Some(*ratio);
+        }
+        let target = normalized_model_name(model);
+        self.models
+            .iter()
+            .find(|(key, _)| normalized_model_name(key) == target)
+            .map(|(_, ratio)| *ratio)
+    }
+
+    /// Merge one observation into the file for a model.
+    ///
+    /// Merge-in-place and atomic, exactly like
+    /// [`ContextWindowOverrides::remember_provider_window`]: other models keep
+    /// their entries and a half-written file can never replace a good one.
+    /// Returns the model's updated totals so the caller can keep the same
+    /// value in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the I/O or serialization error; learning a ratio must not fail
+    /// a turn, so the caller only warns.
+    pub fn remember_token_ratio(
+        model: &str,
+        sample: LearnedTokenRatio,
+        path: &Path,
+    ) -> std::io::Result<LearnedTokenRatio> {
+        let mut store = Self::from_json_file(path).unwrap_or_default();
+        let key = if store.models.contains_key(model) {
+            model.to_string()
+        } else {
+            let target = normalized_model_name(model);
+            store
+                .models
+                .keys()
+                .find(|key| normalized_model_name(key) == target)
+                .cloned()
+                .unwrap_or_else(|| model.to_string())
+        };
+        let entry = store.models.entry(key).or_default();
+        entry.merge(sample);
+        let updated = *entry;
+
+        let json = serde_json::to_string_pretty(&store).map_err(std::io::Error::other)?;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, json)?;
+        std::fs::rename(&temporary, path)?;
+        Ok(updated)
+    }
 }
 
 /// Normalize a model name for lookup and matching.
@@ -1708,5 +1995,95 @@ mod context_window_tests {
         let path = dir.path().join("nested").join("context_windows.json");
         ContextWindowOverrides::remember_provider_window("m", 200_000, &path).unwrap();
         assert!(path.exists());
+    }
+
+    // ─── Learned token ratios ───────────────────────────────────────────────
+
+    /// A provider that counts 30 % more than `chars / 4` makes a budget shrink
+    /// by the same factor: a 100 K heuristic target names ~77 K provider
+    /// tokens, so a strategy told 77 K trims to the real landing line.
+    #[test]
+    fn a_denser_provider_ratio_shrinks_the_budget() {
+        let ratio = LearnedTokenRatio::from_sample(130_000, 100_000).expect("a usable sample");
+        assert_eq!(ratio.translate(100_000), 76_923);
+    }
+
+    /// The other direction: prose-heavy traffic can be *lighter* than the
+    /// heuristic, and the provider then has room for a larger history. Holding
+    /// the budget fixed there compacts context the provider still accepts.
+    #[test]
+    fn a_sparser_provider_ratio_grows_the_budget() {
+        let ratio = LearnedTokenRatio::from_sample(80_000, 100_000).expect("a usable sample");
+        assert_eq!(ratio.translate(100_000), 125_000);
+    }
+
+    /// Samples that cannot inform a ratio are dropped rather than folded in:
+    /// tiny requests are scaffolding, and a ratio outside the band means the
+    /// usage report was not about the request that was guessed.
+    #[test]
+    fn implausible_or_tiny_samples_are_rejected() {
+        assert!(LearnedTokenRatio::from_sample(10_000, 500).is_none());
+        assert!(LearnedTokenRatio::from_sample(500, 10_000).is_none());
+        assert!(LearnedTokenRatio::from_sample(900_000, 100_000).is_none());
+        assert!(LearnedTokenRatio::from_sample(20_000, 100_000).is_none());
+        assert_eq!(LearnedTokenRatio::default().translate(100_000), 100_000);
+    }
+
+    /// The file keeps every model and accumulates repeated observations, so a
+    /// second session starts with the ratio the first one learned.
+    #[test]
+    fn remembering_a_ratio_merges_and_survives_a_new_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token_ratios.json");
+        std::fs::write(&path, r#"{"models": {"other": {"provider_tokens": 130000, "heuristic_tokens": 100000, "samples": 1}}}"#).unwrap();
+
+        let sample = LearnedTokenRatio::from_sample(130_000, 100_000).unwrap();
+        let first = TokenRatioStore::remember_token_ratio("m", sample, &path).unwrap();
+        assert_eq!(first.samples, 1);
+        let second = TokenRatioStore::remember_token_ratio("m", sample, &path).unwrap();
+        assert_eq!(second.samples, 2);
+
+        let written = TokenRatioStore::from_json_file(&path).expect("still valid JSON");
+        let stored = written.resolve("m").expect("the ratio survived");
+        assert_eq!(stored.provider_tokens, 260_000);
+        assert_eq!(stored.heuristic_tokens, 200_000);
+        assert!(
+            written.resolve("other").is_some(),
+            "another entry was dropped"
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "a temporary file was left behind"
+        );
+    }
+
+    /// Router prefixes are stripped on both sides, so a ratio recorded behind
+    /// one endpoint answers for the bare model name later.
+    #[test]
+    fn a_ratio_is_matched_through_router_prefixes() {
+        let mut store = TokenRatioStore::default();
+        store.models.insert(
+            "deepseek/deepseek-v4.1-flash".into(),
+            LearnedTokenRatio::from_sample(130_000, 100_000).unwrap(),
+        );
+        let resolved = store.resolve("deepseek-v4.1-flash").expect("normalized");
+        assert_eq!(
+            resolved,
+            LearnedTokenRatio::from_sample(130_000, 100_000).unwrap()
+        );
+    }
+
+    /// Old samples fade so a model whose payload mix changed is not pinned to
+    /// its first sessions forever. The ratio itself is preserved by halving.
+    #[test]
+    fn a_ratio_decays_once_the_totals_get_large() {
+        let sample = LearnedTokenRatio::from_sample(200_000, 100_000).unwrap();
+        let mut ratio = LearnedTokenRatio::default();
+        for _ in 0..21 {
+            ratio.merge(sample);
+        }
+        assert!(ratio.provider_tokens <= TOKEN_RATIO_DECAY_TOKENS);
+        assert_eq!(ratio.samples, 10, "the sample count halves with the totals");
+        assert!((ratio.ratio() - 2.0).abs() < 1e-9);
     }
 }

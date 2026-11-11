@@ -337,14 +337,26 @@ Every provider-token budget is therefore translated into heuristic units
 before a strategy sees it:
 
 ```
-heuristic_budget = budget × heuristic / measured     (when measured > heuristic)
-heuristic_budget = budget                            (otherwise)
+heuristic_budget = budget × heuristic / provider
 ```
 
-The line and the targets are re-derived on every pass, because the ratio is a
-property of the traffic, not of the model. A heuristic at or above the
-measurement is not evidence of a larger real context — the heuristic overcounts
-prose — so the budget is left as stated in that case.
+The translation runs in both directions. A provider that counts *less* than
+`chars / 4` (prose-heavy traffic) has more real room than the heuristic
+suggests, and holding the budget fixed there compacts history the provider
+would still accept. The ratio is bounded to `0.5..=4` so a usage report that
+is not about the guessed request (a cached prefix, a different history) falls
+back instead of rescaling wildly, and samples below 2 000 heuristic tokens or
+1 000 provider tokens are ignored as scaffolding noise.
+
+A live measurement describes this request and wins whenever the context is
+anchored. A cold session has no measurement until its first response, and its
+first compaction decision is precisely the one with nothing to lean on — so
+the provider-to-heuristic ratio observed by previous sessions is persisted per
+model in `token_ratios.json` (same client-data home and merge-in-place write as
+the learned context windows) and used until a live measurement replaces it.
+Totals decay by half past 4 M sampled tokens, so a model whose payload mix
+drifts is not pinned to its earliest sessions. The ratio is re-derived on
+every pass; only its memory between sessions is per model.
 
 A second translation follows the first: the budget is stated for the whole
 request, but a rule-based strategy can only trim the *history*. Everything

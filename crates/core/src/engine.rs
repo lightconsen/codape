@@ -32,8 +32,8 @@ use crate::stop_hook::{self, StopHookContext, StopHookDecision};
 use crate::tool_executor::{NoOpToolExecutor, ToolExecutor, ToolInfo};
 use crate::tool_scheduler;
 use crate::types::{
-    CompactionEvent, ContextWindowResolver, EngineEvent, Message, ModelId, ThinkingBlock, ToolCall,
-    ToolResult, UsageSummary,
+    CompactionEvent, ContextWindowResolver, EngineEvent, LearnedTokenRatio, Message, ModelId,
+    ThinkingBlock, TokenRatioStore, ToolCall, ToolResult, UsageSummary,
 };
 use std::path::PathBuf;
 
@@ -2099,6 +2099,14 @@ pub struct QueryEngine {
     /// turns it on for the sessions it runs, which is where remembering the
     /// window for the next session is the point.
     persist_learned_context_window: bool,
+    /// Provider-to-heuristic token ratio learned for this model.
+    ///
+    /// A live usage report already anchors the current request; this is what
+    /// translates budgets before the first report of a session (or after a
+    /// compaction reset the anchor), using what earlier sessions observed.
+    /// Loaded from the client-data file when persistence is enabled, then
+    /// updated from every usable usage report.
+    learned_token_ratio: Option<LearnedTokenRatio>,
     /// Hook executor for firing lifecycle hooks.
     ///
     /// Shared rather than owned so a session can hand a clone to a background
@@ -2491,6 +2499,7 @@ impl QueryEngine {
             context_window_resolver: None,
             learned_context_window: None,
             persist_learned_context_window: false,
+            learned_token_ratio: None,
             hooks: Arc::new(NoOpHookExecutor),
             session_watch_paths: Vec::new(),
             tools: Box::new(NoOpToolExecutor),
@@ -2834,13 +2843,20 @@ impl QueryEngine {
         self.context_window_resolver = Some(resolver);
     }
 
-    /// Whether a window learned from a provider is also written to the
-    /// client-data file, for the next session to find.
+    /// Whether facts learned from a provider are also read from and written
+    /// to the client-data files, for the next session to find.
     ///
-    /// Disabled by default; the CLI enables it. While disabled the window is
-    /// still learned for the running session.
-    pub const fn set_persist_learned_context_window(&mut self, persist: bool) {
+    /// Covers both the context window a rejection taught and the
+    /// provider-to-heuristic token ratio usage reports teach. Disabled by
+    /// default; the CLI enables it. While disabled both are still learned for
+    /// the running session, and the config home is never touched — which is
+    /// what keeps a test run from changing the window or ratio the next real
+    /// session starts with.
+    pub fn set_persist_learned_context_window(&mut self, persist: bool) {
         self.persist_learned_context_window = persist;
+        if persist && self.learned_token_ratio.is_none() {
+            self.learned_token_ratio = TokenRatioStore::load_client_data().resolve(&self.model.0);
+        }
     }
 
     /// Compaction thresholds for this engine's model and override chain.
@@ -2929,6 +2945,40 @@ impl QueryEngine {
                 %error,
                 "could not remember the learned context window; this session still uses it"
             );
+        }
+    }
+
+    /// Fold one provider-vs-heuristic observation into the learned ratio.
+    ///
+    /// The in-memory ratio always updates; writing it to the client-data file
+    /// only happens when persistence is enabled, under the same rule as the
+    /// learned window. A failed write is a warning: the session keeps using
+    /// the ratio it just learned.
+    fn remember_token_ratio(&mut self, sample: LearnedTokenRatio) {
+        self.learned_token_ratio
+            .get_or_insert_with(LearnedTokenRatio::default)
+            .merge(sample);
+        let ratio = self.learned_token_ratio.unwrap_or(sample).ratio();
+        tracing::debug!(
+            model = %self.model.0,
+            ratio,
+            samples = self.learned_token_ratio.map_or(0, |r| r.samples),
+            "learned the provider-to-heuristic token ratio"
+        );
+        if !self.persist_learned_context_window {
+            return;
+        }
+        match TokenRatioStore::remember_token_ratio(
+            &self.model.0,
+            sample,
+            &crate::types::token_ratio_client_data_path(),
+        ) {
+            Ok(updated) => self.learned_token_ratio = Some(updated),
+            Err(error) => tracing::warn!(
+                model = %self.model.0,
+                %error,
+                "could not remember the learned token ratio; this session still uses it"
+            ),
         }
     }
 
@@ -4990,7 +5040,7 @@ impl QueryEngine {
             let fixed_tokens =
                 self.fixed_overhead_tokens(measured_tokens, estimated_tokens, prefix_tokens);
             let landing_tokens =
-                Self::heuristic_budget(thresholds.landing(), measured_tokens, estimated_tokens);
+                self.heuristic_budget(thresholds.landing(), measured_tokens, estimated_tokens);
             let floor = estimated_tokens.saturating_sub(fixed_tokens) / 4;
             let minimum_tokens = fixed_tokens.saturating_add(floor);
             if !blocked && !turn.provider_overflowed && landing_tokens <= minimum_tokens {
@@ -5314,19 +5364,42 @@ impl QueryEngine {
     /// whose target the history already meets removes nothing. Scaling every
     /// budget by the measured ratio puts both on one ruler.
     ///
-    /// A measurement at or below the heuristic is not evidence of a larger
-    /// real context (the heuristic can overcount on prose), so the budget is
-    /// left alone unless the provider's count is the larger one.
-    const fn heuristic_budget(budget: usize, measured: usize, heuristic: usize) -> usize {
-        if heuristic == 0 || measured <= heuristic {
-            return budget;
+    /// The translation runs both ways. A provider that counts *less* than the
+    /// heuristic (prose-heavy traffic) has more real room than the heuristic
+    /// suggests, and shrinking its target would compact history the provider
+    /// still has room for. The ratio is bounded
+    /// ([`LearnedTokenRatio::from_sample`]), so a measurement that is not
+    /// about the same request falls back instead of rescaling wildly.
+    ///
+    /// Until the session's first usage report there is no measurement; the
+    /// ratio earlier sessions learned for this model stands in, which is what
+    /// keeps the first compaction decision of a cold session on the
+    /// provider's ruler rather than the heuristic's.
+    fn heuristic_budget(&self, budget: usize, measured: usize, heuristic: usize) -> usize {
+        self.token_ratio(measured, heuristic)
+            .map_or(budget, |ratio| ratio.translate(budget))
+    }
+
+    /// The provider-to-heuristic ratio to translate a budget with.
+    ///
+    /// A live measurement wins; it describes this request. The two values are
+    /// equal exactly when there is no measurement (the heuristic answered for
+    /// both sides), and then the ratio learned for the model stands in.
+    /// `None` means the budget is already in heuristic units and must be left
+    /// alone.
+    fn token_ratio(&self, measured: usize, heuristic: usize) -> Option<LearnedTokenRatio> {
+        if measured != heuristic
+            && let Some(live) = LearnedTokenRatio::from_measurement(measured, heuristic)
+        {
+            return Some(live);
         }
-        budget.saturating_mul(heuristic) / measured
+        self.learned_token_ratio
+            .filter(LearnedTokenRatio::is_usable)
     }
 
     /// The landing line expressed in the heuristic units the strategies use.
     fn heuristic_landing_line(&self, measured: usize, heuristic: usize) -> usize {
-        Self::heuristic_budget(self.compact_thresholds().landing(), measured, heuristic)
+        self.heuristic_budget(self.compact_thresholds().landing(), measured, heuristic)
     }
 
     /// The non-history overhead of the request, in the strategies' units.
@@ -5343,7 +5416,7 @@ impl QueryEngine {
         prefix_tokens: usize,
     ) -> usize {
         self.measured_fixed_tokens().map_or(prefix_tokens, |fixed| {
-            Self::heuristic_budget(fixed, measured, heuristic)
+            self.heuristic_budget(fixed, measured, heuristic)
         })
     }
 
@@ -5412,7 +5485,8 @@ impl QueryEngine {
         // that it is deleting working state, not reclaiming slack.
         let floor = history_heuristic / 4;
 
-        let auto_target = Self::heuristic_budget(landing, measured, heuristic)
+        let auto_target = self
+            .heuristic_budget(landing, measured, heuristic)
             .saturating_sub(fixed)
             .max(floor);
         let snip_budget = if self.compact_config.snip_target_tokens < landing {
@@ -5420,7 +5494,8 @@ impl QueryEngine {
         } else {
             landing
         };
-        let snip_target = Self::heuristic_budget(snip_budget, measured, heuristic)
+        let snip_target = self
+            .heuristic_budget(snip_budget, measured, heuristic)
             .saturating_sub(fixed)
             .max(floor);
         (auto_target, snip_target)
@@ -6212,7 +6287,7 @@ impl QueryEngine {
         // per-turn injections and the serialized tools together. Targets must
         // leave this much of the budget alone, or they ask a history-only
         // strategy for room that does not exist.
-        let (history_messages, fixed_tokens) = match self.usage_anchor {
+        let (history_messages, fixed_tokens, heuristic_history) = match self.usage_anchor {
             // The anchor's shape describes the request that was measured; the
             // history may have grown with the response since then.
             Some(anchor) if anchor.history_messages <= turn.history().len() => {
@@ -6222,6 +6297,7 @@ impl QueryEngine {
                 (
                     anchor.history_messages,
                     prompt_tokens.saturating_sub(measured_history),
+                    measured_history,
                 )
             }
             _ => {
@@ -6229,6 +6305,7 @@ impl QueryEngine {
                 (
                     turn.history().len(),
                     prompt_tokens.saturating_sub(measured_history),
+                    measured_history,
                 )
             }
         };
@@ -6238,6 +6315,14 @@ impl QueryEngine {
             prompt_tokens,
             fixed_tokens,
         });
+
+        // Same request, two rulers: the provider's count and the heuristic's
+        // estimate. Recording the pair is what lets the next cold session
+        // translate budgets before its own first measurement.
+        let heuristic_tokens = heuristic_history.saturating_add(prefix_tokens);
+        if let Some(sample) = LearnedTokenRatio::from_sample(prompt_tokens, heuristic_tokens) {
+            self.remember_token_ratio(sample);
+        }
 
         // The request was accepted, which is a statement about the window:
         // input plus the requested output fit inside it. Unknown models
@@ -12632,15 +12717,19 @@ mod tests {
         let (with_prefix, _) = engine.rule_based_targets(123_000, 90_000, 20_000);
         assert_eq!(with_prefix, auto_target - 20_000);
 
-        // A heuristic that already over-counts, or an equal count, is not
-        // evidence of a larger real context: the budget stays as stated.
+        // Equal counts mean there is no measurement: the heuristic answered
+        // for both sides, so the budget stays as stated.
         assert_eq!(
             engine.rule_based_targets(90_000, 90_000, 0).0,
             thresholds.landing()
         );
+
+        // A provider that counts *less* than the heuristic has more real
+        // room, so the target grows; compacting to the untranslated line
+        // there would throw away history the provider still accepts.
         assert_eq!(
             engine.rule_based_targets(60_000, 90_000, 0).0,
-            thresholds.landing()
+            thresholds.landing() * 90_000 / 60_000
         );
     }
 
@@ -12813,6 +12902,89 @@ mod tests {
             "the measured overhead ({}) must be subtracted, not the message prefix ({prefix}): \
              {measured_target} vs {prefix_target}",
             anchor.fixed_tokens
+        );
+    }
+
+    /// A ratio learned in an earlier session is the only translation a cold
+    /// session has until its first usage report. It must size the landing line
+    /// (and therefore every rule-based target) in both directions.
+    #[test]
+    fn a_learned_ratio_sizes_targets_before_the_first_measurement() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let landing = engine.compact_thresholds().landing();
+        let heuristic = 60_000;
+
+        engine.learned_token_ratio =
+            Some(LearnedTokenRatio::from_sample(130_000, 100_000).unwrap());
+        let denser = engine.heuristic_landing_line(heuristic, heuristic);
+        assert_eq!(denser, landing * 100_000 / 130_000);
+        assert!(
+            denser < landing,
+            "a provider that counts denser must trim earlier: {denser} vs {landing}"
+        );
+
+        engine.learned_token_ratio = Some(LearnedTokenRatio::from_sample(80_000, 100_000).unwrap());
+        let sparser = engine.heuristic_landing_line(heuristic, heuristic);
+        assert_eq!(sparser, landing * 100_000 / 80_000);
+        assert!(
+            sparser > landing,
+            "a provider that counts less must not be compacted early: {sparser} vs {landing}"
+        );
+    }
+
+    /// The remembered ratio is a stand-in, not a veto: once the provider has
+    /// measured this request, its own ratio decides.
+    #[test]
+    fn a_live_measurement_beats_the_learned_ratio() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learned_token_ratio =
+            Some(LearnedTokenRatio::from_sample(200_000, 100_000).unwrap());
+        engine.usage_anchor = Some(UsageAnchor {
+            history_messages: 0,
+            prefix_tokens: 0,
+            prompt_tokens: 1_500,
+            fixed_tokens: 0,
+        });
+
+        assert_eq!(
+            engine.heuristic_budget(10_000, 15_000, 10_000),
+            6_666,
+            "the live 1.5 ratio must win over the remembered 2.0"
+        );
+    }
+
+    /// The observation is what the file is built from: one usage report pairs
+    /// the provider's count with the heuristic's estimate of the same request.
+    #[test]
+    fn a_usage_report_learns_the_ratio() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("s"), Message::user("x".repeat(40_000))];
+        turn.set_history_range(1, 2);
+        let history = PromptCompiler::estimate_message_tokens(turn.history());
+        assert!(
+            history >= 2_000,
+            "the sample must clear the guard: {history}"
+        );
+
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: history * 2,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+
+        let ratio = engine
+            .learned_token_ratio
+            .expect("the report taught the ratio");
+        assert!(
+            (ratio.ratio() - 2.0).abs() < 0.01,
+            "provider counted double the heuristic: {ratio:?}"
         );
     }
 
