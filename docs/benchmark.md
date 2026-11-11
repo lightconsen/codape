@@ -675,6 +675,60 @@ be torn down while the test holds its captured pipes — makes it a harness
 interaction worth isolating before the next run, not a reason to distrust the
 71. The three tests are 0.5 % of the scored total.
 
+### 2026-11-11 — `caps-log` on the fixed estimator, before the target work: **72, timed out**
+
+- run-id: `pb-nikoladucak__caps-log.2cf2d1e-20261111-r4`
+- instance: `nikoladucak__caps-log.2cf2d1e` (C++, medium)
+- protocol: as r3, except that the runner now exports
+  `CODAPE_CONTEXT_WINDOW=131072` into the container itself and the session
+  header is minted per run
+- agent: 241 reported turns, 247 assistant frames, 7 199 995 ms, exit 124 —
+  `SIGTERM` ended the run while a turn was in flight
+- tools: the agent was still working at the cutoff (its last commands read the
+  reference `transcript.txt` and probe `--log-filename-format`), not looping
+- raw tests: 682/1 232 passed (522 failed, 25 skipped, 3 not run); official
+  score **72**
+- eval: 17 min, one instance; branch `c0e6b8d64108` again produced no
+  `results.xml` (`results_read_failed`, its 3 tests `not_run`)
+
+The binary in this run is the one built from the estimator fixes r3's section
+describes (served window, tool schemas, measured fixed overhead, learned
+window lower bound, no-progress backoff). It predates the observability and
+target commits that came after it: the `summary` label on the event, the
+summary tail sized from the landing target instead of `window / 8`, and
+Micro/Auto stopping once under target. It is the baseline the next run is
+compared against.
+
+There were 6 `token_threshold` compactions, all `Auto`, each landing far
+*below* its target:
+
+| `tokens_before` | `tokens_after` | `target_tokens` | `messages_remaining` |
+|---|---|---|---|
+| 88 388 | 45 564 | 69 931 | 63 |
+| 105 863 | 40 036 | 78 072 | 15 |
+| 94 888 | 15 760 | 75 090 | 22 |
+| 86 984 | 20 820 | 68 122 | 26 |
+| 86 781 | 23 475 | 68 816 | 29 |
+| 71 053 | 29 421 | 55 509 | 24 |
+
+Every pass removed 42–79 K estimated tokens when meeting the target required
+12–60 K, so each one discarded context the summary path could have kept. This
+is the overshoot the rule-based ladder had by design: it truncated every
+eligible tool result and removed half of the older assistant texts regardless
+of how much room was needed. The event predates the `summary` field, so it
+cannot say whether a given pass ran the summary path or the rule path; the
+landing points are consistent with the rule path, and the next run adds the
+label so the two are distinguishable.
+
+The official score filters the same ignored tests as r3 (681 of the 1 232
+reported), so it is computed over the same 551 scored tests. The run did not
+finish, and its raw pass count (682) is 35 lower than r3's (717), while the
+official score is one point higher (72 vs 71) — the filtered score is within
+run-to-run variance, and the difference in duration is not a compaction
+failure. r3 ended in 2 750 s after 135 turns; r4 spent the full
+two hours and 241 turns probing the reference implementation. The same
+`results_read_failed` branch error as r3 recurred and again cost its 3 tests.
+
 ## Benchmarks that need a new runner
 
 All of these are Docker-based and all of them grade by running the project's own
