@@ -118,17 +118,7 @@ jobs:
 
   test:
     name: Test
-    # Pinned, not `ubuntu-latest`, as a stopgap: `ubuntu-latest` rolled to
-    # 26.04 in November 2026 and that image ships `bwrap`. Hooks then confine
-    # through bubblewrap instead of Landlock, `bubblewrap_args()` unshares the
-    # PID namespace, and the three `codape-hooks` tree-kill tests lose their
-    # liveness probe: the hook's `$!` is a namespace-local number that the
-    # host's `ps -p` resolves to an unrelated kernel thread, so
-    # `wait_for_process_exit` never sees the process exit. The tests are
-    # wrong, not the kill — see the follow-up that observes a heartbeat file
-    # instead of a pid. Remove this pin once that lands, or the bubblewrap
-    # path stays at zero coverage, which is how this was missed.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
       # Linking the whole workspace at once exhausts the runner's memory.
@@ -471,10 +461,7 @@ jobs:
   # a fork's pull request has a read-only token.
   coverage:
     name: Coverage
-    # Same stopgap as the Test job above: 26.04's `bwrap` moves hook
-    # confinement onto a PID namespace and breaks the tree-kill tests'
-    # host-pid liveness probe. Remove with the Test job's pin.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
       contents: read
