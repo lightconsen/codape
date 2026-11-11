@@ -1015,6 +1015,67 @@ pub fn summary_split_bounded(
     }
 }
 
+/// Compute the summarize range with the preserved tail sized to a token
+/// budget rather than capped by one.
+///
+/// [`summary_split`] guarantees a message floor but not a size, and
+/// [`summary_split_bounded`] only ever shrinks the tail. Neither can keep a
+/// wide context's tail proportional to the room it has: with a single user
+/// prompt, the floor is the last eight messages however large the window, so
+/// a summarising pass throws away everything between the head and the last
+/// eight messages and lands far below its landing line.
+///
+/// This split grows the tail *backward* until the budget is spent (newest
+/// messages are kept first), and never starts it after the message floor, so
+/// the floor remains preserved. It also keeps at most two thirds of the
+/// messages: on a token-light history the estimates round to zero and the
+/// budget would otherwise "fit" the whole history, turning the pass into a
+/// replacement of two messages that leaves the context the same size.
+#[must_use]
+pub fn summary_split_with_tail_budget(
+    messages: &[Message],
+    keep_recent_turns: usize,
+    keep_recent_messages: usize,
+    tail_tokens: usize,
+) -> SummarySplit {
+    let base = summary_split(messages, keep_recent_turns, keep_recent_messages);
+    if tail_tokens == 0 || messages.is_empty() {
+        return base;
+    }
+
+    // Walk back from the newest message until the next one would exceed the
+    // budget; the tail then starts where it still fits.
+    let mut accumulated = 0usize;
+    let mut token_start = messages.len();
+    for i in (0..messages.len()).rev() {
+        let cost = message_token_estimate(&messages[i]);
+        if accumulated.saturating_add(cost) > tail_tokens {
+            token_start = i + 1;
+            break;
+        }
+        accumulated = accumulated.saturating_add(cost);
+        token_start = i;
+    }
+
+    // Start the tail at a user message when one is available after the
+    // token-sized point, so a tool call is not separated from its result.
+    let aligned = (token_start..messages.len())
+        .find(|i| matches!(messages[*i].role, Role::User))
+        .unwrap_or(token_start);
+    // Earlier than `base.summarize_to` is a larger tail (the budget allowed
+    // it); never later, so the message floor is still preserved. The range
+    // keeps the two messages the summary path needs even if the budget would
+    // otherwise cover the whole history.
+    let sized = base.summarize_from.saturating_add(2);
+    let keeps_at_most = messages.len().saturating_mul(2) / 3;
+    let keep_share = messages.len().saturating_sub(keeps_at_most);
+    let summarize_to = base.summarize_to.min(aligned.max(sized).max(keep_share));
+    SummarySplit {
+        summarize_from: base.summarize_from.min(summarize_to),
+        summarize_to,
+    }
+}
+
 /// Index of the first user message (preserved verbatim, intent anchor).
 fn first_user_index(messages: &[Message]) -> Option<usize> {
     messages.iter().position(|m| matches!(m.role, Role::User))
@@ -2653,6 +2714,88 @@ mod tests {
         assert!(
             !matches!(messages[split.summarize_to].role, Role::Tool),
             "the kept tail begins with a tool result"
+        );
+    }
+
+    /// An agentic session keeps the same eight-message floor however wide the
+    /// window is, so a summary that only honours the floor lands far below the
+    /// landing line. A budget larger than the floor grows the tail backward
+    /// instead of leaving the interval to be thrown away wholesale.
+    #[test]
+    fn a_tail_budget_larger_than_the_floor_keeps_more_history() {
+        let mut messages = vec![make_user_text("the one request for the whole run")];
+        for i in 0..40 {
+            messages.extend(make_tool_exchange(
+                &format!("call {i}"),
+                "read",
+                &format!("output {i} ").repeat(20),
+            ));
+        }
+        let floor = summary_split(&messages, 3, 8);
+        let budget = 1_500;
+        let split = summary_split_with_tail_budget(&messages, 3, 8, budget);
+
+        assert_eq!(split.summarize_from, 1, "the request stays the anchor");
+        assert!(
+            split.summarize_to < floor.summarize_to,
+            "the tail grows past the eight-message floor: {split:?} vs {floor:?}"
+        );
+        assert!(
+            split.summarize_from < split.summarize_to,
+            "there is still a middle to summarize: {split:?}"
+        );
+        let kept: usize = messages[split.summarize_to..]
+            .iter()
+            .map(message_token_estimate)
+            .sum();
+        assert!(
+            kept <= budget,
+            "the kept tail ({kept}) exceeds its budget ({budget})"
+        );
+    }
+
+    /// A budget below the floor must not shrink the working set: the floor is
+    /// the invariant, the budget only decides how much *more* to keep.
+    #[test]
+    fn a_tail_budget_below_the_floor_never_drops_the_message_floor() {
+        let mut messages = vec![make_user_text("start")];
+        for i in 0..12 {
+            messages.extend(make_tool_exchange(
+                &format!("call {i}"),
+                "read",
+                &"x".repeat(20_000),
+            ));
+        }
+        let floor = summary_split(&messages, 3, 8);
+        let split = summary_split_with_tail_budget(&messages, 3, 8, 100);
+
+        assert_eq!(
+            split.summarize_to, floor.summarize_to,
+            "the message floor survives a budget smaller than it"
+        );
+    }
+
+    /// Even a budget that could cover the whole history must leave a third of
+    /// the messages in the range: on a token-light history the estimates round
+    /// to zero, and a pass that only replaces two tiny messages with one is a
+    /// no-op with a boundary marker.
+    #[test]
+    fn a_tail_budget_never_keeps_more_than_two_thirds_of_the_messages() {
+        let mut messages = vec![make_user_text("start")];
+        for i in 0..10 {
+            messages.extend(make_tool_exchange(&format!("call {i}"), "read", "result"));
+        }
+        let split = summary_split_with_tail_budget(&messages, 3, 8, 1_000_000);
+
+        assert_eq!(split.summarize_from, 1);
+        assert_eq!(
+            split.summarize_to,
+            messages.len() - messages.len() * 2 / 3,
+            "the tail keeps two thirds of the messages: {split:?}"
+        );
+        assert!(
+            split.summarize_to >= 3,
+            "the summary path needs at least two messages: {split:?}"
         );
     }
 

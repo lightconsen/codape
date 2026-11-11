@@ -5111,8 +5111,18 @@ impl QueryEngine {
         let tokens_before = estimated_tokens;
         let window = self.context_window().tokens;
         let summary_budget = self.compact_config.resolve_summary_input_budget(window);
-        let tail_tokens = self.compact_config.resolve_summary_tail_tokens(window);
-        let split = compact::summary_split_bounded(
+        // The rule-based targets are computed before the summary path now:
+        // the preserved tail is sized from the same landing line the rules
+        // trim to, so both ways down the ladder leave the context near it.
+        let (auto_target, snip_target) =
+            self.rule_based_targets(measured_tokens, estimated_tokens, prefix_tokens);
+        let window_tail = self.compact_config.resolve_summary_tail_tokens(window);
+        let tail_tokens = Self::summary_tail_tokens(
+            auto_target,
+            window_tail,
+            estimated_tokens.saturating_sub(prefix_tokens),
+        );
+        let split = compact::summary_split_with_tail_budget(
             &history,
             3,
             self.compact_config.keep_recent_messages,
@@ -5242,15 +5252,8 @@ impl QueryEngine {
         }
 
         // ── Rule-based fallback (existing strategies) ──
-        // The rule-based strategies take a target. Use the resolved line for
-        // this model, not the configured fallback, which is sized for a window
-        // that may not be this one. The targets are provider-unit budgets and
-        // the strategies count in their own units, so translate them with the
-        // same ruler that selected the strategy: without this, `Snip`'s 80 000
-        // target was met by a heuristic history the provider scored at 30 %
-        // more, and the pass was a no-op that counted as a failure.
-        let (auto_target, snip_target) =
-            self.rule_based_targets(measured_tokens, estimated_tokens, prefix_tokens);
+        // The targets were computed above, with the same landing line the
+        // summary path sized its tail from.
         let history = escalated_history.unwrap_or_else(|| turn.history().to_vec());
         let result: CompactResult = match strategy {
             CompactStrategy::Micro => compact::micro_compact(&history, self.micro_params()),
@@ -5333,6 +5336,39 @@ impl QueryEngine {
         self.measured_fixed_tokens().map_or(prefix_tokens, |fixed| {
             Self::heuristic_budget(fixed, measured, heuristic)
         })
+    }
+
+    /// How much recent history a summarising pass keeps verbatim.
+    ///
+    /// The message floor keeps the last few messages, and `window / 8` keeps
+    /// the live working set, but neither is sized for the room the pass has:
+    /// at 128K the floor is a few thousand tokens, so the summary path threw
+    /// away everything between the head and the last eight messages and landed
+    /// 25–55 K below the landing line. Two thirds of the history budget is
+    /// what the pass can keep and still leave the summary room to earn its
+    /// call.
+    ///
+    /// The window-based value is a floor only while it fits inside that
+    /// budget: a tail larger than the target it is aiming at cannot land on
+    /// the line, and on a 32K window the eighth (8 000) already exceeds the
+    /// landing line the pass is trying to reach.
+    ///
+    /// The tail also never takes more than three quarters of the history. The
+    /// target can be much larger than the context when a configured fallback
+    /// line was never replaced by a measurement (a fresh 32K guess against a
+    /// 10 000-token history still names a 147 000-token target), and a pass
+    /// that keeps the whole history summarizes nothing.
+    fn summary_tail_tokens(
+        history_target: usize,
+        window_tail: usize,
+        history_tokens: usize,
+    ) -> usize {
+        let goal = history_target.saturating_mul(2) / 3;
+        let ceiling = history_tokens.saturating_mul(3) / 4;
+        let floor = window_tail.min(history_target);
+        goal.max(floor)
+            .min(ceiling)
+            .min(CompactConfig::MAX_SUMMARY_TAIL_TOKENS)
     }
 
     /// The targets the rule-based strategies trim to, in the strategies' own
@@ -5839,8 +5875,23 @@ impl QueryEngine {
         let history = turn.history().to_vec();
         let window = self.context_window().tokens;
         let summary_budget = self.compact_config.resolve_summary_input_budget(window);
-        let tail_tokens = self.compact_config.resolve_summary_tail_tokens(window);
-        let split = compact::summary_split_bounded(
+        // Size the tail exactly as the compaction will: a prefetched summary
+        // is only reusable if it describes the same interval the synchronous
+        // pass would summarize.
+        let prefix_tokens = turn.context_prefix_tokens();
+        let estimated_tokens = PromptCompiler::estimate_message_tokens(&history) + prefix_tokens;
+        let (auto_target, _) = self.rule_based_targets(
+            self.turn_context_tokens(turn),
+            estimated_tokens,
+            prefix_tokens,
+        );
+        let window_tail = self.compact_config.resolve_summary_tail_tokens(window);
+        let tail_tokens = Self::summary_tail_tokens(
+            auto_target,
+            window_tail,
+            estimated_tokens.saturating_sub(prefix_tokens),
+        );
+        let split = compact::summary_split_with_tail_budget(
             &history,
             3,
             self.compact_config.keep_recent_messages,
@@ -12584,6 +12635,45 @@ mod tests {
         );
     }
 
+    /// The preserved tail follows the landing target, not just the window:
+    /// at 128K, two thirds of the history budget is far more than an eighth
+    /// of the window, and keeping only the eighth is what landed summarised
+    /// passes 25–55K below the line.
+    #[test]
+    fn the_summary_tail_follows_the_landing_target() {
+        let window_tail = 131_072 / 8; // 16 384
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(69_931, window_tail, 200_000),
+            40_000,
+            "two thirds of a wide context's history budget is capped, not the window eighth"
+        );
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(30_000, window_tail, 200_000),
+            20_000,
+            "a smaller target keeps two thirds of it"
+        );
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(12_000, window_tail, 200_000),
+            12_000,
+            "the window eighth cannot exceed the budget it is aiming at"
+        );
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(30_000, 8_000, 200_000),
+            20_000,
+            "when the window floor is smaller, two thirds of the target wins"
+        );
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(147_000, 8_000, 10_042),
+            7_531,
+            "a fallback target larger than the history still leaves a quarter to summarize"
+        );
+        assert_eq!(
+            QueryEngine::summary_tail_tokens(0, 0, 0),
+            0,
+            "an unknown window and no target keep no tail"
+        );
+    }
+
     /// Under the scaled target Snip actually trims a history that the
     /// configured target would have found already small enough.
     #[test]
@@ -13528,6 +13618,61 @@ mod tests {
             calls.load(Ordering::SeqCst),
             1,
             "compaction re-requested a summary it already had"
+        );
+    }
+
+    /// A summarising pass on a wide window keeps the tail the landing line
+    /// has room for. Only an eighth of the window — or the last eight
+    /// messages — landed the context far below the line: the r4 benchmark's
+    /// passes left 25–55 K of headroom unused and summarized history the
+    /// model was still working from.
+    #[tokio::test]
+    async fn a_summary_on_a_wide_window_lands_near_its_landing_target() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        engine.set_compaction_backend(Arc::new(CountingSummaryBackend {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
+
+        // ~90 000 heuristic tokens of agentic history: one request, then a
+        // long run of steps.
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages.push(Message::user("the task for this run"));
+        for i in 0..100 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "x".repeat(3_600)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+
+        let outcome = engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+
+        let CompactOutcome::Compacted {
+            summary,
+            tokens_after,
+            target_tokens,
+            ..
+        } = outcome
+        else {
+            panic!("expected a summary compaction, got {outcome:?}");
+        };
+        assert_eq!(summary.label(), "summarized");
+        assert!(
+            tokens_after * 2 > target_tokens,
+            "the summary landed at {tokens_after} against a {target_tokens} \
+             target: it kept far less history than the landing line has room for"
+        );
+        assert!(
+            tokens_after < target_tokens,
+            "the pass must still land under its target: {tokens_after} vs {target_tokens}"
         );
     }
 

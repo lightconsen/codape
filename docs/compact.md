@@ -447,12 +447,20 @@ session: those have one user message and hundreds of tool exchanges, so a
 turn-counted tail alone covers everything and there is never a range to
 summarize.
 
-The message floor is not a size bound: eight recent messages can hold most of
-the context when the tail is tool-heavy. `summary_split_bounded` adds a token
-ceiling to the preserved tail — an eighth of the window, clamped between 8 000
-and 40 000 tokens — and only ever makes the tail smaller than the message floor
-allows. The tail starts at a user message so a tool call is not separated from
-its result.
+The message floor is not a size bound in either direction. Eight recent
+messages can hold most of the context when the tail is tool-heavy, so
+`summary_split_bounded` caps the tail at an eighth of the window (clamped
+between 8 000 and 40 000 tokens). But in a wide context the floor is also far
+*too small*: an agentic session's last eight messages are a few thousand
+tokens at 128K, so a pass that kept only those landed 25–55 K below the landing
+line and threw away history the model was still using.
+`summary_split_with_tail_budget` fills the tail backward until a token budget
+is spent and never starts it after the message floor, so the floor still
+survives. The budget is two thirds of the history target the landing line
+implies (`summary_tail_tokens`), floored by the window-based value and capped
+at 40 000 tokens: what the pass can keep and still leave the summary room to
+earn its model call. Both paths start the tail at a user message when one is
+available so a tool call is not separated from its result.
 
 The summarizer's own input has the same problem in reverse. A fixed 20 000-token
 cap was sized for 128K windows: on a much larger window it dropped exactly the

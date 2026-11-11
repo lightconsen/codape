@@ -245,6 +245,14 @@ impl CompactConfig {
     /// turning every compaction into an expensive book-length call.
     pub const MAX_SUMMARY_INPUT_TOKENS: usize = 60_000;
 
+    /// Ceiling on how much recent history a summary keeps verbatim.
+    ///
+    /// The tail is sized from the landing line, not from the window alone, so
+    /// it can be much larger than `window / 8` on a wide window. This ceiling
+    /// keeps one very large window from turning a summarising pass into a pass
+    /// that summarizes almost nothing.
+    pub const MAX_SUMMARY_TAIL_TOKENS: usize = 40_000;
+
     /// Tokens of conversation text the summarizer is fed.
     ///
     /// `summary_input_max_tokens` is the floor: it is sized for the 128K
@@ -273,11 +281,13 @@ impl CompactConfig {
 
     /// Tokens of recent history a summary keeps verbatim, or 0 when unknown.
     ///
-    /// The message floor (`keep_recent_messages`) alone is not bounded: eight
-    /// messages can be 60 000 tokens when the tail holds large tool results,
-    /// which leaves little of the window for the summary to describe. An
-    /// eighth of the window keeps the live working set live without letting it
-    /// become the context. Unknown windows keep the message floor alone.
+    /// This is a floor, not the whole rule: the pass also has a landing line
+    /// to reach, and keeping only an eighth of a wide window lands far below
+    /// it. The engine raises the tail toward two thirds of the history budget
+    /// when that is larger; the window-based value guarantees the live working
+    /// set survives even when the targets are not known (an unknown window, or
+    /// a context still below the line). Unknown windows keep the message floor
+    /// alone.
     #[must_use]
     pub const fn resolve_summary_tail_tokens(&self, context_window: usize) -> usize {
         if context_window == 0 {
@@ -286,8 +296,8 @@ impl CompactConfig {
         let eighth = context_window / 8;
         if eighth < 8_000 {
             8_000
-        } else if eighth > 40_000 {
-            40_000
+        } else if eighth > Self::MAX_SUMMARY_TAIL_TOKENS {
+            Self::MAX_SUMMARY_TAIL_TOKENS
         } else {
             eighth
         }
