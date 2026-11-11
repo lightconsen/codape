@@ -27,7 +27,7 @@ Everything else below needs work first.
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Sample — **21/24** on a 24-instance, 12-repository stratified subset (`swe-verified-24-20261110-b1..b6`); earlier hand-picked subsets 3/3, 2/3; see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Sample — **9/12** on a 12-instance, 9-language stratified subset (`swe-multilingual-12-20261110-b1..b3`); earlier pipeline check 1/1; see [run history](#swe-bench-run-history) |
-| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | Sample — 0/3 solved on `figlet` (0/1044, compile_failed), `pixterm` (60/430), `zip-password-finder` (92/680); earlier `cmatrix` pipeline check 1/1; see [run history](#programbench-run-history) |
+| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | Sample — 0/3 solved on `figlet` (0/1044, compile_failed), `pixterm` (60/430), `zip-password-finder` (92/680); `caps-log` improved from 0 (`compile_failed`, compaction loop) to 71 once the served window was passed in; earlier `cmatrix` pipeline check 1/1; see [run history](#programbench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
 The first five are research instruments: Docker, network, paid model tokens,
@@ -541,9 +541,51 @@ also the only one of the three where tool time is substantial: 5 317 s across
 
 These are three hand-picked instances, one per language/difficulty, not a random
 sample: 0/3 estimates nothing about ProgramBench as a whole. `caps-log` (C++,
-medium) was deferred after the three runs above; the Claude Code harness control
-on `figlet` and `pixterm` is recorded below, followed by the `caps-log` runs
-that turned into the compaction investigation.
+medium) was deferred after the three runs above. The Claude Code harness control
+on `figlet` and `pixterm` and the `caps-log` runs that turned into the
+compaction investigation follow.
+
+### 2026-11-11 — Claude Code harness control: `figlet`, `pixterm`
+
+The same two instances were run with Claude Code 2.1.318 instead of Codape, to
+separate "the model cannot recover this program" from "this harness's loop
+cannot". Everything else was held equal: the same cleanroom image tag, the same
+gateway/model (`deepseek-v4.1-flash` through `opencode.ai`), an internal network
+that allows only the gateway, 4 CPUs, 8 GB, 500 turns and a 7 200 s agent
+budget. `CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072` matched the window Codape had.
+
+- run-ids: `pb-claude-cmatsuoka__figlet.202a0a8-20261111`,
+  `pb-claude-eliukblau__pixterm.1a93fd5-20261111`
+- both were killed by the 7 200 s timeout (exit 124) and produced no closing
+  `result` frame; the transcripts are stream-json frames only
+
+| instance | assistant frames | tool calls | compactions | raw tests | official | outcome |
+|---|---:|---|---:|---|---|---|
+| `cmatsuoka__figlet.202a0a8` | 736 | 351 Bash, 20 Read, 19 Edit, 3 Write | 14 | 880/1 044 | 82 (872 scored) | compiled; 164 tests failed |
+| `eliukblau__pixterm.1a93fd5` | 253 | 129 Bash | 8 | 0/458 | 0, `ERROR: compile_failed` | no `compile.sh` in the submission |
+
+The control answers the question the Codape figlet run raised. Codape's two
+`context window is full` aborts (128 429 and 129 449 estimated tokens against a
+128 072 blocked line, the first only 357 over) were not an unavoidable property
+of the task, the model, or the window: Claude Code compacted 14 times on the
+same task, never aborted on context, and kept working until the clock ran out.
+Codape's abort path was self-inflicted — an open circuit breaker refused every
+pass before `Blocked` and then treated `Blocked` as fatal without one local
+attempt — and the 3 456 s it spent in those aborts was 48 % of its budget.
+
+The control is not a win for Claude Code. It also hit the 2-hour wall on both
+instances, and on `pixterm` it did worse than Codape: its submission had no
+`compile.sh` at all, so the harness could not build it (0/458, `compile_failed`),
+while Codape's compiled and scored 60/430 official (276/458 raw). Eight
+compactions in two hours is also a large share of a 253-frame run. What the
+pair shows is narrower and useful: **a working compaction loop lets a run keep
+going; a broken one converts a recoverable context into a terminal error.** The
+compaction fixes recorded in `docs/compact.md` (trigger at `auto`, land at
+`warn`, history-space targets, ladder through `LastResort`, maintenance passes
+exempt from breaker accounting) target exactly that failure.
+
+Both cleanroom images were removed after grading; no ProgramBench container or
+image remains on the host.
 
 ### 2026-11-11 — `caps-log` with the default window guess: **0, `compile_failed`**
 
@@ -593,47 +635,45 @@ the window's lower bound, a threshold pass that cannot reach the landing line
 returns `Uncompactable`, and a pass that removed nothing is not retried at the
 same size. The reruns that exercise these are recorded below.
 
-### 2026-11-11 — Claude Code harness control: `figlet`, `pixterm`
+### 2026-11-11 — `caps-log` with the served window passed in: **71, not solved**
 
-The same two instances were run with Claude Code 2.1.318 instead of Codape, to
-separate "the model cannot recover this program" from "this harness's loop
-cannot". Everything else was held equal: the same cleanroom image tag, the same
-gateway/model (`deepseek-v4.1-flash` through `opencode.ai`), an internal network
-that allows only the gateway, 4 CPUs, 8 GB, 500 turns and a 7 200 s agent
-budget. `CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072` matched the window Codape had.
+- run-id: `pb-nikoladucak__caps-log.2cf2d1e-20261111-r3`
+- instance: `nikoladucak__caps-log.2cf2d1e` (C++, medium)
+- protocol: as r2, with `CODAPE_CONTEXT_WINDOW=131072` exported into the
+  container by hand (the runner would learn to do this itself before r4)
+- agent: 146 assistant frames, 135 reported turns, 2 750 s, exit 0 and a
+  `success` result frame — it finished on its own instead of hitting the clock
+- tools: 135 `Bash`, 7 `Write`, 3 `Edit`, 1 `Read`; the submission compiles
+- raw tests: 717/1 232; official score 71
 
-- run-ids: `pb-claude-cmatsuoka__figlet.202a0a8-20261111`,
-  `pb-claude-eliukblau__pixterm.1a93fd5-20261111`
-- both were killed by the 7 200 s timeout (exit 124) and produced no closing
-  `result` frame; the transcripts are stream-json frames only
+The window override alone changed the run from a compaction loop into a task.
+There were 4 `token_threshold` compactions, all `Auto`, starting at 84 993–
+89 787 estimated tokens — the line the 128k window actually implies — against
+241 passes (238 of them `LastResort`) in r2. No pass was retried after removing
+nothing, no turn aborted on context, and the agent spent its time writing
+`source/*.cpp`, probing the reference, and running the cleanroom's build.
 
-| instance | assistant frames | tool calls | compactions | raw tests | official | outcome |
-|---|---:|---|---:|---|---|---|
-| `cmatsuoka__figlet.202a0a8` | 736 | 351 Bash, 20 Read, 19 Edit, 3 Write | 14 | 880/1 044 | 82 (872 scored) | compiled; 164 tests failed |
-| `eliukblau__pixterm.1a93fd5` | 253 | 129 Bash | 8 | 0/458 | 0, `ERROR: compile_failed` | no `compile.sh` in the submission |
+ProgramBench's official score filters the report: 681 of the 1 232 reported
+tests are marked ignored in `tests.json` (two of the twelve branches,
+`78a25e6570f4` and `c60a1c23d5ae`, are ignored in their entirety; the others
+lose individual `dummy_pass`/`gold_fail` entries). That leaves 551 scored
+tests, 390 of them passed — 71. The failures cluster in configuration
+validation (36 in `tests.test_config`, 15 in `test_config_error_paths`, 8 in
+`test_cli_options`), git integration and operations (15 + 15 + 9 in
+`test_log_repository_errors`), and smaller groups in annual-log data,
+encryption, scratchpad, and app lifecycle. These are fidelity gaps in the
+reconstruction, not loop failures: the agent reached the end of the task with
+time to spare and simply did not implement the config parser's error surface
+and git paths closely enough.
 
-The control answers the question the Codape figlet run raised. Codape's two
-`context window is full` aborts (128 429 and 129 449 estimated tokens against a
-128 072 blocked line, the first only 357 over) were not an unavoidable property
-of the task, the model, or the window: Claude Code compacted 14 times on the
-same task, never aborted on context, and kept working until the clock ran out.
-Codape's abort path was self-inflicted — an open circuit breaker refused every
-pass before `Blocked` and then treated `Blocked` as fatal without one local
-attempt — and the 3 456 s it spent in those aborts was 48 % of its budget.
-
-The control is not a win for Claude Code. It also hit the 2-hour wall on both
-instances, and on `pixterm` it did worse than Codape: its submission had no
-`compile.sh` at all, so the harness could not build it (0/458, `compile_failed`),
-while Codape's compiled and scored 60/430 official (276/458 raw). Eight
-compactions in two hours is also a large share of a 253-frame run. What the
-pair shows is narrower and useful: **a working compaction loop lets a run keep
-going; a broken one converts a recoverable context into a terminal error.** The
-compaction fixes recorded in `docs/compact.md` (trigger at `auto`, land at
-`warn`, history-space targets, ladder through `LastResort`, maintenance passes
-exempt from breaker accounting) target exactly that failure.
-
-Both cleanroom images were removed after grading; no ProgramBench container or
-image remains on the host.
+One branch, `c0e6b8d64108` (3 config/env tests, the only remaining branch that
+launches the TUI and expects it to time out), produced no `results.xml` after
+two attempts and consumed about 31.5 of the eval's 33.3 minutes. The
+three tests are reported `not_run` and count against the score. The cause was
+not established from the log; the shape — a submitted TUI process that cannot
+be torn down while the test holds its captured pipes — makes it a harness
+interaction worth isolating before the next run, not a reason to distrust the
+71. The three tests are 0.5 % of the scored total.
 
 ## Benchmarks that need a new runner
 
