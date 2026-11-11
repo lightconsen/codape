@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Run Codape on one ProgramBench instance and grade it with the official harness.
+"""Run Codape (or Claude Code) on one ProgramBench instance and grade it with the official harness.
 
 ProgramBench gives the agent a compiled reference executable and its bundled
 documentation, and asks for an independent source reimplementation plus a
 ``compile.sh`` that produces ``./executable``.  The official package grades the
 submitted workspace in a Docker container.
 
-This wrapper adds the Codape-specific parts: it installs a pinned Codape
-release, starts the cleanroom image, runs the headless agent, extracts the
-workspace, and hands it to ``programbench eval``.
+This wrapper adds the agent-specific parts: it installs a pinned Codape
+release (or copies the local Claude Code binary), starts the cleanroom image,
+runs the headless agent, extracts the workspace, and hands it to
+``programbench eval``.
+
+``--agent claude-code`` exists for harness comparisons.  On a gateway that maps
+every model alias to the same backend, it holds the model constant and changes
+only the harness (system prompt, tool loop, context policy, final checks), so
+differences isolate harness behavior rather than model capability.
 
 The task container is attached to an internal Docker network.  A small
 allowlisted CONNECT proxy is its only route out, and it permits only
@@ -45,6 +51,10 @@ DEFAULT_TIMEOUT = 5400
 DEFAULT_MAX_TURNS = 400
 DEFAULT_CPUS = 8
 DEFAULT_MEMORY = "8g"
+# Claude Code assumes a 200k window for unknown model IDs.  The gateway model
+# used for the Codape runs is served with a 128k window, so tell the harness the
+# real size; otherwise it compacts too late and requests fail at the gateway.
+DEFAULT_CLAUDE_CONTEXT_TOKENS = 131072
 INTERNAL_NETWORK = "codape-programbench-internal"
 PROXY_CONTAINER = "codape-programbench-proxy"
 PROXY_PORT = 8888
@@ -59,6 +69,7 @@ PASSTHROUGH_ENV = (
     "OPENAI_BASE_URL",
     "CODAPE_MODEL",
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_CUSTOM_HEADERS",
     "OPENAI_MODEL",
     "CODAPE_CUSTOM_HEADERS",
     "CODAPE_CONTEXT_WINDOW",
@@ -304,6 +315,28 @@ def codape_binary() -> Path:
     return binary
 
 
+def claude_binary() -> Path:
+    found = shutil.which("claude")
+    if not found:
+        raise BenchError("claude CLI not found on PATH; install Claude Code or pass --agent codape")
+    binary = Path(found).resolve()
+    if not binary.is_file():
+        raise BenchError(f"claude CLI is not a regular file: {binary}")
+    return binary
+
+
+def agent_binary(agent: str) -> Path:
+    return codape_binary() if agent == "codape" else claude_binary()
+
+
+def agent_binary_name(agent: str) -> str:
+    return "codape" if agent == "codape" else "claude"
+
+
+def agent_stream_name(agent: str) -> str:
+    return f"/tmp/{agent_binary_name(agent)}-stream.jsonl"
+
+
 def load_instance(instance_id: str) -> dict:
     python = programbench_python()
     code = textwrap.dedent(
@@ -390,22 +423,16 @@ def start_proxy() -> None:
         Path(handle.name).unlink(missing_ok=True)
 
 
-def container_env() -> list[str]:
+def container_env(agent: str, context_tokens: int) -> list[str]:
     args: list[str] = []
     for name in PASSTHROUGH_ENV:
         if os.environ.get(name):
             args += ["-e", name]
-    # These are not secrets; they tell Codape to use the allowlisted proxy and
-    # keep its own state out of the submitted workspace.
+    # These are not secrets; they tell the agent to use the allowlisted proxy
+    # and keep its own state out of the submitted workspace.
     args += [
         "-e",
-        "CODAPE_SANDBOX=off",
-        "-e",
-        "CODAPE_LOG=off",
-        "-e",
         "NO_COLOR=1",
-        "-e",
-        "CLAUDE_CONFIG_DIR=/tmp/codape-config",
         "-e",
         f"HTTPS_PROXY=http://{PROXY_CONTAINER}:{PROXY_PORT}",
         "-e",
@@ -415,6 +442,36 @@ def container_env() -> list[str]:
         "-e",
         "NO_PROXY=localhost,127.0.0.1",
     ]
+    if agent == "codape":
+        args += [
+            "-e",
+            "CODAPE_SANDBOX=off",
+            "-e",
+            "CODAPE_LOG=off",
+            "-e",
+            "CLAUDE_CONFIG_DIR=/tmp/codape-config",
+        ]
+    else:
+        # Claude Code reads its gateway/auth settings from the forwarded
+        # ANTHROPIC_* variables.  Autoupdate and telemetry would leave the
+        # allowlisted host and are disabled; the context override keeps its
+        # compaction threshold aligned with the served window.
+        args += [
+            "-e",
+            "CLAUDE_CONFIG_DIR=/tmp/claude-config",
+            "-e",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+            "-e",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+            "-e",
+            f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={context_tokens}",
+            "-e",
+            "DISABLE_AUTOUPDATER=1",
+            "-e",
+            "DISABLE_TELEMETRY=1",
+            "-e",
+            "API_TIMEOUT_MS=3000000",
+        ]
     return args
 
 
@@ -496,19 +553,45 @@ def read_file(container: str, source: str, destination: Path) -> None:
     check(["docker", "cp", f"{container}:{source}", str(destination)], timeout=120)
 
 
-def run_agent(container: str, timeout: int, max_turns: int) -> int:
+def run_agent(container: str, timeout: int, max_turns: int, agent: str, context_tokens: int) -> int:
+    binary = f"/tmp/{agent_binary_name(agent)}"
+    stream = agent_stream_name(agent)
+    exit_code = f"/tmp/{agent_binary_name(agent)}-exit-code"
+    if agent == "codape":
+        argv = (
+            f"{binary} -p --dangerously-skip-permissions --no-session-persistence "
+            f"--no-telemetry --output-format stream-json --max-turns {max_turns}"
+        )
+    else:
+        # --verbose is required for stream-json in print mode.  Skip the
+        # interactive permission prompts; this runs in a disposable container.
+        argv = (
+            f"{binary} -p --dangerously-skip-permissions --no-session-persistence "
+            f"--output-format stream-json --verbose --max-turns {max_turns}"
+        )
     script = (
         f"timeout --signal=TERM --kill-after=30 {timeout} "
-        "/tmp/codape -p --dangerously-skip-permissions --no-session-persistence "
-        f"--no-telemetry --output-format stream-json --max-turns {max_turns} "
+        f"{argv} "
         "< /tmp/programbench-instruction.txt "
-        "> /tmp/codape-stream.jsonl 2>&1; "
-        "printf '%s\\n' $? > /tmp/codape-exit-code"
+        f"> {stream} 2>&1; "
+        f"printf '%s\\n' $? > {exit_code}"
     )
-    command = ["docker", "exec", "-u", "agent", "-w", "/workspace", *container_env(), container, "sh", "-c", script]
+    command = [
+        "docker",
+        "exec",
+        "-u",
+        "agent",
+        "-w",
+        "/workspace",
+        *container_env(agent, context_tokens),
+        container,
+        "sh",
+        "-c",
+        script,
+    ]
     run(command, timeout=timeout + 180)
     result = subprocess.run(
-        ["docker", "exec", container, "cat", "/tmp/codape-exit-code"],
+        ["docker", "exec", container, "cat", exit_code],
         capture_output=True,
         text=True,
         timeout=30,
@@ -538,11 +621,23 @@ def summarize_stream(path: Path) -> str:
         turns = sum(frame.get("num_turns") or 0 for frame in results)
         duration = sum(frame.get("duration_ms") or 0 for frame in results)
         last = results[-1]
-        return (
+        message = (
             f"result frames={len(results)} subtype={last.get('subtype', '?')} "
             f"is_error={any(frame.get('is_error') for frame in results)} "
             f"turns={turns} duration_ms={duration}"
         )
+        # Claude Code reports token usage and cost; Codape does not.
+        usage = last.get("usage") or {}
+        if usage:
+            message += (
+                f" input_tokens={usage.get('input_tokens', 0)}"
+                f" output_tokens={usage.get('output_tokens', 0)}"
+                f" cache_read={usage.get('cache_read_input_tokens', 0)}"
+                f" cache_write={usage.get('cache_creation_input_tokens', 0)}"
+            )
+        if last.get("total_cost_usd") is not None:
+            message += f" cost_usd={last['total_cost_usd']:.4f}"
+        return message
     if not frames:
         return f"no JSON frames; last line: {lines[-1][:400]}"
     last = frames[-1]
@@ -563,7 +658,7 @@ def parse_eval(path: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run Codape on one ProgramBench instance")
+    parser = argparse.ArgumentParser(description="Run Codape or Claude Code on one ProgramBench instance")
     parser.add_argument("--instance", default=DEFAULT_INSTANCE, help=f"ProgramBench instance ID (default: {DEFAULT_INSTANCE})")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target" / "external-benchmarks" / "programbench")
     parser.add_argument("--run-id", help="Run identifier (default: pb-YYYYmmdd-HHMMSS)")
@@ -572,6 +667,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cpus", type=int, default=DEFAULT_CPUS)
     parser.add_argument("--memory", default=DEFAULT_MEMORY)
     parser.add_argument("--model", help="Model ID passed to Codape")
+    parser.add_argument(
+        "--agent",
+        choices=("codape", "claude-code"),
+        default="codape",
+        help="Agent harness to run (default: codape)",
+    )
+    parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=DEFAULT_CLAUDE_CONTEXT_TOKENS,
+        help="Context window advertised to Claude Code; ignored for Codape",
+    )
     parser.add_argument("--keep-container", action="store_true", help="Leave the task container running")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -586,7 +693,12 @@ def main(argv: list[str] | None = None) -> int:
         print("ProgramBench dry run; nothing will be downloaded or executed.")
         print(f"instance      : {args.instance}")
         print(f"package       : programbench=={PROGRAMBENCH_VERSION}")
-        print(f"codape        : {CODAPE_VERSION} ({CODAPE_TARGET})")
+        print(f"agent         : {args.agent}")
+        if args.agent == "codape":
+            print(f"codape        : {CODAPE_VERSION} ({CODAPE_TARGET})")
+        else:
+            print(f"claude        : {claude_binary()}")
+            print(f"context       : {args.context_tokens} tokens")
         print(f"cleanroom     : {image_for(args.instance)}")
         print(f"network       : internal {INTERNAL_NETWORK} via allowlisted proxy {PROXY_ALLOWED_HOST}:443")
         print(f"output        : {args.output_dir / args.run_id}")
@@ -601,40 +713,47 @@ def main(argv: list[str] | None = None) -> int:
         image = image_for(args.instance)
         log(f"instance: {args.instance} ({instance.get('language', '?')}, {instance.get('difficulty', '?')})")
         check(["docker", "pull", image], timeout=1800)
-        binary = codape_binary()
+        binary = agent_binary(args.agent)
 
         run_dir = args.output_dir / args.run_id
         instance_dir = run_dir / args.instance
         instance_dir.mkdir(parents=True, exist_ok=True)
-        container = f"pb-codape-{uuid.uuid4().hex[:10]}"
+        container = f"pb-{agent_binary_name(args.agent)}-{uuid.uuid4().hex[:10]}"
 
         start_proxy()
         try:
             start_container(image, container, args.cpus, args.memory, args.timeout)
-            check(["docker", "cp", str(binary), f"{container}:/tmp/codape"], timeout=60)
-            check(["docker", "exec", "-u", "0", container, "chmod", "0755", "/tmp/codape"], timeout=30)
-            copy_text(
-                container,
-                '{"config_version": 4, "telemetry_enabled": false}\n',
-                "/tmp/codape-settings.json",
-            )
-            check(
-                [
-                    "docker",
-                    "exec",
-                    "-u",
-                    "agent",
+            destination = f"/tmp/{agent_binary_name(args.agent)}"
+            check(["docker", "cp", str(binary), f"{container}:{destination}"], timeout=300)
+            check(["docker", "exec", "-u", "0", container, "chmod", "0755", destination], timeout=30)
+            if args.agent == "codape":
+                copy_text(
                     container,
-                    "sh",
-                    "-c",
-                    "mkdir -p /tmp/codape-config && cp /tmp/codape-settings.json /tmp/codape-config/settings.json",
-                ],
-                timeout=30,
-            )
+                    '{"config_version": 4, "telemetry_enabled": false}\n',
+                    "/tmp/codape-settings.json",
+                )
+                check(
+                    [
+                        "docker",
+                        "exec",
+                        "-u",
+                        "agent",
+                        container,
+                        "sh",
+                        "-c",
+                        "mkdir -p /tmp/codape-config && cp /tmp/codape-settings.json /tmp/codape-config/settings.json",
+                    ],
+                    timeout=30,
+                )
+            else:
+                check(
+                    ["docker", "exec", "-u", "agent", container, "mkdir", "-p", "/tmp/claude-config"],
+                    timeout=30,
+                )
             copy_text(container, INSTRUCTION, "/tmp/programbench-instruction.txt")
 
-            log(f"agent: {args.timeout}s, {args.max_turns} turns, container {container}")
-            exit_code = run_agent(container, args.timeout, args.max_turns)
+            log(f"agent: {args.agent}, {args.timeout}s, {args.max_turns} turns, container {container}")
+            exit_code = run_agent(container, args.timeout, args.max_turns, args.agent, args.context_tokens)
             log(f"agent exit code: {exit_code}")
             if exit_code != 0:
                 log("warning: the agent did not exit cleanly; still extracting the workspace")
@@ -644,9 +763,9 @@ def main(argv: list[str] | None = None) -> int:
             # timeout.  Do this before reading the stream and the submission.
             ensure_running(container)
 
-            stream_path = instance_dir / "codape-stream.jsonl"
+            stream_path = instance_dir / f"{agent_binary_name(args.agent)}-stream.jsonl"
             try:
-                read_file(container, "/tmp/codape-stream.jsonl", stream_path)
+                read_file(container, agent_stream_name(args.agent), stream_path)
             except BenchError as exc:
                 log(f"warning: could not copy the agent stream: {exc}")
             log(summarize_stream(stream_path))
@@ -706,7 +825,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"eval exit code: {result.returncode}")
         print(f"eval log: {eval_log}")
         if summary is None:
-            print(f"PROGRAMBENCH_SUMMARY run_id={args.run_id} instance={args.instance} score=na")
+            print(f"PROGRAMBENCH_SUMMARY run_id={args.run_id} agent={args.agent} instance={args.instance} score=na")
             return 1
         # `programbench info` applies the task's ignored tests/branches, which
         # the raw eval JSON intentionally keeps. Print it so a reported score
@@ -722,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"info failed ({info.returncode}): {info.stderr.strip()}")
         print(
-            f"PROGRAMBENCH_SUMMARY run_id={args.run_id} instance={args.instance} "
+            f"PROGRAMBENCH_SUMMARY run_id={args.run_id} agent={args.agent} instance={args.instance} "
             f"raw_passed={summary['passed']} raw_total={summary['total']} "
             f"raw_score={summary['passed'] / summary['total'] if summary['total'] else 0:.4f} "
             f"error_code={summary['error_code']} warnings={summary['warnings']}"
