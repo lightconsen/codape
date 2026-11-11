@@ -555,6 +555,12 @@ that turned into the compaction investigation.
 - raw tests: 0/1 232 — the submission did not compile; official score 0,
   `ERROR: compile_failed`
 
+The first attempt at this instance, `pb-nikoladucak__caps-log.2cf2d1e-20261111`,
+is not a scored run. It ended in 2 s with four `error_during_execution` frames:
+the gateway answered every request with `MissingSessionID` because the request
+carried no `x-opencode-session` header. The retries below set it by forwarding
+`CODAPE_CUSTOM_HEADERS` into the container, which the runner already supported.
+
 The stream is a record of a compaction loop rather than of the task. It holds
 241 `token_threshold` compaction events in 393 turns — 168 `compacted` and 73
 `no_progress` — of which 238 ran the `LastResort` strategy, 2 `Snip`, and 1
