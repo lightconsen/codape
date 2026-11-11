@@ -1086,6 +1086,23 @@ pub enum CompactionEvent {
         target_tokens: usize,
         /// The non-compactable prefix included in both sizes.
         prefix_tokens: usize,
+        /// What became of the summary step: `summarized`, `not_requested`,
+        /// `range_too_small`, `empty` or `failed`.
+        ///
+        /// A pass that summarized and one that fell back to the rules leave
+        /// very different amounts of history; a transcript without this field
+        /// cannot tell them apart. Old frames omit it, hence the default.
+        #[serde(default)]
+        summary: String,
+        /// Provider-anchored whole-request size before the pass, when an
+        /// answered request anchors one. The sizes either side are estimates;
+        /// this is the number the trigger was judged against, and the gap
+        /// between the two rulers is what makes a target overshoot legible.
+        #[serde(default)]
+        measured_tokens: Option<usize>,
+        /// The fixed overhead the targets subtracted, in strategy units.
+        #[serde(default)]
+        fixed_tokens: usize,
     },
     /// The check ran but this trigger stood down: the other path owns it.
     DeferredToThresholdPath {

@@ -540,7 +540,15 @@ failing.
 Each pass reports what it was asked to do and what it actually did. The
 compaction event carries the trigger, the requested and effective strategies,
 the sizes before and after, the landing target, the non-compactable prefix and
-the tokens removed; `NoProgress` carries the same strategy fields. Two
+the tokens removed; `NoProgress` carries the same strategy fields. The
+`Compacted` event also names what became of the summary step (`summarized`,
+`not_requested`, `range_too_small`, `empty`, `failed`) — a summarized pass and
+a rule-based fallback leave very different amounts of history — and separates
+the two rulers: `tokens_before`/`tokens_after` are estimates, while
+`measured_tokens` is the provider-anchored size the trigger was judged against
+(`null` before the first answered request), with `fixed_tokens` the overhead
+the targets subtracted. Without that pair, a pass that lands far below its
+target looks the same whether the estimate or the tokenizer is to blame. Two
 outcomes report a pass that did not run and why: `BackedOff` (the size, the
 last failed size, and the size at which a retry becomes worth it) and
 `Uncompactable` (the fixed overhead, the landing line, and the smallest

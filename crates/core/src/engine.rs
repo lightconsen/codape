@@ -1479,6 +1479,24 @@ pub enum SummaryOutcome {
     Empty,
 }
 
+impl SummaryOutcome {
+    /// The stable name this outcome carries on the event stream.
+    ///
+    /// The error text of a failed summary is useful in logs but is not a stable
+    /// protocol value, and the event is what an external host records. The
+    /// label says which path the pass took; the failure detail stays in
+    /// `tracing`.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Summarized => "summarized",
+            Self::NotRequested => "not_requested",
+            Self::RangeTooSmall { .. } => "range_too_small",
+            Self::Failed { .. } => "failed",
+            Self::Empty => "empty",
+        }
+    }
+}
+
 /// What compaction did, or why it did not happen.
 ///
 /// The engine used to answer this only in `tracing::warn!` strings — a caller
@@ -1508,6 +1526,13 @@ pub enum CompactOutcome {
         target_tokens: usize,
         /// The non-compactable prefix included in both sizes.
         prefix_tokens: usize,
+        /// Provider-anchored size before the pass, when there is a measurement
+        /// to anchor on. `tokens_before` is an estimate; this is the number the
+        /// trigger was judged against, and the two can differ by the tokenizer's
+        /// ratio. `None` before the first answered request.
+        measured_tokens: Option<usize>,
+        /// The fixed overhead the targets subtracted, in strategy units.
+        fixed_tokens: usize,
     },
     /// The check ran but this trigger stood down: the context is not in the
     /// band this trigger acts on, and the other path owns it.
@@ -1725,11 +1750,13 @@ fn compaction_event_from_outcome(outcome: &CompactOutcome) -> CompactionEvent {
             trigger,
             tokens_removed,
             messages_remaining,
-            summary: _,
+            summary,
             tokens_before,
             tokens_after,
             target_tokens,
             prefix_tokens,
+            measured_tokens,
+            fixed_tokens,
         } => CompactionEvent::Compacted {
             strategy: format!("{strategy:?}"),
             effective: format!("{effective:?}"),
@@ -1740,6 +1767,9 @@ fn compaction_event_from_outcome(outcome: &CompactOutcome) -> CompactionEvent {
             tokens_after: *tokens_after,
             target_tokens: *target_tokens,
             prefix_tokens: *prefix_tokens,
+            summary: summary.label().to_string(),
+            measured_tokens: *measured_tokens,
+            fixed_tokens: *fixed_tokens,
         },
         CompactOutcome::DeferredToThresholdPath { estimated_tokens } => {
             CompactionEvent::DeferredToThresholdPath {
@@ -5418,6 +5448,17 @@ impl QueryEngine {
         // next tool result crosses again.
         let measured_tokens = self.turn_context_tokens(turn);
         let line = self.heuristic_landing_line(measured_tokens, tokens_before);
+        // The measurement is not the estimate: the provider's tokenizer is the
+        // authority on how full the request is, and a run's post-mortem needs
+        // both rulers. `None` when no answered request anchors the size yet.
+        let measured_before = self
+            .usage_anchor
+            .filter(|anchor| {
+                anchor.prompt_tokens > 0 && anchor.history_messages <= turn.history().len()
+            })
+            .map(|_| measured_tokens);
+        let fixed_tokens =
+            self.fixed_overhead_tokens(measured_tokens, tokens_before, prefix_tokens);
 
         // Circuit breaker accounting: a pass that neither reached the landing
         // line nor removed a tenth of the context counts as a failure.
@@ -5594,6 +5635,8 @@ impl QueryEngine {
                 tokens_after,
                 target_tokens: line,
                 prefix_tokens,
+                measured_tokens: measured_before,
+                fixed_tokens,
             }
         } else {
             CompactOutcome::NoProgress {
@@ -12053,6 +12096,8 @@ mod tests {
             tokens_after: 99_000,
             target_tokens: 78_072,
             prefix_tokens: 800,
+            measured_tokens: Some(97_500),
+            fixed_tokens: 8_100,
         };
         match compaction_event_from_outcome(&compacted) {
             CompactionEvent::Compacted {
@@ -12065,7 +12110,13 @@ mod tests {
                 tokens_after,
                 target_tokens,
                 prefix_tokens,
+                summary,
+                measured_tokens,
+                fixed_tokens,
             } => {
+                assert_eq!(summary, "not_requested");
+                assert_eq!(measured_tokens, Some(97_500));
+                assert_eq!(fixed_tokens, 8_100);
                 assert_eq!(strategy, "Auto");
                 assert_eq!(effective, "Micro");
                 assert_eq!(trigger, "token_threshold");
@@ -12114,6 +12165,8 @@ mod tests {
             tokens_after: 90,
             target_tokens: 80,
             prefix_tokens: 10,
+            measured_tokens: None,
+            fixed_tokens: 10,
         };
         assert!(compacted.failure_message().is_none());
 
@@ -12719,6 +12772,102 @@ mod tests {
                  {landing_tokens}, {minimum_tokens}"
             );
         }
+    }
+
+    /// The r2 pathology end to end: an unknown model, the 32k guess, and a
+    /// request the provider measured almost entirely as fixed overhead. The
+    /// pass stands down without touching the history, the request goes out as
+    /// it is, and the acceptance teaches the window a lower bound — so the
+    /// next check is not the same arithmetic with the same outcome. Before
+    /// these guards, this shape ran 241 passes and submitted nothing.
+    #[tokio::test]
+    async fn an_unknown_window_that_cannot_compact_learns_from_the_request_it_sends() {
+        let (mut engine, mut rx, _session) = make_test_engine();
+        engine.model = ModelId("mystery-model".into());
+        engine.set_context_window_resolver(ContextWindowResolver::new(
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+        ));
+        assert_eq!(
+            engine.context_window().tokens,
+            crate::types::UNKNOWN_CONTEXT_WINDOW
+        );
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("s"), Message::user("x".repeat(40_000))];
+        turn.set_history_range(1, 2);
+        let history_before = turn.history().to_vec();
+        let prefix = turn.context_prefix_tokens();
+        // The provider measured the request at 19 000 tokens, 8 600 of them
+        // not history. Against the 32k guess the landing line is a few
+        // thousand tokens: the fixed part alone fills it.
+        engine.usage_anchor = Some(UsageAnchor {
+            history_messages: 1,
+            prefix_tokens: prefix,
+            prompt_tokens: 19_000,
+            fixed_tokens: 8_600,
+        });
+
+        let outcome = engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+        assert!(
+            matches!(outcome, CompactOutcome::Uncompactable { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            turn.history().len(),
+            history_before.len(),
+            "no pass may delete history"
+        );
+        assert_eq!(
+            PromptCompiler::estimate_message_tokens(turn.history()),
+            PromptCompiler::estimate_message_tokens(&history_before),
+            "no message may be rewritten"
+        );
+        assert_eq!(turn.compact_no_progress, 0, "no pass may have run");
+        assert_eq!(turn.recovery_count, 0, "no retry may have been spent");
+
+        let mut saw_uncompactable = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::Compaction(CompactionEvent::Uncompactable { .. }) => {
+                    saw_uncompactable = true;
+                }
+                EngineEvent::Compaction(CompactionEvent::Compacted { .. }) => {
+                    panic!("a pass ran: {event:?}");
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_uncompactable, "the stand-down must be observable");
+
+        // The request is sent as it is and the provider accepts it. Its input
+        // plus the requested output is a proven lower bound on the window.
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 19_000,
+                output_tokens: 20,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        let expected = 19_000 + QueryEngine::DEFAULT_MAX_TOKENS as usize;
+        assert_eq!(
+            engine.context_window().tokens,
+            expected,
+            "the accepted request must raise the guess"
+        );
+        assert!(engine.context_window().tokens > crate::types::UNKNOWN_CONTEXT_WINDOW);
     }
 
     /// An accepted request proves the window was at least its input plus the
