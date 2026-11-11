@@ -123,17 +123,34 @@ fn a_destructive_shell_command_cannot_touch_a_path_outside_the_workspace() {
         "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // The guarantee is that the path did not change, and that is all it is.
+    //
+    // This used to also demand one of `Permission denied`, `Operation not
+    // permitted` or `not allowed` in the output, which pinned the test to the
+    // mechanism one backend happens to use. It broke as soon as the
+    // ubuntu-latest image started shipping `bwrap`: bubblewrap rebuilds `/tmp`
+    // as a private tmpfs (see `bubblewrap_args`), so this victim does not
+    // exist in the namespace at all, and `rm -rf` of an absent path is a
+    // silent `exit 0` — no kernel refusal, nothing to refuse. Under Landlock
+    // and `sandbox-exec` the same command is refused instead.
+    //
+    // The sentinel is still the thing worth asserting, and it still has
+    // teeth: removing the sandbox entirely deletes it and fails this test.
+    // What it cannot do under bubblewrap is notice a *too-permissive write
+    // policy* for a path under /tmp, because the tmpfs shadows the host tree
+    // regardless of the policy. That is a property of where the fixture
+    // points, not of the guarantee.
     assert_eq!(
         std::fs::read_to_string(victim.join("sentinel")).ok(),
         Some("keep".to_string()),
         "the destructive command reached a path outside the workspace"
     );
+    // Without this, a run where the tool was never invoked would satisfy the
+    // assertion above by doing nothing at all.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Operation not permitted")
-            || stdout.contains("Permission denied")
-            || stdout.contains("not allowed"),
-        "the command failed for a reason other than confinement:\n{stdout}"
+        stdout.contains(r#""name":"Bash""#),
+        "the destructive command never reached the shell:\n{stdout}"
     );
     let _ = std::fs::remove_dir_all(&victim);
 }
