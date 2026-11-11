@@ -542,7 +542,50 @@ also the only one of the three where tool time is substantial: 5 317 s across
 These are three hand-picked instances, one per language/difficulty, not a random
 sample: 0/3 estimates nothing about ProgramBench as a whole. `caps-log` (C++,
 medium) was deferred after the three runs above; the Claude Code harness control
-on `figlet` and `pixterm` is recorded below.
+on `figlet` and `pixterm` is recorded below, followed by the `caps-log` runs
+that turned into the compaction investigation.
+
+### 2026-11-11 — `caps-log` with the default window guess: **0, `compile_failed`**
+
+- run-id: `pb-nikoladucak__caps-log.2cf2d1e-20261111-r2`
+- instance: `nikoladucak__caps-log.2cf2d1e` (C++, medium)
+- protocol: as the three-instance sample, **except** that the runner did not
+  yet pass the served window; Codape was left to guess
+- agent: 393 assistant frames in 7 200 s (exit 124), 332 reported turns
+- raw tests: 0/1 232 — the submission did not compile; official score 0,
+  `ERROR: compile_failed`
+
+The stream is a record of a compaction loop rather than of the task. It holds
+241 `token_threshold` compaction events in 393 turns — 168 `compacted` and 73
+`no_progress` — of which 238 ran the `LastResort` strategy, 2 `Snip`, and 1
+`Auto`. The passes removed 433 018 estimated tokens in total but landed nowhere:
+the median pass started at 9 636 estimated tokens, and the last passes left 0
+messages in the history. No source file was written.
+
+The arithmetic explains all of it. The runner served a 128k model but Codape
+did not know the window, so it used `UNKNOWN_CONTEXT_WINDOW` (32 000). With
+that value the compaction line is `32 000 − 20 000 − 13 000`, i.e. effectively
+zero, so every request crossed it on the first turn; the landing line derived
+from it is also zero, which no pass can reach, and progress fell back to "removed
+at least a tenth". The only way to satisfy that is to delete history, and the
+strategy ladder marched to `LastResort` within the first few passes.
+
+Two estimator defects made the loop worse. `context_prefix_tokens` counted
+messages only, so the serialized tool schemas — the largest fixed part of a
+request — were invisible; on this gateway the measured prompt ran at about
+1.95× the estimate, with roughly 8–9k tokens of fixed overhead. And the targets
+subtracted only the message prefix (1 290 in the first pass above), asking the
+history to shed room that the tool schemas had already spent. Every pass then
+looked successful by the tenth-removed rule while the real request stayed over
+the real limits.
+
+The fixes are in `docs/compact.md` and in the commit that follows this run: the
+runner now passes the served window to Codape via `CODAPE_CONTEXT_WINDOW`, the
+request estimate includes the tool schemas, a measured request records its
+fixed overhead and targets subtract it, an accepted request raises and persists
+the window's lower bound, a threshold pass that cannot reach the landing line
+returns `Uncompactable`, and a pass that removed nothing is not retried at the
+same size. The reruns that exercise these are recorded below.
 
 ### 2026-11-11 — Claude Code harness control: `figlet`, `pixterm`
 
