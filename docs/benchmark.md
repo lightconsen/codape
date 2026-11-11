@@ -27,7 +27,7 @@ Everything else below needs work first.
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Sample — **21/24** on a 24-instance, 12-repository stratified subset (`swe-verified-24-20261110-b1..b6`); earlier hand-picked subsets 3/3, 2/3; see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Sample — **9/12** on a 12-instance, 9-language stratified subset (`swe-multilingual-12-20261110-b1..b3`); earlier pipeline check 1/1; see [run history](#swe-bench-run-history) |
-| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | 1/1 solved (`pb-cmatrix-20261110-r2`) — one instance, not a benchmark score; see [run history](#programbench-run-history) |
+| [ProgramBench](https://programbench.com/) | 201 instances in `programbench==1.2.5` | `scripts/external-benchmarks/programbench/` | Sample — 0/3 solved on `figlet` (0/1044, compile_failed), `pixterm` (60/430), `zip-password-finder` (92/680); earlier `cmatrix` pipeline check 1/1; see [run history](#programbench-run-history) |
 | Cassette benchmark | 17 mock cases (3 more live) | `scripts/test-code-agent-benchmark.sh` | In CI, every push |
 
 The first five are research instruments: Docker, network, paid model tokens,
@@ -477,6 +477,72 @@ because it needs no downloaded model or dataset. `cmatrix` is a small, public,
 well-known program, and the network allowlist stops lookup but not
 memorization; treat this as a pipeline pass, not evidence of general
 program-recovery ability.
+
+### 2026-11-11 — three-instance sample: `figlet`, `pixterm`, `zip-password-finder` (**0/3 solved**)
+
+- run-ids: `pb-cmatsuoka__figlet.202a0a8-20261110`,
+  `pb-eliukblau__pixterm.1a93fd5-20261110`,
+  `pb-agourlay__zip-password-finder.704700d-20261110`
+- instances: C/easy, Go/easy, Rust/medium
+- protocol: same as `cmatrix`; 7 200 s agent budget, 500 turns, 4 CPUs, 8 GB,
+  internal network with only `opencode.ai:443` allowed; each 4+ GB cleanroom
+  image removed after grading
+- all three hit the 7 200 s timeout (exit 124); none finished early
+
+| instance | turns | shell jobs | raw tests | official | outcome |
+|---|---:|---:|---|---|---|
+| `cmatsuoka__figlet.202a0a8` | 355 | 364 | 0/1 044 | 0, `ERROR: compile_failed` | final source did not compile |
+| `eliukblau__pixterm.1a93fd5` | 53 | 53 | 276/458 | 60 (430 scored tests) | compiled; 172 scored tests failed |
+| `agourlay__zip-password-finder.704700d` | 103 | 95 | 738/792 | 92 (680 scored tests) | compiled; 53 tests failed |
+
+**`figlet` (C, easy).** The submission contains a reconstructed figlet tree and a
+correct `compile.sh`, but `figlet.c:1518` has `error: 'else' without a previous
+'if'`, so all 1 044 tests are `not_run`. The agent had built and self-tested
+`myfig` around turn 340 (its own sweep reported no diffs on the main cases,
+4 diffs on `ivrit`), then made about 20 more edits without recompiling. Two
+`context window is full (128 429 / 129 449 estimated tokens)` aborts cost
+3 456 s — 48 % of the budget. Only 63 s of the 7 200 s went to shell
+execution: 364 jobs, median 0.01 s, while the 364 model gaps totalled 7 124 s
+(median 14 s, p90 42 s).
+
+**`pixterm` (Go, easy).** It compiles with `go build` (no module dependencies)
+and passes 276/458 raw tests. The 172 scored failures split into 66 image
+decodes (`unknown format`: 59 `.bmp`, 2 `.tiff`, 2 `.webp`), about 87 rendering
+and dithering mismatches, about 20 CLI validation/exit-code differences, and 7
+pytest timeouts. `go.mod` declares no dependencies, the module cache has no
+`golang.org/x/image`, and the build phase is network-blocked, so supporting
+those formats meant writing decoders; the agent repeated the README's format
+list in `--help` but never implemented or tested them. Only 53 turns were made
+in 2 hours: 8 s of shell time and 6 999 s in model gaps (median 74 s, p90
+370 s, max 1 114 s), including one 653 s segment that ended on a transport error
+(`error sending request for url .../v1/messages`). Most early turns probed the
+reference's scaling and dithering with synthetic PNGs; the first source write
+was call 36 of 58.
+
+**`zip-password-finder` (Rust, medium).** It compiles with the cleanroom's
+`rustc` and scores 738/792 raw; the official score is 92 on 680 scored tests,
+**not solved** (no ✅; ProgramBench reserves that for 100). The 53 failures are
+32 `Password not found`, 9 timeouts on larger search spaces, 7 exact
+error-message mismatches around `--maxPasswordLen 0`, 3 directory-input cases,
+1 `--` separator case, and 1 empty-charset-file case. The `not found` bucket is
+not a crypto bug: the dictionary-attack tests largely pass, and the submitted
+code's candidate enumeration is wrong. It walks one concatenated space of passwords of
+increasing length, but when the per-worker stride carries past the last
+password of a length, it puts the carry in the most-significant digit instead
+of starting the next length at zero; the seeded value depends on the last digit
+and the stride. With one worker that skips the first `n` candidates of each new
+length; with multiple workers the digit/index mapping also diverges, so
+candidates are both duplicated and skipped. For `-c l` (26 letters), `ab` is
+length-2 candidate 1 and is skipped even with one worker; simulating the
+submitted algorithm with 8 workers on the default 62-character alphabet tests
+535 of 3 906 candidates up to length 2, and never tests `ab`. This instance is
+also the only one of the three where tool time is substantial: 5 317 s across
+95 jobs, against 6 000 s of model gaps (median 55 s, p90 151 s, max 593 s).
+
+These are three hand-picked instances, one per language/difficulty, not a random
+sample: 0/3 estimates nothing about ProgramBench as a whole. `caps-log` (C++,
+medium) was deferred after the three runs above; a Claude Code harness control
+on `figlet` and `pixterm` is recorded separately once complete.
 
 ## Benchmarks that need a new runner
 
