@@ -3106,24 +3106,32 @@ mod tests {
         assert!(matches!(result, Err(HookError::Timeout(50))));
     }
 
-    /// Whether `pid` still runs. A zombie has already exited and does not
-    /// count; `ps` reports it with a `Z` state.
+    /// The heartbeat the backgrounding hook leaves, once it has ticked.
+    ///
+    /// The file is written through a rename, so a reader never sees it empty
+    /// or half-written: the shell truncates `probe.tick.new` and renames it
+    /// over `probe.tick`, and `rename(2)` is atomic within one directory.
     #[cfg(unix)]
-    fn hook_process_alive(pid: i32) -> bool {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output();
-        match output {
-            Ok(output) => {
-                let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                !state.is_empty() && !state.starts_with('Z')
-            }
-            Err(_) => false,
-        }
+    fn heartbeat(directory: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(directory.join("probe.tick"))
+            .ok()
+            .map(|text| text.trim().to_string())
     }
 
     /// A hook that backgrounds a process and then hangs. Only killing the
     /// direct child would leave the background process running.
+    ///
+    /// The background process reports liveness through a heartbeat file
+    /// rather than the pid it could write with `$!`. A pid is not usable here:
+    /// hooks default to confinement, confinement on a Linux host with `bwrap`
+    /// is bubblewrap, and [`bubblewrap_args`] unshares the PID namespace — so
+    /// the `$!` a hook sees is local to that namespace. Probing it from the
+    /// test process either finds nothing or, for a small number, an unrelated
+    /// kernel thread that never exits. That is exactly what made
+    /// `the background process 4 survived` fire on ubuntu-26.04 (whose image
+    /// ships `bwrap`, unlike 24.04's) while the tree had in fact been killed.
+    /// A file's contents are outside every namespace, so this observation
+    /// means the same thing for bwrap, Landlock, and `sandbox-exec`.
     #[cfg(unix)]
     fn backgrounding_hook(directory: &std::path::Path, timeout_ms: u64) -> HookConfig {
         HookConfig {
@@ -3131,7 +3139,10 @@ mod tests {
             event: "Stop".to_string(),
             kind: HookType::Command,
             tier: HookTier::Core,
-            command: "sh -c 'sleep 30 & echo $! > probe.pid; sleep 30'".to_string(),
+            command: "sh -c 'n=0; while :; do n=$((n + 1)); \
+                      echo $n > probe.tick.new && mv probe.tick.new probe.tick; \
+                      sleep 0.02; done & sleep 30'"
+                .to_string(),
             http: None,
             prompt: None,
             model: None,
@@ -3150,36 +3161,50 @@ mod tests {
         }
     }
 
-    /// The pid the backgrounding hook wrote, once it is visible.
+    /// Wait until the backgrounded process stops running, observed through
+    /// its heartbeat.
+    ///
+    /// A tick that fails to advance for five consecutive polls is the signal:
+    /// the loop ticks every 20ms and the polls are 50ms apart, so a live
+    /// process moves the counter several times per poll. Several quiet polls
+    /// rather than one keeps a scheduler stall under the suite's load from
+    /// reading as an exit — and 250ms is still far shorter than the 20ms tick
+    /// a survivor produces, so it cannot hide one.
     #[cfg(unix)]
-    async fn background_pid(directory: &std::path::Path) -> i32 {
-        let path = directory.join("probe.pid");
+    async fn wait_for_background_exit(directory: &std::path::Path) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        loop {
-            if let Ok(text) = std::fs::read_to_string(&path)
-                && let Ok(pid) = text.trim().parse::<i32>()
-            {
-                return pid;
+
+        // The caller may have cancelled the execution before the hook got as
+        // far as its first tick, so the file is waited for too.
+        let mut last = loop {
+            if let Some(tick) = heartbeat(directory) {
+                break tick;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "the hook never wrote its background pid"
+                "the hook never wrote its heartbeat"
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
+        };
 
-    /// Wait for a process to be gone (a zombie has already exited).
-    #[cfg(unix)]
-    async fn wait_for_process_exit(pid: i32) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while hook_process_alive(pid) && std::time::Instant::now() < deadline {
+        let mut quiet = 0;
+        loop {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let current = heartbeat(directory).expect("the heartbeat file disappeared");
+            if current == last {
+                quiet += 1;
+                if quiet == 5 {
+                    return;
+                }
+            } else {
+                quiet = 0;
+                last = current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the background process is still running after its tree was killed (tick {last})"
+            );
         }
-        assert!(
-            !hook_process_alive(pid),
-            "the background process {pid} survived"
-        );
     }
 
     /// `kill_on_drop` only signals the direct child. A hook that backgrounds a
@@ -3200,7 +3225,7 @@ mod tests {
         let result = execute_hook_with_timeout(&hook, &input, None, None).await;
         assert!(matches!(result, Err(HookError::Timeout(800))), "{result:?}");
 
-        wait_for_process_exit(background_pid(directory.path()).await).await;
+        wait_for_background_exit(directory.path()).await;
     }
 
     /// The tree kill also covers a hook running under the OS sandbox: the
@@ -3228,7 +3253,7 @@ mod tests {
             "{result:?}"
         );
 
-        wait_for_process_exit(background_pid(directory.path()).await).await;
+        wait_for_background_exit(directory.path()).await;
     }
 
     /// The outer timeout drops the execution future instead of returning from
@@ -3254,7 +3279,7 @@ mod tests {
         .await;
         assert!(outcome.is_err(), "the caller cancelled the execution");
 
-        wait_for_process_exit(background_pid(directory.path()).await).await;
+        wait_for_background_exit(directory.path()).await;
     }
 
     /// The old shell prefix could be undone by the hook itself. The limits are
