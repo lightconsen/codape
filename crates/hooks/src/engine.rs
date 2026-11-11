@@ -3124,8 +3124,8 @@ mod tests {
     /// The background process reports liveness through a heartbeat file
     /// rather than the pid it could write with `$!`. A pid is not usable here:
     /// hooks default to confinement, confinement on a Linux host with `bwrap`
-    /// is bubblewrap, and [`bubblewrap_args`] unshares the PID namespace — so
-    /// the `$!` a hook sees is local to that namespace. Probing it from the
+    /// is bubblewrap, and `codape_core::sandbox::bubblewrap_args` unshares the
+    /// PID namespace — so the `$!` a hook sees is local to that namespace. Probing it from the
     /// test process either finds nothing or, for a small number, an unrelated
     /// kernel thread that never exits. That is exactly what made
     /// `the background process 4 survived` fire on ubuntu-26.04 (whose image
