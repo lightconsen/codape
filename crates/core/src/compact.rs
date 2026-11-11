@@ -163,7 +163,23 @@ fn is_micro_compactable(name: &str) -> bool {
 /// truncated result is a cache miss on the next request.
 #[must_use]
 pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> CompactResult {
+    micro_compact_to(messages, params, 0)
+}
+
+/// Micro compact that stops once the history is under `target_tokens`.
+///
+/// Truncating every eligible result removes more than a pass has to: when the
+/// landing target is reachable after a third of them, the rest was the model's
+/// working set, and rewriting it only buys a cache miss. A zero target keeps
+/// the old behaviour (every eligible result).
+#[must_use]
+pub fn micro_compact_to(
+    messages: &[Message],
+    params: MicroCompactParams,
+    target_tokens: usize,
+) -> CompactResult {
     let tokens_before = total_token_estimate(messages);
+    let mut current = tokens_before;
 
     // Map tool_call_id → tool name from the assistant ToolCall messages.
     let tool_names: std::collections::HashMap<&str, &str> = messages
@@ -199,6 +215,9 @@ pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> Compac
     let mut result = messages.to_vec();
 
     for idx in tool_result_indices.iter().take(summarize_count) {
+        if target_tokens > 0 && current <= target_tokens {
+            break;
+        }
         if let MessageContent::ToolResult(tr) = &result[*idx].content {
             // Conservative: leave unpaired, non-whitelisted or small results
             // intact — never rewrite content we don't actually shrink.
@@ -210,6 +229,7 @@ pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> Compac
             if PromptCompiler::estimate_tokens(&tr.output) <= params.min_result_tokens {
                 continue;
             }
+            let before = message_token_estimate(&result[*idx]);
             let truncated =
                 truncate_tool_output(&tr.output, params.head_tokens, params.tail_tokens);
             result[*idx] = Message {
@@ -223,6 +243,8 @@ pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> Compac
                     images: tr.images.clone(),
                 }),
             };
+            let after = message_token_estimate(&result[*idx]);
+            current = current.saturating_sub(before.saturating_sub(after));
         }
     }
 
@@ -287,8 +309,9 @@ pub const fn should_auto_compact(
 /// messages that contain only text (no tool calls).
 #[must_use]
 pub fn auto_compact(messages: &[Message], threshold: usize) -> CompactResult {
-    // First apply micro compact
-    let micro = micro_compact(messages, MicroCompactParams::default());
+    // First apply micro compact, stopping as soon as the target is met: the
+    // results it did not have to touch are the model's working set.
+    let micro = micro_compact_to(messages, MicroCompactParams::default(), threshold);
 
     let tokens_after_micro = total_token_estimate(&micro.messages);
     if tokens_after_micro <= threshold {
@@ -307,7 +330,11 @@ pub fn auto_compact(messages: &[Message], threshold: usize) -> CompactResult {
         };
     }
 
-    // Additional pass: remove older pure-text assistant messages
+    // Additional pass: remove older pure-text assistant messages, oldest
+    // first, and stop once the target is met. Removing half unconditionally
+    // took a pass from 88 000 tokens to 45 000 against a 70 000 target: the
+    // history below the line was deleted for no reason, and the next crossing
+    // came sooner.
     let mut result = micro.messages;
     let assistant_text_indices: Vec<usize> = result
         .iter()
@@ -318,12 +345,21 @@ pub fn auto_compact(messages: &[Message], threshold: usize) -> CompactResult {
         .map(|(i, _)| i)
         .collect();
 
-    // Remove up to half of the older assistant text messages
-    let remove_count = assistant_text_indices.len() / 2;
-    for idx in assistant_text_indices.iter().take(remove_count).rev() {
+    // Half stays the cap: even when the target is unreachable, a single pass
+    // does not delete more than the older half of the assistant text.
+    let remove_limit = assistant_text_indices.len() / 2;
+    let mut to_remove = Vec::new();
+    let mut removal = 0usize;
+    for idx in assistant_text_indices.iter().take(remove_limit) {
+        if tokens_after_micro.saturating_sub(removal) <= threshold {
+            break;
+        }
+        removal = removal.saturating_add(message_token_estimate(&result[*idx]));
+        to_remove.push(*idx);
+    }
+    for idx in to_remove.iter().rev() {
         result.remove(*idx);
     }
-
     let tokens_after = total_token_estimate(&result);
     CompactResult {
         strategy: CompactStrategy::Auto,
@@ -1421,6 +1457,46 @@ mod tests {
         assert_eq!(result.messages.len(), messages.len()); // same count, output shrunk
     }
 
+    /// Micro compaction is the lightest rung, and truncating a result it does
+    /// not need to is a cache miss for nothing: it stops once the history is
+    /// already under the target it was given.
+    #[test]
+    fn micro_compact_to_stops_once_under_the_target() {
+        let mut messages = vec![make_user_text("start")];
+        for i in 0..9 {
+            messages.extend(make_tool_exchange(
+                &format!("tc_{i}"),
+                "read",
+                &"o".repeat(12_000),
+            ));
+        }
+        let params = MicroCompactParams {
+            keep_recent: 5,
+            ..Default::default()
+        };
+        let total = total_token_estimate(&messages);
+
+        let none = micro_compact_to(&messages, params, total);
+        assert_eq!(
+            none.tokens_removed, 0,
+            "a target the history already meets must not rewrite anything"
+        );
+
+        let full = micro_compact(&messages, params);
+        assert!(full.tokens_removed > 0);
+
+        // One truncation saves more than 1 000 tokens, so this target is
+        // reached after the first eligible result.
+        let partial = micro_compact_to(&messages, params, total - 1_000);
+        assert!(partial.tokens_removed > 0, "the pass removed nothing");
+        assert!(
+            partial.tokens_removed < full.tokens_removed,
+            "the targeted pass truncated more than it needed: {} vs {}",
+            partial.tokens_removed,
+            full.tokens_removed
+        );
+    }
+
     #[test]
     fn micro_compact_preserves_recent_tool_results() {
         let mut messages = Vec::new();
@@ -2166,6 +2242,39 @@ mod tests {
         assert!(
             oversized.iter().any(|part| part.contains("yyy")),
             "the newest render must never be dropped: {oversized:?}"
+        );
+    }
+
+    /// Removing half the older assistant text unconditionally is how a pass
+    /// took an 88 000-token context to 45 000 against a 70 000 target. The
+    /// pass stops as soon as the target is met, and half stays only as a cap
+    /// for a target it cannot reach.
+    #[test]
+    fn auto_compact_stops_removing_assistant_text_once_under_the_target() {
+        let messages = vec![
+            make_user_text("start"),
+            make_assistant_text(&"a".repeat(400)),
+            make_assistant_text(&"b".repeat(400)),
+            make_assistant_text(&"c".repeat(400)),
+            make_assistant_text(&"d".repeat(400)),
+            make_user_text("end"),
+        ];
+        // ~400 tokens of assistant text; removing the oldest message leaves
+        // ~300, which meets this target.
+        let result = auto_compact(&messages, 350);
+        let assistants = result
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::Assistant))
+            .count();
+        assert_eq!(
+            assistants, 3,
+            "the oldest message was enough; the pass removed more than it had to"
+        );
+        assert!(
+            total_token_estimate(&result.messages) <= 350,
+            "the pass stopped above its target: {}",
+            total_token_estimate(&result.messages)
         );
     }
 

@@ -5255,9 +5255,18 @@ impl QueryEngine {
         // The targets were computed above, with the same landing line the
         // summary path sized its tail from.
         let history = escalated_history.unwrap_or_else(|| turn.history().to_vec());
+        // A maintenance pass is not landing a threshold: the cache is already
+        // cold, so trimming everything it can is the point, not an overshoot.
+        let (micro_target, auto_threshold) = if trigger == CompactTrigger::TokenThreshold {
+            (auto_target, auto_target)
+        } else {
+            (0, 0)
+        };
         let result: CompactResult = match strategy {
-            CompactStrategy::Micro => compact::micro_compact(&history, self.micro_params()),
-            CompactStrategy::Auto => compact::auto_compact(&history, auto_target),
+            CompactStrategy::Micro => {
+                compact::micro_compact_to(&history, self.micro_params(), micro_target)
+            }
+            CompactStrategy::Auto => compact::auto_compact(&history, auto_threshold),
             CompactStrategy::Reactive => compact::reactive_compact(&history, 3),
             CompactStrategy::Snip => compact::snip_compact(&history, snip_target),
             CompactStrategy::LastResort => compact::last_resort_compact(&history, snip_target),

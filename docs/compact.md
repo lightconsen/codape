@@ -509,6 +509,13 @@ provider still measured over it a recovery.
   rung is recorded separately from the pass that actually ran: an `Auto`
   request that stopped after its micro step used to report `Micro`, so the
   ladder selected `Auto` again and `Snip` was unreachable.
+- `Micro` and `Auto` work to the target instead of to a fixed shape. `Micro`
+  truncates only as many eligible results as it needs to reach it, and `Auto`
+  removes older assistant text oldest-first, stopping as soon as the context
+  is under the target and removing more than half only never happens. Before
+  this, `Auto` truncated every result and then deleted exactly half the older
+  assistant texts: an 88 000-token pass landed at 45 000 against a 70 000
+  target, deleting working history that the line had room for.
 - `LastResort` is local and free: it runs `Snip`, then repeatedly truncates
   the largest remaining tool result (head and tail kept) until the target is
   met or nothing can shrink. It makes no model call and cannot fail the way a
