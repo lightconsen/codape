@@ -236,6 +236,62 @@ impl CompactConfig {
         }
         context_window.saturating_sub(self.blocked_margin_tokens)
     }
+
+    /// Hard ceiling on how much conversation the summarizer may be fed.
+    ///
+    /// A summary request is itself a request: its input plus the reply has to
+    /// fit the window. Quarter-window input leaves three quarters for the
+    /// model's own reasoning, and the ceiling keeps one very large window from
+    /// turning every compaction into an expensive book-length call.
+    pub const MAX_SUMMARY_INPUT_TOKENS: usize = 60_000;
+
+    /// Tokens of conversation text the summarizer is fed.
+    ///
+    /// `summary_input_max_tokens` is the floor: it is sized for the 128K
+    /// windows this project benchmarks, and using it unchanged on a 32K window
+    /// would be a quarter of the window rather than a comfortable slice. On
+    /// larger windows the input grows with the window, because the task state a
+    /// summary has to preserve lives at the start of the range and a fixed 20K
+    /// cap was dropping exactly that.
+    #[must_use]
+    pub const fn resolve_summary_input_budget(&self, context_window: usize) -> usize {
+        if context_window == 0 {
+            return self.summary_input_max_tokens;
+        }
+        let quarter = context_window / 4;
+        let capped = if quarter < Self::MAX_SUMMARY_INPUT_TOKENS {
+            quarter
+        } else {
+            Self::MAX_SUMMARY_INPUT_TOKENS
+        };
+        if capped < self.summary_input_max_tokens {
+            self.summary_input_max_tokens
+        } else {
+            capped
+        }
+    }
+
+    /// Tokens of recent history a summary keeps verbatim, or 0 when unknown.
+    ///
+    /// The message floor (`keep_recent_messages`) alone is not bounded: eight
+    /// messages can be 60 000 tokens when the tail holds large tool results,
+    /// which leaves little of the window for the summary to describe. An
+    /// eighth of the window keeps the live working set live without letting it
+    /// become the context. Unknown windows keep the message floor alone.
+    #[must_use]
+    pub const fn resolve_summary_tail_tokens(&self, context_window: usize) -> usize {
+        if context_window == 0 {
+            return 0;
+        }
+        let eighth = context_window / 8;
+        if eighth < 8_000 {
+            8_000
+        } else if eighth > 40_000 {
+            40_000
+        } else {
+            eighth
+        }
+    }
 }
 
 // ─── Prompt Context ─────────────────────────────────────────────────────────
@@ -480,6 +536,36 @@ impl PromptCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The summary input scales with the window but never below the configured
+    /// floor and never above the ceiling; the preserved tail is an eighth of
+    /// the window, clamped between 8K and 40K.
+    #[test]
+    fn summary_input_scales_with_the_window() {
+        let config = CompactConfig::default();
+
+        // 128K: a quarter (32K) is above the 20K floor and below the ceiling.
+        assert_eq!(config.resolve_summary_input_budget(131_072), 32_768);
+        assert_eq!(config.resolve_summary_tail_tokens(131_072), 16_384);
+
+        // A small window does not get an input larger than its floor allows.
+        assert_eq!(config.resolve_summary_input_budget(32_000), 20_000);
+        assert_eq!(config.resolve_summary_tail_tokens(32_000), 8_000);
+
+        // A very large window stops at the ceiling.
+        assert_eq!(
+            config.resolve_summary_input_budget(1_000_000),
+            CompactConfig::MAX_SUMMARY_INPUT_TOKENS
+        );
+        assert_eq!(config.resolve_summary_tail_tokens(1_000_000), 40_000);
+
+        // An unknown window keeps the configured behaviour.
+        assert_eq!(
+            config.resolve_summary_input_budget(0),
+            config.summary_input_max_tokens
+        );
+        assert_eq!(config.resolve_summary_tail_tokens(0), 0);
+    }
 
     #[test]
     fn static_dynamic_block_separation() {

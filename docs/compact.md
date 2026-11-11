@@ -211,6 +211,13 @@ family.
 - `warn = auto - min(warning_buffer, auto / 2)`
 - `blocked = window - blocked_margin`
 
+`auto` is the **trigger** and `warn` is the **landing line**
+(`CompactThresholds::landing`). A pass is triggered at `auto` but aimed at
+`warn`: landing exactly on the trigger buys no headroom, and the next tool
+result crosses the line again. Until the landing line existed, a pass could
+"meet" its target by removing a few hundred tokens and still count as a
+recovery.
+
 Both `auto` and `warn` have small-window floors so a 32K unknown model still
 compacts sensibly rather than reserving the whole window.
 
@@ -311,6 +318,18 @@ property of the traffic, not of the model. A heuristic at or above the
 measurement is not evidence of a larger real context — the heuristic overcounts
 prose — so the budget is left as stated in that case.
 
+A second translation follows the first: the budget is stated for the whole
+request, but a rule-based strategy can only trim the *history*. The
+non-compactable prefix (system prompt, preamble, per-turn injections) is
+subtracted from the translated target, with a floor of a quarter of the
+history so a pass never deletes working state to meet a number. Without the
+subtraction a pass could "reach" a whole-request target while removing nothing
+from history at all.
+
+The progress line is the translated landing line, not the trigger. A result
+that lands exactly on `auto` has not recovered the context and is not counted
+as progress, even though the raw heuristic may call it a success.
+
 ## Background Summary
 
 Compaction's visible cost is latency: a turn that crosses the line cannot send
@@ -374,10 +393,29 @@ session: those have one user message and hundreds of tool exchanges, so a
 turn-counted tail alone covers everything and there is never a range to
 summarize.
 
+The message floor is not a size bound: eight recent messages can hold most of
+the context when the tail is tool-heavy. `summary_split_bounded` adds a token
+ceiling to the preserved tail — an eighth of the window, clamped between 8 000
+and 40 000 tokens — and only ever makes the tail smaller than the message floor
+allows. The tail starts at a user message so a tool call is not separated from
+its result.
+
+The summarizer's own input has the same problem in reverse. A fixed 20 000-token
+cap was sized for 128K windows: on a much larger window it dropped exactly the
+task state that lives at the start of the interval, and on a 32K window it was
+a quarter of the window. The budget is now a quarter of the window, capped at
+60 000 tokens and floored at `CompactConfig::summary_input_max_tokens`
+(`resolve_summary_input_budget`). Within that budget `build_summary_input`
+keeps the first two renders and the newest one, dropping the largest middle
+messages first — dropping strictly oldest deleted the task state that opens the
+interval — and never drops the newest render, which is the state the model is
+about to continue from.
+
 ## Progress and the Circuit Breaker
 
-A compaction attempt counts as progress only when it reaches the `auto` line or
-removes at least a tenth of the context — not merely when the context shrank.
+A compaction attempt counts as progress only when it reaches the landing line
+(`warn`) or removes at least a tenth of the context — not merely when the
+context shrank, and not when it merely lands on the trigger line (`auto`).
 Both judgements are made on the provider-anchored count, with the line
 translated into the strategies' heuristic units (see [One ruler for the
 decision](#one-ruler-for-the-decision)). An earlier build reported success for
@@ -389,7 +427,7 @@ provider still measured over it a recovery.
 - Progress resets the consecutive-failure counter and the escalation ladder.
   A threshold-triggered pass that removes a meaningful share but leaves the
   context over the line spends one recovery retry. A pass that brings the
-  context back under the `auto` line ends the recovery episode and restores
+  context back under the landing line ends the recovery episode and restores
   the budget: the budget bounds the passes spent returning under the line, not
   the number of times a session may compact. A headless run is one engine turn
   for the whole task, and charging every successful pass made such a run die
@@ -404,16 +442,39 @@ provider still measured over it a recovery.
   tenth of it falls through to the rule-based pass at the next rung instead of
   ending the attempt.
 - When a threshold-triggered pass does not reach the line, the next attempt
-  escalates one rung down the strategy ladder (`Micro` → `Auto` → `Snip`)
-  instead of repeating the pass that just failed.
-- A cache-TTL pass is maintenance and is never charged to the recovery budget.
+  escalates one rung down the strategy ladder — `Micro` → `Auto` → `Snip` →
+  `LastResort` — instead of repeating the pass that just failed. The requested
+  rung is recorded separately from the pass that actually ran: an `Auto`
+  request that stopped after its micro step used to report `Micro`, so the
+  ladder selected `Auto` again and `Snip` was unreachable.
+- `LastResort` is local and free: it runs `Snip`, then repeatedly truncates
+  the largest remaining tool result (head and tail kept) until the target is
+  met or nothing can shrink. It makes no model call and cannot fail the way a
+  summary can.
+- A cache-TTL pass is maintenance. It is never charged to the recovery budget
+  and never touches the failure counter or the escalation ladder — a no-op
+  maintenance pass has no bearing on whether the summarizer is failing. A pass
+  that changes nothing does not replace the history, rewrite the transcript or
+  reset the loop detector.
 
-An open breaker pauses auto-compaction: while the context is still below the
-`blocked` line the turn continues with the context as it is, because the
-provider will still accept the request. Only a full window is terminal, and a
-caller that asked for compaction for its own reason — a spent token budget, a
-provider overflow — reports that reason rather than compaction's.
+An open breaker, or a spent recovery budget, no longer pauses compaction at the
+token line. Both are stop signals for the *named* strategies, and they select
+`LastResort` instead. Refusing to try turned a context 357 tokens over the
+`blocked` line — after two hours and 125 productive turns of a figlet run —
+into a failed run; the last resort would have removed a tool result and
+continued. A `blocked` context is therefore never fatal before that attempt.
+Once the attempt has run and the context is still `blocked`, the turn stops
+rather than sending a request that cannot fit. The dead-loop Stop hook is not
+allowed to pre-empt the forced last resort either: it exists to stop paid
+retries, not the free attempt the exhausted budget leaves available.
 
-The check is repeated after compaction, and a turn whose context is still past
-the `blocked` line — on a window that is actually known — stops rather than
-sending a request that cannot fit.
+The cache-TTL path is the exception: with the breaker open it still returns
+`CircuitBreakerOpen` rather than running another named pass, because a
+maintenance tidy-up is not worth a model call when the summarizer has been
+failing.
+
+Each pass reports what it was asked to do and what it actually did. The
+compaction event carries the trigger, the requested and effective strategies,
+the sizes before and after, the landing target, the non-compactable prefix and
+the tokens removed; `NoProgress` carries the same strategy fields. That is
+enough for a replay to explain a run without the engine's log file.

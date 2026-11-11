@@ -37,13 +37,27 @@ pub enum CompactStrategy {
     Reactive,
     /// Most aggressive: truncate history at a snip point.
     Snip,
+    /// Last resort: snip, then truncate the largest remaining tool results
+    /// even inside the preserved tail.
+    ///
+    /// The other strategies preserve recent messages verbatim, which is the
+    /// right default but leaves a context that cannot recover when the bulk
+    /// sits in the tail. Between dropping a tool output's middle and losing
+    /// the session, the former is the cheaper loss. This rung is only used
+    /// when the named strategies have stopped making progress.
+    LastResort,
 }
 
 /// Result of applying a compact strategy.
 #[derive(Debug, Clone)]
 pub struct CompactResult {
-    /// Which strategy was applied.
+    /// The rung that was requested. This is what the escalation ladder
+    /// advances from, so a strategy that falls back to a lighter pass must
+    /// still report the rung it was asked to run.
     pub strategy: CompactStrategy,
+    /// What actually ran. `Auto` can stop after its micro pass, for example;
+    /// the ladder uses `strategy`, while telemetry uses this.
+    pub effective: CompactStrategy,
     /// Messages after compaction.
     pub messages: Vec<Message>,
     /// Estimated tokens removed.
@@ -172,6 +186,7 @@ pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> Compac
         // Nothing to compact — all tool results are within keep_recent
         return CompactResult {
             strategy: CompactStrategy::Micro,
+            effective: CompactStrategy::Micro,
             messages: messages.to_vec(),
             tokens_removed: 0,
             boundary_inserted: false,
@@ -214,6 +229,7 @@ pub fn micro_compact(messages: &[Message], params: MicroCompactParams) -> Compac
     let tokens_after = total_token_estimate(&result);
     CompactResult {
         strategy: CompactStrategy::Micro,
+        effective: CompactStrategy::Micro,
         messages: result,
         tokens_removed: tokens_before.saturating_sub(tokens_after),
         boundary_inserted: false,
@@ -276,7 +292,19 @@ pub fn auto_compact(messages: &[Message], threshold: usize) -> CompactResult {
 
     let tokens_after_micro = total_token_estimate(&micro.messages);
     if tokens_after_micro <= threshold {
-        return micro;
+        // Report the rung that was requested, not the pass that happened to be
+        // enough. Returning a `Micro`-labelled result here made the escalation
+        // ladder see `Some(Micro)` on the next turn and choose `Auto` again —
+        // the same call with the same arithmetic — so `Auto → Snip` was
+        // unreachable exactly when the light passes stopped working.
+        return CompactResult {
+            strategy: CompactStrategy::Auto,
+            effective: CompactStrategy::Micro,
+            messages: micro.messages,
+            tokens_removed: micro.tokens_removed,
+            boundary_inserted: micro.boundary_inserted,
+            boundary_index: micro.boundary_index,
+        };
     }
 
     // Additional pass: remove older pure-text assistant messages
@@ -299,6 +327,7 @@ pub fn auto_compact(messages: &[Message], threshold: usize) -> CompactResult {
     let tokens_after = total_token_estimate(&result);
     CompactResult {
         strategy: CompactStrategy::Auto,
+        effective: CompactStrategy::Auto,
         messages: result,
         tokens_removed: tokens_after_micro.saturating_sub(tokens_after),
         boundary_inserted: false,
@@ -352,6 +381,7 @@ pub fn reactive_compact(messages: &[Message], keep_recent_turns: usize) -> Compa
     if messages.is_empty() {
         return CompactResult {
             strategy: CompactStrategy::Reactive,
+            effective: CompactStrategy::Reactive,
             messages: Vec::new(),
             tokens_removed: 0,
             boundary_inserted: false,
@@ -377,6 +407,7 @@ pub fn reactive_compact(messages: &[Message], keep_recent_turns: usize) -> Compa
         // Not enough turns to truncate
         return CompactResult {
             strategy: CompactStrategy::Reactive,
+            effective: CompactStrategy::Reactive,
             messages: messages.to_vec(),
             tokens_removed: 0,
             boundary_inserted: false,
@@ -413,6 +444,7 @@ pub fn reactive_compact(messages: &[Message], keep_recent_turns: usize) -> Compa
     let tokens_after = total_token_estimate(&result);
     CompactResult {
         strategy: CompactStrategy::Reactive,
+        effective: CompactStrategy::Reactive,
         messages: result,
         tokens_removed: tokens_before.saturating_sub(tokens_after),
         boundary_inserted: true,
@@ -433,6 +465,7 @@ pub fn snip_compact(messages: &[Message], target_tokens: usize) -> CompactResult
     if messages.is_empty() {
         return CompactResult {
             strategy: CompactStrategy::Snip,
+            effective: CompactStrategy::Snip,
             messages: Vec::new(),
             tokens_removed: 0,
             boundary_inserted: false,
@@ -446,6 +479,7 @@ pub fn snip_compact(messages: &[Message], target_tokens: usize) -> CompactResult
     if tokens_before <= target_tokens {
         return CompactResult {
             strategy: CompactStrategy::Snip,
+            effective: CompactStrategy::Snip,
             messages: messages.to_vec(),
             tokens_removed: 0,
             boundary_inserted: false,
@@ -503,10 +537,81 @@ pub fn snip_compact(messages: &[Message], target_tokens: usize) -> CompactResult
     let tokens_after = total_token_estimate(&result);
     CompactResult {
         strategy: CompactStrategy::Snip,
+        effective: CompactStrategy::Snip,
         messages: result,
         tokens_removed: tokens_before.saturating_sub(tokens_after),
         boundary_inserted: true,
         boundary_index: first_user_idx.map(|i| i + 1),
+    }
+}
+
+/// Apply the last-resort pass: snip to the target, then truncate whatever
+/// large tool results the preserved tail still holds.
+///
+/// Every other strategy deliberately keeps recent messages byte-identical, and
+/// that is right while a lighter rung can still reach the line. It is also a
+/// dead end when the bulk of the context *is* a recent tool output: `Snip`
+/// keeps the tail whole, so its target can be met on paper while the result
+/// stays over the line. At that point the choice is between losing the middle
+/// of an output the agent can re-derive and losing the session; this pass
+/// chooses the former. It makes no model calls and is safe to run when the
+/// recovery budget is spent.
+#[must_use]
+pub fn last_resort_compact(messages: &[Message], target_tokens: usize) -> CompactResult {
+    let tokens_before = total_token_estimate(messages);
+    let mut result = snip_compact(messages, target_tokens);
+    let params = MicroCompactParams::default();
+
+    // Snip already cut whole messages. What can remain over target is a single
+    // message larger than the target (usually a tool result in the preserved
+    // tail), so shrink the largest one repeatedly. Each truncation keeps head
+    // and tail, and no result is shrunk below the micro floor.
+    let mut total = total_token_estimate(&result.messages);
+    while total > target_tokens {
+        let largest = result
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| match &message.content {
+                MessageContent::ToolResult(tr)
+                    if message_token_estimate(message) > params.min_result_tokens =>
+                {
+                    let size = message_token_estimate(message);
+                    Some((index, size, tr))
+                }
+                _ => None,
+            })
+            .max_by_key(|(_, size, _)| *size);
+
+        let Some((index, size, tr)) = largest else {
+            break;
+        };
+        let truncated = truncate_tool_output(&tr.output, params.head_tokens, params.tail_tokens);
+        let new_size = PromptCompiler::estimate_tokens(&truncated);
+        if truncated == tr.output || new_size >= size {
+            // Nothing left this pass can safely shrink. Stop rather than spin.
+            break;
+        }
+        result.messages[index] = Message {
+            role: Role::Tool,
+            content: MessageContent::ToolResult(ToolResult {
+                tool_call_id: tr.tool_call_id.clone(),
+                output: truncated,
+                is_error: tr.is_error,
+                images: tr.images.clone(),
+            }),
+        };
+        total = total_token_estimate(&result.messages);
+    }
+
+    let tokens_after = total_token_estimate(&result.messages);
+    CompactResult {
+        strategy: CompactStrategy::LastResort,
+        effective: CompactStrategy::LastResort,
+        messages: result.messages,
+        tokens_removed: tokens_before.saturating_sub(tokens_after),
+        boundary_inserted: result.boundary_inserted,
+        boundary_index: result.boundary_index,
     }
 }
 
@@ -632,6 +737,19 @@ impl CompactThresholds {
     #[must_use]
     pub const fn enforces_blocked(&self) -> bool {
         !self.window_source.is_guess()
+    }
+
+    /// Where a threshold-triggered pass aims, as opposed to where it starts.
+    ///
+    /// The `auto` line is the trigger; compacting exactly to it hands the
+    /// session back the smallest possible margin, and the next tool result
+    /// crosses again. The warning line is one buffer lower and is already a
+    /// meaningful amount of context: landing there buys about 20 000 tokens of
+    /// room on a 128K window instead of a few hundred. An unknown or guessed
+    /// window uses the same relationship between the two lines.
+    #[must_use]
+    pub const fn landing(&self) -> usize {
+        self.warn
     }
 
     /// Which line `estimated_tokens` has reached.
@@ -848,6 +966,55 @@ pub fn summary_split(
     }
 }
 
+/// Compute the summarize range with a token ceiling on the preserved tail.
+///
+/// [`summary_split`] guarantees a message floor but not a size: eight recent
+/// messages can hold most of the context when the tail is tool-heavy, which
+/// leaves the summary describing a small fraction of the conversation. A
+/// non-zero `tail_max_tokens` caps the tail; the token cap may only make the
+/// tail smaller, never larger than the message floor allows.
+#[must_use]
+pub fn summary_split_bounded(
+    messages: &[Message],
+    keep_recent_turns: usize,
+    keep_recent_messages: usize,
+    tail_max_tokens: usize,
+) -> SummarySplit {
+    let base = summary_split(messages, keep_recent_turns, keep_recent_messages);
+    if tail_max_tokens == 0 || messages.is_empty() {
+        return base;
+    }
+
+    // Walk back from the newest message until the tail would exceed the
+    // budget; the tail then starts at the first message that still fits.
+    let mut accumulated = 0usize;
+    let mut token_start = messages.len();
+    for i in (0..messages.len()).rev() {
+        let cost = message_token_estimate(&messages[i]);
+        if accumulated.saturating_add(cost) > tail_max_tokens {
+            token_start = i + 1;
+            break;
+        }
+        accumulated = accumulated.saturating_add(cost);
+        token_start = i;
+    }
+
+    // Start the tail at a user message when one is available after the
+    // token-sized point, so a tool call is not separated from its result. If
+    // there is none, the message floor is the better fallback.
+    let token_start = (token_start..messages.len())
+        .find(|i| matches!(messages[*i].role, Role::User))
+        .unwrap_or(base.summarize_to);
+
+    // A later start is a smaller tail: the token cap can tighten the message
+    // floor but never loosen it.
+    let summarize_to = base.summarize_to.max(token_start);
+    SummarySplit {
+        summarize_from: base.summarize_from.min(summarize_to),
+        summarize_to,
+    }
+}
+
 /// Index of the first user message (preserved verbatim, intent anchor).
 fn first_user_index(messages: &[Message]) -> Option<usize> {
     messages.iter().position(|m| matches!(m.role, Role::User))
@@ -923,9 +1090,12 @@ fn render_message_for_summary(msg: &Message) -> String {
 /// Render the summarize range into summarizer input, capped to
 /// `max_tokens` (chars/4 heuristic, matching `PromptCompiler`).
 ///
-/// When over budget, whole messages are dropped from the front of the range
-/// (oldest first) until it fits — the tail of the range is the most
-/// decision-dense, so it is always kept.
+/// When over budget, the largest middle messages are dropped first, and only
+/// then the oldest. Dropping strictly oldest-first deleted the part of the
+/// range closest to the task prompt — the goal, the constraints, the paths
+/// already ruled out — while keeping every repetitive tool result at the end.
+/// Both ends of the range carry task state; the bulk in the middle is what a
+/// summary can most afford to lose.
 #[must_use]
 pub fn build_summary_input(
     messages: &[Message],
@@ -939,12 +1109,42 @@ pub fn build_summary_input(
 
     let max_chars = max_tokens.saturating_mul(4);
     let mut total = rendered.iter().map(String::len).sum::<usize>();
+    let mut keep = vec![true; rendered.len()];
+
+    // Keep the first two and the last render; drop the largest of the rest.
+    if rendered.len() > 4 {
+        let mut middle: Vec<usize> = (2..rendered.len() - 1).collect();
+        while total > max_chars {
+            let Some((position, index)) = middle
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, index)| rendered[**index].len())
+            else {
+                break;
+            };
+            let index = *index;
+            keep[index] = false;
+            total -= rendered[index].len();
+            middle.swap_remove(position);
+        }
+    }
+
+    // If the ends alone are over budget, drop from the front but never the
+    // newest render: it is the state the model is about to continue from.
     let mut start = 0usize;
-    while total > max_chars && start < rendered.len() {
-        total -= rendered[start].len();
+    while total > max_chars && start + 1 < rendered.len() {
+        if keep[start] {
+            total -= rendered[start].len();
+            keep[start] = false;
+        }
         start += 1;
     }
-    rendered[start..].to_vec()
+
+    rendered
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(rendered, keep)| keep.then_some(rendered))
+        .collect()
 }
 
 /// Assemble post-compaction messages for LLM summary compaction.
@@ -979,6 +1179,7 @@ pub fn assemble_summary_result(
 
     CompactResult {
         strategy: CompactStrategy::Auto,
+        effective: CompactStrategy::Auto,
         messages: result,
         tokens_removed: tokens_before.saturating_sub(tokens_after),
         boundary_inserted: true,
@@ -1817,9 +2018,94 @@ mod tests {
         let messages = vec![make_user_text("hello"), make_assistant_text("world")];
         let micro = micro_compact(&messages, MicroCompactParams::default());
         let result = auto_compact(&messages, 10000);
-        assert_eq!(result.strategy, CompactStrategy::Micro);
+        // The requested rung is `Auto` even when the pass stops after its
+        // micro step: reporting `Micro` made the ladder believe the lightest
+        // rung had already run and select `Auto` again, so `Snip` was never
+        // reachable and the same ineffective arithmetic was repeated until
+        // the breaker opened.
+        assert_eq!(result.strategy, CompactStrategy::Auto);
+        assert_eq!(result.effective, CompactStrategy::Micro);
         assert_eq!(result.messages.len(), micro.messages.len());
         assert_eq!(result.tokens_removed, micro.tokens_removed);
+    }
+
+    /// Snip cannot drop the first user message, so a tail it leaves behind
+    /// because the head alone is over target survives; the last resort's
+    /// truncation reaches into that tail and makes the pass count.
+    #[test]
+    fn the_last_resort_shrinks_a_tail_that_snip_preserves() {
+        let messages = vec![
+            make_user_text(&"h".repeat(100_000)),
+            make_assistant_text("ok"),
+            Message::tool(ToolResult::text("call-1", "t".repeat(200_000))),
+        ];
+        let target = 70_000;
+
+        let snip = snip_compact(&messages, target);
+        assert_eq!(
+            snip.tokens_removed, 0,
+            "fixture: Snip should be unable to reach this target"
+        );
+
+        let result = last_resort_compact(&messages, target);
+        assert_eq!(result.strategy, CompactStrategy::LastResort);
+        assert_eq!(result.effective, CompactStrategy::LastResort);
+        assert!(result.tokens_removed > 0, "the last resort shrank nothing");
+        assert!(
+            total_token_estimate(&result.messages) <= target,
+            "the last resort stopped above its target"
+        );
+        // The head is still the original intent verbatim, and the tool result
+        // keeps its identity so provider-side pairing survives.
+        assert_eq!(
+            content_json(&result.messages[0]),
+            content_json(&messages[0])
+        );
+        let MessageContent::ToolResult(tr) = &result.messages[2].content else {
+            panic!("the tool result changed shape");
+        };
+        assert_eq!(tr.tool_call_id, "call-1");
+        assert!(tr.output.len() < 200_000);
+    }
+
+    /// The summary input keeps the interval's head and its newest message,
+    /// dropping the largest middles first under a tight budget. Dropping
+    /// strictly oldest deleted the task-state that opens the interval.
+    #[test]
+    fn a_large_middle_is_summarized_without_dropping_the_head() {
+        let mut messages = vec![
+            make_user_text("HEAD"),
+            make_user_text("HEAD2"),
+            make_assistant_text(&format!("middle-1 {}", "x".repeat(1_000))),
+            make_assistant_text(&format!("middle-2 {}", "x".repeat(1_000))),
+            make_assistant_text(&format!("middle-3 {}", "x".repeat(1_000))),
+            make_assistant_text(&format!("middle-4 {}", "x".repeat(1_000))),
+            make_assistant_text(&format!("middle-5 {}", "x".repeat(1_000))),
+            make_assistant_text("TAIL"),
+        ];
+        let split = SummarySplit {
+            summarize_from: 0,
+            summarize_to: messages.len(),
+        };
+
+        let input = build_summary_input(&messages, &split, 100);
+
+        assert_eq!(input.len(), 3, "only the ends should survive: {input:?}");
+        assert!(input[0].contains("HEAD"));
+        assert!(input[1].contains("HEAD2"));
+        assert!(input[2].contains("TAIL"));
+        assert!(
+            !input.iter().any(|part| part.contains("middle-")),
+            "a middle render survived: {input:?}"
+        );
+
+        // The budget bounds the renders, not the message count.
+        messages[7] = make_assistant_text(&"y".repeat(10_000));
+        let oversized = build_summary_input(&messages, &split, 100);
+        assert!(
+            oversized.iter().any(|part| part.contains("yyy")),
+            "the newest render must never be dropped: {oversized:?}"
+        );
     }
 
     #[test]

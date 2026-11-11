@@ -541,8 +541,50 @@ also the only one of the three where tool time is substantial: 5 317 s across
 
 These are three hand-picked instances, one per language/difficulty, not a random
 sample: 0/3 estimates nothing about ProgramBench as a whole. `caps-log` (C++,
-medium) was deferred after the three runs above; a Claude Code harness control
-on `figlet` and `pixterm` is recorded separately once complete.
+medium) was deferred after the three runs above; the Claude Code harness control
+on `figlet` and `pixterm` is recorded below.
+
+### 2026-11-11 — Claude Code harness control: `figlet`, `pixterm`
+
+The same two instances were run with Claude Code 2.1.318 instead of Codape, to
+separate "the model cannot recover this program" from "this harness's loop
+cannot". Everything else was held equal: the same cleanroom image tag, the same
+gateway/model (`deepseek-v4.1-flash` through `opencode.ai`), an internal network
+that allows only the gateway, 4 CPUs, 8 GB, 500 turns and a 7 200 s agent
+budget. `CLAUDE_CODE_MAX_CONTEXT_TOKENS=131072` matched the window Codape had.
+
+- run-ids: `pb-claude-cmatsuoka__figlet.202a0a8-20261111`,
+  `pb-claude-eliukblau__pixterm.1a93fd5-20261111`
+- both were killed by the 7 200 s timeout (exit 124) and produced no closing
+  `result` frame; the transcripts are stream-json frames only
+
+| instance | assistant frames | tool calls | compactions | raw tests | official | outcome |
+|---|---:|---|---:|---|---|---|
+| `cmatsuoka__figlet.202a0a8` | 736 | 351 Bash, 20 Read, 19 Edit, 3 Write | 14 | 880/1 044 | 82 (872 scored) | compiled; 164 tests failed |
+| `eliukblau__pixterm.1a93fd5` | 253 | 129 Bash | 8 | 0/458 | 0, `ERROR: compile_failed` | no `compile.sh` in the submission |
+
+The control answers the question the Codape figlet run raised. Codape's two
+`context window is full` aborts (128 429 and 129 449 estimated tokens against a
+128 072 blocked line, the first only 357 over) were not an unavoidable property
+of the task, the model, or the window: Claude Code compacted 14 times on the
+same task, never aborted on context, and kept working until the clock ran out.
+Codape's abort path was self-inflicted — an open circuit breaker refused every
+pass before `Blocked` and then treated `Blocked` as fatal without one local
+attempt — and the 3 456 s it spent in those aborts was 48 % of its budget.
+
+The control is not a win for Claude Code. It also hit the 2-hour wall on both
+instances, and on `pixterm` it did worse than Codape: its submission had no
+`compile.sh` at all, so the harness could not build it (0/458, `compile_failed`),
+while Codape's compiled and scored 60/430 official (276/458 raw). Eight
+compactions in two hours is also a large share of a 253-frame run. What the
+pair shows is narrower and useful: **a working compaction loop lets a run keep
+going; a broken one converts a recoverable context into a terminal error.** The
+compaction fixes recorded in `docs/compact.md` (trigger at `auto`, land at
+`warn`, history-space targets, ladder through `LastResort`, maintenance passes
+exempt from breaker accounting) target exactly that failure.
+
+Both cleanroom images were removed after grading; no ProgramBench container or
+image remains on the host.
 
 ## Benchmarks that need a new runner
 

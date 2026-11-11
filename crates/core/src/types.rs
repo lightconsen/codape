@@ -1068,14 +1068,24 @@ pub enum CompactionEvent {
     },
     /// Compaction ran and removed tokens.
     Compacted {
-        /// Which strategy ran.
+        /// The rung that was requested.
         strategy: String,
+        /// What actually ran.
+        effective: String,
         /// What triggered it.
         trigger: String,
         /// Estimated tokens removed.
         tokens_removed: usize,
         /// Messages left after compaction.
         messages_remaining: usize,
+        /// Whole-request size before the pass.
+        tokens_before: usize,
+        /// Whole-request size after the pass.
+        tokens_after: usize,
+        /// The landing line the pass was judged against.
+        target_tokens: usize,
+        /// The non-compactable prefix included in both sizes.
+        prefix_tokens: usize,
     },
     /// The check ran but this trigger stood down: the other path owns it.
     DeferredToThresholdPath {
@@ -1103,6 +1113,12 @@ pub enum CompactionEvent {
     },
     /// Compaction ran but removed nothing.
     NoProgress {
+        /// The rung that was requested.
+        strategy: String,
+        /// What actually ran.
+        effective: String,
+        /// What triggered it.
+        trigger: String,
         /// Tokens before.
         tokens_before: usize,
         /// Tokens after.

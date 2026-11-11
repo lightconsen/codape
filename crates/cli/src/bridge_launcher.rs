@@ -4378,6 +4378,17 @@ printf 'ECHO:%s\n' "$line""#;
             process_is_alive(pid),
             "the session child should be running before cleanup"
         );
+        // A pid alone cannot prove liveness after cleanup: the kernel may
+        // reuse it for a process another test started in the meantime, which
+        // made this assertion fail only when the suite ran in parallel. The
+        // start time distinguishes the child from a stranger.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let start_time = codape_core::process_tree::process_start_time(pid);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(
+            start_time.is_some(),
+            "a running child must have a kernel start time"
+        );
 
         // Drive the child the way the worker's runner does, so this is a real
         // running session rather than a bare process.
@@ -4415,6 +4426,12 @@ printf 'ECHO:%s\n' "$line""#;
         assert!(outcome.is_err(), "a killed session is not a success");
 
         // The process is gone, not merely removed from the map.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(
+            codape_core::process_tree::process_start_time(pid) != start_time,
+            "the session child should not be left running after cleanup"
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert!(
             !process_is_alive(pid),
             "the session child should not be left running after cleanup"

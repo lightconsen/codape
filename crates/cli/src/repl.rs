@@ -1141,6 +1141,19 @@ fn protocol_frame(event: &EngineEvent, session_id: &str) -> Option<codape_events
             session_id: session_id.to_string(),
             data: serde_json::Map::new(),
         }),
+        // Compaction outcomes are advisory to a host, and the boundary frame
+        // alone cannot say which rung ran, what it aimed at, or how much it
+        // removed. A stream that only shows the boundary forces the analysis
+        // back to counting frames; the metadata makes the decision legible in
+        // the artifact the run already saves.
+        EngineEvent::Compaction(event) => ProtocolMessage::System(SystemFrame {
+            subtype: "compaction".to_string(),
+            session_id: session_id.to_string(),
+            data: serde_json::to_value(event)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default(),
+        }),
         EngineEvent::Notification { message } => ProtocolMessage::System(SystemFrame {
             subtype: "informational".to_string(),
             session_id: session_id.to_string(),
