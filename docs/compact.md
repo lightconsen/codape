@@ -189,6 +189,21 @@ error: the window still applies for the rest of the session.
 an engine built directly (tests and embedders) and on for the sessions the CLI
 runs, so a test suite cannot change the window a real session starts with.
 
+**An accepted request is also evidence.** Before any overflow, the only fact
+about the window is the provider's own acceptance rule: a request is sent only
+when `input + max_tokens` fits. Every accepted response therefore raises the
+learned value to at least `prompt_tokens + max_tokens`
+(`QueryEngine::raise_context_window_lower_bound`). That matters for a gateway
+alias the table does not know: the 32 000-token placeholder can be four times
+too small, and a session that never overflows a 128K model would otherwise
+compact against a 16K trigger for its whole life — the failure a ProgramBench
+run showed as 241 passes across 393 turns. The bound only raises the value, so
+a configured window larger than the bound stays in charge; one the bound
+overtakes was demonstrably too small. It stays on the safe side of the
+estimate: the bound is at most the real window, so compaction still errs
+early, never late. It is remembered through the same client-data entry as a
+value an overflow stated.
+
 Because the value persists, a provider that states a misleading number makes it
 sticky for that model until the file or an override says otherwise. That is why
 the write goes to the *lowest*-priority remembered source: `CODAPE_CONTEXT_WINDOW`,
@@ -277,6 +292,19 @@ begins with the messages the measurement covered, so the same measurement
 still describes its prefix. That is the case that matters — the request that
 overflows is the one after the measurement, not the one that produced it.
 
+Not all of the request is messages. The serialized tool schemas ride in a
+separate `tools` array that the API client builds from the registry;
+`build_context` never puts them in `messages`, so a message-only estimate
+described a request several thousand tokens smaller than the one the provider
+counted — on every request of the session, and worst on exactly the
+tool-heavy agentic traffic that decides when compaction fires.
+`TurnRuntime::tool_schema_tokens` estimates them from the same `ToolInfo`
+values and the same JSON shape the client serializes, and
+`context_prefix_tokens` adds them to the prefix, so the whole-request count
+(the trigger, the progress line, the targets) covers them. A provider
+measurement covers them too: an anchored estimate adds only growth since the
+measurement, so the schemas are never counted twice.
+
 `measured_prompt_tokens` is `input_tokens + cache_read_input_tokens +
 cache_creation_input_tokens`: Anthropic reports only the uncached remainder in
 `input_tokens`, while OpenAI-compatible endpoints put everything in
@@ -319,16 +347,42 @@ measurement is not evidence of a larger real context — the heuristic overcount
 prose — so the budget is left as stated in that case.
 
 A second translation follows the first: the budget is stated for the whole
-request, but a rule-based strategy can only trim the *history*. The
-non-compactable prefix (system prompt, preamble, per-turn injections) is
-subtracted from the translated target, with a floor of a quarter of the
-history so a pass never deletes working state to meet a number. Without the
-subtraction a pass could "reach" a whole-request target while removing nothing
-from history at all.
+request, but a rule-based strategy can only trim the *history*. Everything
+that is not history — the system prompt, the preamble, the per-turn
+injections, the tool schemas and the request scaffolding — is subtracted from
+the translated target, with a floor of a quarter of the history so a pass
+never deletes working state to meet a number. Without the subtraction a pass
+could "reach" a whole-request target while removing nothing from history at
+all.
+
+What is subtracted is the *measured* overhead when a provider count exists:
+`UsageAnchor::fixed_tokens` is `prompt_tokens` minus the estimated history of
+the request that count describes. The message-level prefix alone misses the
+tool schemas and the scaffolding, and a target translated against the smaller
+number asks history for room the fixed part has already spent. Without a
+measurement the prefix is the best available estimate.
 
 The progress line is the translated landing line, not the trigger. A result
 that lands exactly on `auto` has not recovered the context and is not counted
 as progress, even though the raw heuristic may call it a success.
+
+### When no pass can reach the line
+
+If the fixed part alone fills the landing line, no history rewrite can get the
+request under it: even a pass that kept a quarter of the history would leave
+the request above the line. That is a property of the request, not of the
+strategy, so every rung of the ladder would fail identically — and the next
+turn would re-derive the same target and fail again. `CompactOutcome::Uncompactable`
+reports the situation instead of running the arithmetic out; it carries the
+fixed overhead, the landing line and the smallest request a pass could leave.
+
+It is a report, not a failure. Above the `blocked` line the request still goes
+out, so the turn continues; only `blocked` ends the turn. It is not reported at
+the `blocked` line either, where a heavy pass that leaves the history above
+the landing line can still bring the request below the blocked one — skipping
+there would fail a recoverable turn. The same applies after a provider
+rejection: an overflow proves the request does not fit, so compaction is not
+speculative and runs whatever the arithmetic says.
 
 ## Background Summary
 
@@ -456,6 +510,16 @@ provider still measured over it a recovery.
   maintenance pass has no bearing on whether the summarizer is failing. A pass
   that changes nothing does not replace the history, rewrite the transcript or
   reset the loop detector.
+- A pass that removed nothing is not repeated at the same size. Retrying it
+  every turn spent a whole two-hour benchmark run on compaction — 241 passes,
+  73 of them no-progress, no source written — because each turn re-crossed the
+  line and re-derived an unreachable target. After a no-progress threshold
+  pass, the next attempt waits until the context is `blocked` (where a request
+  cannot be sent at all) or has grown by a twentieth of the auto line (at
+  least 2 000 tokens). The wait is reported as `BackedOff` with the size at
+  which a retry becomes worth it. A cache-TTL no-op neither sets nor clears
+  this state: a maintenance pass below the line says nothing about whether a
+  threshold pass can work.
 
 An open breaker, or a spent recovery budget, no longer pauses compaction at the
 token line. Both are stop signals for the *named* strategies, and they select
@@ -476,5 +540,9 @@ failing.
 Each pass reports what it was asked to do and what it actually did. The
 compaction event carries the trigger, the requested and effective strategies,
 the sizes before and after, the landing target, the non-compactable prefix and
-the tokens removed; `NoProgress` carries the same strategy fields. That is
-enough for a replay to explain a run without the engine's log file.
+the tokens removed; `NoProgress` carries the same strategy fields. Two
+outcomes report a pass that did not run and why: `BackedOff` (the size, the
+last failed size, and the size at which a retry becomes worth it) and
+`Uncompactable` (the fixed overhead, the landing line, and the smallest
+request a pass could leave). That is enough for a replay to explain a run
+without the engine's log file.

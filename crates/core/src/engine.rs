@@ -29,7 +29,7 @@ use crate::permissions::{PermissionChecker, PermissionMode, PermissionResult};
 use crate::prompt::{AssembledContext, CompactConfig, PromptCompiler, PromptContext};
 use crate::state::SessionState;
 use crate::stop_hook::{self, StopHookContext, StopHookDecision};
-use crate::tool_executor::{NoOpToolExecutor, ToolExecutor};
+use crate::tool_executor::{NoOpToolExecutor, ToolExecutor, ToolInfo};
 use crate::tool_scheduler;
 use crate::types::{
     CompactionEvent, ContextWindowResolver, EngineEvent, Message, ModelId, ThinkingBlock, ToolCall,
@@ -813,17 +813,18 @@ pub struct UsageAnchor {
     pub prefix_tokens: usize,
     /// Tokens the provider reported for the input, cached parts included.
     pub prompt_tokens: usize,
-}
-
-impl UsageAnchor {
-    /// Anchor on a provider's measurement.
-    #[must_use]
-    pub const fn measured(self, prompt_tokens: usize) -> Self {
-        Self {
-            prompt_tokens,
-            ..self
-        }
-    }
+    /// Provider-measured overhead that is not history.
+    ///
+    /// This is `prompt_tokens` minus the measured request's estimated history:
+    /// the system prompt, the per-turn injections, the serialized tool schemas
+    /// and the request scaffolding the tokenizer charges for. It is the part
+    /// compaction cannot touch, and targets have to be translated against it
+    /// rather than against the message-only prefix — which undercounts a
+    /// tool-heavy request by several thousand tokens.
+    ///
+    /// Zero until the provider answers; see
+    /// [`QueryEngine::measured_fixed_tokens`].
+    pub fixed_tokens: usize,
 }
 
 /// Per-turn runtime data — state, messages, pending items, budget.
@@ -842,6 +843,28 @@ pub struct TurnRuntime {
     /// assembled by `build_context` (a test, or a caller supplying its own),
     /// and the whole list is treated as history.
     pub history_range: Option<(usize, usize)>,
+    /// Estimated tokens the serialized tool schemas add to the request.
+    ///
+    /// Tools are not messages: the API client sends them in a separate `tools`
+    /// array built from the registry. Leaving them out of the prefix made the
+    /// estimate look comfortable while the provider measured a request several
+    /// thousand tokens larger — on every request of the session.
+    pub tool_schema_tokens: usize,
+    /// Consecutive compaction passes that removed nothing, and the measured
+    /// request size the most recent one ran at.
+    ///
+    /// A pass that removed nothing will remove nothing again at the same size;
+    /// retrying it on every turn is what turned a two-hour benchmark run into
+    /// 241 compaction passes and almost no work. See `no_progress_retry_at`.
+    pub compact_no_progress: u32,
+    /// The measured size at which the last no-progress pass ran.
+    pub compact_no_progress_tokens: usize,
+    /// The provider rejected this turn's request as over the window.
+    ///
+    /// Compaction after a rejection is not speculative: the request provably
+    /// cannot be sent, whatever the estimate says, so the "no pass can reach
+    /// the landing line" stand-down must not apply.
+    pub provider_overflowed: bool,
     /// Pending tool calls awaiting execution.
     pub pending_tool_calls: Vec<PendingToolCall>,
     /// Pending permission request.
@@ -896,6 +919,10 @@ impl TurnRuntime {
             state: TurnState::Initialize,
             messages: Vec::new(),
             history_range: None,
+            tool_schema_tokens: 0,
+            compact_no_progress: 0,
+            compact_no_progress_tokens: 0,
+            provider_overflowed: false,
             pending_tool_calls: Vec::new(),
             pending_permission: None,
             pending_elevation: None,
@@ -956,17 +983,18 @@ impl TurnRuntime {
         self.history_range = Some((start, end));
     }
 
-    /// The context outside the history (preamble, system prompt, injections),
-    /// as it will be sent with the next request.
+    /// The context outside the history (preamble, system prompt, injections,
+    /// serialized tool schemas), as it will be sent with the next request.
     #[must_use]
     pub fn context_prefix_tokens(&self) -> usize {
-        match self.history_range {
+        let messages = match self.history_range {
             Some((start, end)) if end <= self.messages.len() => {
                 PromptCompiler::estimate_message_tokens(&self.messages[..start])
                     + PromptCompiler::estimate_message_tokens(&self.messages[end..])
             }
             _ => 0,
-        }
+        };
+        messages + self.tool_schema_tokens
     }
 
     /// The request as it will be sent, measured where possible.
@@ -985,8 +1013,12 @@ impl TurnRuntime {
     /// whole list heuristically.
     #[must_use]
     pub fn context_tokens(&self, anchor: Option<UsageAnchor>) -> usize {
+        // The tool schemas ride outside the message list; without them the
+        // estimate is several thousand tokens short of what is sent.
+        let whole_list =
+            || PromptCompiler::estimate_message_tokens(&self.messages) + self.tool_schema_tokens;
         let Some(anchor) = anchor else {
-            return PromptCompiler::estimate_message_tokens(&self.messages);
+            return whole_list();
         };
         let history = self.history();
         // A shorter history means compaction replaced the messages the
@@ -994,7 +1026,7 @@ impl TurnRuntime {
         // A zero count means the shape was recorded but the provider has not
         // answered yet.
         if anchor.history_messages > history.len() || anchor.prompt_tokens == 0 {
-            return PromptCompiler::estimate_message_tokens(&self.messages);
+            return whole_list();
         }
         let appended = PromptCompiler::estimate_message_tokens(&history[anchor.history_messages..]);
         // Per-turn injections (denied-tool summaries, custom system prompts)
@@ -1028,6 +1060,7 @@ impl TurnRuntime {
         self.pending_elicitation = None;
         self.last_stop_reason = None;
         self.empty_answer_retries = 0;
+        self.provider_overflowed = false;
         // `last_compact_strategy` deliberately survives the turn boundary: it
         // is the escalation ladder, and a pass that made no progress must be
         // followed by a heavier one even when the next attempt starts a new
@@ -1505,6 +1538,36 @@ pub enum CompactOutcome {
         /// The hook's reason.
         reason: String,
     },
+    /// A recent pass removed nothing, and the context has not changed enough
+    /// for another one to come out differently.
+    BackedOff {
+        /// Consecutive passes that removed nothing so far.
+        consecutive_no_progress: u32,
+        /// Measured size of the request now.
+        estimated_tokens: usize,
+        /// Measured size at which the last no-progress pass ran.
+        last_tokens: usize,
+        /// Measured size at which a pass is worth another attempt.
+        retry_at: usize,
+    },
+    /// No pass can put the request under the landing line.
+    ///
+    /// The request's fixed part — system prompt, injections, serialized tool
+    /// schemas and request scaffolding — already fills the line, so even a
+    /// pass that kept only a quarter of the history would leave the request
+    /// above it. Running one would spend the recovery budget and destroy
+    /// working context to prove arithmetic that is already known. The caller
+    /// decides what a context that cannot be compacted means; only the
+    /// blocked line makes it fatal.
+    Uncompactable {
+        /// The request's non-history overhead (strategy units).
+        fixed_tokens: usize,
+        /// The landing line the overhead already fills (strategy units).
+        landing_tokens: usize,
+        /// The smallest whole request a pass keeping a quarter of the history
+        /// could leave (strategy units).
+        minimum_tokens: usize,
+    },
     /// Compaction ran but removed nothing — the context is irrecoverable by
     /// this strategy, and the circuit breaker counts it.
     NoProgress {
@@ -1699,6 +1762,26 @@ fn compaction_event_from_outcome(outcome: &CompactOutcome) -> CompactionEvent {
         },
         CompactOutcome::StopHookTerminated { reason } => CompactionEvent::StopHookTerminated {
             reason: reason.clone(),
+        },
+        CompactOutcome::BackedOff {
+            consecutive_no_progress,
+            estimated_tokens,
+            last_tokens,
+            retry_at,
+        } => CompactionEvent::BackedOff {
+            consecutive_no_progress: *consecutive_no_progress,
+            estimated_tokens: *estimated_tokens,
+            last_tokens: *last_tokens,
+            retry_at: *retry_at,
+        },
+        CompactOutcome::Uncompactable {
+            fixed_tokens,
+            landing_tokens,
+            minimum_tokens,
+        } => CompactionEvent::Uncompactable {
+            fixed_tokens: *fixed_tokens,
+            landing_tokens: *landing_tokens,
+            minimum_tokens: *minimum_tokens,
         },
         CompactOutcome::NoProgress {
             strategy,
@@ -2791,26 +2874,60 @@ impl QueryEngine {
                 "provider reported the real context window"
             );
             self.learned_context_window = Some(window);
-            // Remember it for the next session too. A provider that rejects a
-            // request has already cost the session that request; making the
-            // next one pay for the same lesson is the whole complaint this
-            // answers. The write goes to the client-data file, which sits below
-            // settings and the environment — an explicit window in either still
-            // wins, and the user's settings file is never edited.
-            if self.persist_learned_context_window
-                && let Err(error) = crate::types::ContextWindowOverrides::remember_provider_window(
-                    &self.model.0,
-                    window,
-                    &crate::types::context_window_client_data_path(),
-                )
-            {
-                tracing::warn!(
-                    model = %self.model.0,
-                    %error,
-                    "could not remember the learned context window; this session still uses it"
-                );
-            }
+            self.persist_window_override(window);
         }
+    }
+
+    /// Remember a learned window for the next session.
+    ///
+    /// A provider that rejects a request has already cost the session that
+    /// request; making the next one pay for the same lesson is the whole
+    /// complaint this answers. The write goes to the client-data file, which
+    /// sits below settings and the environment — an explicit window in either
+    /// still wins, and the user's settings file is never edited.
+    fn persist_window_override(&self, window: usize) {
+        if !self.persist_learned_context_window {
+            return;
+        }
+        if let Err(error) = crate::types::ContextWindowOverrides::remember_provider_window(
+            &self.model.0,
+            window,
+            &crate::types::context_window_client_data_path(),
+        ) {
+            tracing::warn!(
+                model = %self.model.0,
+                %error,
+                "could not remember the learned context window; this session still uses it"
+            );
+        }
+    }
+
+    /// Raise the window estimate to a lower bound an accepted request proved.
+    ///
+    /// A provider accepts a request only when its input plus the requested
+    /// output fits the window, so an accepted request proves
+    /// `window >= prompt_tokens + max_tokens`. That is weaker than the exact
+    /// value an overflow error states, but it is the only evidence available
+    /// before one, and it moves the guess in the safe direction: a window
+    /// that is too small costs context, one that is too large loses the
+    /// conversation.
+    ///
+    /// The estimate only ever rises here. A configured window that is larger
+    /// than the bound stays in charge; learning only overtakes it when
+    /// accepted requests prove the configured value was too small.
+    fn raise_context_window_lower_bound(&mut self, lower_bound: usize) {
+        let current = self.context_window().tokens;
+        if lower_bound <= current {
+            return;
+        }
+        tracing::info!(
+            model = %self.model.0,
+            previous = current,
+            learned = lower_bound,
+            "an accepted request raised the context-window lower bound"
+        );
+        self.learned_context_window = Some(lower_bound);
+        self.persist_window_override(lower_bound);
     }
 
     /// Refresh the session-memory document at compaction time and return the
@@ -4566,9 +4683,33 @@ impl QueryEngine {
         }
     }
 
+    /// Estimate the tokens the serialized tool schemas add to a request.
+    ///
+    /// The API client builds this array from the same [`ToolInfo`] values, in
+    /// the same shape, so the estimate covers exactly what is sent: the
+    /// schemas are not messages, and a request's biggest fixed cost after the
+    /// system prompt is usually this array.
+    fn tool_schema_tokens(tools: &[ToolInfo]) -> usize {
+        if tools.is_empty() {
+            return 0;
+        }
+        let schemas: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                })
+            })
+            .collect();
+        PromptCompiler::estimate_tokens(&serde_json::Value::Array(schemas).to_string())
+    }
+
     fn build_context(&mut self, turn: &mut TurnRuntime, options: &SubmitOptions) {
         // Assemble context using PromptCompiler
         let available_tools = self.tools.list_tools();
+        turn.tool_schema_tokens = Self::tool_schema_tokens(&available_tools);
         let ctx = PromptContext {
             cwd: self.session.cwd.as_path(),
             available_tools,
@@ -4702,6 +4843,10 @@ impl QueryEngine {
             return Err(error);
         }
 
+        // The request provably does not fit: whatever the estimate says, a
+        // pass that is worth trying must not be skipped as speculative.
+        turn.provider_overflowed = true;
+
         // The turn is past `StartRequest` when the request fails, and the
         // recovery decision is only reachable from there.
         turn.transition_to(TurnState::CompactRecovery);
@@ -4793,6 +4938,45 @@ impl QueryEngine {
                 consecutive_failures: turn.compact_failures,
                 max: self.compact_config.max_consecutive_failures,
             };
+        }
+
+        // A threshold pass can only rewrite the history. When everything that
+        // is not history already fills the landing line, the smallest request
+        // a pass could leave is still over it: the target in history space is
+        // zero or negative. Running the pass would spend the recovery budget
+        // and delete working context to prove arithmetic already known — and
+        // then do it again next turn, which is exactly what a 32k guess on a
+        // 128k model looked like from the outside (241 passes, 73 of them
+        // removing nothing). Report it and let the caller decide; only the
+        // blocked line makes it fatal.
+        if trigger == CompactTrigger::TokenThreshold {
+            let thresholds = self.compact_thresholds();
+            // At the blocked line the request cannot be sent at all, and a
+            // heavy pass that leaves the history above the landing line can
+            // still bring it below the blocked one. Skipping there would turn
+            // a recoverable turn into a failed one, so the arithmetic below
+            // only stands down when the request can go out as it is.
+            let blocked = thresholds.level(measured_tokens) == compact::ContextLevel::Blocked;
+            let fixed_tokens =
+                self.fixed_overhead_tokens(measured_tokens, estimated_tokens, prefix_tokens);
+            let landing_tokens =
+                Self::heuristic_budget(thresholds.landing(), measured_tokens, estimated_tokens);
+            let floor = estimated_tokens.saturating_sub(fixed_tokens) / 4;
+            let minimum_tokens = fixed_tokens.saturating_add(floor);
+            if !blocked && !turn.provider_overflowed && landing_tokens <= minimum_tokens {
+                tracing::warn!(
+                    measured_tokens,
+                    fixed_tokens,
+                    landing_tokens,
+                    minimum_tokens,
+                    "compaction cannot reach the landing line; the request's fixed part fills it"
+                );
+                return CompactOutcome::Uncompactable {
+                    fixed_tokens,
+                    landing_tokens,
+                    minimum_tokens,
+                };
+            }
         }
 
         // The strategy follows the trigger. A cold cache is a moment to tidy
@@ -5103,6 +5287,24 @@ impl QueryEngine {
         Self::heuristic_budget(self.compact_thresholds().landing(), measured, heuristic)
     }
 
+    /// The non-history overhead of the request, in the strategies' units.
+    ///
+    /// Preferred over the message-level prefix when the provider has measured
+    /// a request: the measurement covers the serialized tool schemas and the
+    /// request scaffolding that the prefix estimate does not, and targets
+    /// translated against the smaller number ask the history for room that
+    /// the fixed part of the request has already spent.
+    fn fixed_overhead_tokens(
+        &self,
+        measured: usize,
+        heuristic: usize,
+        prefix_tokens: usize,
+    ) -> usize {
+        self.measured_fixed_tokens().map_or(prefix_tokens, |fixed| {
+            Self::heuristic_budget(fixed, measured, heuristic)
+        })
+    }
+
     /// The targets the rule-based strategies trim to, in the strategies' own
     /// units and in *history* space.
     ///
@@ -5127,13 +5329,16 @@ impl QueryEngine {
     ) -> (usize, usize) {
         let thresholds = self.compact_thresholds();
         let landing = thresholds.landing();
-        let history_heuristic = heuristic.saturating_sub(prefix_tokens);
+        // What the fixed part of the request costs on the strategies' ruler.
+        // Measurement first: the prefix alone misses the tool schemas.
+        let fixed = self.fixed_overhead_tokens(measured, heuristic, prefix_tokens);
+        let history_heuristic = heuristic.saturating_sub(fixed);
         // Never ask a pass to keep less than a quarter of the history: below
         // that it is deleting working state, not reclaiming slack.
         let floor = history_heuristic / 4;
 
         let auto_target = Self::heuristic_budget(landing, measured, heuristic)
-            .saturating_sub(prefix_tokens)
+            .saturating_sub(fixed)
             .max(floor);
         let snip_budget = if self.compact_config.snip_target_tokens < landing {
             self.compact_config.snip_target_tokens
@@ -5141,7 +5346,7 @@ impl QueryEngine {
             landing
         };
         let snip_target = Self::heuristic_budget(snip_budget, measured, heuristic)
-            .saturating_sub(prefix_tokens)
+            .saturating_sub(fixed)
             .max(floor);
         (auto_target, snip_target)
     }
@@ -5211,7 +5416,8 @@ impl QueryEngine {
         // the same way their targets were. It is the *landing* line, not the
         // trigger: landing exactly on the trigger buys no headroom and the
         // next tool result crosses again.
-        let line = self.heuristic_landing_line(self.turn_context_tokens(turn), tokens_before);
+        let measured_tokens = self.turn_context_tokens(turn);
+        let line = self.heuristic_landing_line(measured_tokens, tokens_before);
 
         // Circuit breaker accounting: a pass that neither reached the landing
         // line nor removed a tenth of the context counts as a failure.
@@ -5219,6 +5425,17 @@ impl QueryEngine {
         let maintenance = trigger == CompactTrigger::CacheTtl;
         let last_resort = matches!(result.effective, CompactStrategy::LastResort);
         if !maintenance {
+            // The backoff state outlives the pass and the turn: it is what
+            // stops the next turn from repeating arithmetic that just failed.
+            // A maintenance pass below the line says nothing about whether a
+            // threshold pass can work, so it neither sets nor clears it.
+            if made_progress {
+                turn.compact_no_progress = 0;
+                turn.compact_no_progress_tokens = 0;
+            } else {
+                turn.compact_no_progress = turn.compact_no_progress.saturating_add(1);
+                turn.compact_no_progress_tokens = measured_tokens;
+            }
             if made_progress {
                 turn.compact_failures = 0;
                 // The context is back where it belongs; the next crossing
@@ -5671,6 +5888,25 @@ impl QueryEngine {
         }
     }
 
+    /// Where a context that has stopped yielding to compaction becomes worth
+    /// another attempt.
+    ///
+    /// `None` while no pass has failed. Once one has, the next attempt has to
+    /// wait for measured growth worth a twentieth of the compaction line (at
+    /// least 2 000 tokens): a context that has barely moved would meet the
+    /// same target with the same result, and repeating that is the failure
+    /// mode this guards against. The blocked line bypasses the wait in the
+    /// caller — there a request genuinely cannot be sent.
+    fn no_progress_retry_at(
+        turn: &TurnRuntime,
+        thresholds: &compact::CompactThresholds,
+    ) -> Option<usize> {
+        (turn.compact_no_progress > 0).then(|| {
+            turn.compact_no_progress_tokens
+                .saturating_add((thresholds.auto / 20).max(2_000))
+        })
+    }
+
     /// Compact before a request when the estimated context has crossed a line.
     ///
     /// `CompactThresholds` answers "how full is the window"; until this call
@@ -5706,7 +5942,34 @@ impl QueryEngine {
                 self.prefetch_summary_if_useful(turn);
                 return None;
             }
-            compact::ContextLevel::Compact | compact::ContextLevel::Blocked => {}
+            compact::ContextLevel::Compact => {
+                // A pass that removed nothing will remove nothing again at
+                // the same size: the arithmetic that set its target has not
+                // changed. Retrying it every turn is how a two-hour run spent
+                // 241 passes on compaction instead of work. Only a context
+                // that has really moved — or one that is now blocked and
+                // cannot be sent at all — is worth another attempt.
+                if let Some(retry_at) = Self::no_progress_retry_at(turn, &thresholds)
+                    && estimated < retry_at
+                {
+                    let outcome = CompactOutcome::BackedOff {
+                        consecutive_no_progress: turn.compact_no_progress,
+                        estimated_tokens: estimated,
+                        last_tokens: turn.compact_no_progress_tokens,
+                        retry_at,
+                    };
+                    tracing::debug!(
+                        estimated_tokens = estimated,
+                        last_tokens = turn.compact_no_progress_tokens,
+                        retry_at,
+                        consecutive_no_progress = turn.compact_no_progress,
+                        "a recent compaction removed nothing; not retrying at this size"
+                    );
+                    self.emit_compaction(compaction_event_from_outcome(&outcome));
+                    return None;
+                }
+            }
+            compact::ContextLevel::Blocked => {}
         }
 
         tracing::debug!(
@@ -5790,7 +6053,19 @@ impl QueryEngine {
             history_messages: turn.history().len(),
             prefix_tokens: turn.context_prefix_tokens(),
             prompt_tokens: 0,
+            fixed_tokens: 0,
         });
+    }
+
+    /// The provider-measured size of everything compaction cannot touch.
+    ///
+    /// `None` until the provider has answered a request: the message-level
+    /// prefix is a heuristic, and an unmeasured overhead is better left to
+    /// `rule_based_targets`' fallback than presented as a measurement.
+    fn measured_fixed_tokens(&self) -> Option<usize> {
+        self.usage_anchor
+            .filter(|anchor| anchor.prompt_tokens > 0 && anchor.fixed_tokens > 0)
+            .map(|anchor| anchor.fixed_tokens)
     }
 
     /// Anchor the estimate on a provider's measurement of the last request.
@@ -5829,14 +6104,44 @@ impl QueryEngine {
             );
             return;
         }
-        self.usage_anchor = Some(match self.usage_anchor {
-            Some(anchor) => anchor.measured(prompt_tokens),
-            None => UsageAnchor {
-                history_messages: turn.history().len(),
-                prefix_tokens,
-                prompt_tokens,
-            },
+        // What the provider charged beyond the history is the only measurement
+        // of the request's fixed cost there is: the system prompt, the
+        // per-turn injections and the serialized tools together. Targets must
+        // leave this much of the budget alone, or they ask a history-only
+        // strategy for room that does not exist.
+        let (history_messages, fixed_tokens) = match self.usage_anchor {
+            // The anchor's shape describes the request that was measured; the
+            // history may have grown with the response since then.
+            Some(anchor) if anchor.history_messages <= turn.history().len() => {
+                let measured_history = PromptCompiler::estimate_message_tokens(
+                    &turn.history()[..anchor.history_messages],
+                );
+                (
+                    anchor.history_messages,
+                    prompt_tokens.saturating_sub(measured_history),
+                )
+            }
+            _ => {
+                let measured_history = PromptCompiler::estimate_message_tokens(turn.history());
+                (
+                    turn.history().len(),
+                    prompt_tokens.saturating_sub(measured_history),
+                )
+            }
+        };
+        self.usage_anchor = Some(UsageAnchor {
+            history_messages,
+            prefix_tokens,
+            prompt_tokens,
+            fixed_tokens,
         });
+
+        // The request was accepted, which is a statement about the window:
+        // input plus the requested output fit inside it. Unknown models
+        // otherwise run against [`UNKNOWN_CONTEXT_WINDOW`], a guess that can
+        // be four times too small.
+        let lower_bound = prompt_tokens.saturating_add(self.max_tokens as usize);
+        self.raise_context_window_lower_bound(lower_bound);
     }
 
     /// Compact proactively when the prompt cache has gone cold.
@@ -12265,6 +12570,268 @@ mod tests {
         );
     }
 
+    /// The tool schemas are sent with every request and are not messages; the
+    /// request estimate has to carry them, or it describes a request several
+    /// thousand tokens smaller than the one the provider measures.
+    #[test]
+    fn tool_schemas_count_toward_the_request_estimate() {
+        let tools = vec![ToolInfo {
+            name: "bash".into(),
+            description: "Run a shell command".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }];
+        let tokens = QueryEngine::tool_schema_tokens(&tools);
+        assert!(tokens > 0, "a serialized schema costs tokens");
+        assert_eq!(
+            QueryEngine::tool_schema_tokens(&[]),
+            0,
+            "no tools, no overhead"
+        );
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("system prompt"), Message::user("hi")];
+        turn.set_history_range(1, 2);
+        let without = turn.context_tokens(None);
+        turn.tool_schema_tokens = tokens;
+        assert_eq!(turn.context_tokens(None), without + tokens);
+        assert_eq!(
+            turn.context_prefix_tokens(),
+            PromptCompiler::estimate_message_tokens(&turn.messages[..1]) + tokens
+        );
+
+        // An anchor's measurement already covers the schemas; counting them
+        // again would shrink every target by their size.
+        let anchor = UsageAnchor {
+            history_messages: 1,
+            prefix_tokens: turn.context_prefix_tokens(),
+            prompt_tokens: 500,
+            fixed_tokens: 480,
+        };
+        assert_eq!(turn.context_tokens(Some(anchor)), 500);
+    }
+
+    /// The provider measures everything the request contains, including the
+    /// tool schemas and the scaffolding the message estimator cannot see.
+    /// What it charged beyond the history is a measurement of the part
+    /// compaction cannot touch, and targets translated against it leave that
+    /// part alone.
+    #[test]
+    fn a_measurement_learns_the_fixed_overhead_targets_subtract() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("s"), Message::user("x".repeat(40_000))];
+        turn.set_history_range(1, 2);
+        turn.tool_schema_tokens = 2_000;
+
+        let heuristic =
+            PromptCompiler::estimate_message_tokens(&turn.messages) + turn.tool_schema_tokens;
+        let history = PromptCompiler::estimate_message_tokens(turn.history());
+        let prefix = turn.context_prefix_tokens();
+
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: history + 12_000,
+                output_tokens: 30,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        let anchor = engine.usage_anchor.expect("the measurement is anchored");
+        assert_eq!(
+            anchor.fixed_tokens, 12_000,
+            "the measured overhead is prompt minus the measured request's history"
+        );
+
+        let measured_target = engine
+            .rule_based_targets(history + 12_000, heuristic, prefix)
+            .0;
+        let (mut unmeasured, _rx2, _session2) = make_test_engine();
+        unmeasured.learn_context_window(131_072);
+        let prefix_target = unmeasured
+            .rule_based_targets(history + 12_000, heuristic, prefix)
+            .0;
+        assert!(
+            measured_target < prefix_target,
+            "the measured overhead ({}) must be subtracted, not the message prefix ({prefix}): \
+             {measured_target} vs {prefix_target}",
+            anchor.fixed_tokens
+        );
+    }
+
+    /// Nothing the engine does to the history can put the request under the
+    /// landing line when the fixed part alone fills it. Running a pass anyway
+    /// destroys working context and then repeats next turn; the outcome says
+    /// so instead.
+    #[tokio::test]
+    async fn a_request_whose_fixed_part_fills_the_landing_line_is_uncompactable() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        // An unknown model: the window is a 32k guess, exactly the setup in
+        // which a 128k provider thrashed through 241 compaction passes.
+        engine.model = ModelId("mystery-model".into());
+        engine.set_context_window_resolver(ContextWindowResolver::new(
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+        ));
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::system("s"), Message::user("x".repeat(4_000))];
+        turn.set_history_range(1, 2);
+        let prefix = turn.context_prefix_tokens();
+        // The provider measured the small request at 16 600 tokens, of which
+        // 8 600 are not history: system prompt, tool schemas, scaffolding.
+        engine.usage_anchor = Some(UsageAnchor {
+            history_messages: 1,
+            prefix_tokens: prefix,
+            prompt_tokens: 16_600,
+            fixed_tokens: 8_600,
+        });
+
+        let outcome = engine
+            .run_compact_recovery(
+                &mut turn,
+                &SubmitOptions::default(),
+                1,
+                CompactTrigger::TokenThreshold,
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, CompactOutcome::Uncompactable { .. }),
+            "{outcome:?}"
+        );
+        if let CompactOutcome::Uncompactable {
+            fixed_tokens,
+            landing_tokens,
+            minimum_tokens,
+        } = outcome
+        {
+            assert!(
+                landing_tokens <= minimum_tokens,
+                "the report must show why no pass can reach the line: {fixed_tokens}, \
+                 {landing_tokens}, {minimum_tokens}"
+            );
+        }
+    }
+
+    /// An accepted request proves the window was at least its input plus the
+    /// requested output. That is the only evidence about an unknown model's
+    /// window before an overflow, and it moves the guess in the safe direction.
+    #[test]
+    fn an_accepted_request_raises_the_window_lower_bound() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.model = ModelId("mystery-model".into());
+        engine.set_context_window_resolver(ContextWindowResolver::new(
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+            crate::types::ContextWindowOverrides::default(),
+        ));
+        assert_eq!(
+            engine.context_window().tokens,
+            crate::types::UNKNOWN_CONTEXT_WINDOW
+        );
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("x".repeat(240_000))];
+        engine.record_request_shape(&turn);
+        engine.record_prompt_tokens(
+            &turn,
+            &UsageSummary {
+                input_tokens: 60_000,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        let expected = 60_000 + QueryEngine::DEFAULT_MAX_TOKENS as usize;
+        assert_eq!(engine.context_window().tokens, expected);
+
+        // A smaller accepted request teaches nothing new, and nothing lowers
+        // a bound that a larger request already proved.
+        let mut smaller = TurnRuntime::new(TokenBudget::with_defaults());
+        smaller.messages = vec![Message::user("x".repeat(40_000))];
+        engine.record_request_shape(&smaller);
+        engine.record_prompt_tokens(
+            &smaller,
+            &UsageSummary {
+                input_tokens: 10_000,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            },
+        );
+        assert_eq!(engine.context_window().tokens, expected);
+    }
+
+    /// A pass that removed nothing will remove nothing again at the same size.
+    /// The retry waits for measured growth worth a twentieth of the line.
+    #[test]
+    fn a_no_progress_pass_sets_the_size_at_which_a_retry_is_worth_it() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let thresholds = engine.compact_thresholds();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        assert_eq!(
+            QueryEngine::no_progress_retry_at(&turn, &thresholds),
+            None,
+            "nothing has failed yet"
+        );
+
+        turn.compact_no_progress = 2;
+        turn.compact_no_progress_tokens = 90_000;
+        let margin = (thresholds.auto / 20).max(2_000);
+        assert_eq!(
+            QueryEngine::no_progress_retry_at(&turn, &thresholds),
+            Some(90_000 + margin)
+        );
+    }
+
+    /// The caller-side effect: above the compact line, with a recent pass that
+    /// removed nothing at this size, the turn sends the request instead of
+    /// compacting again — and says on the event stream why.
+    #[tokio::test]
+    async fn a_context_that_stopped_yielding_to_compaction_is_not_retried() {
+        let (mut engine, mut rx, _session) = make_test_engine();
+        engine.learn_context_window(131_072);
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        // ~110 000 heuristic tokens: over the auto line, below blocked.
+        turn.messages = vec![Message::user("x".repeat(440_000))];
+        let measured = engine.turn_context_tokens(&turn);
+        turn.compact_no_progress = 1;
+        turn.compact_no_progress_tokens = measured;
+
+        let reason = engine
+            .maybe_compact_on_threshold(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(reason.is_none(), "{reason:?}");
+        assert_eq!(turn.compact_failures, 0, "no pass may have run");
+        assert_eq!(turn.recovery_count, 0, "no pass may have run");
+
+        let mut backed_off = None;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Compaction(CompactionEvent::BackedOff {
+                estimated_tokens,
+                retry_at,
+                ..
+            }) = event
+            {
+                backed_off = Some((estimated_tokens, retry_at));
+            }
+        }
+        let (estimated_tokens, retry_at) =
+            backed_off.expect("the backoff must be observable on the event stream");
+        assert_eq!(estimated_tokens, measured);
+        assert!(retry_at > measured);
+    }
+
     /// The line a pass is judged against is the provider's, translated. A
     /// result that looks under `auto` to the heuristic but is still over it to
     /// the provider — and removed less than a tenth — is not a recovery.
@@ -12274,10 +12841,12 @@ mod tests {
         engine.learn_context_window(131_072);
         let auto = engine.compact_thresholds().auto;
 
-        // 41 × 10 000 chars ≈ 102 500 heuristic tokens, measured at 140 000.
+        // 25 × 10 000 chars ≈ 62 500 heuristic tokens, measured at 90 000.
+        // The measurement is under the window minus the requested output, so
+        // accepting it is consistent with the window this test states.
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("the request")];
-        for _ in 0..41 {
+        for _ in 0..25 {
             turn.messages.push(Message::assistant("x".repeat(10_000)));
         }
         let before = PromptCompiler::estimate_message_tokens(&turn.messages);
@@ -12285,11 +12854,16 @@ mod tests {
         engine.record_prompt_tokens(
             &turn,
             &UsageSummary {
-                input_tokens: 140_000,
+                input_tokens: 90_000,
                 output_tokens: 30,
                 cache_read_tokens: 0,
                 cache_creation_tokens: 0,
             },
+        );
+        assert_eq!(
+            engine.context_window().tokens,
+            131_072,
+            "a measurement that fits must not move the window"
         );
 
         // Drop two messages: the heuristic result lands under the raw line,

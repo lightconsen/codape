@@ -446,6 +446,11 @@ def container_env(agent: str, context_tokens: int) -> list[str]:
         "NO_PROXY=localhost,127.0.0.1",
     ]
     if agent == "codape":
+        # The served model is absent from Codape's window table, so without
+        # this the harness assumes a 32k window, compacts against a line below
+        # the request's fixed overhead, and re-compacts on every turn.  The
+        # override is explicit rather than forwarded so a stale host value
+        # cannot disagree with what this script reports.
         args += [
             "-e",
             "CODAPE_SANDBOX=off",
@@ -453,6 +458,8 @@ def container_env(agent: str, context_tokens: int) -> list[str]:
             "CODAPE_LOG=off",
             "-e",
             "CLAUDE_CONFIG_DIR=/tmp/codape-config",
+            "-e",
+            f"CODAPE_CONTEXT_WINDOW={context_tokens}",
         ]
     else:
         # Claude Code reads its gateway/auth settings from the forwarded
@@ -680,7 +687,8 @@ def main(argv: list[str] | None = None) -> int:
         "--context-tokens",
         type=int,
         default=DEFAULT_CLAUDE_CONTEXT_TOKENS,
-        help="Context window advertised to Claude Code; ignored for Codape",
+        help="Context window served to the agent; passed to Codape as CODAPE_CONTEXT_WINDOW "
+        "and to Claude Code as CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     )
     parser.add_argument("--keep-container", action="store_true", help="Leave the task container running")
     parser.add_argument("--dry-run", action="store_true")
@@ -699,6 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"agent         : {args.agent}")
         if args.agent == "codape":
             print(f"codape        : {CODAPE_VERSION} ({CODAPE_TARGET})")
+            print(f"context       : {args.context_tokens} tokens")
         else:
             print(f"claude        : {claude_binary()}")
             print(f"context       : {args.context_tokens} tokens")

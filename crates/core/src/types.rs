@@ -1111,6 +1111,33 @@ pub enum CompactionEvent {
         /// The hook's reason.
         reason: String,
     },
+    /// A recent pass removed nothing, and the context has not changed enough
+    /// for another one to come out differently.
+    BackedOff {
+        /// Consecutive passes that removed nothing so far.
+        consecutive_no_progress: u32,
+        /// Measured size of the request now.
+        estimated_tokens: usize,
+        /// Measured size at which the last no-progress pass ran.
+        last_tokens: usize,
+        /// Measured size at which a pass is worth another attempt.
+        retry_at: usize,
+    },
+    /// No pass can put the request under the landing line: the provider
+    /// measured a request whose fixed part already fills it.
+    ///
+    /// The context is still usable — nothing is lost — but compacting it
+    /// again cannot buy headroom, so the engine stops trying until the
+    /// situation changes.
+    Uncompactable {
+        /// The request's non-history overhead (strategy units).
+        fixed_tokens: usize,
+        /// The landing line the overhead already fills (strategy units).
+        landing_tokens: usize,
+        /// The smallest whole request a pass keeping a quarter of the history
+        /// could leave (strategy units).
+        minimum_tokens: usize,
+    },
     /// Compaction ran but removed nothing.
     NoProgress {
         /// The rung that was requested.
