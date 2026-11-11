@@ -135,11 +135,12 @@ fn a_destructive_shell_command_cannot_touch_a_path_outside_the_workspace() {
     // and `sandbox-exec` the same command is refused instead.
     //
     // The sentinel is still the thing worth asserting, and it still has
-    // teeth: removing the sandbox entirely deletes it and fails this test.
-    // What it cannot do under bubblewrap is notice a *too-permissive write
-    // policy* for a path under /tmp, because the tmpfs shadows the host tree
-    // regardless of the policy. That is a property of where the fixture
-    // points, not of the guarantee.
+    // teeth: removing the sandbox entirely deletes it and fails this test, and
+    // so does widening the policy to allow writes under `/tmp` — bubblewrap
+    // emits `--bind /tmp /tmp` after the private tmpfs, which puts the host
+    // tree back over it. So the empty-`/tmp` start does not blind this test to
+    // an over-permissive policy; only the error *message* it used to demand is
+    // missing, because nothing was there to refuse.
     assert_eq!(
         std::fs::read_to_string(victim.join("sentinel")).ok(),
         Some("keep".to_string()),

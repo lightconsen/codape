@@ -4150,6 +4150,54 @@ mod tests {
         );
     }
 
+    /// `/tmp` is replaced before any writable path is bound, never after.
+    ///
+    /// The order is load-bearing in both directions, and only one of them is
+    /// obvious:
+    ///
+    /// * A bind *after* the tmpfs punches through it. That is how a workspace
+    ///   under `/tmp` is reachable at all — the private tmpfs would otherwise
+    ///   hide the directory `--chdir` needs. It is also why a policy that
+    ///   grants `/tmp` writes is genuinely observable: `--bind /tmp /tmp` puts
+    ///   the host tree back over the tmpfs, so `rm -rf` on host data really
+    ///   does delete it (measured with bwrap 0.9.0 and 0.12.0).
+    /// * A tmpfs *after* the binds erases them. The whole of `/tmp` — including
+    ///   the workspace just bound into it — is replaced by an empty mount, and
+    ///   `--chdir` then fails with "No such file or directory" before the child
+    ///   ever starts.
+    ///
+    /// So the tmpfs must precede every writable bind. Pure, so it holds on
+    /// every platform rather than only where bwrap is installed.
+    #[test]
+    fn bubblewrap_replaces_tmp_before_binding_anything_writable() {
+        let mut config = bubblewrap_config();
+        // Both a workspace under /tmp and a grant *of* /tmp: the first is
+        // reachable only through the hole a later bind punches, the second is
+        // the bind that covers the tmpfs.
+        config.allowed_write_paths = vec![PathBuf::from("/tmp/work/project")];
+        config.additional_working_dirs = vec![PathBuf::from("/tmp")];
+
+        let args = bubblewrap_args(&config, std::path::Path::new("/tmp/work/project"));
+
+        let tmpfs = args
+            .windows(2)
+            .position(|w| w == ["--tmpfs", "/tmp"])
+            .expect("the private /tmp should be created");
+        let binds: Vec<usize> = args
+            .windows(3)
+            .enumerate()
+            .filter(|(_, w)| w[0] == "--bind")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(binds.len(), 2, "expected both write paths bound: {args:?}");
+        for bind in binds {
+            assert!(
+                tmpfs < bind,
+                "a /tmp mount emitted after a writable bind erases it: {args:?}"
+            );
+        }
+    }
+
     #[test]
     fn bubblewrap_makes_each_writable_path_writable_once() {
         let mut config = bubblewrap_config();
