@@ -63,6 +63,9 @@ PROXY_ALLOWED_HOST = "opencode.ai"
 PASSTHROUGH_ENV = (
     "CODAPE_API_KEY",
     "ANTHROPIC_API_KEY",
+    # Claude Code exports its gateway credential under this name; both agents
+    # accept it, so forward it like the other credentials (name only).
+    "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
     "CODAPE_BASE_URL",
     "ANTHROPIC_BASE_URL",
