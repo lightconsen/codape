@@ -1690,6 +1690,6 @@
     "recorded_at": "2026-10-26T00:00:00Z",
     "suite": "e2e_equivalence",
     "backfilled": true,
-    "system_sha256": "61fa083c33c89d12881e21e7408d4ef15edf7b6758c314219726bbefd1b15acb"
+    "system_sha256": "e6d8be687448837f985e64cb9c1992995e9c6a5dde988a77780483be02b7b9cb"
   }
 }
