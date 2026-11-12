@@ -142,16 +142,19 @@ below add `caps-log` (Claude Code 62 against Codape r5's 89) and
 **What the ledger says.** Terminal-Bench's two permanent failures are a network
 lottery and a session longer than the budget; most of its other recorded
 failures were fixture defects, with `pytorch-model-cli.easy` the clearest
-model-adherence miss. SWE-bench's six unresolved instances are model misses;
-two `requests` instances are environment misses a correct patch cannot move.
+model-adherence miss. Three of SWE-bench's eight ledger rows have since passed
+on a rerun (`seaborn`, `astropy`, `fastlane`); of the five still unresolved,
+three are model misses and two `requests` instances are environment misses a
+correct patch cannot move.
 ProgramBench has no solved instance beyond `cmatrix`: the four `caps-log` scores
 trace the compaction work (0 → 71 → 72 → 89), and even r5's 89 is a fidelity
 gap, not a harness verdict.
 
 The same-model control below re-reads these rows with Claude Code on the same
 endpoint. It confirms the model-only rows, moves `seaborn` to variance, finds
-two rows (`fmt`, `fastlane`) where the scaffold was the difference, and finds
-two where Codape led (`astropy`, `caps-log`) — so "failed" was never one thing.
+two rows (`fmt`, `fastlane`) where the scaffold looked like the difference —
+the re-run confirms that for `fastlane` but not for `fmt` — and finds two
+where Codape led (`astropy`, `caps-log`), so "failed" was never one thing.
 
 Raw per-run JSON and transcripts are not committed, and benchmark containers
 and images are removed after a run; the run-ids in the two histories are the
