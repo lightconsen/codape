@@ -106,13 +106,13 @@ best-of-runs table is in
 
 | Instance | Benchmark / run | Class | Why it failed |
 |---|---|---|---|
-| `pydata__xarray-6938` | Verified 24 (21/24) | model | Changed `Dataset.swap_dims()`; the graded test calls `IndexVariable.to_index_variable()` directly, so the intended change is in `xarray/core/variable.py`. |
+| `pydata__xarray-6938` | Verified 24 (21/24); k3 r1 | fixture | The issue names `Dataset.swap_dims()`; the graded test asserts `IndexVariable.to_index_variable()` returns a copy. Both `deepseek-v4.1-flash` and Kimi k3 fixed the named method and passed the issue's MVCE, then failed the hidden contract. |
 | `mwaskom__seaborn-3187` | Verified 24 | model | Partial fix: `Plot`'s legend passes, but `relplot()` goes through `seaborn/utils.py`, which was not touched. |
 | `psf__requests-1921` | Verified 24 | environment | The fix works and all six FAIL_TO_PASS pass; two PASS_TO_PASS hit `CERTIFICATE_VERIFY_FAILED` against `httpbin.org`. The dataset's own gold patch also scores 0/1, leaving 22/23 scoreable. |
 | `astropy__astropy-14369` | Verified batch 1 (2/3) | model | Accepted products after `/`; the negative test requires an unparenthesized denominator to raise. A corrected grammar patch resolved 1/1 without model calls. |
 | `psf__requests-1963` | Lite batch 1 (2/3) | environment | All FAIL_TO_PASS passed; two PASS_TO_PASS hit `CERTIFICATE_VERIFY_FAILED`. A comment-only baseline reproduced both. |
-| `caddyserver__caddy-6411` | Multilingual 12 (9/12) | model | Trimmed every trailing newline instead of one; `foo\n\n` became `foo` where the test expects `foo\n`. |
-| `fmtlib__fmt-3750` | Multilingual 12 | model | Gated localization to decimal, the opposite of the issue: grouping in hex, binary and octal under `L`. |
+| `caddyserver__caddy-6411` | Multilingual 12 (9/12); k3 r1 | model | Trimmed every trailing newline instead of one; `foo\n\n` became `foo` where the test expects `foo\n`. Both models chose `strings.TrimRight`. |
+| `fmtlib__fmt-3750` | Multilingual 12; k3 r1 | fixture | The issue's example uses the default locale and prints ungrouped `75BCD15`; the graded test uses a grouping facet and expects `7,5bc,d15`. Both models read the example as "grouping is decimal-only". |
 | `fastlane__fastlane-19207` | Multilingual 12 | model | Splatted the argument array into `Actions.sh(*zip_command)` instead of escaping its elements, regressing six arity specs, and left a stray `zip-action-fix.patch`. |
 
 Run-ids and timings are in [SWE-bench run history](#swe-bench-run-history).
@@ -144,8 +144,9 @@ lottery and a session longer than the budget; most of its other recorded
 failures were fixture defects, with `pytorch-model-cli.easy` the clearest
 model-adherence miss. Three of SWE-bench's eight ledger rows have since passed
 on a rerun (`seaborn`, `astropy`, `fastlane`); of the five still unresolved,
-three are model misses and two `requests` instances are environment misses a
-correct patch cannot move.
+one is a model miss (`caddy`), two are fixture under-specification (`xarray`,
+`fmt`), and two `requests` instances are environment misses a correct patch
+cannot move.
 ProgramBench has no solved instance beyond `cmatrix`: the four `caps-log` scores
 trace the compaction work (0 → 71 → 72 → 89), and even r5's 89 is a fidelity
 gap, not a harness verdict.
@@ -313,7 +314,40 @@ guard stayed silent in both runs for the same underlying reason: no recognized
 test command ever came back red, since the rewritten fastlane specs passed and
 the new fmt test encoded the wrong answer. The guard is built for the
 green-to-red regression; the test-bending case is what the review turn caught,
-and the missing-oracle case remains model knowledge.
+and the missing-oracle case is what the model swap below tests.
+
+## Model swap on three SWE-bench misses
+
+The same-model control separated scaffold from model; the scaffold fixes then
+closed `fastlane` and left `fmt`. The next question is whether the cheap misses
+are model knowledge or something the model cannot see. We re-ran `fmt`,
+`xarray` and `caddy` with Kimi k3 on the same Codape build and flags
+(`--no-required-artifacts --verbose-tool-input --verify-on-finish`), 1M context
+and 3 600 s, one isolated run each: `fmt-kimi-k3-r1`, `xarray-kimi-k3-r1`,
+`caddy-kimi-k3-r1`. The endpoint is `https://api.kimi.com/coding/`; the runner
+now forwards `CODAPE_REQUEST_TIMEOUT_SECS` so Codape's 120 s default cannot cut
+a slow completion.
+
+| Instance | deepseek-v4.1-flash | Kimi k3 | What both patches say |
+|---|---|---|---|
+| `fmtlib__fmt-3750` | 0/1, 402 s (r2) | 0/1, 525 s | Both gate grouping to decimal. k3 returns `false` for non-`dec` presentation types and falls back to the unlocalized path; the graded test uses a grouping facet and expects `7,5bc,d15`. |
+| `pydata__xarray-6938` | 0/1, 381 s | 0/1, 588 s | Both fix `Dataset.swap_dims()`; the graded test asserts `IndexVariable.to_index_variable()` returns a copy (`a is not b`). |
+| `caddyserver__caddy-6411` | 0/1, 818 s | 0/1, 443 s | Both replace the raw return with `strings.TrimRight(body, "\r\n")`; the graded fixture `foo\n\n` expects `foo\n`. |
+
+No instance flipped. The patches are not random: each model follows the issue
+text to a locally reasonable fix and misses the contract the hidden test
+asserts. For `fmt` the issue's own example uses the default locale and prints
+ungrouped `75BCD15`; for `xarray` the issue names `swap_dims` and the hidden
+test moves the requirement to `to_index_variable`. Both are now classed
+**fixture** in the ledger: following the instruction cannot pass the graded
+test. `caddy` stays **model** — the issue says a trailing newline, singular,
+and both models removed every one.
+
+The verification turn returned `VERIFICATION: PASS` on all three, and the
+red-test guard stayed silent: each repository's own tests were green. That is
+the limit of both mechanisms — they check the tests the repo has, not the
+hidden contract. If the goal is to close these rows, the lever is the task text
+or the fixture, not a stronger model on the same instructions.
 
 ## Pins
 
