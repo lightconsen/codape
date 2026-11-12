@@ -6802,9 +6802,10 @@ impl ReplLoop {
 
         const REPAIR_REPORT_LIMIT: usize = 8 * 1024;
 
-        let prompt = verification_prompt(task, &self.working_tree_diff());
+        let diff = self.working_tree_diff();
+        let prompt = verification_prompt(task, &diff);
         let report = self.run_headless_turn(&prompt).await?;
-        if !verification_failed(&report) {
+        if !verification_failed(&report, &diff) {
             return Ok(report);
         }
         // One repair turn, then a second review. A run that needed the repair
@@ -6814,7 +6815,11 @@ impl ReplLoop {
             "The verification pass found a problem with the working tree:\n\n{}\n\n\
              Fix the cause in the code, not in the test: restore any test the diff changed \
              to fit the code, keep the existing call convention unless every caller agrees \
-             on the new one, and run the covering test again. State what you changed.",
+             on the new one, and restore any observable property the diff dropped unless the \
+             task explicitly asks for it to change. Run the covering test again. If the review \
+             reported `COVERAGE: NONE`, add the smallest test that pins the behavior the task \
+             asks for: derive its expected values from the task and from what the code did \
+             before the change, run it, and fix the code if it fails. State what you changed.",
             truncate_on_char_boundary(report.trim(), REPAIR_REPORT_LIMIT),
         );
         let mut text = report;
@@ -7149,17 +7154,124 @@ fn verification_prompt(task: &str, diff: &str) -> String {
          argument types, or what an argument means? If it did, do all callers and tests still \
          use the original convention?\n\
          4. Does the diff modify or delete a test to make it match the new code? If so, that \
-         is a failure: restore the test's own assertions.\n\n\
+         is a failure: restore the test's own assertions.\n\
+         5. For the input in the task and the edge cases next to it, list the observable \
+         properties of the output before and after the change (base, sign and prefix, case, \
+         digit separators, width and padding, ordering). The task authorizes changing only the \
+         property it complains about; does the diff change or drop any other property? If the \
+         changed path is gated by a flag, locale, mode, encoding, or format spec, exercise at \
+         least one non-default value with the feature on: the default may be a no-op.\n\n\
+         Then give the test that covers the behavior on its own line, exactly one of:\n\
+         `COVERAGE: <test file>::<test name>` or `COVERAGE: NONE`.\n\
+         Write `COVERAGE: NONE (no test harness)` only when the repository has no test harness.\n\n\
          If any answer shows a problem, fix the code now — not the test — and say what you \
-         changed. Do not add documentation or unrelated polish. End with exactly one line: \
+         changed. A passing verdict with `COVERAGE: NONE` is valid only when the diff changes no \
+         code. Do not add documentation or unrelated polish. End with exactly one line: \
          `VERIFICATION: PASS` or `VERIFICATION: FAIL: <reason>`.\n\n\
          Task:\n{task}\n\nWorking tree:\n{diff}"
     )
 }
 
-/// Whether a review reported a problem.
-fn verification_failed(report: &str) -> bool {
+/// Whether a review reported a problem or failed to establish coverage.
+///
+/// The review already knows when no test covers the changed behavior; before
+/// this gate it could say so and still end with `VERIFICATION: PASS`, because
+/// the verdict was the only thing read. A code diff with `COVERAGE: NONE` (or
+/// no coverage line at all) is not a verified fix, so it gets the same repair
+/// turn as an explicit failure. Test-only and documentation-only diffs are
+/// exempt: there is no code behavior for a test to cover.
+fn verification_failed(report: &str, diff: &str) -> bool {
     report.contains("VERIFICATION: FAIL")
+        || (coverage_is_unproven(report) && diff_touches_code(diff))
+}
+
+/// Whether the report leaves the covering test unnamed or says there is none.
+///
+/// `COVERAGE: NONE (no test harness)` is the explicit exemption for
+/// repositories with no tests to run.
+fn coverage_is_unproven(report: &str) -> bool {
+    let line = report.lines().rev().find_map(|line| {
+        let line = line.trim().trim_matches('`').trim();
+        line.strip_prefix("COVERAGE:").map(str::trim)
+    });
+    match line {
+        Some(rest) => {
+            let rest = rest.to_ascii_uppercase();
+            rest.starts_with("NONE") && !rest.contains("NO TEST HARNESS")
+        }
+        None => true,
+    }
+}
+
+/// Whether the diff changes code that a test could cover.
+///
+/// Test files and documentation are skipped. `working_tree_diff` prefixes its
+/// sections, and untracked files only appear in `git status --porcelain`, so
+/// both the status lines and the unified-diff headers are read. `.codape/` is
+/// session metadata, not part of the change under review.
+fn diff_touches_code(diff: &str) -> bool {
+    let mut in_status = false;
+    for line in diff.lines() {
+        if let Some(section) = line.strip_prefix("### ") {
+            in_status = section.starts_with("git status");
+            continue;
+        }
+        let path = if in_status {
+            if line.len() <= 3 {
+                continue;
+            }
+            line[3..]
+                .trim()
+                .rsplit(" -> ")
+                .next()
+                .unwrap_or_default()
+                .trim()
+        } else if let Some(path) = line
+            .strip_prefix("+++ b/")
+            .or_else(|| line.strip_prefix("+++ "))
+        {
+            path.trim()
+        } else {
+            continue;
+        };
+        if path.is_empty() || path == "/dev/null" {
+            continue;
+        }
+        if !looks_like_test_path(path) && !looks_like_doc_path(path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_lowercase();
+    path.starts_with("test/")
+        || path.starts_with("tests/")
+        || path.starts_with("spec/")
+        || path.starts_with("__tests__/")
+        || path.contains("/test/")
+        || path.contains("/tests/")
+        || path.contains("/spec/")
+        || path.contains("/__tests__/")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_test.py")
+        || path.ends_with("_test.go")
+        || path.contains("_test.")
+        || path.contains("_spec.")
+        || path.contains(".test.")
+        || path.contains(".spec.")
+}
+
+fn looks_like_doc_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_lowercase();
+    path.starts_with("docs/")
+        || path.ends_with(".md")
+        || path.starts_with("readme")
+        || path.starts_with("changelog")
+        || path.starts_with("license")
+        || path == ".codape/"
+        || path.starts_with(".codape/")
 }
 
 /// Attach the review to the answer the run reports.
@@ -10900,11 +11012,58 @@ mod tests {
 
     #[test]
     fn verification_verdict_is_read_from_the_last_clause() {
+        let diff = "### git status --porcelain\n M src/lib.rs\n";
         assert!(verification_failed(
-            "1. src/lib.rs::format_int\nVERIFICATION: FAIL: the spec was rewritten"
+            "COVERAGE: src/lib.rs::format_int\nVERIFICATION: FAIL: the spec was rewritten",
+            diff
         ));
         assert!(!verification_failed(
-            "1. src/lib.rs::format_int\n2. 3 tests, 0 failures\nVERIFICATION: PASS"
+            "COVERAGE: src/lib.rs::format_int\n2. 3 tests, 0 failures\nVERIFICATION: PASS",
+            diff
+        ));
+    }
+
+    #[test]
+    fn a_pass_without_coverage_is_treated_as_a_failure() {
+        let source = "### git status --porcelain\n M src/lib.rs\n";
+        let unified = "### git diff\n+++ b/src/lib.rs\n";
+        assert!(verification_failed(
+            "1. None.\nCOVERAGE: NONE\nVERIFICATION: PASS",
+            source
+        ));
+        // No coverage line at all is just as unproven as an explicit NONE.
+        assert!(verification_failed("VERIFICATION: PASS", source));
+        assert!(verification_failed(
+            "COVERAGE: NONE\nVERIFICATION: PASS",
+            unified
+        ));
+    }
+
+    #[test]
+    fn coverage_none_is_exempt_for_tests_docs_and_a_missing_harness() {
+        let source = "### git status --porcelain\n M src/lib.rs\n";
+        let test_only = "### git status --porcelain\n?? test/new-test.cc\n";
+        let docs_only = "### git status --porcelain\n M docs/benchmark.md\n";
+        let metadata_only = "### git status --porcelain\n?? .codape/session.json\n";
+        assert!(!verification_failed(
+            "COVERAGE: test/new-test.cc::new_test\nVERIFICATION: PASS",
+            source
+        ));
+        assert!(!verification_failed(
+            "COVERAGE: NONE\nVERIFICATION: PASS",
+            test_only
+        ));
+        assert!(!verification_failed(
+            "COVERAGE: NONE\nVERIFICATION: PASS",
+            docs_only
+        ));
+        assert!(!verification_failed(
+            "COVERAGE: NONE\nVERIFICATION: PASS",
+            metadata_only
+        ));
+        assert!(!verification_failed(
+            "COVERAGE: NONE (no test harness)\nVERIFICATION: PASS",
+            source
         ));
     }
 
@@ -10928,16 +11087,18 @@ mod tests {
     }
 
     #[test]
-    fn the_review_prompt_asks_the_four_questions_and_carries_the_diff() {
+    fn the_review_prompt_asks_five_questions_and_carries_the_diff() {
         let prompt = verification_prompt("fix the call", "diff --git a/x b/x");
         for question in [
             "1. Which test",
             "2. Is that test",
             "3. Did the change",
             "4. Does the diff",
+            "5. For the input",
         ] {
             assert!(prompt.contains(question), "missing {question}");
         }
+        assert!(prompt.contains("COVERAGE: <test file>::<test name>"));
         assert!(prompt.contains("VERIFICATION: PASS"));
         assert!(prompt.contains("fix the call"));
         assert!(prompt.contains("diff --git a/x b/x"));

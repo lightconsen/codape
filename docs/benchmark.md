@@ -283,12 +283,21 @@ test. It is advisory and one-shot per command; a false reminder costs a turn,
 so parsing requires a runner's own summary line.
 
 **`--verify-on-finish`.** An opt-in review turn after a headless task reads the
-working-tree diff and answers the four questions the `fastlane` run skipped:
-which test covers the behavior, is it green, did the call convention change,
-and was a test edited to fit the code. A failed review gets one repair turn in
-the same session and a second review, and the verdict is appended to the
-result. It costs turns, so it is off by default; enable it for runs where a
-wrong-but-green patch is the failure mode worth paying to catch.
+working-tree diff and answers five questions: which test covers the behavior,
+is it green, did the call convention change, was a test edited to fit the code,
+and did the diff drop an observable property (separators, prefix, case,
+padding, ordering) that the task did not ask to change. The review must also
+name the covering test on a `COVERAGE: <file>::<test>` line, or write
+`COVERAGE: NONE`. A `PASS` with no coverage line, or with `COVERAGE: NONE` on a
+diff that changes code, is treated as a failure: the report already knows the
+behavior is untested, and that answer used to be ignored because only the
+`VERIFICATION:` verdict was read. Test-only and documentation-only diffs are
+exempt, as is `COVERAGE: NONE (no test harness)`. A failed review gets one
+repair turn in the same session and a second review; the repair asks for the
+smallest test whose expected values come from the task and the pre-change
+behavior. The verdict is appended to the result. It costs turns, so it is off
+by default; enable it for runs where a wrong-but-green patch is the failure
+mode worth paying to catch.
 
 **Tool input in the stream.** `--verbose-tool-input` makes `stream-json`
 `tool_use` frames carry the model's own arguments instead of only the activity
@@ -307,9 +316,10 @@ restored `zip_spec.rb` with `git checkout --`, and changed the source instead:
 `fmtlib__fmt-3750` is still 0/1 (402 s): the patch gates `loc_writer` to
 decimal and adds a test asserting `"{:Lx}" == "75bcd15"`, where the graded test
 expects `"7,5bc,d15"`, `"-0b111,010,110,111,…"` and `"    30,071"`. The review
-turn answered all four questions and returned `VERIFICATION: PASS` because the
-repository suite was green — a review can check the diff against the tests the
-repo has, but it cannot supply an expectation those tests lack. The red-test
+turn answered every question the prompt then asked and returned
+`VERIFICATION: PASS` because the repository suite was green — a review can
+check the diff against the tests the repo has, but it cannot supply an
+expectation those tests lack. The red-test
 guard stayed silent in both runs for the same underlying reason: no recognized
 test command ever came back red, since the rewritten fastlane specs passed and
 the new fmt test encoded the wrong answer. The guard is built for the
@@ -344,10 +354,44 @@ test. `caddy` stays **model** — the issue says a trailing newline, singular,
 and both models removed every one.
 
 The verification turn returned `VERIFICATION: PASS` on all three, and the
-red-test guard stayed silent: each repository's own tests were green. That is
-the limit of both mechanisms — they check the tests the repo has, not the
-hidden contract. If the goal is to close these rows, the lever is the task text
-or the fixture, not a stronger model on the same instructions.
+red-test guard stayed silent: each repository's own tests were green. Those
+runs predate the coverage gate below; under it, the fmt review's explicit
+"no existing test covers" answer would have forced a repair instead of a PASS.
+That is the limit of both mechanisms — they check the tests the repo has, not
+the hidden contract. If the goal is to close these rows, the lever is the task
+text or the fixture, not a stronger model on the same instructions.
+
+### Coverage gate: `fmt-kimi-k3-r2`
+
+The first fmt run exposed a narrower scaffold gap than "the review cannot
+supply an oracle": the review had said no test covered the change and still
+ended `VERIFICATION: PASS`, because the orchestrator read only the verdict.
+The gate above turns that sentence into a repair trigger, and the review prompt
+now asks which observable properties of the old output the diff changed.
+Re-running the same instance with the same model and flags (`fmt-kimi-k3-r2`)
+shows what that buys and what it does not.
+
+The gate fired. The first review reported `COVERAGE: NONE` and `PASS`; the
+repair turn added `test/format-test.cc` cases for `{:Lx}`, `{:LX}`, `{:Lo}` and
+`{:Lb}` under a grouping facet; the second review reported
+`COVERAGE: test/format-test.cc::format_test.localized_nondecimal_int` and
+`PASS`. A verdict can no longer stand on "no test covers this".
+
+The patch still scored 0/1 (1 729 s generation, 2 746 B): it keeps the guard
+that sends non-decimal types down the unlocalized path, and the new tests pin
+`"{:Lx}" == "75bcd15"`. The fifth question did make the review compare old and
+new output, and it recorded the dropped separators — then justified them as
+"matching `std::format`". The graded test expects `"7,5bc,d15"`, so the fixture
+still holds the expectation the run cannot see. Cost: 1 705 s of agent time
+against 525 s in `r1`, for a 30-turn task plus review/repair turns of 9, 12 and
+4 turns, and no flip.
+
+What the gate buys: a PASS can no longer coexist with an explicit "nothing
+tests this", and the repair turn has to write an executable expectation. What
+it cannot buy: the expectation itself. A same-model review that derives "the
+reference implementation does not group hex" from its own prior will write that
+into the new test. Closing this row still needs the task text or the fixture to
+state that `L` keeps grouping in every base.
 
 ## Pins
 
