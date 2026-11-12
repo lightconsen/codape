@@ -132,6 +132,9 @@ PASSTHROUGH_ENV = (
     # otherwise spend entirely on thinking and end the run having emitted
     # nothing. A raised value is clamped to half the model's context window.
     "CODAPE_MAX_TOKENS",
+    # A slow reasoning model needs more than Codape's 120 s default per
+    # request; without this the run aborts on the first long completion.
+    "CODAPE_REQUEST_TIMEOUT_SECS",
 )
 
 API_KEY_ENV = (
