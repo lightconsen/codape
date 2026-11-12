@@ -822,8 +822,8 @@ pub struct UsageAnchor {
     /// rather than against the message-only prefix — which undercounts a
     /// tool-heavy request by several thousand tokens.
     ///
-    /// Zero until the provider answers; see
-    /// [`QueryEngine::measured_fixed_tokens`].
+    /// Zero until the provider answers; `QueryEngine::measured_fixed_tokens`
+    /// is how the engine fills it in.
     pub fixed_tokens: usize,
 }
 
