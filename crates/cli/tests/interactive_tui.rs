@@ -1442,7 +1442,14 @@ fn a_compacted_session_backs_up_and_summarizes() {
     let record = dir.path().join("requests.jsonl");
     let server = StaticServer::start_recording(Some(&record));
     let mut envs = server.envs();
-    envs.push(("CODAPE_CONTEXT_WINDOW".into(), "12000".into()));
+    // Large enough that the session's own preamble and tool schemas (~6k
+    // tokens) do not eat the trigger line on the first request, small enough
+    // that eight short turns still cross it. At 12000 the first request was
+    // already over the line with three messages of history, so the preserved
+    // tail covered everything and the summarising path had no interval to
+    // work on — the pass fell back to the rules and no `<context_summary>`
+    // was ever sent.
+    envs.push(("CODAPE_CONTEXT_WINDOW".into(), "14000".into()));
     let mut session = PtySession::launch_with_args(
         dir.path(),
         &envs,
