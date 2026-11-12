@@ -2531,7 +2531,9 @@ tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 A cross-benchmark table of every recorded failure — Terminal-Bench, SWE-bench,
 and ProgramBench, with each failure classified — is in
-[benchmark.md](benchmark.md#failure-ledger).
+[benchmark.md](benchmark.md#failure-ledger), and the same-model run under
+Claude Code that re-reads these failures is in
+[benchmark.md](benchmark.md#codape-vs-claude-code-same-model).
 
 ## Codape defects the benchmark exposed
 

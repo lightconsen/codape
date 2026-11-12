@@ -135,7 +135,9 @@ attempted instance:
 The Claude Code control is not a Codape failure but is the useful comparison:
 on `figlet` it scored 82 (872 scored) without solving, and on `pixterm` it
 scored 0 (`compile_failed`, no `compile.sh`). Run details are in
-[ProgramBench run history](#programbench-run-history).
+[ProgramBench run history](#programbench-run-history). The same-model pairs
+below add `caps-log` (Claude Code 62 against Codape r5's 89) and
+`zip-password-finder` (99 against 92); neither harness solves either one.
 
 **What the ledger says.** Terminal-Bench's two permanent failures are a network
 lottery and a session longer than the budget; most of its other recorded
@@ -146,9 +148,90 @@ ProgramBench has no solved instance beyond `cmatrix`: the four `caps-log` scores
 trace the compaction work (0 → 71 → 72 → 89), and even r5's 89 is a fidelity
 gap, not a harness verdict.
 
+The same-model control below re-reads these rows with Claude Code on the same
+endpoint. It confirms the model-only rows, moves `seaborn` to variance, finds
+two rows (`fmt`, `fastlane`) where the scaffold was the difference, and finds
+two where Codape led (`astropy`, `caps-log`) — so "failed" was never one thing.
+
 Raw per-run JSON and transcripts are not committed, and benchmark containers
 and images are removed after a run; the run-ids in the two histories are the
 handle for reproducing one.
+
+## Codape vs Claude Code, same model
+
+A failed task says the agent did not solve it; it does not say whether the
+model lacked the capability or the scaffold wasted it. The control that
+separates the two holds everything but the harness fixed: the same instance at
+the same commit, the same image, the same served model (`deepseek-v4.1-flash`),
+the same 131 072-token window, 200 turns (500 on ProgramBench) and the same
+wall clock. Codape 0.2.0 and Claude Code 2.1.318 are each installed into the
+instance container and pointed at the same gateway. The SWE-bench and
+Terminal-Bench runners grew `--agent codape|claude-code` for this; the
+ProgramBench runner already had it.
+
+Read a row by the two patches, not the two scores:
+
+- **Both fail with the same wrong patch.** The model made the same mistake
+  under two scaffolds, so the failure is the model's.
+- **Both pass.** Whatever failed before was run-to-run variance.
+- **Only one passes.** That asymmetry is the only place a scaffold claim can
+  start; one run per arm cannot prove it.
+
+SWE-bench, one fresh run per arm on each of the ledger's unresolved instances:
+
+| Instance | Dataset | Codape | Claude Code | What the two patches say |
+|---|---|---|---|---|
+| `pydata__xarray-6938` | Verified | 0/1, 381 s | 0/1, 157 s, $0.41 | Both copy `to_index_variable()` before assigning `dims` in `Dataset.swap_dims`; the graded path is `IndexVariable.to_index_variable()`. |
+| `mwaskom__seaborn-3187` | Verified | **1/1**, 511 s | **1/1**, 470 s, $1.08 | Both turn off the offset and scientific notation on the scale's formatter in `scales.py`. |
+| `astropy__astropy-14369` | Verified | **1/1**, 1 023 s | 0/1, 277 s, $0.56 | Codape changed the division rule to `combined_units DIVISION unit_expression` and regenerated `cds_parsetab`; Claude's grammar refactor still accepted `km/s.Mpc-1` and `/s.Mpc` (2 of 738 tests failed). |
+| `caddyserver__caddy-6411` | Multilingual | 0/1, 818 s | 0/1, 138 s, $0.43 | Both `strings.TrimRight(body, "\r\n")` — trims every trailing newline where the test wants one removed. |
+| `fmtlib__fmt-3750` | Multilingual | 0/1, 705 s | **1/1**, 527 s, $1.34 | Codape gated digit grouping to decimal, the same miss it made on 2026-11-11; Claude added a `write_int` overload that applies grouping in every base. |
+| `fastlane__fastlane-19207` | Multilingual | 0/1, 643 s | **1/1**, 286 s, $0.72 | Codape splatted the argv array into `Actions.sh(*zip_command)` again; Claude escaped each element. |
+
+Terminal-Bench, against the repaired fixtures described in
+[Local fixture patches](terminal-bench.md#local-fixture-patches):
+
+| Task | Codape | Claude Code | Reading |
+|---|---|---|---|
+| `pytorch-model-cli.easy` | 0/1 `test_timeout` (earlier: 2 timeouts, one 5/6) | 0/1 `test_timeout`, 408 s | Same 120 s grading budget; both C readers are too slow, and the run that finished used the wrong `[-1,1]` scaling. |
+| `nginx-request-logging` | **1/1**, 236 s | **1/1**, 119 s | Codape resolved it once in its own history and failed once by naming the format `benchmark`; the model miss does not reproduce under either arm now. |
+| `raman-fitting.easy` | **1/1**, 1 354 s | **1/1**, 500 s | Both converge; Codape is 2.7× slower to the same answer. |
+
+ProgramBench, with the protocol of `caps-log` r5 (4 CPUs, 8 GB, 7 200 s,
+500 turns, `CODAPE_CONTEXT_WINDOW=131072`):
+
+| Instance | Codape | Claude Code | Reading |
+|---|---|---|---|
+| `nikoladucak__caps-log.2cf2d1e` | r5: **89**, 775/1 232 raw (490/551 scored) | **62**, 603/1 232 raw, $7.68 | Codape's score is higher on the same protocol, but the margin includes run variance; both hit the same `results_read_failed` on the `c0e6b8d64108` branch (3 `not_run`). |
+| `agourlay__zip-password-finder.704700d` | **92**, 680 scored | **99**, 786/792 raw (5 failures), $18.05 | Neither is solved. Claude Code came within six tests — one charset naming case, one combined-charset case, two CLI/env flags and the minimum-length constraint — after 324 turns and 83 minutes. |
+
+**What the comparison says so far.** Three pairs fail identically under both
+scaffolds: `xarray` and `caddy` with the same wrong patch, `pytorch-model-cli`
+on the same grading timeout — those are model limits. Three pairs pass under
+both: `nginx` and `raman` on their repaired fixtures, and `seaborn` on its
+pristine one, which makes the ledger's `seaborn` row variance rather than a
+model miss. Two are scaffold-shaped: `fmt` and `fastlane`, the Multilingual
+instances where Codape repeated the exact mistake it had made in its history
+while Claude Code found the fix — Codape's exploration, not the model, is what
+stands between it and a patch there. Two run the other way: Codape solved
+`astropy` where Claude Code did not, and Codape's `caps-log` r5 (89) beats this
+Claude Code run (62) on the same protocol, though that comparison also carries
+the run-to-run spread r2–r5 already showed. On `zip-password-finder` the
+order flips again: Claude Code reached 99 to Codape's 92, and neither is
+solved, so ProgramBench has no solved instance under either harness.
+
+The caveats are the sample. Each cell is one run; a single pass or fail moves a
+row. Claude Code reports its own cost, Codape does not emit usage in headless
+stream-json, so the money column exists on one side only. And the two arms
+share a model, not a prompt: the system prompt is part of the scaffold under
+test, which is exactly what this control is meant to vary.
+
+Run-ids: `xarray-claude-r1`, `xarray-codape-r1`, `seaborn-claude-r1`,
+`seaborn-codape-r1`, `astropy-claude-r1`, `astropy-codape-r1`,
+`caddy-claude-r1`, `caddy-codape-r1`, `fmt-claude-r1`, `fmt-codape-r1`,
+`fastlane-claude-r1`, `fastlane-codape-r1`, `pytorch-model-cli-claude-r1`,
+`nginx-claude-r1`, `nginx-codape-r3`, `raman-claude-r2`, `raman-codape-r2`,
+`caps-log-claude-r1`, `zip-claude-r1`.
 
 ## Pins
 
