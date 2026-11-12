@@ -81,7 +81,9 @@ pub struct RedactedToolResult {
 fn redact_event(event: &EngineEvent) -> RedactedEvent {
     match event {
         EngineEvent::TextDelta(delta) => RedactedEvent::TextDelta(delta.clone()),
-        EngineEvent::ToolCallStart { id, name, summary } => RedactedEvent::ToolCallStart {
+        EngineEvent::ToolCallStart {
+            id, name, summary, ..
+        } => RedactedEvent::ToolCallStart {
             id: redact_id(id),
             name: name.clone(),
             summary: summary.clone(),

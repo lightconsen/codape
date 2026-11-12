@@ -1240,6 +1240,15 @@ pub enum EngineEvent {
         name: String,
         /// Safe activity summary for interactive UI surfaces.
         summary: String,
+        /// The call's own input, when the producer had it.
+        ///
+        /// The summary is a rendering, not the request: a transcript built
+        /// from summaries cannot say which command ran or which file was
+        /// edited, which is exactly what a benchmark review needs. Carried
+        /// here so a protocol writer can expose it on request
+        /// (`--verbose-tool-input`); UI surfaces keep using `summary`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<serde_json::Value>,
     },
     /// A tool call has completed.
     ToolCallEnd {

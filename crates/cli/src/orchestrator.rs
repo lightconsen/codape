@@ -330,6 +330,17 @@ pub struct SessionContext {
     /// Paths the request requires as output; a headless turn that ends
     /// without them is continued.
     pub require_artifacts: Vec<std::path::PathBuf>,
+    /// Whether the request text is read for required output paths. Off for
+    /// tasks whose deliverable is the working tree, and for requests that
+    /// quote build logs: a path mentioned near an output verb in pasted log
+    /// output is not a deliverable, and pursuing it wastes the run.
+    pub infer_artifacts: bool,
+    /// Whether a headless run reviews its own working-tree diff before it
+    /// reports (`--verify-on-finish`).
+    pub verify_on_finish: bool,
+    /// Whether stream-json frames carry each tool call's own input
+    /// (`--verbose-tool-input`).
+    pub verbose_tool_input: bool,
     /// Replay user messages.
     pub replay_user_messages: bool,
     /// Include partial messages.
@@ -727,6 +738,9 @@ impl StartupOrchestrator {
                 max_turns: None,
                 time_budget: None,
                 require_artifacts: Vec::new(),
+                infer_artifacts: true,
+                verify_on_finish: false,
+                verbose_tool_input: false,
                 replay_user_messages: false,
                 include_partial_messages: false,
                 effort: None,
@@ -800,6 +814,9 @@ impl StartupOrchestrator {
         self.ctx
             .require_artifacts
             .clone_from(&args.require_artifact);
+        self.ctx.infer_artifacts = !args.no_required_artifacts;
+        self.ctx.verify_on_finish = args.verify_on_finish;
+        self.ctx.verbose_tool_input = args.verbose_tool_input;
         self.ctx.replay_user_messages = args.replay_user_messages;
         self.ctx.include_partial_messages = args.include_partial_messages;
         self.ctx.effort.clone_from(&args.effort);
@@ -3069,13 +3086,19 @@ impl StartupOrchestrator {
         // inside was. A path that already existed when the run began is an
         // input the request mentions, not something this run has to produce.
         let mut required = self.ctx.require_artifacts.clone();
-        for path in crate::artifacts::required_from_instruction(&user_prompt) {
-            if !required.contains(&path) {
-                required.push(path);
+        if self.ctx.infer_artifacts {
+            for path in
+                crate::artifacts::required_from_instruction(&user_prompt, std::path::Path::new(cwd))
+            {
+                if !required.contains(&path) {
+                    required.push(path);
+                }
             }
         }
         required.retain(|path| std::fs::metadata(path).is_err());
         repl.with_required_artifacts(required);
+        repl.with_verify_on_finish(self.ctx.verify_on_finish);
+        repl.with_verbose_tool_input(self.ctx.verbose_tool_input);
 
         // The engine owns the one-retry fallback for both interactive and
         // headless sessions, so the headless path must not retry again: doing
@@ -3103,6 +3126,17 @@ impl StartupOrchestrator {
          them as requirements: follow them literally and do not substitute a different design. \
          Before finishing, run the exact verification commands from the request and confirm they \
          succeed; if they fail, fix the setup instead of explaining why a different design is better. \
+         Code changes: the request's example is a symptom, not the specification. Before editing, \
+         find the test file that covers the behavior and read the assertions it makes; run that \
+         test command once to get a baseline. After editing, run it unfiltered. If a test that \
+         passed before your edit now fails, revert and treat the failure as evidence the approach \
+         is wrong — never edit the test to fit the code. If your change alters how a function is \
+         called (arity or argument type), find every caller and test before choosing it, and \
+         prefer fixing the value over changing the convention. When a reference implementation of \
+         the same behavior exists, run it on the input where the competing explanations predict \
+         different output, and use its result as the expected value. Exercise every value of the \
+         flag you changed, not just the one in the example. If the local history does not contain \
+         the fix after one look, stop searching; design a discriminating experiment instead. \
          When the request names a hidden or private test, hold out part of the original inputs and \
          test them in the format that test will read; do not apply a lossy normalization \
          (lower-casing, truncation, re-encoding) that the check does not. \
@@ -3140,8 +3174,8 @@ impl StartupOrchestrator {
          certain and name the gaps instead of inventing entries. \
          The time budget is limited: if one route keeps failing and the deliverable still does not \
          exist, switch to the most promising untried route; when the request's own acceptance \
-         checks pass, stop and report the result instead of adding documentation, extra tests, or \
-         unrelated polish.";
+         checks and the repository's tests pass, stop and report the result instead of adding \
+         documentation, extra tests, or unrelated polish.";
 
     /// Assemble the non-interactive prompt.
     ///
@@ -5018,6 +5052,9 @@ mod tests {
             max_turns: None,
             time_budget: None,
             require_artifact: Vec::new(),
+            no_required_artifacts: false,
+            verify_on_finish: false,
+            verbose_tool_input: false,
             api_key: None,
             no_telemetry: false,
             mcp_config: None,

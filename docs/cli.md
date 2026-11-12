@@ -79,6 +79,9 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--max-budget-usd USD` | | Maximum budget for this session |
 | `--time-budget SECS` | | Wall-clock budget for the run (`CODAPE_TIME_BUDGET`). In headless mode the model is told how much of it remains at 25, 50, 75 and 90 percent, with what to do with the remaining time. The clock never ends a turn; it only informs it |
 | `--require-artifact PATH` | | A path the request requires as output (`CODAPE_REQUIRE_ARTIFACTS`, colon-separated). When a headless turn ends without it — absent, empty, or an empty directory — the model is sent back for it, up to three times. Paths the instruction itself names with an output verb are added automatically, and paths that existed before the run are treated as inputs |
+| `--no-required-artifacts` | | Do not read the request text for required output paths; explicit `--require-artifact` paths still apply. Use when the deliverable is the working tree, or when the request quotes build logs whose paths an output verb near them would otherwise turn into deliverables |
+| `--verify-on-finish` | | After a headless task's turn, run a review turn that reads the working-tree diff and answers which test covers the behavior, whether it is green, whether a call convention changed, and whether a test was edited to fit the code. A failed review gets one repair turn, then a second review; the verdict is appended to the reported result |
+| `--verbose-tool-input` | | Send each tool call's own input in `stream-json` `tool_use` frames instead of only the activity summary. Meant for audits and benchmark transcripts, where the command a run chose has to be readable from the stream |
 | `--api-key KEY` | | API key (overrides environment and config) |
 | `--no-telemetry` | | Disable telemetry for this session |
 | `--mcp-config PATH` | | MCP config file path |

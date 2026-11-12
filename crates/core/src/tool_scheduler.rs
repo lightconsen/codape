@@ -105,6 +105,10 @@ pub async fn run_tool_calls<S: std::hash::BuildHasher + Sync>(
                 .get(&call.id)
                 .cloned()
                 .unwrap_or_else(|| ToolCall::summarize_activity(&call.name, &call.input)),
+            // The summary hides the request; the input is kept so a host that
+            // asks for it (`--verbose-tool-input`) can see the command or
+            // path the model actually chose.
+            input: Some(call.input.clone()),
         });
 
         // 3. PreToolUse hook

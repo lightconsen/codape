@@ -2069,6 +2069,8 @@ pub struct QueryEngine {
     current_turn: Arc<std::sync::atomic::AtomicU32>,
     /// Denied tool calls from previous turns, injected into next prompt.
     denied_tools: Vec<DeniedToolCall>,
+    /// Watches test results so a regression is surfaced to the model.
+    test_guard: crate::test_guard::TestGuard,
     /// Schema validator for structured output.
     structured_output: Option<StructuredOutputValidator>,
     /// Prompt compiler for system prompt assembly.
@@ -2493,6 +2495,7 @@ impl QueryEngine {
             event_tx,
             current_turn: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             denied_tools: Vec::new(),
+            test_guard: crate::test_guard::TestGuard::new(),
             structured_output: None,
             prompt_compiler: PromptCompiler::new(config),
             compact_config: config,
@@ -4831,6 +4834,14 @@ impl QueryEngine {
             self.denied_tools.clear();
         }
 
+        // Surface a test regression once, in the turn that follows it. The
+        // reminder is deliberately advisory: the model may still have a good
+        // reason for the failure, but it cannot miss that a test it ran green
+        // went red after an edit.
+        for reminder in self.test_guard.take_pending() {
+            turn.messages.push(Message::system(reminder));
+        }
+
         // Append custom system prompt if provided
         if let Some(ref prompt) = options.custom_system_prompt {
             turn.messages.push(Message::system(prompt.clone()));
@@ -7052,6 +7063,7 @@ impl QueryEngine {
             id: call.id.clone(),
             name: call.name.clone(),
             summary,
+            input: Some(call.input.clone()),
         });
 
         // 3. Permission check
@@ -7284,6 +7296,10 @@ impl QueryEngine {
                 *slot = result;
             }
         }
+        // Read the batch before the call list is cleared: a test command's
+        // failure count is what lets the next turn say a previously green
+        // test went red.
+        self.test_guard.observe(&turn.pending_tool_calls, &results);
         turn.pending_tool_calls.clear();
         self.tools.clear_permission_subjects();
         Ok(results)

@@ -134,6 +134,33 @@ pub struct Cli {
     )]
     pub require_artifact: Vec<std::path::PathBuf>,
 
+    /// Do not read the request text for required output paths. Explicit
+    /// `--require-artifact` paths still apply. Use when the deliverable is the
+    /// working tree (a code change) or when the request quotes build logs,
+    /// whose paths an output-word near them would otherwise turn into
+    /// deliverables the model must fabricate.
+    #[arg(long)]
+    pub no_required_artifacts: bool,
+
+    /// Run a self-verification pass before a headless run reports.
+    ///
+    /// After the task's turn ends, a review turn reads the working-tree diff
+    /// and answers: which test covers the behavior, is it green, and did the
+    /// change alter how an existing function is called? A failed review gets
+    /// one repair turn in the same session before the result is reported.
+    /// Costs extra turns, so it is off unless asked for.
+    #[arg(long)]
+    pub verify_on_finish: bool,
+
+    /// Send each tool call's own input in stream-json frames.
+    ///
+    /// By default a `tool_use` frame carries a short activity summary, so a
+    /// transcript assembled from the stream says that a command ran but not
+    /// which one. With this flag the frame carries the model's arguments
+    /// verbatim. Meant for audits and benchmark runs; the frames get larger.
+    #[arg(long)]
+    pub verbose_tool_input: bool,
+
     /// API key (overrides environment and config).
     #[arg(long, value_name = "KEY")]
     pub api_key: Option<String>,

@@ -53,6 +53,7 @@ pub mod syntax;
 pub mod task;
 pub mod team;
 pub mod team_context;
+pub mod test_guard;
 pub mod tool_executor;
 pub mod tool_scheduler;
 pub mod types;

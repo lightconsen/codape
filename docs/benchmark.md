@@ -233,6 +233,61 @@ Run-ids: `xarray-claude-r1`, `xarray-codape-r1`, `seaborn-claude-r1`,
 `nginx-claude-r1`, `nginx-codape-r3`, `raman-claude-r2`, `raman-codape-r2`,
 `caps-log-claude-r1`, `zip-claude-r1`.
 
+## Scaffold fixes from the control
+
+The two scaffold-shaped pairs share one shape: a run saw the evidence the
+scaffold was supposed to supply and read it the wrong way. `fastlane` changed
+`Actions.sh(zip_command)` to `Actions.sh(*zip_command)`, watched six existing
+specs fail on the arity change, and rewrote the specs to match instead of
+reconsidering the change. `fmt` built its locale oracle on the default
+`std::numpunct`, where grouped and ungrouped hex output are identical, so the
+experiment could not distinguish the two explanations. Both fixes below are
+scaffold changes — the model is untouched — and neither has been measured yet;
+the next run of those two instances is the measurement.
+
+**Code changes in the headless note.** `HEADLESS_OPERATING_NOTE` now carries a
+"Code changes" block for runs that edit a working tree: find and read the test
+that covers the behavior before editing, run it once for a baseline, run it
+unfiltered afterwards, revert when a previously green test goes red rather than
+editing the test, check every caller before changing a call convention, use a
+reference implementation on an input where the competing explanations diverge,
+and stop searching local history after one look. The fast lane observations are
+the source: the accepted runs spent their pre-edit calls on the test and the
+oracle, the failing ones on `git log`.
+
+**Artifact inference is scoped, and off for code-change runs.** The inference
+that reads output paths out of the request now only accepts absolute paths under
+the working directory or an output root (`/app`, `/output`, `/outputs`,
+`/results`, `/testbed`, `/workspace`, `/work`), rejects paths containing
+placeholder, backtrace or log punctuation, and requires the output verb to be
+close to the path. `--no-required-artifacts` turns the inference off while
+keeping explicit `--require-artifact` paths; the SWE-bench runner passes it,
+because the deliverable there is the diff. On `fastlane__fastlane-19207` the
+inference read seven macOS paths out of a pasted build log, sent the run back
+twice and produced six files under `/Users`, `/Library` and `/Build`.
+
+**A red-test guard.** `crates/core/src/test_guard.rs` records the failure count
+of every recognized test command (gtest, cargo, rspec, pytest, ctest, jest,
+mocha, go) and, when a command that was green earlier comes back red — or when
+the first run of a test command after a source edit is red — queues one system
+reminder for the next turn: revert or change the approach, do not edit the
+test. It is advisory and one-shot per command; a false reminder costs a turn,
+so parsing requires a runner's own summary line.
+
+**`--verify-on-finish`.** An opt-in review turn after a headless task reads the
+working-tree diff and answers the four questions the `fastlane` run skipped:
+which test covers the behavior, is it green, did the call convention change,
+and was a test edited to fit the code. A failed review gets one repair turn in
+the same session and a second review, and the verdict is appended to the
+result. It costs turns, so it is off by default; enable it for runs where a
+wrong-but-green patch is the failure mode worth paying to catch.
+
+**Tool input in the stream.** `--verbose-tool-input` makes `stream-json`
+`tool_use` frames carry the model's own arguments instead of only the activity
+summary. The SWE-bench runner passes it, so the saved transcript can attribute
+a step: the earlier streams said a command ran but not which one, which is why
+the `fmt` and `fastlane` analyses had to reason from the patches alone.
+
 ## Pins
 
 A score means nothing without the version it was produced at. These are the pins

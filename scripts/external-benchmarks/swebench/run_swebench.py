@@ -748,6 +748,16 @@ def agent_command(
             "--no-telemetry",
             "--output-format",
             "stream-json",
+            # The deliverable is the working-tree diff. Reading the issue text
+            # for output paths would turn paths quoted from a reporter's build
+            # log into deliverables: on fastlane__fastlane-19207 the inferred
+            # set sent the run back twice and made it fabricate six files
+            # under /Users and /Library.
+            "--no-required-artifacts",
+            # The stream is the evidence for every post-run analysis. With
+            # summaries only, a transcript says a command ran but not which
+            # one, so a failure cannot be attributed to a step.
+            "--verbose-tool-input",
             "--max-turns",
             str(max_turns),
         ]

@@ -1093,7 +1093,11 @@ fn permission_request_args(arguments: &str) -> serde_json::Value {
 /// the host cannot answer, an elevation request — rather than something a
 /// consumer outside the process acts on. The protocol is what a host reads to
 /// follow the conversation, not a mirror of everything the UI does.
-fn protocol_frame(event: &EngineEvent, session_id: &str) -> Option<codape_events::ProtocolMessage> {
+fn protocol_frame(
+    event: &EngineEvent,
+    session_id: &str,
+    verbose_tool_input: bool,
+) -> Option<codape_events::ProtocolMessage> {
     use codape_events::{
         AssistantFrame, MessageBody, ProtocolMessage, SystemFrame, UserFrame, protocol,
     };
@@ -1108,12 +1112,29 @@ fn protocol_frame(event: &EngineEvent, session_id: &str) -> Option<codape_events
             parent_tool_use_id: None,
             session_id: session_id.to_string(),
         }),
-        EngineEvent::ToolCallStart { id, name, summary } => {
+        EngineEvent::ToolCallStart {
+            id,
+            name,
+            summary,
+            input,
+        } => {
+            // The summary is a rendering, not the call: `Bash` becomes
+            // "Running a command", and a transcript built from that cannot
+            // say which command ran. Off by default because the input can be
+            // large; `--verbose-tool-input` sends the model's own arguments
+            // so the stream can be audited at call level.
+            let block_input = if verbose_tool_input {
+                input
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({ "summary": summary }))
+            } else {
+                serde_json::json!({ "summary": summary })
+            };
             ProtocolMessage::Assistant(AssistantFrame {
                 message: MessageBody::assistant(vec![protocol::tool_use_block(
                     id,
                     name,
-                    serde_json::json!({ "summary": summary }),
+                    block_input,
                 )]),
                 parent_tool_use_id: None,
                 session_id: session_id.to_string(),
@@ -2338,6 +2359,12 @@ pub struct ReplLoop {
     /// Paths the request requires as output (--require-artifact). A headless
     /// turn that ends without them is continued.
     require_artifacts: Vec<std::path::PathBuf>,
+    /// Whether a headless run reviews its own working-tree diff before it
+    /// reports (--verify-on-finish).
+    verify_on_finish: bool,
+    /// Whether stream-json tool-call frames carry the call's own input
+    /// (--verbose-tool-input).
+    verbose_tool_input: bool,
     /// Replay user messages from previous session (--replay-user-messages).
     replay_user_messages: bool,
     /// Include partial messages in context (--include-partial-messages).
@@ -2672,6 +2699,8 @@ impl ReplLoop {
             max_turns: None,
             time_budget: None,
             require_artifacts: Vec::new(),
+            verify_on_finish: false,
+            verbose_tool_input: false,
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
@@ -3080,6 +3109,8 @@ impl ReplLoop {
             max_turns: None,
             time_budget: None,
             require_artifacts: Vec::new(),
+            verify_on_finish: false,
+            verbose_tool_input: false,
             replay_user_messages: false,
             include_partial_messages: false,
             betas: Vec::new(),
@@ -3481,6 +3512,18 @@ impl ReplLoop {
     /// Set the paths a headless run must produce (`--require-artifact`).
     pub fn with_required_artifacts(&mut self, paths: Vec<std::path::PathBuf>) {
         self.require_artifacts = paths;
+    }
+
+    /// Ask for a self-review pass before a headless run reports
+    /// (`--verify-on-finish`).
+    pub const fn with_verify_on_finish(&mut self, verify: bool) {
+        self.verify_on_finish = verify;
+    }
+
+    /// Send each tool call's own input in stream-json frames
+    /// (`--verbose-tool-input`).
+    pub const fn with_verbose_tool_input(&mut self, verbose: bool) {
+        self.verbose_tool_input = verbose;
     }
 
     /// A turn-end reminder for the artifacts the run owes and has not written.
@@ -5315,7 +5358,12 @@ impl ReplLoop {
                             // while still letting this event drive the label.
                             self.tool_use_summaries.insert(id, summary);
                         }
-                        EngineEvent::ToolCallStart { id, name, summary } => {
+                        EngineEvent::ToolCallStart {
+                            id,
+                            name,
+                            summary,
+                            ..
+                        } => {
                             let summary = self.tool_use_summaries.remove(&id).unwrap_or(summary);
                             self.tool_names.insert(id.clone(), name.clone());
                             phase.note_tool_start(&summary);
@@ -6711,6 +6759,25 @@ impl ReplLoop {
             result = failure.map_or(Ok(output), Err);
         }
 
+        // `--verify-on-finish`: after the task's own turn, read the working
+        // tree back against the task and repair once if the review finds a
+        // problem. A run that already failed stays failed: there is nothing
+        // to review, and its error is the result.
+        if self.verify_on_finish && result.is_ok() {
+            let answer = result.unwrap_or_default();
+            match self.run_verification_pass(prompt).await {
+                Ok(report) => result = Ok(join_verification_report(&answer, &report)),
+                // The review is advisory. Losing the delivered answer because
+                // the review turn hit an API error would be worse than
+                // reporting the answer without a review.
+                Err(error) => {
+                    tracing::warn!(%error, "verification pass did not finish");
+                    eprintln!("verification pass did not finish: {error}");
+                    result = Ok(answer);
+                }
+            }
+        }
+
         // Headless runs used to leave no transcript behind, so `--print`
         // sessions could not be resumed or found by `/resume`. Persist what
         // the turn produced; slash-command-only runs are covered too.
@@ -6720,6 +6787,115 @@ impl ReplLoop {
         }
         self.stop_artifact_serving().await;
         result
+    }
+
+    /// Run the `--verify-on-finish` review, repairing once if it fails.
+    ///
+    /// The review is an ordinary turn in the same session, so it has the
+    /// conversation and the tools: it can run the covering test instead of
+    /// reasoning about it. It asks the questions a run that changed a public
+    /// call convention and then rewrote the failing specs never asked: which
+    /// test covers the behavior, is it green, did the call convention change,
+    /// and were tests edited to agree with the code.
+    async fn run_verification_pass(&mut self, task: &str) -> Result<String> {
+        use std::fmt::Write as _;
+
+        const REPAIR_REPORT_LIMIT: usize = 8 * 1024;
+
+        let prompt = verification_prompt(task, &self.working_tree_diff());
+        let report = self.run_headless_turn(&prompt).await?;
+        if !verification_failed(&report) {
+            return Ok(report);
+        }
+        // One repair turn, then a second review. A run that needed the repair
+        // should not report the verdict it just fixed, and a run that ignored
+        // the report keeps the second verdict in its text.
+        let repair = format!(
+            "The verification pass found a problem with the working tree:\n\n{}\n\n\
+             Fix the cause in the code, not in the test: restore any test the diff changed \
+             to fit the code, keep the existing call convention unless every caller agrees \
+             on the new one, and run the covering test again. State what you changed.",
+            truncate_on_char_boundary(report.trim(), REPAIR_REPORT_LIMIT),
+        );
+        let mut text = report;
+        match self.run_headless_turn(&repair).await {
+            Ok(note) => {
+                text.push_str("\n\nRepair turn:\n");
+                text.push_str(note.trim());
+            }
+            Err(error) => {
+                let _ = write!(text, "\n\n(repair turn did not finish: {error})");
+                return Ok(text);
+            }
+        }
+        let prompt = verification_prompt(task, &self.working_tree_diff());
+        match self.run_headless_turn(&prompt).await {
+            Ok(second) => {
+                text.push_str("\n\nSecond review:\n");
+                text.push_str(second.trim());
+            }
+            Err(error) => {
+                let _ = write!(text, "\n\n(second review did not finish: {error})");
+            }
+        }
+        Ok(text)
+    }
+
+    /// A bounded view of the working tree for the review.
+    ///
+    /// Untracked paths are listed rather than diffed, because `git diff` does
+    /// not show them and a new file is exactly the change a review must see.
+    fn working_tree_diff(&self) -> String {
+        const LIMIT: usize = 48 * 1024;
+        // `-c safe.directory=*`: inside a benchmark or dev container the
+        // checkout usually belongs to another uid, and git then refuses to
+        // read it — the review would get an empty tree to inspect.
+        let runs: [(&str, &[&str]); 3] = [
+            (
+                "git status --porcelain",
+                &["-c", "safe.directory=*", "status", "--porcelain"],
+            ),
+            (
+                "git diff --stat",
+                &["-c", "safe.directory=*", "diff", "--stat"],
+            ),
+            ("git diff", &["-c", "safe.directory=*", "diff"]),
+        ];
+        let mut out = String::new();
+        for (label, args) in runs {
+            let output = match std::process::Command::new("git")
+                .args(args)
+                .current_dir(&self.cwd)
+                .output()
+            {
+                Ok(output) => output,
+                Err(error) => return format!("(git could not be run: {error})"),
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&output.stdout);
+            let text = text.trim_end();
+            if text.is_empty() {
+                continue;
+            }
+            out.push_str("### ");
+            out.push_str(label);
+            out.push('\n');
+            out.push_str(text);
+            out.push_str("\n\n");
+        }
+        if out.is_empty() {
+            return "(no diff was available: the working tree has no changes, or this is \
+                    not a git repository)"
+                .to_string();
+        }
+        if out.len() > LIMIT {
+            let end = truncate_on_char_boundary(&out, LIMIT).len();
+            out.truncate(end);
+            out.push_str("\n(diff truncated)\n");
+        }
+        out
     }
 
     /// Write the transcript and index entry for a headless session.
@@ -6885,7 +7061,7 @@ impl ReplLoop {
         for event in events {
             self.record_engine_event_telemetry(&event);
             if let Some(sink) = protocol.as_mut()
-                && let Some(frame) = protocol_frame(&event, session_id)
+                && let Some(frame) = protocol_frame(&event, session_id, self.verbose_tool_input)
                 && let Err(error) = sink.emit(&frame)
             {
                 tracing::warn!("could not write a protocol frame: {error}");
@@ -6951,6 +7127,63 @@ fn append_mod_ui_block(output: &mut String, elements: &[codape_core::ui_protocol
     }
     output.push_str(&rendered);
     output.push('\n');
+}
+
+/// The review turn's instruction for `--verify-on-finish`.
+///
+/// The questions are the ones whose answers separated the two harnesses on
+/// the same failing tasks: a run that could name the covering test and see it
+/// green, and that would not change a call convention, reached the accepted
+/// fix; a run that omitted them rewrote the specs instead.
+fn verification_prompt(task: &str, diff: &str) -> String {
+    format!(
+        "Verification pass. The task below was just worked on in this session, and the \
+         working tree holds the result. Review it before it is reported. Use the tools: read \
+         the diff, locate the test that covers the changed behavior, and run it unfiltered.\n\n\
+         Answer each question on its own line, starting with its number:\n\
+         1. Which test file and test name cover the behavior the task asked to change? If none \
+         does, say so.\n\
+         2. Is that test green in the working tree, run the way the repository runs it? Quote \
+         the summary line.\n\
+         3. Did the change alter how an existing function or method is called — its arity, \
+         argument types, or what an argument means? If it did, do all callers and tests still \
+         use the original convention?\n\
+         4. Does the diff modify or delete a test to make it match the new code? If so, that \
+         is a failure: restore the test's own assertions.\n\n\
+         If any answer shows a problem, fix the code now — not the test — and say what you \
+         changed. Do not add documentation or unrelated polish. End with exactly one line: \
+         `VERIFICATION: PASS` or `VERIFICATION: FAIL: <reason>`.\n\n\
+         Task:\n{task}\n\nWorking tree:\n{diff}"
+    )
+}
+
+/// Whether a review reported a problem.
+fn verification_failed(report: &str) -> bool {
+    report.contains("VERIFICATION: FAIL")
+}
+
+/// Attach the review to the answer the run reports.
+fn join_verification_report(answer: &str, report: &str) -> String {
+    let mut out = answer.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str("Verification:\n");
+    out.push_str(report.trim());
+    out
+}
+
+/// The longest prefix of `text` that fits in `limit` bytes without splitting
+/// a character.
+fn truncate_on_char_boundary(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Most consecutive auto-submitted turns one person-initiated turn may spawn.
@@ -8275,7 +8508,7 @@ impl ReplLoop {
                 }
             }, if live_events.is_some() => {
                 if let Some(sink) = protocol.as_mut()
-                    && let Some(frame) = protocol_frame(&event, &session_id)
+                    && let Some(frame) = protocol_frame(&event, &session_id, self.verbose_tool_input)
                         && let Err(error) = sink.emit(&frame) {
                             tracing::warn!("could not write a protocol frame: {error}");
                         }
@@ -10663,6 +10896,53 @@ mod tests {
     };
     use codape_core::types::{ToolResult, UsageSummary};
 
+    // ── Verification pass ───────────────────────────────────────────────────
+
+    #[test]
+    fn verification_verdict_is_read_from_the_last_clause() {
+        assert!(verification_failed(
+            "1. src/lib.rs::format_int\nVERIFICATION: FAIL: the spec was rewritten"
+        ));
+        assert!(!verification_failed(
+            "1. src/lib.rs::format_int\n2. 3 tests, 0 failures\nVERIFICATION: PASS"
+        ));
+    }
+
+    #[test]
+    fn the_review_is_appended_below_the_answer() {
+        let joined = join_verification_report("done.\n", "  VERIFICATION: PASS\n\n");
+        assert_eq!(joined, "done.\n\nVerification:\nVERIFICATION: PASS");
+        assert_eq!(
+            join_verification_report("", "VERIFICATION: PASS"),
+            "Verification:\nVERIFICATION: PASS"
+        );
+    }
+
+    #[test]
+    fn truncation_never_splits_a_character() {
+        let text = "αβγδε";
+        assert_eq!(truncate_on_char_boundary(text, 100), text);
+        // 3 bytes is inside the second two-byte character.
+        assert_eq!(truncate_on_char_boundary(text, 3), "α");
+        assert_eq!(truncate_on_char_boundary(text, 0), "");
+    }
+
+    #[test]
+    fn the_review_prompt_asks_the_four_questions_and_carries_the_diff() {
+        let prompt = verification_prompt("fix the call", "diff --git a/x b/x");
+        for question in [
+            "1. Which test",
+            "2. Is that test",
+            "3. Did the change",
+            "4. Does the diff",
+        ] {
+            assert!(prompt.contains(question), "missing {question}");
+        }
+        assert!(prompt.contains("VERIFICATION: PASS"));
+        assert!(prompt.contains("fix the call"));
+        assert!(prompt.contains("diff --git a/x b/x"));
+    }
+
     // ── Mod UI focus ────────────────────────────────────────────────────────
 
     #[test]
@@ -11023,6 +11303,7 @@ mod tests {
             id: "call-1".into(),
             name: "Read".into(),
             summary: "read a file".into(),
+            input: None,
         });
         repl.record_engine_event_telemetry(&EngineEvent::ToolCallEnd {
             id: "call-1".into(),
@@ -12203,7 +12484,7 @@ mod tests {
     fn engine_events_map_to_the_protocol_frames_a_host_reads() {
         use codape_events::ProtocolMessage;
 
-        let delta = protocol_frame(&EngineEvent::TextDelta("hello".into()), "s1");
+        let delta = protocol_frame(&EngineEvent::TextDelta("hello".into()), "s1", false);
         let Some(ProtocolMessage::StreamEvent(frame)) = delta else {
             panic!("a text delta should be a stream_event frame");
         };
@@ -12215,8 +12496,10 @@ mod tests {
                 id: "call_1".into(),
                 name: "Read".into(),
                 summary: "Reading src/lib.rs".into(),
+                input: None,
             },
             "s1",
+            false,
         );
         let Some(ProtocolMessage::Assistant(frame)) = start else {
             panic!("a tool call start should be an assistant frame");
@@ -12235,13 +12518,14 @@ mod tests {
                 },
             },
             "s1",
+            false,
         );
         let Some(ProtocolMessage::User(frame)) = end else {
             panic!("a tool result is a user-side message in the protocol");
         };
         assert_eq!(frame.message.content[0]["type"], "tool_result");
 
-        let boundary = protocol_frame(&EngineEvent::CompactBoundary, "s1");
+        let boundary = protocol_frame(&EngineEvent::CompactBoundary, "s1", false);
         let Some(ProtocolMessage::System(frame)) = boundary else {
             panic!("a compact boundary should be a system frame");
         };
@@ -12253,6 +12537,7 @@ mod tests {
                 id: "retry".into(),
             }]),
             "s1",
+            false,
         );
         let Some(ProtocolMessage::System(frame)) = mod_ui else {
             panic!("mod UI should be a system frame");
@@ -12402,7 +12687,7 @@ mod tests {
         // A normal protocol frame is not an answer.
         assert_eq!(
             control_response_from_line(
-                &protocol_frame(&EngineEvent::TextDelta("hi".into()), "s1")
+                &protocol_frame(&EngineEvent::TextDelta("hi".into()), "s1", false)
                     .unwrap()
                     .to_line(),
                 false,
@@ -12427,11 +12712,64 @@ mod tests {
         assert!(!repl.headless_permission_control());
     }
 
+    /// `--verbose-tool-input` puts the model's own arguments in the frame;
+    /// without it the frame keeps the activity summary.
+    #[test]
+    fn verbose_tool_input_replaces_the_summary_with_the_call() {
+        use codape_events::ProtocolMessage;
+
+        let event = EngineEvent::ToolCallStart {
+            id: "call_1".into(),
+            name: "Bash".into(),
+            summary: "Running a command".into(),
+            input: Some(serde_json::json!({ "command": "cargo test" })),
+        };
+        let quiet = protocol_frame(&event, "s1", false).expect("a start is a frame");
+        let ProtocolMessage::Assistant(frame) = quiet else {
+            panic!("a tool call start should be an assistant frame");
+        };
+        assert_eq!(
+            frame.message.content[0]["input"]["summary"],
+            "Running a command"
+        );
+        assert!(frame.message.content[0]["input"].get("command").is_none());
+
+        let loud = protocol_frame(&event, "s1", true).expect("a start is a frame");
+        let ProtocolMessage::Assistant(frame) = loud else {
+            panic!("a tool call start should be an assistant frame");
+        };
+        assert_eq!(frame.message.content[0]["input"]["command"], "cargo test");
+        assert!(frame.message.content[0]["input"].get("summary").is_none());
+    }
+
+    /// A start whose producer had no input (a comment or a replayed event)
+    /// still renders: the summary is the fallback under both settings.
+    #[test]
+    fn a_start_without_input_falls_back_to_its_summary() {
+        use codape_events::ProtocolMessage;
+
+        let event = EngineEvent::ToolCallStart {
+            id: "call_1".into(),
+            name: "Read".into(),
+            summary: "Reading src/lib.rs".into(),
+            input: None,
+        };
+        let ProtocolMessage::Assistant(frame) =
+            protocol_frame(&event, "s1", true).expect("a start is a frame")
+        else {
+            panic!("a tool call start should be an assistant frame");
+        };
+        assert_eq!(
+            frame.message.content[0]["input"]["summary"],
+            "Reading src/lib.rs"
+        );
+    }
+
     /// A dialog this process asks a person is not something a host can act on,
     /// so it is not in the stream.
     #[test]
     fn process_local_events_are_not_protocol_frames() {
-        assert!(protocol_frame(&EngineEvent::SessionEnd, "s1").is_none());
+        assert!(protocol_frame(&EngineEvent::SessionEnd, "s1", false).is_none());
         assert!(
             protocol_frame(
                 &EngineEvent::PermissionRequest {
@@ -12440,6 +12778,7 @@ mod tests {
                     args: serde_json::json!({}),
                 },
                 "s1",
+                false,
             )
             .is_none()
         );

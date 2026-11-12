@@ -204,7 +204,9 @@ impl UiState {
     pub fn apply_engine_event(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::TextDelta(text) => self.push_text_delta(&text),
-            EngineEvent::ToolCallStart { id, name, summary } => {
+            EngineEvent::ToolCallStart {
+                id, name, summary, ..
+            } => {
                 self.active_tool_calls
                     .push(ActiveToolCall { id, name, summary });
             }
@@ -648,6 +650,7 @@ mod tests {
             id: "tc1".into(),
             name: "read".into(),
             summary: "Reading src/lib.rs...".into(),
+            input: None,
         });
         assert_eq!(state.active_tool_calls.len(), 1);
         assert_eq!(state.active_tool_calls[0].summary, "Reading src/lib.rs...");
@@ -702,6 +705,7 @@ mod tests {
             id: "tc1".into(),
             name: "read".into(),
             summary: "Reading src/lib.rs...".into(),
+            input: None,
         });
         state.apply_engine_event(EngineEvent::SessionEnd);
         assert!(state.session_ended);
