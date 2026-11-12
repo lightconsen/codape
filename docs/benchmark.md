@@ -50,6 +50,106 @@ scripts/external-benchmarks/programbench/run.sh --dry-run
 
 `--dry-run` needs no Docker, no key, and no downloads. Start there.
 
+## Failure ledger
+
+Every task with a recorded failure, across the three external benchmarks, in
+one place. The class says what the failure was, because "failed" covers four
+very different things:
+
+- **model** — the agent had what it needed and shipped the wrong or incomplete
+  artifact.
+- **fixture** — the task text contradicts or omits what the test checks, or the
+  test itself is stale; following the instruction cannot pass.
+- **environment** — the container, pinned image, or network cannot grade a
+  correct answer.
+- **budget/plumbing** — time, disk, or the harness ended the run before the
+  work could be measured.
+
+"Resolved later" means a rerun passed, so best-of-runs counts the task; it does
+not mean the first failure did not happen. Terminal-Bench rows marked *after
+patch* were graded against the repaired fixture in `0.1.1-analysis`, not the
+pristine task — see
+[Local fixture patches](terminal-bench.md#local-fixture-patches).
+
+### Terminal-Bench
+
+75 distinct tasks attempted; 73 resolved. Two have never resolved:
+
+| Task | Class | Why it fails |
+|---|---|---|
+| `extract-moves-from-video` | environment + budget | YouTube answers a bot check and the Tor route past it is intermittent. The best run downloaded and OCR'd the video but reached 52.22 % similarity against 90 %. Ten runs, none resolved. |
+| `play-zork` | budget + model | The full 3 600 s went into probes, save states and a room map; 179/350 at the timer. `/app/answer.txt` was filled from the game's source text rather than from a completed run. |
+
+The remaining recorded failures, by batch:
+
+| Task | Status | Class | Why it failed |
+|---|---|---|---|
+| `pytorch-model-cli.easy` | 0/3 repeats (two test timeouts, one 5/6) | model | Replaced the documented `p/255` scaling with `[-1,1]`. The test's expected classes are the reference's raw-pixel predictions, including its mistakes. |
+| `swe-bench-fsspec` | 0/3, not scored | fixture | The official test patch hits an already-modified file, prompts for a reverse, and waits out the 900 s test budget in a PTY. |
+| `sqlite-with-gcov` | resolved later (3/3 at 1 800 s) | budget | Killed at 902 s of a 900 s agent budget before building. |
+| `extract-safely` | resolved later (3/3) | Codape defect | The piped prompt was truncated at its first line, so the model never saw the sentence naming `/app/solution.txt`. Fixed with `read_to_string`. |
+| `polyglot-c-py` | resolved after patch | fixture | The instruction says `main.c.py`; the test runs `main.py.c`. |
+| `nginx-request-logging` | resolved after patch; failed once more | fixture, then model | The test reads `log_format` and `limit_req_zone` from `nginx.conf` while the instruction puts everything in the site file. A later run named the format `benchmark` instead of `detailed`. |
+| `raman-fitting.easy` | resolved after patch; failed once more | fixture, then model | The instruction says `amplitude`, the test reads `["A"]`. A later run converged to `gamma=18.2` / `offset=1018` against `17.52` / `1239`. |
+| `vim-terminal-task` | resolved after patch | fixture | 4/5 passed; the test requires the executable bit, which the instruction never asks for. |
+| `decommissioning-service-with-sensitive-data` | resolved after patch | fixture | 5/6 passed; the test wants the archive to carry `opt/sensitive_service_data/...`, the instruction only says "the entire directory". |
+| `jupyter-notebook-server` | resolved after loop fix + patch | Codape defect + fixture | The loop detector fired on a legitimately long `pip install`; after that fix, 2/4 — the test imports `c.NotebookApp.*` from a config file the instruction never names. |
+| `cron-broken-network` | resolved after patch | fixture | The test compared the served page to example.com's 2017 body; the site has been redesigned. |
+| `tmux-advanced-workflow` | not scored | plumbing | The test died in its own `apt-get update` (`parse_error`). |
+
+The 26 fixture edits across 22 tasks are listed in
+[Local fixture patches](terminal-bench.md#local-fixture-patches); the
+best-of-runs table is in
+[Scoreboard so far](terminal-bench.md#scoreboard-so-far).
+
+### SWE-bench
+
+| Instance | Benchmark / run | Class | Why it failed |
+|---|---|---|---|
+| `xarray__xarray-6938` | Verified 24 (21/24) | model | Changed `Dataset.swap_dims()`; the graded test calls `IndexVariable.to_index_variable()` directly, so the intended change is in `xarray/core/variable.py`. |
+| `mwaskom__seaborn-3187` | Verified 24 | model | Partial fix: `Plot`'s legend passes, but `relplot()` goes through `seaborn/utils.py`, which was not touched. |
+| `psf__requests-1921` | Verified 24 | environment | The fix works and all six FAIL_TO_PASS pass; two PASS_TO_PASS hit `CERTIFICATE_VERIFY_FAILED` against `httpbin.org`. The dataset's own gold patch also scores 0/1, leaving 22/23 scoreable. |
+| `astropy__astropy-14369` | Verified batch 1 (2/3) | model | Accepted products after `/`; the negative test requires an unparenthesized denominator to raise. A corrected grammar patch resolved 1/1 without model calls. |
+| `psf__requests-1963` | Lite batch 1 (2/3) | environment | All FAIL_TO_PASS passed; two PASS_TO_PASS hit `CERTIFICATE_VERIFY_FAILED`. A comment-only baseline reproduced both. |
+| `caddyserver__caddy-6411` | Multilingual 12 (9/12) | model | Trimmed every trailing newline instead of one; `foo\n\n` became `foo` where the test expects `foo\n`. |
+| `fmtlib__fmt-3750` | Multilingual 12 | model | Gated localization to decimal, the opposite of the issue: grouping in hex, binary and octal under `L`. |
+| `fastlane__fastlane-19207` | Multilingual 12 | model | Splatted the argument array into `Actions.sh(*zip_command)` instead of escaping its elements, regressing six arity specs, and left a stray `zip-action-fix.patch`. |
+
+Run-ids and timings are in [SWE-bench run history](#swe-bench-run-history).
+
+### ProgramBench
+
+Only `cmatrix` reached the 100 that ProgramBench requires for ✅. Every other
+attempted instance:
+
+| Instance | Result | Class | Why it failed |
+|---|---|---|---|
+| `cmatsuoka__figlet` | 0/1 044, `compile_failed` | model | `figlet.c:1518` had `'else'` without a previous `'if'`: ~20 edits after the last successful build were never compiled. Two context-window aborts cost 3 456 s. |
+| `eliukblau__pixterm` | 60 (430 scored) | model | Compiles and passes 276/458 raw; 172 scored failures — 66 image decodes (`.bmp`, `.tiff`, `.webp`), ~87 rendering/dithering, ~20 CLI, 7 timeouts. The formats were advertised in `--help` but never implemented. |
+| `agourlay__zip-password-finder` | 92 (680 scored) | model | 53 failures: 32 `Password not found`, 9 timeouts, 7 error-message mismatches. The candidate enumeration carries into the most-significant digit and skips candidates such as `ab`; not a crypto bug. |
+| `nikoladucak__caps-log` r2 | 0, `compile_failed` | Codape defect | With the window left at the 32K unknown-model default, compaction looped 241 times. |
+| `caps-log` r3 | 71, not solved | model | With the real 128K window passed in it became a task; the remaining gap was config-validation and git-integration fidelity. |
+| `caps-log` r4 | 72, timed out | budget + Codape defect | Six Auto passes landed 24–60 K below target; the run hit the 7 200 s cap (exit 124) before placing the deliverables. |
+| `caps-log` r5 | **89**, not solved | model | Target-sized summary tail: two labelled `summarized` passes landed at 39 207/57 907 and 49 413/62 449, then `no_progress`, three `backed_off`, and a `Snip` recovery. 490/551 scored; exit 0 with ~43 minutes unused. |
+
+The Claude Code control is not a Codape failure but is the useful comparison:
+on `figlet` it scored 82 (872 scored) without solving, and on `pixterm` it
+scored 0 (`compile_failed`, no `compile.sh`). Run details are in
+[ProgramBench run history](#programbench-run-history).
+
+**What the ledger says.** Terminal-Bench's two permanent failures are a network
+lottery and a session longer than the budget; most of its other recorded
+failures were fixture defects, with `pytorch-model-cli.easy` the clearest
+model-adherence miss. SWE-bench's six unresolved instances are model misses;
+two `requests` instances are environment misses a correct patch cannot move.
+ProgramBench has no solved instance beyond `cmatrix`: the four `caps-log` scores
+trace the compaction work (0 → 71 → 72 → 89), and even r5's 89 is a fidelity
+gap, not a harness verdict.
+
+Raw per-run JSON and transcripts are not committed, and benchmark containers
+and images are removed after a run; the run-ids in the two histories are the
+handle for reproducing one.
+
 ## Pins
 
 A score means nothing without the version it was produced at. These are the pins

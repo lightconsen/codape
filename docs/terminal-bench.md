@@ -2529,6 +2529,10 @@ provider errors and harness plumbing. The three tasks above are what remains of
 those classes. The fixture defects the campaign did repair — 26 files across 22
 tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
+A cross-benchmark table of every recorded failure — Terminal-Bench, SWE-bench,
+and ProgramBench, with each failure classified — is in
+[benchmark.md](benchmark.md#failure-ledger).
+
 ## Codape defects the benchmark exposed
 
 All nineteen were real, and all are fixed:
