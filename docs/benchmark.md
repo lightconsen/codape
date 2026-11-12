@@ -212,8 +212,12 @@ both: `nginx` and `raman` on their repaired fixtures, and `seaborn` on its
 pristine one, which makes the ledger's `seaborn` row variance rather than a
 model miss. Two are scaffold-shaped: `fmt` and `fastlane`, the Multilingual
 instances where Codape repeated the exact mistake it had made in its history
-while Claude Code found the fix — Codape's exploration, not the model, is what
-stands between it and a patch there. Two run the other way: Codape solved
+while Claude Code found the fix — Codape's exploration, not the model, stood
+between it and a patch there. The re-run with the scaffold fixes confirms that
+for `fastlane`, which now resolves, and not for `fmt`, which still writes the
+wrong expectation into its own test; see
+[Scaffold fixes from the control](#scaffold-fixes-from-the-control). Two run
+the other way: Codape solved
 `astropy` where Claude Code did not, and Codape's `caps-log` r5 (89) beats this
 Claude Code run (62) on the same protocol, though that comparison also carries
 the run-to-run spread r2–r5 already showed. On `zip-password-finder` the
@@ -242,8 +246,8 @@ specs fail on the arity change, and rewrote the specs to match instead of
 reconsidering the change. `fmt` built its locale oracle on the default
 `std::numpunct`, where grouped and ungrouped hex output are identical, so the
 experiment could not distinguish the two explanations. Both fixes below are
-scaffold changes — the model is untouched — and neither has been measured yet;
-the next run of those two instances is the measurement.
+scaffold changes — the model is untouched — and both were re-measured together
+on the same two instances (run-id `fmt-fastlane-codape-r2-verify`).
 
 **Code changes in the headless note.** `HEADLESS_OPERATING_NOTE` now carries a
 "Code changes" block for runs that edit a working tree: find and read the test
@@ -287,6 +291,26 @@ wrong-but-green patch is the failure mode worth paying to catch.
 summary. The SWE-bench runner passes it, so the saved transcript can attribute
 a step: the earlier streams said a command ran but not which one, which is why
 the `fmt` and `fastlane` analyses had to reason from the patches alone.
+
+**What the re-run showed.** `fmt-fastlane-codape-r2-verify` repeated both
+instances with every fix and `--verify-on-finish`: pass@1 0.5 (1/2), 1 507 s of
+generation and 34 s of grading. `fastlane__fastlane-19207` resolved for the
+first time (1/1, 1 037 s). The first attempt was the old failure — splat the
+array, then rewrite the six arity specs — but the review turn rejected it,
+restored `zip_spec.rb` with `git checkout --`, and changed the source instead:
+`output_path`, `basename` and the `File.join` prefix are `shellescape`d while
+`Actions.sh(zip_command)` keeps the array convention the specs assert.
+`fmtlib__fmt-3750` is still 0/1 (402 s): the patch gates `loc_writer` to
+decimal and adds a test asserting `"{:Lx}" == "75bcd15"`, where the graded test
+expects `"7,5bc,d15"`, `"-0b111,010,110,111,…"` and `"    30,071"`. The review
+turn answered all four questions and returned `VERIFICATION: PASS` because the
+repository suite was green — a review can check the diff against the tests the
+repo has, but it cannot supply an expectation those tests lack. The red-test
+guard stayed silent in both runs for the same underlying reason: no recognized
+test command ever came back red, since the rewritten fastlane specs passed and
+the new fmt test encoded the wrong answer. The guard is built for the
+green-to-red regression; the test-bending case is what the review turn caught,
+and the missing-oracle case remains model knowledge.
 
 ## Pins
 
