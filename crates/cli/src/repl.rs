@@ -7263,6 +7263,9 @@ fn looks_like_test_path(path: &str) -> bool {
         || path.contains(".spec.")
 }
 
+// The path is lowercased on the line below, so the comparison is already
+// case-insensitive; the lint cannot see that.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn looks_like_doc_path(path: &str) -> bool {
     let path = path.replace('\\', "/").to_lowercase();
     path.starts_with("docs/")
