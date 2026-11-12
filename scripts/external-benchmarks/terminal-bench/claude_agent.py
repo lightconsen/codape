@@ -48,7 +48,17 @@ class ClaudeAgent(ClaudeCodeAgent):
 
     @property
     def _env(self) -> dict[str, str]:
-        env = dict(super()._env)
+        # Built rather than inherited: the stock property indexes
+        # ANTHROPIC_API_KEY unconditionally, and this gateway is driven by
+        # ANTHROPIC_AUTH_TOKEN only.
+        env: dict[str, str] = {
+            "FORCE_AUTO_BACKGROUND_TASKS": "1",
+            "ENABLE_BACKGROUND_TASKS": "1",
+        }
+        if self._model_name:
+            env["ANTHROPIC_MODEL"] = self._model_name.removeprefix("anthropic/")
+        elif "ANTHROPIC_MODEL" in os.environ:
+            env["ANTHROPIC_MODEL"] = os.environ["ANTHROPIC_MODEL"]
         base_url = os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get(
             "CODAPE_BASE_URL"
         )

@@ -34,12 +34,20 @@ TERMINAL_BENCH_PYTHON = "3.12"
 DATASET = "terminal-bench-core==0.1.1"
 CODAPE_VERSION = "v0.2.0"
 ADAPTER_IMPORT_PATH = "codape_agent:CodapeAgent"
+CLAUDE_ADAPTER_IMPORT_PATH = "claude_agent:ClaudeAgent"
+CLAUDE_CODE_VERSION = "2.1.318"
 
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 200
 DEFAULT_N_CONCURRENT = 1
 
-API_KEY_ENV = ("ANTHROPIC_API_KEY", "CODAPE_API_KEY", "OPENAI_API_KEY")
+API_KEY_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODAPE_API_KEY",
+    "CODAPE_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+)
 MODEL_ENV = ("ANTHROPIC_MODEL", "CODAPE_MODEL", "OPENAI_MODEL")
 
 
@@ -219,9 +227,9 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         "--n-concurrent",
         str(args.n_concurrent),
         "--agent-import-path",
-        ADAPTER_IMPORT_PATH,
+        ADAPTER_IMPORT_PATH if args.agent == "codape" else CLAUDE_ADAPTER_IMPORT_PATH,
         "--agent-kwarg",
-        f"version={args.codape_version}",
+        f"version={args.codape_version if args.agent == 'codape' else args.claude_version}",
         "--agent-kwarg",
         f"max_turns={args.max_turns}",
         "--agent-kwarg",
@@ -238,22 +246,23 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         command += ["--global-test-timeout-sec", str(args.test_timeout)]
     if args.model:
         command += ["--model", args.model]
-    if args.codape_binary:
-        command += ["--agent-kwarg", f"binary_path={args.codape_binary}"]
-    if args.extra_args:
-        command += ["--agent-kwarg", f"extra_args={' '.join(args.extra_args)}"]
-    if args.extra_instructions:
-        command += [
-            "--agent-kwarg",
-            f"extra_instructions={args.extra_instructions}",
-        ]
-    if args.task_proxy:
-        command += ["--agent-kwarg", f"task_proxy={args.task_proxy}"]
-    if args.task_proxy_direct_hosts:
-        command += [
-            "--agent-kwarg",
-            f"task_proxy_direct_hosts={args.task_proxy_direct_hosts}",
-        ]
+    if args.agent == "codape":
+        if args.codape_binary:
+            command += ["--agent-kwarg", f"binary_path={args.codape_binary}"]
+        if args.extra_args:
+            command += ["--agent-kwarg", f"extra_args={' '.join(args.extra_args)}"]
+        if args.extra_instructions:
+            command += [
+                "--agent-kwarg",
+                f"extra_instructions={args.extra_instructions}",
+            ]
+        if args.task_proxy:
+            command += ["--agent-kwarg", f"task_proxy={args.task_proxy}"]
+        if args.task_proxy_direct_hosts:
+            command += [
+                "--agent-kwarg",
+                f"task_proxy_direct_hosts={args.task_proxy_direct_hosts}",
+            ]
     if args.tasks:
         for task in args.tasks:
             command += ["--task-id", task]
@@ -267,8 +276,12 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
     print("Terminal-Bench dry run; nothing will be downloaded, built, or executed.")
     print(f"pinned harness : terminal-bench=={TERMINAL_BENCH_VERSION}")
     print(f"pinned dataset : {args.dataset}")
-    print(f"adapter        : {ADAPTER_IMPORT_PATH} ({ADAPTER_DIR / 'codape_agent.py'})")
-    print(f"adapter install: {args.codape_version} ({ADAPTER_DIR / 'codape-setup.sh.j2'})")
+    if args.agent == "codape":
+        print(f"adapter        : {ADAPTER_IMPORT_PATH} ({ADAPTER_DIR / 'codape_agent.py'})")
+        print(f"adapter install: {args.codape_version} ({ADAPTER_DIR / 'codape-setup.sh.j2'})")
+    else:
+        print(f"adapter        : {CLAUDE_ADAPTER_IMPORT_PATH} ({ADAPTER_DIR / 'claude_agent.py'})")
+        print(f"adapter install: Claude Code {args.claude_version} (nvm + npm inside each task container)")
     if args.codape_binary:
         print(f"codape binary : {args.codape_binary}")
     print(f"venv cache     : {venv_dir(cache_dir)}")
@@ -303,7 +316,7 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
     print("#    (network required; the dataset is cached under ~/.cache/terminal-bench)")
     print()
 
-    print("# 3. Run Codape through the adapter")
+    print(f"# 3. Run {args.agent} through the adapter")
     print("+ PYTHONPATH=" + str(ADAPTER_DIR) + " " + " ".join(command))
     print()
 
@@ -407,7 +420,18 @@ Notes:
     )
     parser.add_argument("-t", "--task", dest="tasks", action="append", metavar="ID", help="Task ID or glob; repeatable")
     parser.add_argument("--limit", type=positive_int, help="Run the first N tasks from the dataset")
-    parser.add_argument("--model", help="Model ID passed to both tb metadata and Codape")
+    parser.add_argument("--model", help="Model ID passed to both tb metadata and the agent")
+    parser.add_argument(
+        "--agent",
+        choices=("codape", "claude-code"),
+        default="codape",
+        help="Agent harness installed into the task container (default: codape)",
+    )
+    parser.add_argument(
+        "--claude-version",
+        default=CLAUDE_CODE_VERSION,
+        help=f"Claude Code version installed with --agent claude-code (default: {CLAUDE_CODE_VERSION})",
+    )
     parser.add_argument("--timeout", type=positive_float, default=DEFAULT_TIMEOUT, help=f"Per-task Codape timeout in seconds (default: {DEFAULT_TIMEOUT})")
     parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"Codape --max-turns (default: {DEFAULT_MAX_TURNS})")
     parser.add_argument(
@@ -480,6 +504,17 @@ Notes:
             parser.error(
                 "--extra-arg must not contain '=' because tb splits --agent-kwarg on it"
             )
+    if args.agent == "claude-code":
+        if args.codape_binary:
+            parser.error("--codape-binary is only used with --agent codape")
+        if args.extra_args:
+            parser.error("--extra-arg is only used with --agent codape")
+        if args.task_proxy or args.task_proxy_direct_hosts:
+            parser.error("--task-proxy options are only used with --agent codape")
+        if not args.model:
+            args.model = model_label()
+        if args.model == "default":
+            parser.error("--agent claude-code needs --model or ANTHROPIC_MODEL / CODAPE_MODEL")
     if args.run_id is None:
         args.run_id = f"tb-{utc_stamp()}"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):

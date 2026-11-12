@@ -106,7 +106,7 @@ best-of-runs table is in
 
 | Instance | Benchmark / run | Class | Why it failed |
 |---|---|---|---|
-| `xarray__xarray-6938` | Verified 24 (21/24) | model | Changed `Dataset.swap_dims()`; the graded test calls `IndexVariable.to_index_variable()` directly, so the intended change is in `xarray/core/variable.py`. |
+| `pydata__xarray-6938` | Verified 24 (21/24) | model | Changed `Dataset.swap_dims()`; the graded test calls `IndexVariable.to_index_variable()` directly, so the intended change is in `xarray/core/variable.py`. |
 | `mwaskom__seaborn-3187` | Verified 24 | model | Partial fix: `Plot`'s legend passes, but `relplot()` goes through `seaborn/utils.py`, which was not touched. |
 | `psf__requests-1921` | Verified 24 | environment | The fix works and all six FAIL_TO_PASS pass; two PASS_TO_PASS hit `CERTIFICATE_VERIFY_FAILED` against `httpbin.org`. The dataset's own gold patch also scores 0/1, leaving 22/23 scoreable. |
 | `astropy__astropy-14369` | Verified batch 1 (2/3) | model | Accepted products after `/`; the negative test requires an unparenthesized denominator to raise. A corrected grammar patch resolved 1/1 without model calls. |
@@ -349,7 +349,7 @@ Every patch was a non-empty source diff; the shortest was 475 bytes
 (`pytest-7982`) and the longest 3 130 bytes (`seaborn-3069`). The three
 unresolved split into two genuine model misses and one environment defect.
 
-**`xarray__xarray-6938` — fixed at the wrong layer.** The model changed
+**`pydata__xarray-6938` — fixed at the wrong layer.** The model changed
 `Dataset.swap_dims()` to copy an `IndexVariable` before assigning `dims`. The
 graded test,
 `xarray/tests/test_variable.py::TestIndexVariable::test_to_index_variable_copy`,

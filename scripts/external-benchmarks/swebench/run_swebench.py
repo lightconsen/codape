@@ -113,6 +113,9 @@ PASSTHROUGH_ENV = (
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL",
+    # Claude Code reads gateway headers from this spelling; the runner
+    # normalizes CODAPE_CUSTOM_HEADERS into it for the claude-code arm.
+    "ANTHROPIC_CUSTOM_HEADERS",
     "CODAPE_API_KEY",
     "CODAPE_AUTH_TOKEN",
     "CODAPE_BASE_URL",
@@ -143,9 +146,11 @@ MODEL_ENV = ("ANTHROPIC_MODEL", "CODAPE_MODEL", "OPENAI_MODEL")
 DEFAULT_AGENT_TIMEOUT = 1800
 DEFAULT_EVAL_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 200
+DEFAULT_CONTEXT_TOKENS = 131072
 
 CONTAINER_WORKDIR = "/testbed"
 CONTAINER_CONFIG_DIR = "/tmp/codape-config"
+CONTAINER_CLAUDE_CONFIG_DIR = "/tmp/claude-config"
 
 # The exact patch-extraction script. It is also exercised by the local
 # patch-format test: `git add -A` makes untracked files appear as additions,
@@ -474,7 +479,39 @@ def docker_available() -> tuple[bool, str]:
 
 
 def selected_env_names() -> list[str]:
-    return [name for name in PASSTHROUGH_ENV if os.environ.get(name)]
+    names = [name for name in PASSTHROUGH_ENV if os.environ.get(name)]
+    # Both harnesses must see the same gateway headers.  Codape reads
+    # CODAPE_CUSTOM_HEADERS; Claude Code reads ANTHROPIC_CUSTOM_HEADERS.
+    # Forwarding the name lets agent_child_env() supply whichever spelling the
+    # host set, without putting the value in a docker argument.
+    if os.environ.get("CODAPE_CUSTOM_HEADERS") or os.environ.get("ANTHROPIC_CUSTOM_HEADERS"):
+        for name in ("ANTHROPIC_CUSTOM_HEADERS", "CODAPE_CUSTOM_HEADERS"):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def agent_child_env() -> dict[str, str]:
+    """Environment for the docker-exec client, never for a command argument."""
+    env = os.environ.copy()
+    headers = env.get("ANTHROPIC_CUSTOM_HEADERS") or env.get("CODAPE_CUSTOM_HEADERS")
+    if headers:
+        env["ANTHROPIC_CUSTOM_HEADERS"] = headers
+        env["CODAPE_CUSTOM_HEADERS"] = headers
+    window = env.get("CODAPE_CONTEXT_WINDOW")
+    if window and not env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"):
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = window
+    return env
+
+
+def claude_binary() -> Path:
+    found = shutil.which("claude")
+    if not found:
+        raise BenchError("claude CLI not found on PATH; install Claude Code or use --agent codape")
+    binary = Path(found).resolve()
+    if not binary.is_file():
+        raise BenchError(f"claude CLI is not a regular file: {binary}")
+    return binary
 
 
 def require_api_key() -> None:
@@ -653,6 +690,21 @@ def seed_config(container: str) -> None:
     run_checked(["docker", "exec", container, "sh", "-c", script], what="seeding an isolated Codape config home")
 
 
+def install_claude(container: str, binary: Path | None) -> None:
+    binary = binary or claude_binary()
+    if not binary.exists():
+        raise BenchError(f"--claude-binary does not exist: {binary}")
+    run_checked(
+        ["docker", "cp", str(binary), f"{container}:/tmp/claude"],
+        what="copying Claude Code into the container",
+    )
+    run_checked(["docker", "exec", container, "chmod", "0755", "/tmp/claude"], what="making Claude Code executable")
+    run_checked(
+        ["docker", "exec", container, "mkdir", "-p", CONTAINER_CLAUDE_CONFIG_DIR],
+        what="preparing an isolated Claude Code config home",
+    )
+
+
 def shlex_quote(value: str) -> str:
     # Imported lazily to keep this helper obvious; shlex is stdlib.
     import shlex
@@ -660,43 +712,96 @@ def shlex_quote(value: str) -> str:
     return shlex.quote(value)
 
 
-def agent_command(container: str, timeout: int, max_turns: int, extra_args: list[str]) -> list[str]:
-    env = selected_env_names()
+def agent_command(
+    container: str,
+    timeout: int,
+    max_turns: int,
+    extra_args: list[str],
+    agent: str = "codape",
+    context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+) -> list[str]:
     command = ["docker", "exec", "-i", "-w", CONTAINER_WORKDIR]
-    for name in env:
+    for name in selected_env_names():
         command += ["-e", name]
-    command += [
-        "-e",
-        f"CLAUDE_CONFIG_DIR={CONTAINER_CONFIG_DIR}",
-        "-e",
-        "CODAPE_LOG=off",
-        "-e",
-        "NO_COLOR=1",
-        # The instance container is the isolation boundary; the shell sandbox
-        # would block the network and privilege-drop syscalls tests need.
-        "-e",
-        "CODAPE_SANDBOX=off",
-        container,
-        "timeout",
-        "--signal=TERM",
-        "--kill-after=30",
-        str(timeout),
-        "codape",
-        "-p",
-        "--dangerously-skip-permissions",
-        "--no-session-persistence",
-        "--no-telemetry",
-        "--output-format",
-        "stream-json",
-        "--max-turns",
-        str(max_turns),
-    ]
+    if agent == "codape":
+        command += [
+            "-e",
+            f"CLAUDE_CONFIG_DIR={CONTAINER_CONFIG_DIR}",
+            "-e",
+            "CODAPE_LOG=off",
+            "-e",
+            "NO_COLOR=1",
+            # The instance container is the isolation boundary; the shell
+            # sandbox would block the network and privilege-drop syscalls the
+            # repository tests need.
+            "-e",
+            "CODAPE_SANDBOX=off",
+            container,
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=30",
+            str(timeout),
+            "codape",
+            "-p",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--no-telemetry",
+            "--output-format",
+            "stream-json",
+            "--max-turns",
+            str(max_turns),
+        ]
+    else:
+        # Claude Code needs the gateway settings under its own names; keep its
+        # state out of the repository and stop it reaching any other host.
+        # SWE-bench containers run as root, so IS_SANDBOX admits the bypass.
+        command += [
+            "-e",
+            f"CLAUDE_CONFIG_DIR={CONTAINER_CLAUDE_CONFIG_DIR}",
+            "-e",
+            f"CLAUDE_CODE_MAX_CONTEXT_TOKENS={context_tokens}",
+            "-e",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+            "-e",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+            "-e",
+            "DISABLE_AUTOUPDATER=1",
+            "-e",
+            "DISABLE_TELEMETRY=1",
+            "-e",
+            "API_TIMEOUT_MS=3000000",
+            "-e",
+            "IS_SANDBOX=1",
+            container,
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=30",
+            str(timeout),
+            "/tmp/claude",
+            "-p",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--max-turns",
+            str(max_turns),
+        ]
     command += extra_args
     return command
 
 
-def run_agent(container: str, prompt: str, timeout: int, max_turns: int, extra_args: list[str], log_dir: Path) -> dict[str, Any]:
-    command = agent_command(container, timeout, max_turns, extra_args)
+def run_agent(
+    container: str,
+    prompt: str,
+    timeout: int,
+    max_turns: int,
+    extra_args: list[str],
+    log_dir: Path,
+    agent: str = "codape",
+    context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+) -> dict[str, Any]:
+    command = agent_command(container, timeout, max_turns, extra_args, agent, context_tokens)
     print("+ " + " ".join(command) + "   (prompt on stdin)", flush=True)
     started = time.monotonic()
     try:
@@ -708,6 +813,7 @@ def run_agent(container: str, prompt: str, timeout: int, max_turns: int, extra_a
             stderr=subprocess.PIPE,
             timeout=timeout + 120,
             check=False,
+            env=agent_child_env(),
         )
         stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
     except subprocess.TimeoutExpired as exc:
@@ -779,7 +885,8 @@ def run_one_instance(
     print(f"image: {image}", flush=True)
 
     ensure_image(image)
-    container = f"codape-swebench-{args.run_id}-{safe_name(instance_id)}"[:120]
+    prefix = "codape" if args.agent == "codape" else "claude"
+    container = f"{prefix}-swebench-{args.run_id}-{safe_name(instance_id)}"[:120]
     subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     # Match the official harness: root and SYS_ADMIN, because some repository
     # test suites need an unprivileged user namespace.
@@ -803,9 +910,21 @@ def run_one_instance(
     started = time.monotonic()
     try:
         run_checked(run_command, what=f"starting a container for {instance_id}")
-        install_codape(container, args.codape_binary)
-        seed_config(container)
-        agent = run_agent(container, prompt, args.timeout, args.max_turns, args.codape_arg, instance_dir)
+        if args.agent == "codape":
+            install_codape(container, args.codape_binary)
+            seed_config(container)
+        else:
+            install_claude(container, args.claude_binary)
+        agent = run_agent(
+            container,
+            prompt,
+            args.timeout,
+            args.max_turns,
+            args.codape_arg,
+            instance_dir,
+            agent=args.agent,
+            context_tokens=args.context_tokens,
+        )
         patch = extract_patch(container, base_commit, instance_dir)
     finally:
         if not args.keep_containers:
@@ -826,6 +945,7 @@ def run_one_instance(
 
     record = {
         "instance_id": instance_id,
+        "agent": args.agent,
         "image": image,
         "language": language_for(instance, args.dataset),
         "log_parser": instance.get("log_parser"),
@@ -1044,10 +1164,20 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
         print(f"docker         : NOT AVAILABLE ({message}) -- dry run continues; a real run needs Docker")
     env_names = selected_env_names()
     print("model env      : " + (", ".join(env_names) if env_names else "none set (a real run needs an API key)"))
-    if args.codape_binary:
-        print(f"codape binary : {args.codape_binary}")
+    print(f"agent          : {args.agent}")
+    print(f"context window : {args.context_tokens} tokens")
+    if args.agent == "codape":
+        if args.codape_binary:
+            print(f"codape binary : {args.codape_binary}")
+        else:
+            print(f"codape binary : download {CODAPE_RELEASE_VERSION} ({CODAPE_TARGET}) inside each container")
     else:
-        print(f"codape binary : download {CODAPE_RELEASE_VERSION} ({CODAPE_TARGET}) inside each container")
+        try:
+            binary = args.claude_binary or claude_binary()
+        except BenchError:
+            print("claude binary : NOT FOUND on PATH (a real run needs Claude Code)")
+        else:
+            print(f"claude binary : {binary}")
     print()
 
     print("# 1. Prepare the isolated evaluation venv (only for a real run)")
@@ -1073,16 +1203,26 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
             limit = 1 if args.limit is None else args.limit
             instance_ids = ["<selected-instance-ids>"]
             print(f"# 3. Generation for the first {limit} instance(s), sorted by instance_id")
-        container = f"codape-swebench-{args.run_id}-<instance>"
+        prefix = "codape" if args.agent == "codape" else "claude"
+        container = f"{prefix}-swebench-{args.run_id}-<instance>"
         print(f"+ docker pull --platform linux/amd64 <image from dataset row>")
         print(f"+ docker run -d --name {container} --user root --cap-add SYS_ADMIN --platform linux/amd64 -w {CONTAINER_WORKDIR} <image> sleep infinity")
-        if args.codape_binary:
-            print(f"+ docker cp {args.codape_binary} {container}:/usr/local/bin/codape")
-            print(f"+ docker exec {container} chmod 0755 /usr/local/bin/codape")
+        if args.agent == "codape":
+            if args.codape_binary:
+                print(f"+ docker cp {args.codape_binary} {container}:/usr/local/bin/codape")
+                print(f"+ docker exec {container} chmod 0755 /usr/local/bin/codape")
+            else:
+                print(f"+ docker exec {container} sh -c '<pinned Codape {CODAPE_RELEASE_VERSION} download + SHA256SUMS verification>'")
+            print(f"+ docker exec {container} sh -c '<seed {CONTAINER_CONFIG_DIR}/settings.json with telemetry_enabled=false>'")
         else:
-            print(f"+ docker exec {container} sh -c '<pinned Codape {CODAPE_RELEASE_VERSION} download + SHA256SUMS verification>'")
-        print(f"+ docker exec {container} sh -c '<seed {CONTAINER_CONFIG_DIR}/settings.json with telemetry_enabled=false>'")
-        agent = agent_command(container, args.timeout, args.max_turns, args.codape_arg)
+            try:
+                binary = args.claude_binary or claude_binary()
+            except BenchError:
+                binary = Path("claude")
+            print(f"+ docker cp {binary} {container}:/tmp/claude")
+            print(f"+ docker exec {container} chmod 0755 /tmp/claude")
+            print(f"+ docker exec {container} mkdir -p {CONTAINER_CLAUDE_CONFIG_DIR}")
+        agent = agent_command(container, args.timeout, args.max_turns, args.codape_arg, args.agent, args.context_tokens)
         print("+ " + " ".join(agent) + "   (issue text on stdin)")
         print(f"+ docker exec -w {CONTAINER_WORKDIR} {container} sh -c '<git reset -q INSTANCE_BASE_COMMIT; git -c core.fileMode=false add -A; git diff --cached --binary INSTANCE_BASE_COMMIT>'")
         print(f"+ write one JSONL line to {predictions}: instance_id, model_name_or_path={args.model_name}, model_patch")
@@ -1135,7 +1275,7 @@ def positive_float(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Codape on a reproducible SWE-bench Verified/Lite subset and grade with the official harness.",
+        description="Run Codape (or Claude Code) on a reproducible SWE-bench subset and grade with the official harness.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   # Inspect every command without Docker, keys, or downloads
@@ -1145,6 +1285,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   export ANTHROPIC_API_KEY=... ANTHROPIC_BASE_URL=... ANTHROPIC_MODEL=...
   scripts/external-benchmarks/swebench/run.sh --limit 1 --instance astropy__astropy-12907
 
+  # The same instance under Claude Code, with the same model and budget
+  scripts/external-benchmarks/swebench/run.sh --agent claude-code \
+      --limit 1 --instance astropy__astropy-12907 --run-id astropy-claude
+
   # Re-grade an existing predictions file without spending model tokens
   scripts/external-benchmarks/swebench/run.sh --eval-only target/swe-bench/preds.jsonl
 
@@ -1152,6 +1296,10 @@ Notes:
   * The subset is sorted by instance_id, so --limit N is reproducible.
   * Codape is installed inside each official image from a pinned release; use
     --codape-binary to test a locally built Linux ELF binary instead.
+  * --agent claude-code is the harness control: hold the model, image, budget,
+    and context window equal, and change only the agent.  Set the gateway
+    header in ANTHROPIC_CUSTOM_HEADERS (or CODAPE_CUSTOM_HEADERS; the runner
+    normalizes it) so both arms send the same request metadata.
   * API keys are read from the environment and passed to docker by variable
     name only. They are never written to a repository file.
 """,
@@ -1170,8 +1318,11 @@ Notes:
     parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"Codape --max-turns (default: {DEFAULT_MAX_TURNS})")
     parser.add_argument("--predictions", help="Predictions JSONL path (default: <run-dir>/predictions.jsonl)")
     parser.add_argument("--eval-only", metavar="PATH", help="Skip generation and grade this predictions JSONL with the official harness")
+    parser.add_argument("--agent", choices=("codape", "claude-code"), default="codape", help="Agent harness to run inside the instance container (default: codape)")
     parser.add_argument("--model-name", help="model_name_or_path written to predictions (default: codape-<model>)")
     parser.add_argument("--codape-binary", type=Path, help="Linux x86_64 ELF Codape binary to copy into containers")
+    parser.add_argument("--claude-binary", type=Path, help="Claude Code executable to copy into containers (default: claude on PATH)")
+    parser.add_argument("--context-tokens", type=positive_int, default=DEFAULT_CONTEXT_TOKENS, help=f"Context window both harnesses are told about (default: {DEFAULT_CONTEXT_TOKENS})")
     parser.add_argument("--codape-arg", action="append", default=[], metavar="ARG", help="Extra argument passed to Codape; repeatable")
     parser.add_argument("--extra-instructions", help="Extra text appended to every issue prompt")
     parser.add_argument("--run-id", help="Run identifier (default: swebench-YYYYmmdd-HHMMSS)")
@@ -1195,11 +1346,19 @@ Notes:
         parser.error(f"--codape-binary does not exist: {args.codape_binary}")
     if args.codape_binary and not looks_like_linux_elf(args.codape_binary):
         parser.error(f"--codape-binary must be a Linux ELF binary: {args.codape_binary}")
+    if args.claude_binary and not args.claude_binary.expanduser().is_file():
+        parser.error(f"--claude-binary does not exist: {args.claude_binary}")
+    if args.agent == "claude-code" and args.codape_binary:
+        parser.error("--codape-binary is only used with --agent codape")
+    if args.agent == "codape" and args.claude_binary:
+        parser.error("--claude-binary is only used with --agent claude-code")
     if args.run_id is None:
         args.run_id = f"swebench-{utc_stamp()}"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
         parser.error("--run-id may contain only letters, digits, dot, underscore, and hyphen")
     args.output_dir = args.output_dir.expanduser().resolve()
+    if args.claude_binary:
+        args.claude_binary = args.claude_binary.expanduser().resolve()
     args.cache_dir = resolve_cache_dir(str(args.cache_dir) if args.cache_dir else None)
     args._dataset = dataset_spec(args.dataset, args.dataset_revision)
     args.model_name = prediction_model_name(args.model_name)

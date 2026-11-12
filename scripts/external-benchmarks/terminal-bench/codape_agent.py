@@ -69,7 +69,9 @@ DEFAULT_TIMEOUT_SEC = 1800
 # are never printed by this module.
 PASSTHROUGH_ENV = (
     "CODAPE_API_KEY",
+    "CODAPE_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY",
     "CODAPE_BASE_URL",
     "ANTHROPIC_BASE_URL",
@@ -78,6 +80,7 @@ PASSTHROUGH_ENV = (
     "ANTHROPIC_MODEL",
     "OPENAI_MODEL",
     "CODAPE_CUSTOM_HEADERS",
+    "ANTHROPIC_CUSTOM_HEADERS",
     # Codape assumes a conservative 32K window for a model it does not know,
     # and compacts against that guess. A model with a larger real window then
     # spends most of the task compacting instead of working. These let the
@@ -167,6 +170,11 @@ class CodapeAgent(AbstractInstalledAgent):
             for name in PASSTHROUGH_ENV
             if (value := os.environ.get(name))
         }
+        # Either spelling on the host configures the same gateway headers;
+        # Codape reads CODAPE_CUSTOM_HEADERS, so fill it from whichever is set.
+        headers = env.get("CODAPE_CUSTOM_HEADERS") or env.get("ANTHROPIC_CUSTOM_HEADERS")
+        if headers:
+            env["CODAPE_CUSTOM_HEADERS"] = headers
         if self._model_name:
             env["CODAPE_MODEL"] = self._model_name
         # Keep Codape's state out of the task's working tree and skip the
