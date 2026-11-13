@@ -128,6 +128,17 @@ def check(args: argparse.Namespace) -> int:
         age = (now - recorded_at).days
         if age > max_age:
             stale.append((path, age))
+        # The digest is checked for every recording, backfilled or not: a
+        # backfilled cassette still replays, and a recording whose system
+        # prompt was never fingerprinted cannot be refused when the prompt
+        # changes. Only `endpoint_host` and `test` are tie-breakers for
+        # attribution, which a backfilled recording genuinely never had, so
+        # those are the two that stay skipped.
+        digest = metadata.get("system_sha256")
+        if digest is None:
+            missing_digest.append(path)
+        elif not DIGEST_PATTERN.fullmatch(str(digest)):
+            bad_digest.append(path)
         if metadata.get("backfilled"):
             backfilled += 1
             continue
@@ -135,11 +146,6 @@ def check(args: argparse.Namespace) -> int:
             missing_endpoint.append(path)
         if not metadata.get("test"):
             missing_test.append(path)
-        digest = metadata.get("system_sha256")
-        if digest is None:
-            missing_digest.append(path)
-        elif not DIGEST_PATTERN.fullmatch(str(digest)):
-            bad_digest.append(path)
 
     print(f"cassettes: {len(files)} files, {human_size(total_size)}, {len(suite_sizes)} suites")
     if backfilled:
