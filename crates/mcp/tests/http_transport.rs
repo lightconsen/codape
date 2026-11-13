@@ -1,5 +1,11 @@
 //! End-to-end checks for remote MCP HTTP/SSE transport.
 
+// Every `MutexGuard` this file holds across an `.await` serializes tests that
+// touch process-wide state; the guard is released before the next test can
+// take it. Allowed here rather than workspace-wide, so production code that
+// holds a `std::sync::Mutex` across `.await` still trips the lint.
+#![allow(clippy::await_holding_lock)]
+
 use codape_mcp::channel::{
     InboundRequestHandler, JsonRpcChannel, JsonRpcError, ServerNotificationHandler,
 };

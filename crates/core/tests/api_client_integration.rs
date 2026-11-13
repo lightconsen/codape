@@ -3,6 +3,12 @@
 //! These tests correspond to the equivalence test plan Module 10:
 //! 10.1 streaming, 10.2 retry/fallback, 10.3 TokenBudget, 10.4 CostTracker, 10.5 model routing
 
+// Every `MutexGuard` this file holds across an `.await` serializes tests that
+// touch process-wide state; the guard is released before the next test can
+// take it. Allowed here rather than workspace-wide, so production code that
+// holds a `std::sync::Mutex` across `.await` still trips the lint.
+#![allow(clippy::await_holding_lock)]
+
 use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 
