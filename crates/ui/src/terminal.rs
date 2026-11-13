@@ -318,6 +318,48 @@ fn exit_commands(keyboard_pushed: bool, out: &mut impl std::io::Write) -> std::i
     out.flush()
 }
 
+/// Put the terminal back the way [`TerminalUi::enter`] found it, from a panic
+/// hook.
+///
+/// The hook has no `TerminalUi` to call [`TerminalUi::exit`] on — the value
+/// belongs to the loop that is unwinding, and in a release build
+/// (`panic = "abort"`) nothing unwinds and no destructor runs at all. So this
+/// re-derives the same decision from the environment and writes the same
+/// sequences, in the same order.
+///
+/// It writes to **stdout**, not stderr: the TUI draws on stdout, and
+/// `LeaveAlternateScreen` on a different descriptor leaves the alternate
+/// screen exactly where it was — the panic text would land in a buffer the
+/// user cannot see and the shell would come back holding a screen that was
+/// never popped.
+///
+/// Best-effort and safe to call when the TUI was never entered: a terminal
+/// with an empty keyboard-enhancement stack and no alternate screen ignores
+/// both sequences. Without a terminal (a pipe or a file) it writes nothing,
+/// so a headless crash does not inject escapes into output a script is
+/// collecting.
+pub fn restore_after_panic() {
+    use std::io::IsTerminal;
+
+    let mut stdout = std::io::stdout();
+    if !stdout.is_terminal() {
+        return;
+    }
+    let _ = panic_exit_commands(&TerminalProfile::from_env(), &mut stdout);
+    let _ = crossterm::terminal::disable_raw_mode();
+}
+
+/// The escape sequences [`restore_after_panic`] writes, separated out so they
+/// can be asserted against without a terminal.
+fn panic_exit_commands(
+    profile: &TerminalProfile,
+    out: &mut impl std::io::Write,
+) -> std::io::Result<()> {
+    // Popped only when `enter` would have pushed it, for the reason
+    // `exit_commands` documents.
+    exit_commands(profile.keyboard_flags().is_some(), out)
+}
+
 /// Pane positions in the vertical layout.
 ///
 /// `Layout::split` returns one rect per constraint, in order, even when a
@@ -2131,6 +2173,30 @@ mod tests {
             !bytes.contains("\x1b[<1u"),
             "popped a protocol level that was never pushed: {bytes:?}"
         );
+    }
+
+    /// A panic hook restores the terminal without a `TerminalUi`, so it
+    /// re-derives the same decision from the environment. It has to reach the
+    /// same bytes an orderly exit writes, or the shell is left in a mode the
+    /// process thought it had left.
+    #[test]
+    fn the_panic_restore_writes_what_an_orderly_exit_writes() {
+        for env in [
+            env(&[("KITTY_WINDOW_ID", "1")]),
+            env(&[("TERM_PROGRAM", "vscode")]),
+            env(&[]),
+        ] {
+            let profile = TerminalProfile::detect(&env);
+            let mut orderly = Vec::new();
+            exit_commands(profile.keyboard_flags().is_some(), &mut orderly)
+                .expect("write exit commands");
+            let mut after_panic = Vec::new();
+            panic_exit_commands(&profile, &mut after_panic).expect("write panic exit commands");
+            assert_eq!(
+                orderly, after_panic,
+                "panic restore diverged from an orderly exit"
+            );
+        }
     }
 
     #[test]

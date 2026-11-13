@@ -177,8 +177,16 @@ impl TelemetryHandle {
 
 /// Spawn the worker thread with panic recovery.
 ///
-/// If the worker panics, it is respawned (up to 3 times) after a 10s cooldown.
 /// A fresh SQLite connection is opened on each respawn to avoid poisoning.
+///
+/// **The recovery only works in an unwind profile.** `[profile.release]` sets
+/// `panic = "abort"`, so in a shipped binary a panic here ends the process and
+/// `catch_unwind` never returns `Err`. That is acceptable: telemetry is
+/// best-effort and nothing reads it back synchronously, so losing it is better
+/// than taking the session down — which is why the one panic a worker can
+/// actually cause on its own (failing to open the store) is handled rather
+/// than unwrapped. The respawn loop matters for `cargo test`, which builds
+/// with the `dev` profile's unwinding panic strategy.
 fn spawn_worker_with_recovery(
     receiver: mpsc::Receiver<WorkerCommand>,
     db_path: std::path::PathBuf,
@@ -191,8 +199,17 @@ fn spawn_worker_with_recovery(
 
         loop {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let store =
-                    TelemetryStore::open(&db_path).expect("telemetry worker failed to open store");
+                let store = match TelemetryStore::open(&db_path) {
+                    Ok(store) => store,
+                    Err(error) => {
+                        // Under `panic = "abort"` an `expect` here would abort
+                        // the whole process, turning a lost telemetry database
+                        // into a lost session. There is nothing left to do
+                        // with the channel but drop it.
+                        tracing::warn!("telemetry worker could not open its store: {error}");
+                        return;
+                    }
+                };
                 run_store_worker(&receiver, &store);
             }));
 
