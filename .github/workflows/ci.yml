@@ -92,6 +92,20 @@ jobs:
       - name: Check cassette metadata
         run: python3 scripts/cassette_tool.py check --strict
 
+  unsafe-allowlist:
+    name: Unsafe allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # `Cargo.toml` denies `unsafe_code` workspace-wide, but a file that
+      # starts with `#![allow(unsafe_code)]` compiles anyway and nothing else
+      # reports it. This fails when a file switches the deny off without a
+      # reviewed line in scripts/unsafe_allowlist.txt, or when the list keeps
+      # a line for a file that no longer needs it.
+      - name: Check the unsafe_code allowlist
+        run: python3 scripts/check-unsafe.py
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

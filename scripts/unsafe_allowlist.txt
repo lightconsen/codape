@@ -1,0 +1,17 @@
+# Files allowed to switch off the workspace-wide unsafe_code deny.
+#
+# Checked by scripts/check-unsafe.py, which fails when a file switches the
+# lint off without a line here, and when a line here no longer matches a
+# file. Each reason says why the deny cannot hold for that file. Add one
+# deliberately: this file is the record of the decision, so the diff that
+# adds it is what gets reviewed.
+#
+# format: <path> <reason>
+
+crates/cli/src/daemon.rs kill(2) is how a PID file is checked for liveness and how a stale daemon is signalled
+crates/core/src/process_tree.rs job objects and process groups are set through libc/Win32 handles
+crates/core/src/sandbox.rs pre_exec, setrlimit, prlimit and the libproc/parent-chain walk have no safe wrapper
+crates/core/src/sandbox_windows.rs the AppContainer, ACL and job-object path is raw Win32 by construction
+crates/plugins/src/wasm_runtime.rs pre_exec for compile rlimits, and wasmtime Module::deserialize is an unsafe fn
+crates/plugins/tests/wasm_compile_subprocess.rs std::env::set_var is unsafe on edition 2024 and these tests mutate PATH
+crates/tools/src/verified_fs.rs fcntl(F_GETPATH) and GetFinalPathNameByHandleW are the only portable ways to ask for a handle's path

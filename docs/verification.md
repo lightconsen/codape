@@ -37,6 +37,7 @@ this table is what they check):
 |---|---|
 | `fmt` | `cargo fmt --all --check` |
 | `cassettes` | `python3 scripts/cassette_tool.py check --strict` (metadata, size, staleness, credentials; runs in seconds) |
+| `unsafe-allowlist` | `python3 scripts/check-unsafe.py` — every file that opts out of the workspace `unsafe_code` deny has a reviewed line in `scripts/unsafe_allowlist.txt` |
 | `cross-check-musl` | `cargo check --workspace --target x86_64-unknown-linux-musl` — the release matrix's musl target, whose libc differs from glibc in ways a gnu build cannot see |
 | `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p codape-bridge --test ssh_spawn` — the SSH spawn path against a real server |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (the backlog is zero, so a warning fails) |
@@ -146,6 +147,17 @@ workspace lints in `Cargo.toml` allow a small, documented set of lints whose
 suggested rewrite is worse than the code (`assert_is_empty`,
 `significant_drop_tightening`, `option_if_let_else`,
 `cast_possible_truncation`, `type_complexity`, `needless_pass_by_value`).
+
+`unsafe_code` is denied for the whole workspace, which is the strongest form
+the lint has — and the easiest to lose: a file that starts with
+`#![allow(unsafe_code)]` compiles its `unsafe` blocks with no warning and
+nothing in the build says the deny was switched off. Seven files do that, each
+for a reason the platform API forces (raw Win32, `pre_exec`, `setrlimit`,
+`fcntl(F_GETPATH)`). `scripts/check-unsafe.py` reads `scripts/unsafe_allowlist.txt`
+and fails when a file opts out without a line there, or when the list keeps a
+line for a file that no longer needs it. The CI job `unsafe-allowlist` runs it,
+so the deny stays a claim the build can check rather than one a doc comment
+makes.
 
 Two more are `warn` rather than `allow`, so new code cannot quietly grow the
 problem:

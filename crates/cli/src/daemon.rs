@@ -1,4 +1,8 @@
 //! Daemon PID file management for serve/serve-stop/serve-status.
+//!
+//! `kill(2)` is how a PID file is checked for liveness (`kill(pid, 0)`) and
+//! how a stale daemon is asked to stop. The workspace denies `unsafe_code`;
+//! both call sites are the same libc call and carry their own SAFETY note.
 #![allow(unsafe_code)]
 
 use std::path::PathBuf;
