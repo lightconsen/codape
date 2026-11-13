@@ -3042,16 +3042,35 @@ printf 'ECHO:%s\n' "$line""#;
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // ENV_LOCK keeps the fake `kill` off PATH; held across the await on purpose.
     async fn shutdown_terminates_the_child_gracefully() {
+        // `signal` runs `kill` resolved through PATH, and
+        // `a_leading_child_is_stopped_through_its_process_group` puts a stand-in
+        // `kill` at the front of PATH while it runs. Without this lock the two
+        // race: that test's fake exits 0 without signalling anything, `signal`
+        // reports the request delivered, and the marker this test asserts on is
+        // never written. The lock is what makes PATH mutation safe, so a test
+        // that depends on the real `kill` has to take it too.
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("terminated");
-        let script =
-            "trap 'echo term > \"$1\"; exit 0' TERM; echo ready; while :; do sleep 0.05; done";
+        let ready = tmp.path().join("ready");
+        // The `ready` file is written *after* the trap is installed, so the
+        // test can wait for the state it needs instead of sleeping and hoping.
+        // A fixed sleep here made this test fail whenever the suite kept the
+        // machine busy enough that `sh` had not reached `trap` yet: the signal
+        // then hit a shell with the default disposition and never reached the
+        // handler the assertion looks for.
+        let script = "trap 'echo term > \"$1\"; exit 0' TERM; \
+             echo ready > \"$2\"; while :; do sleep 0.05; done";
         let child = Command::new("sh")
             .arg("-c")
             .arg(script)
             .arg("sh")
             .arg(&marker)
+            .arg(&ready)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -3077,13 +3096,24 @@ printf 'ECHO:%s\n' "$line""#;
             .await
         });
 
-        // Give `sh` time to install the trap, then ask it to stop.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the trap to exist, then ask the child to stop. The wait is
+        // bounded generously; it normally resolves in a few milliseconds.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child should install its SIGTERM trap"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         stop.cancel();
 
-        let result = tokio::time::timeout(Duration::from_secs(2), handle)
+        // The outer timeout is wider than `terminate_child`'s grace, so a slow
+        // exit is reported as a failed assertion (with the marker state) rather
+        // than as a harness timeout racing the code under test.
+        let result = tokio::time::timeout(Duration::from_secs(8), handle)
             .await
-            .expect("the child should stop within the grace period")
+            .expect("the child should stop well within the grace period")
             .unwrap();
         assert!(result.is_err(), "a cancelled session is not a success");
         assert!(
