@@ -2084,6 +2084,137 @@ impl Drop for TuiActiveGuard {
     }
 }
 
+/// What the interactive loop asks the transcript writer to do.
+enum SnapshotJob {
+    /// Append these messages. The caller has already checked that the file
+    /// holds exactly the history that precedes them.
+    Append { messages: Vec<Message> },
+    /// Write the file from scratch, for when the history shrank (compaction,
+    /// rewind) or moved to a different session. Appending then would leave a
+    /// tail the session no longer has.
+    Rewrite { messages: Vec<Message> },
+}
+
+/// Carry out one job against a store. Shared by the writer thread and the
+/// fallback that runs on the caller's thread.
+fn apply_snapshot_job(
+    store: &codape_memory::transcript::TranscriptStore,
+    session_id: &str,
+    job: &SnapshotJob,
+) -> Result<(), codape_memory::transcript::TranscriptError> {
+    match job {
+        SnapshotJob::Append { messages } => messages
+            .iter()
+            .try_for_each(|message| store.append(session_id, message)),
+        SnapshotJob::Rewrite { messages } => store.rewrite(session_id, messages),
+    }
+}
+
+/// The thread that owns the interactive transcript's file.
+///
+/// `persist_interactive_snapshot` used to rewrite the whole transcript on the
+/// UI thread at every tool step and once a second while text streams: O(n²) in
+/// session length, plus a `sync_all` per write, inside the `async` draw loop.
+/// The UI now hands over only the messages the file does not have yet and
+/// moves on; this thread does the disk work.
+struct SnapshotWriter {
+    jobs: std::sync::mpsc::Sender<(String, SnapshotJob)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SnapshotWriter {
+    /// `None` when the thread could not be spawned — the caller then writes
+    /// inline. A lost transcript is bad; taking the session down over a
+    /// thread-spawn failure is worse.
+    fn start(dir: std::path::PathBuf) -> Option<Self> {
+        let store = codape_memory::transcript::TranscriptStore::new(dir);
+        let (jobs, inbox) = std::sync::mpsc::channel::<(String, SnapshotJob)>();
+        let handle = std::thread::Builder::new()
+            .name("codape-transcript".into())
+            .spawn(move || {
+                for (session_id, job) in inbox {
+                    if let Err(error) = apply_snapshot_job(&store, &session_id, &job) {
+                        tracing::warn!("failed to persist transcript for {session_id}: {error}");
+                    }
+                }
+            });
+        match handle {
+            Ok(thread) => Some(Self {
+                jobs,
+                thread: Some(thread),
+            }),
+            Err(error) => {
+                tracing::warn!("could not start the transcript writer, writing inline: {error}");
+                None
+            }
+        }
+    }
+
+    fn send(&self, session_id: &str, job: SnapshotJob) {
+        // A closed channel means the thread panicked. Say so; the session
+        // carries on with a stale transcript rather than stopping.
+        if self.jobs.send((session_id.to_string(), job)).is_err() {
+            tracing::warn!("transcript writer is gone; this session's transcript is stale");
+        }
+    }
+}
+
+impl Drop for SnapshotWriter {
+    fn drop(&mut self) {
+        // Dropping the sender ends the `for job in inbox` loop, so the thread
+        // finishes the queue and exits. Joining it means the last turn is on
+        // disk before the process returns.
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let (placeholder, _dead) = std::sync::mpsc::channel::<(String, SnapshotJob)>();
+        drop(std::mem::replace(&mut self.jobs, placeholder));
+        let _ = thread.join();
+    }
+}
+
+/// The writer plus what the file is known to hold.
+struct TranscriptSink {
+    /// The transcript directory the store points at. A cwd change makes this
+    /// stale, and a sink writing into the old directory would be wrong.
+    dir: std::path::PathBuf,
+    session_id: String,
+    /// How many messages have been handed over, in order. Compared against
+    /// the history length to pick append or rewrite.
+    written: usize,
+    store: codape_memory::transcript::TranscriptStore,
+    writer: Writer,
+}
+
+/// Where the jobs go. Decided once, on the first write.
+enum Writer {
+    /// Not yet started; the first job starts the thread or falls back.
+    Unstarted,
+    Thread(SnapshotWriter),
+    /// The thread could not be spawned, so the caller's thread writes.
+    Inline,
+}
+
+impl TranscriptSink {
+    fn write(&mut self, job: SnapshotJob) {
+        if matches!(self.writer, Writer::Unstarted) {
+            self.writer =
+                SnapshotWriter::start(self.dir.clone()).map_or(Writer::Inline, Writer::Thread);
+        }
+        match &self.writer {
+            Writer::Thread(writer) => writer.send(&self.session_id, job),
+            Writer::Inline | Writer::Unstarted => {
+                if let Err(error) = apply_snapshot_job(&self.store, &self.session_id, &job) {
+                    tracing::warn!(
+                        "failed to persist transcript for {}: {error}",
+                        self.session_id
+                    );
+                }
+            }
+        }
+    }
+}
+
 pub struct ReplLoop {
     /// Command registry.
     commands: CommandRegistry,
@@ -2346,6 +2477,11 @@ pub struct ReplLoop {
     permission_rules_installed: bool,
     /// Disable session persistence (--no-session-persistence).
     no_persistence: bool,
+    /// The interactive transcript's writer, started on the first persist.
+    ///
+    /// A mutex because the persist call sites take `&self`; nothing else
+    /// contends for it, and the lock is never held across an `.await`.
+    transcript: std::sync::Mutex<Option<TranscriptSink>>,
     /// Disable slash commands (--disable-slash-commands).
     no_slash_commands: bool,
     /// JSON schema for structured output (--json-schema).
@@ -2693,6 +2829,7 @@ impl ReplLoop {
             permission_rules: None,
             permission_rules_installed: false,
             no_persistence: false,
+            transcript: std::sync::Mutex::new(None),
             no_slash_commands: false,
             json_schema: None,
             max_budget_usd: None,
@@ -3103,6 +3240,7 @@ impl ReplLoop {
             permission_rules: None,
             permission_rules_installed: false,
             no_persistence: false,
+            transcript: std::sync::Mutex::new(None),
             no_slash_commands: false,
             json_schema: None,
             max_budget_usd: None,
@@ -4591,12 +4729,7 @@ impl ReplLoop {
         };
         let session = engine.session();
         let session_id = session.session_id.to_string();
-        let transcript_store = codape_memory::transcript::TranscriptStore::new(
-            session_resume::transcript_dir(&self.cwd),
-        );
-        if let Err(err) = transcript_store.rewrite(&session_id, &session.messages) {
-            tracing::warn!("Failed to persist transcript for {session_id}: {err}");
-        }
+        self.persist_transcript(&session_id, &session.messages);
         let snapshot = build_interactive_snapshot(ui_state, self.current_session_title());
         if let Err(err) = session_resume::save_snapshot(&self.cwd, &session_id, &snapshot) {
             tracing::warn!("Failed to persist interactive snapshot for {session_id}: {err}");
@@ -4623,6 +4756,54 @@ impl ReplLoop {
         );
     }
 
+    /// Hand the transcript off to its writer thread.
+    ///
+    /// The session history normally only grows, so the usual case appends just
+    /// the messages the file does not have yet. Anything that shrinks it
+    /// (compaction, rewind, a different session) is sent as a rewrite: an
+    /// append would leave behind a tail the session no longer has.
+    fn persist_transcript(&self, session_id: &str, messages: &[Message]) {
+        let dir = session_resume::transcript_dir(&self.cwd);
+        let mut slot = self
+            .transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // A new directory means a different transcript tree, so the writer
+        // that points at the old one cannot be reused. Swapping the directory
+        // is a session-level event (a `--worktree` move), not a per-turn one,
+        // so joining the old thread here is acceptable.
+        if slot.as_ref().is_some_and(|sink| sink.dir != dir) {
+            *slot = None;
+        }
+        let store = codape_memory::transcript::TranscriptStore::new(dir.clone());
+        let sink = slot.get_or_insert_with(|| TranscriptSink {
+            dir: dir.clone(),
+            session_id: session_id.to_string(),
+            written: 0,
+            store,
+            writer: Writer::Unstarted,
+        });
+
+        let moved_to_another_session = sink.session_id != session_id;
+        if moved_to_another_session {
+            sink.session_id = session_id.to_string();
+        }
+
+        if moved_to_another_session || messages.len() < sink.written {
+            // Another session's file, or a history that shrank (compaction,
+            // rewind): only a rewrite describes it.
+            sink.written = messages.len();
+            sink.write(SnapshotJob::Rewrite {
+                messages: messages.to_vec(),
+            });
+        } else if messages.len() > sink.written {
+            let new = messages[sink.written..].to_vec();
+            sink.written = messages.len();
+            sink.write(SnapshotJob::Append { messages: new });
+        }
+    }
+
     fn clear_interactive_snapshot(&self, session_id: Option<&str>) {
         if self.no_persistence {
             return;
@@ -4634,6 +4815,13 @@ impl ReplLoop {
             && let Err(err) = session_resume::remove_snapshot(&self.cwd, &session_id)
         {
             tracing::warn!("Failed to remove interactive snapshot for {session_id}: {err}");
+        }
+        // The writer would otherwise keep appending into the file this just
+        // removed. Dropping the sink joins the thread, so anything already
+        // queued lands before `/clear` reports success — exactly what a person
+        // asking to clear expects to be gone.
+        if let Ok(mut slot) = self.transcript.lock() {
+            *slot = None;
         }
     }
 

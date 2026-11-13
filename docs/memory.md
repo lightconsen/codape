@@ -469,6 +469,16 @@ Thread-safety (concurrent stores) and TF-IDF semantic search are always enabled 
   transcripts.
   Exact-id resume still reads the transcript, and every index read tolerates a
   corrupt or locked database by warning and scanning transcripts.
+- **The transcript file is written by its own thread.** `persist_interactive_snapshot`
+  fires at every tool step and once a second while text streams, so it cannot
+  rewrite the file: that is O(n²) in session length, and it ran inside the TUI's
+  `async` draw loop. The REPL instead tracks how many messages the file holds and
+  hands the writer thread only the tail. A history that *shrank* (compaction,
+  rewind) or a session switch is sent as a rewrite, because an append would leave
+  a tail the session no longer has. Dropping the REPL joins the writer, so the
+  last turn reaches the disk before the process exits; `/clear` drops it first so
+  nothing queued is written into the file that was just removed. If the thread
+  cannot be spawned the same jobs run inline, on the caller's thread.
 - **`DataDirectories` (`codape-config`) is only partly adopted.**
   `sessions_db_path` is used for the workspace-local `<cwd>/.codape/sessions.db`
   by rooting a `DataDirectories` at `<cwd>/.codape`; `project_dir` and
