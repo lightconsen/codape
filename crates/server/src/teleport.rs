@@ -10,17 +10,21 @@
 //! Endpoints (all JSON):
 //!
 //! - `POST /teleport/shares` with `{"snapshot": {...}}` → `{"token": "..."}`
-//! - `GET /teleport/shares` → `{"shares": [{"token","session_id","created_at"}]}`
+//! - `GET /teleport/shares` → `{"shares": [{"session_id","created_at"}]}`
 //! - `GET /teleport/shares/{token}` → the snapshot
 //! - `DELETE /teleport/shares/{token}` → `204`, or `404` when it is gone
 //!
+//! Every request must carry `Authorization: Bearer <token>` from
+//! [`crate::auth::SERVICE_TOKENS_ENV`], except on a loopback bind with no token
+//! configured. See [`crate::auth`] for the rule and why it exists.
+//!
 //! The service is deliberately small enough to run on a laptop: no TLS, no
-//! accounts. Put it behind the deployment's own TLS and authentication (a
-//! reverse proxy, a private network) — the token is a capability, and anyone
-//! who has it can read the session.
+//! accounts. Put it behind the deployment's own TLS (a reverse proxy, a private
+//! network). The share token is a capability, and anyone who has it can read
+//! the session — which is why [`ShareInfo`] does not repeat it back: a listing
+//! nobody authenticated for must not hand out working capabilities.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +35,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+use crate::auth::{AuthError, ServiceAuth, ensure_exposure_is_authenticated, exposure_note};
 
 /// Path every teleport endpoint hangs off.
 pub const TELEPORT_SHARE_PATH: &str = "/teleport/shares";
@@ -48,6 +54,12 @@ struct Share {
 }
 
 /// What `GET /teleport/shares` reports for each share.
+///
+/// The token is included, and that is only safe because the endpoint is behind
+/// [`crate::auth`]: it used to be reachable with no credential at all, which
+/// made every share joinable by anyone who could reach the port. An operator
+/// holding the service token can already revoke; being able to see what is
+/// shared is the point of the listing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShareInfo {
     /// The capability token.
@@ -64,6 +76,7 @@ pub struct TeleportService {
     port: u16,
     ttl: Duration,
     shares: Arc<Mutex<HashMap<String, Share>>>,
+    auth: ServiceAuth,
 }
 
 impl TeleportService {
@@ -74,6 +87,7 @@ impl TeleportService {
             port,
             ttl: DEFAULT_TTL,
             shares: Arc::new(Mutex::new(HashMap::new())),
+            auth: ServiceAuth::default(),
         }
     }
 
@@ -84,7 +98,19 @@ impl TeleportService {
             port,
             ttl,
             shares: Arc::new(Mutex::new(HashMap::new())),
+            auth: ServiceAuth::default(),
         }
+    }
+
+    /// Require a bearer token on every request.
+    ///
+    /// The CLI fills this from [`crate::auth::SERVICE_TOKENS_ENV`]; a caller
+    /// that binds anything but loopback must call it, or [`Self::run`] refuses
+    /// to start.
+    #[must_use]
+    pub fn with_auth(mut self, auth: ServiceAuth) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// The configured port.
@@ -94,8 +120,16 @@ impl TeleportService {
     }
 
     /// Bind and serve until the process stops.
+    ///
+    /// The bind address comes from [`crate::auth::resolve_bind_addr`], which
+    /// defaults to loopback.
+    ///
+    /// # Errors
+    /// The address could not be resolved, the exposure is unauthenticated, or
+    /// the port could not be bound.
     pub async fn run(&self) -> Result<(), String> {
-        let addr: SocketAddr = ([0, 0, 0, 0], self.port).into();
+        let addr = crate::auth::resolve_bind_addr(None, self.port)?;
+        ensure_exposure_is_authenticated(&addr, &self.auth, "teleport service")?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|error| format!("failed to bind the teleport service on {addr}: {error}"))?;
@@ -110,7 +144,10 @@ impl TeleportService {
         let address = listener
             .local_addr()
             .map_err(|error| format!("could not read the listener address: {error}"))?;
-        info!("teleport rendezvous listening on http://{address}{TELEPORT_SHARE_PATH}");
+        info!(
+            "teleport rendezvous listening on http://{address}{TELEPORT_SHARE_PATH} ({})",
+            exposure_note(&address, &self.auth)
+        );
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -121,8 +158,9 @@ impl TeleportService {
             };
             let shares = Arc::clone(&self.shares);
             let ttl = self.ttl;
+            let auth = self.auth.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle(stream, shares, ttl).await {
+                if let Err(error) = handle(stream, shares, ttl, auth).await {
                     warn!("teleport request failed: {error}");
                 }
             });
@@ -189,14 +227,28 @@ async fn handle(
     mut stream: TcpStream,
     shares: Arc<Mutex<HashMap<String, Share>>>,
     ttl: Duration,
+    auth: ServiceAuth,
 ) -> Result<(), String> {
-    let (method, path, body) = read_request(&mut stream).await?;
+    let request = read_request(&mut stream).await?;
     let service = TeleportService {
         port: 0,
         ttl,
         shares,
+        auth: ServiceAuth::default(),
     };
 
+    // Authenticate before dispatching: the route table never sees a request
+    // that has not passed here, so no endpoint can be added later that forgets.
+    if let Err(refusal) = auth.check_authorization(request.authorization.as_deref()) {
+        let status = match refusal {
+            AuthError::Missing => 401,
+            AuthError::Invalid => 403,
+        };
+        return write_response(&mut stream, status, &json!({"error": refusal.message()})).await;
+    }
+
+    let (ref method, ref path) = (request.method, request.path);
+    let body = request.body;
     let response = match (method.as_str(), path.as_str()) {
         ("POST", TELEPORT_SHARE_PATH) => match parse_snapshot(&body) {
             Ok(snapshot) => match service.share(snapshot).await {
@@ -246,8 +298,17 @@ fn parse_snapshot(body: &[u8]) -> Result<Value, String> {
         .ok_or_else(|| "the request has no snapshot".to_string())
 }
 
-/// Read one HTTP request into method, path and body.
-async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>), String> {
+/// One parsed HTTP request.
+struct HttpRequest {
+    method: String,
+    path: String,
+    /// The raw `Authorization` header value, when one was sent.
+    authorization: Option<String>,
+    body: Vec<u8>,
+}
+
+/// Read one HTTP request.
+async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];
     let header_end = loop {
@@ -274,14 +335,19 @@ async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
 
-    let content_length = lines
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
+    let mut authorization = None;
+    let mut content_length = 0_usize;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().unwrap_or(0);
+        }
+    }
     if content_length > 64 * 1024 * 1024 {
         return Err("the request body is larger than 64 MiB".to_string());
     }
@@ -298,7 +364,12 @@ async fn read_request(stream: &mut TcpStream) -> Result<(String, String, Vec<u8>
         body.extend_from_slice(&chunk[..read]);
     }
     body.truncate(content_length);
-    Ok((method, path, body))
+    Ok(HttpRequest {
+        method,
+        path,
+        authorization,
+        body,
+    })
 }
 
 /// Write one JSON response.
@@ -308,6 +379,8 @@ async fn write_response(stream: &mut TcpStream, status: u16, body: &Value) -> Re
         201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         _ => "Unknown",
     };
@@ -378,6 +451,100 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "sess-1");
         assert!(!listed[0].token.is_empty());
+    }
+
+    #[tokio::test]
+    async fn listing_requires_a_token_when_one_is_configured() {
+        // The listing repeats share tokens, so it is exactly the endpoint that
+        // must never answer without a credential.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let service = TeleportService::new(0).with_auth(ServiceAuth::from_list("secret"));
+        let served = tokio::spawn(async move { service.run_on(listener).await });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(b"GET /teleport/shares HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "unauthenticated listing: {response}"
+        );
+
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_request_is_refused_before_routing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let service = TeleportService::new(0).with_auth(ServiceAuth::from_list("secret"));
+        let served = tokio::spawn(async move { service.run_on(listener).await });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(b"GET /teleport/shares HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "unauthenticated read: {response}"
+        );
+
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_request_reaches_the_route() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let service = TeleportService::new(0).with_auth(ServiceAuth::from_list("secret"));
+        let served = tokio::spawn(async move { service.run_on(listener).await });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(
+                b"GET /teleport/shares HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer secret\r\n\r\n",
+            )
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "authenticated read: {response}"
+        );
+
+        served.abort();
+    }
+
+    #[tokio::test]
+    async fn a_wrong_token_is_forbidden_not_unauthorized() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let service = TeleportService::new(0).with_auth(ServiceAuth::from_list("secret"));
+        let served = tokio::spawn(async move { service.run_on(listener).await });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(
+                b"GET /teleport/shares HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\n\r\n",
+            )
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "wrong token: {response}"
+        );
+
+        served.abort();
     }
 
     #[tokio::test]

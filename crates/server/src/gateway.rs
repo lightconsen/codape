@@ -31,7 +31,6 @@
 //!   request cannot lose a frame, and a worker never reads back its own.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -88,6 +87,7 @@ pub struct GatewayServer {
     port: u16,
     control_plane: Arc<Mutex<ControlPlaneState>>,
     mailboxes: Arc<Mutex<HashMap<String, Mailbox>>>,
+    auth: crate::auth::ServiceAuth,
 }
 
 impl GatewayServer {
@@ -98,7 +98,17 @@ impl GatewayServer {
             port,
             control_plane: Arc::new(Mutex::new(ControlPlaneState::default())),
             mailboxes: Arc::new(Mutex::new(HashMap::new())),
+            auth: crate::auth::ServiceAuth::default(),
         }
+    }
+
+    /// Require a bearer token on every request.
+    ///
+    /// A gateway that binds anything but loopback refuses to start without one.
+    #[must_use]
+    pub fn with_auth(mut self, auth: crate::auth::ServiceAuth) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// The control plane state, for an embedding process that wants to submit
@@ -109,8 +119,13 @@ impl GatewayServer {
     }
 
     /// Bind and serve until the process stops.
+    ///
+    /// # Errors
+    /// The bind address could not be resolved, the exposure is unauthenticated,
+    /// or the port could not be bound.
     pub async fn run(&self) -> Result<(), String> {
-        let addr: SocketAddr = ([0, 0, 0, 0], self.port).into();
+        let addr = crate::auth::resolve_bind_addr(None, self.port)?;
+        crate::auth::ensure_exposure_is_authenticated(&addr, &self.auth, "bridge gateway")?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|error| format!("failed to bind the gateway on {addr}: {error}"))?;
@@ -122,7 +137,10 @@ impl GatewayServer {
         let address = listener
             .local_addr()
             .map_err(|error| format!("could not read the listener address: {error}"))?;
-        info!("bridge gateway listening on http://{address}");
+        info!(
+            "bridge gateway listening on http://{address} ({})",
+            crate::auth::exposure_note(&address, &self.auth)
+        );
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -133,8 +151,9 @@ impl GatewayServer {
             };
             let control_plane = Arc::clone(&self.control_plane);
             let mailboxes = Arc::clone(&self.mailboxes);
+            let auth = self.auth.clone();
             tokio::spawn(async move {
-                if let Err(error) = handle(stream, control_plane, mailboxes).await {
+                if let Err(error) = handle(stream, control_plane, mailboxes, auth).await {
                     warn!("gateway request failed: {error}");
                 }
             });
@@ -212,9 +231,29 @@ async fn handle(
     mut stream: TcpStream,
     control_plane: Arc<Mutex<ControlPlaneState>>,
     mailboxes: Arc<Mutex<HashMap<String, Mailbox>>>,
+    auth: crate::auth::ServiceAuth,
 ) -> Result<(), String> {
-    let (method, path, query, body) = read_request(&mut stream).await?;
-    let response = route_request(&control_plane, &mailboxes, &method, &path, &query, &body).await;
+    let request = read_request(&mut stream).await?;
+
+    // Authenticate before routing: every endpoint this serves, including the
+    // control plane routes it delegates to, is behind the same check.
+    if let Err(refusal) = auth.check_authorization(request.authorization.as_deref()) {
+        let status = match refusal {
+            crate::auth::AuthError::Missing => 401,
+            crate::auth::AuthError::Invalid => 403,
+        };
+        return write_response(&mut stream, status, &json!({"error": refusal.message()})).await;
+    }
+
+    let response = route_request(
+        &control_plane,
+        &mailboxes,
+        &request.method,
+        &request.path,
+        &request.query,
+        &request.body,
+    )
+    .await;
     write_response(&mut stream, response.0, &response.1).await
 }
 
@@ -287,10 +326,18 @@ fn frames_environment(path: &str) -> Option<&str> {
     Some(rest)
 }
 
-/// Read one HTTP request into method, path, query and body.
-async fn read_request(
-    stream: &mut TcpStream,
-) -> Result<(String, String, HashMap<String, String>, Vec<u8>), String> {
+/// One parsed HTTP request.
+struct HttpRequest {
+    method: String,
+    path: String,
+    query: HashMap<String, String>,
+    /// The raw `Authorization` header value, when one was sent.
+    authorization: Option<String>,
+    body: Vec<u8>,
+}
+
+/// Read one HTTP request.
+async fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 8192];
     let header_end = loop {
@@ -321,14 +368,19 @@ async fn read_request(
         None => (target, HashMap::new()),
     };
 
-    let content_length = lines
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
+    let mut authorization = None;
+    let mut content_length = 0_usize;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_string());
+        } else if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse::<usize>().unwrap_or(0);
+        }
+    }
     if content_length > 64 * 1024 * 1024 {
         return Err("the request body is larger than 64 MiB".to_string());
     }
@@ -345,7 +397,13 @@ async fn read_request(
         body.extend_from_slice(&chunk[..read]);
     }
     body.truncate(content_length);
-    Ok((method, path, query, body))
+    Ok(HttpRequest {
+        method,
+        path,
+        query,
+        authorization,
+        body,
+    })
 }
 
 /// Parse `a=1&b=2` into a map. Repeated keys keep the first value.

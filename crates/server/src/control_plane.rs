@@ -12,7 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -181,6 +180,8 @@ pub struct ControlPlaneServer {
     pub port: u16,
     /// Shared state.
     pub state: Arc<Mutex<ControlPlaneState>>,
+    /// Bearer tokens accepted on every request.
+    pub auth: crate::auth::ServiceAuth,
 }
 
 impl ControlPlaneServer {
@@ -190,25 +191,42 @@ impl ControlPlaneServer {
         Self {
             port,
             state: Arc::new(Mutex::new(ControlPlaneState::default())),
+            auth: crate::auth::ServiceAuth::default(),
         }
     }
 
     /// Create a server with pre-existing state.
     #[must_use]
-    pub const fn with_state(port: u16, state: Arc<Mutex<ControlPlaneState>>) -> Self {
-        Self { port, state }
+    pub fn with_state(port: u16, state: Arc<Mutex<ControlPlaneState>>) -> Self {
+        Self {
+            port,
+            state,
+            auth: crate::auth::ServiceAuth::default(),
+        }
+    }
+
+    /// Require a bearer token on every request.
+    #[must_use]
+    pub fn with_auth(mut self, auth: crate::auth::ServiceAuth) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// Start the control plane HTTP server.
+    ///
+    /// # Errors
+    /// The bind address could not be resolved, the exposure is unauthenticated,
+    /// or the port could not be bound.
     pub async fn run(&self) -> Result<(), String> {
-        let addr: SocketAddr = ([0, 0, 0, 0], self.port).into();
+        let addr = crate::auth::resolve_bind_addr(None, self.port)?;
+        crate::auth::ensure_exposure_is_authenticated(&addr, &self.auth, "control plane")?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| format!("failed to bind control plane on port {}: {e}", self.port))?;
 
         info!(
-            "Control plane server listening on http://0.0.0.0:{}/api/environments",
-            self.port
+            "Control plane server listening on http://{addr}/api/environments ({})",
+            crate::auth::exposure_note(&addr, &self.auth)
         );
 
         loop {
@@ -220,8 +238,9 @@ impl ControlPlaneServer {
                 }
             };
             let state = Arc::clone(&self.state);
+            let auth = self.auth.clone();
             tokio::spawn(async move {
-                let _ = handle_request(stream, state).await;
+                let _ = handle_request(stream, state, auth).await;
             });
         }
     }
@@ -231,6 +250,7 @@ impl ControlPlaneServer {
 async fn handle_request(
     stream: tokio::net::TcpStream,
     state: Arc<Mutex<ControlPlaneState>>,
+    auth: crate::auth::ServiceAuth,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt;
 
@@ -254,6 +274,25 @@ async fn handle_request(
     }
     let method = parts[0];
     let path = parts[1];
+
+    // Authenticate from the head before any body is read or any route runs.
+    let authorization = request.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("authorization")
+            .then(|| value.trim().to_string())
+    });
+    if let Err(refusal) = auth.check_authorization(authorization.as_deref()) {
+        let status = match refusal {
+            crate::auth::AuthError::Missing => 401,
+            crate::auth::AuthError::Invalid => 403,
+        };
+        return write_response(
+            &mut writer,
+            status,
+            &serde_json::json!({"error": refusal.message()}),
+        )
+        .await;
+    }
 
     // Read body if Content-Length present
     let body: String = if let Some(content_len_line) = request
@@ -523,6 +562,8 @@ async fn write_response<S: tokio::io::AsyncWrite + Unpin>(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         500 => "Internal Server Error",
