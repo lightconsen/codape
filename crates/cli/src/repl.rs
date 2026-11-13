@@ -2257,60 +2257,17 @@ impl TranscriptSink {
 pub struct ReplLoop {
     /// Command registry.
     commands: CommandRegistry,
-    /// Current model.
-    model: ModelId,
+    /// Which model to call, how much it may emit, and whether it was chosen.
+    model: ModelSettings,
     /// Telemetry handle when the session opted in.
     ///
     /// Used to record `tool_used`, `api_call` and `error` events; session
     /// start/end are owned by the orchestrator.
     telemetry: Option<codape_telemetry::TelemetryHandle>,
-    /// Agent definitions contributed by active plugins.
-    plugin_agents: Vec<(String, serde_json::Value)>,
-    /// Named workflow scripts contributed by plugins (shared with the tool).
-    plugin_workflows: Option<Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
-    /// Plugin themes, as `(name, theme JSON)`.
-    plugin_themes: Vec<(String, serde_json::Value)>,
-    /// Plugin output styles, as `(name, style document)`.
-    plugin_output_styles: Vec<(String, serde_json::Value)>,
-    /// Plugin monitor declarations, started with the session.
-    plugin_monitors: Option<serde_json::Value>,
-    /// The running monitor supervisor, when any monitor was armed.
-    monitor_supervisor: Option<crate::plugin_monitors::PluginMonitorSupervisor>,
-    /// Plugin LSP server configurations, as `(name, config)`.
-    plugin_lsp_servers: Vec<(String, serde_json::Value)>,
-    /// Default the `LSP` tool applies when a call names no server.
-    lsp_defaults: Arc<std::sync::RwLock<Option<PluginLspDefaults>>>,
-    /// Plugin channels, types, binaries and experimental data, for `/plugin`.
-    plugin_other_components: Vec<(String, Vec<String>)>,
-    /// In-flight tool calls, keyed by call id, for duration/success events.
-    tool_starts: std::collections::HashMap<String, (String, std::time::Instant)>,
-    /// Model-written labels from `ToolUseSummary`, keyed by tool-call id.
-    ///
-    /// `ToolCallStart` consumes the entry so the activity row shows the
-    /// summary the engine produced under `tool_use_summaries`; when the flag
-    /// is off the map stays empty and the start event's own label is used.
-    tool_use_summaries: std::collections::HashMap<String, String>,
-    /// Names of in-flight tool calls, keyed by call id, so a failure can say
-    /// *which* tool failed. `ToolCallEnd` carries only the result.
-    tool_names: std::collections::HashMap<String, String>,
-    /// Session usage at the end of the previous turn, for per-turn deltas.
-    last_usage: codape_core::types::UsageSummary,
-    /// Model to retry with once when the primary model is unavailable
-    /// (`--fallback-model`).
-    fallback_model: Option<ModelId>,
-    /// Maximum output tokens per provider request.
-    ///
-    /// A named custom agent may set this; `CODAPE_MAX_TOKENS` may set it too.
-    /// The definition wins, because it was written for this session while the
-    /// variable is ambient. [`Self::max_tokens_from_agent`] records which
-    /// happened, so the environment is not applied over a definition that
-    /// happens to equal the default.
-    max_tokens: u32,
-    /// True when a named agent definition supplied [`Self::max_tokens`].
-    max_tokens_from_agent: bool,
-    /// True when `--model` was given. A named custom agent's `model` must not
-    /// override an explicitly chosen session model.
-    explicit_model_override: bool,
+    /// What the active plugins contributed: agents, themes, LSP servers and so on.
+    plugins: PluginState,
+    /// In-flight tool calls, so the activity rows can report duration and labels.
+    tools: ToolActivity,
     /// Current working directory.
     cwd: String,
     /// Whether the loop should continue.
@@ -2324,38 +2281,12 @@ pub struct ReplLoop {
     setup_error: Option<String>,
     /// Prompt history.
     history: Vec<String>,
-    /// QueryEngine for processing user queries (14.1 wired).
-    engine: Option<QueryEngine>,
-    /// Event receiver for streaming output.
-    event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
-    /// Session-level effects from commands.
-    session_effects: SessionEffects,
-    /// API client for orchestrator side-queries (title, permission explain, etc.).
-    api_client: Option<Box<dyn ApiClient>>,
-    /// Orchestrator for routing AI calls through product-level entry points.
-    orchestrator: Option<codape_core::orchestrator::Orchestrator>,
-    /// Active background tasks (observable + cancelable).
-    background_tasks: Vec<BackgroundTask>,
-    /// Sender for background task results back to the UI thread.
-    background_results_tx: Option<mpsc::UnboundedSender<BackgroundTaskResult>>,
-    /// Receiver for background task results.
-    background_results_rx: Option<mpsc::UnboundedReceiver<BackgroundTaskResult>>,
-    /// Session memory store for persisting session facts.
-    session_memory_store: Option<Arc<SessionMemoryStore>>,
-    /// Long-term memory store for extracted memories.
-    long_term_store: Option<Arc<LongTermStore>>,
-    /// Session ID for memory operations.
-    session_id: Option<uuid::Uuid>,
-    /// Auto-dream manager for background session consolidation.
-    auto_dream: Option<Arc<AutoDream>>,
-    /// Shutdown signal for the auto-dream watcher.
-    dream_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    /// Team memory sync service for cross-repo memory sharing.
-    team_memory_service: Option<Arc<TeamMemorySyncService>>,
-    /// Whether the memory tools may write. Cleared by
-    /// `--no-session-persistence`, which arrives after the tools are
-    /// registered, so the tools read it at call time.
-    memory_writable: Arc<std::sync::atomic::AtomicBool>,
+    /// The engine and everything the CLI talks to it through.
+    session: SessionHandles,
+    /// Shell and agent work running off the turn's critical path.
+    background: BackgroundWork,
+    /// Session and long-term memory, and the consolidation service behind them.
+    memory: MemoryState,
     /// The live file watcher behind `FileChanged`.
     ///
     /// The receiver alone is not enough: `notify` stops watching when its
@@ -2394,45 +2325,10 @@ pub struct ReplLoop {
     command_history: CommandHistory,
     /// Macro registry for user-defined command sequences.
     macro_registry: MacroRegistry,
-    /// Lifecycle hooks from settings, installed on the engine by
-    /// [`apply_cli_config`](Self::apply_cli_config).
-    hooks_settings: Option<serde_json::Value>,
-    /// The same hooks split by source tier, when the settings service resolved
-    /// them.
-    ///
-    /// [`hooks_settings`](Self::hooks_settings) is the merged view kept for
-    /// compatibility. When this is present it is authoritative for
-    /// installation: managed hooks are installed as
-    /// [`HookTier::Managed`](codape_hooks::HookTier::Managed) and the core
-    /// document is installed as `Core`, so a managed hook neither loses its
-    /// position nor runs a second time through the merged document.
-    hook_layers: Option<codape_config::settings::HookLayers>,
-    /// How many hooks the installed executor is actually running.
-    ///
-    /// `/hooks` and `/status` used to read `CommandContext.active_hooks`,
-    /// which nothing ever assigned, so they always reported zero.
-    active_hooks: usize,
-    /// Handle for delivering mod UI button activations to the mod worker.
-    ///
-    /// Kept after the executor is installed so the terminal can press a
-    /// button without reaching into the engine.
-    mod_ui_handle: Option<codape_mods::ModUiHandle>,
-    /// Messages mods queued with `$.session.submit(text)`.
-    ///
-    /// The engine never drains this queue. The turn loop takes from it at an
-    /// idle boundary and submits each message as an ordinary user turn. When
-    /// mods are not installed it stays empty.
-    mod_submit_queue: codape_mods::ModSubmitQueue,
-    /// Consecutive mod-submitted turns since the last person-initiated prompt.
-    ///
-    /// The loop guard reads this through [`plan_mod_drain`]. Reset when a
-    /// person submits a prompt.
-    mod_auto_turns: usize,
-    /// Mod messages already drained since the last person-initiated prompt.
-    mod_prompts_this_turn: usize,
-    /// Whether the person has already been told that the timeout breaker
-    /// disabled mods. The breaker is sticky, so the message is shown once.
-    mods_disabled_reported: bool,
+    /// Lifecycle hooks: what was configured, and how many the executor runs.
+    hooks: HookState,
+    /// Mod runtime state: the UI handle, the submit queue and the loop guard.
+    mods: ModState,
     /// Where the line-delimited protocol goes, when `--output-format
     /// stream-json` was asked for.
     ///
@@ -2440,87 +2336,109 @@ pub struct ReplLoop {
     /// boxed rather than pinned to `Stdout` so a test can read back what a turn
     /// emitted.
     protocol_sink: Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
-    /// Whether a headless turn negotiates tool approvals over stdin.
-    ///
-    /// Enabled only when the host can answer (see
-    /// [`with_headless_permission_control`](Self::with_headless_permission_control)):
-    /// a `can_use_tool` request goes out on the protocol sink and a
-    /// `control_response` line is read from stdin. When this is off, an `Ask`
-    /// keeps the pre-existing headless behaviour (the tool does not run).
-    headless_permission_control: bool,
-    /// Pending destructive command awaiting confirmation.
-    pending_destructive_cmd: Option<(String, Vec<String>)>,
-    /// Plugin manager for dynamic plugin commands and tools.
-    plugin_manager: Option<Arc<codape_plugins::plugins::PluginManager>>,
-    /// Primary tool executor (stored so plugin fallback can be layered on top).
-    _primary_tool_executor: Option<Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync>>,
-    /// Dispatcher reference for setting per-turn state (e.g., elicitation channel).
-    dispatcher: Option<Arc<RegistryToolDispatcher>>,
-    /// Sub-agent lifecycle manager shared with the registered Agent tool.
-    agent_manager: Option<Arc<tokio::sync::Mutex<AgentManager>>>,
-    /// Parent conversation snapshot read by the Agent tool when it forks a
-    /// sub-agent. Updated immediately before each turn so a spawn reuses the
-    /// conversation as it was when the turn started.
-    parent_context_snapshot: Arc<std::sync::Mutex<Option<ParentContextSnapshot>>>,
-    /// Filtered broadcast subscription used to observe sub-agent events
-    /// directly (as opposed to lifecycle events forwarded through the parent
-    /// engine bus).
-    agent_observable_rx: Option<AgentSubscription>,
-    /// The live MCP servers, filled in by `with_mcp_manager`.
-    ///
-    /// A slot rather than a plain field because the sub-agent tool factory is
-    /// built before the MCP servers are attached, and reads this when it later
-    /// builds a child registry.
-    mcp_manager: Arc<std::sync::RwLock<Option<Arc<codape_mcp::manager::McpManager>>>>,
-    /// Slash-command names already registered for discovered MCP prompts.
-    ///
-    /// The command registry is append-only, so a refresh records what it has
-    /// already added instead of registering the same prompt twice. A prompt
-    /// that disappears from a server keeps its command; invoking it fails with
-    /// that server's error.
-    mcp_prompt_commands: std::collections::HashSet<String>,
-    /// Session handler for questions MCP servers ask, when one was installed.
-    ///
-    /// The manager already holds the inbound half; the TUI needs the same
-    /// object to register its question channel, so the session keeps it too.
-    mcp_elicitation: Option<Arc<SessionElicitationHandler>>,
-    /// The server artifacts are published to, kept alive for the session.
-    ///
-    /// Dropping it would leave the model publishing pages nobody can open.
-    artifact_server: Option<codape_artifacts::ArtifactServer>,
-    /// Where artifacts are stored, when it is not the default location.
-    artifact_store_root: Option<std::path::PathBuf>,
+    /// How tool calls are approved for this session.
+    permissions: SessionPermissions,
+    /// The tool dispatcher and the sub-agent handles built on top of it.
+    agents: AgentRuntime,
+    /// MCP servers, their prompts, and anything waiting on an answer.
+    mcp: McpState,
+    /// The artifact server, kept alive for the session, and where it writes.
+    artifacts: ArtifactPublishing,
     /// The turn currently running in a task, so a key handler can stop it.
     running_query: Option<codape_core::engine::InterruptHandle>,
-    /// Pending elicitation response sender — when set, user input is treated as an answer.
-    pending_elicitation: Option<tokio::sync::oneshot::Sender<serde_json::Value>>,
-    /// The multi-field form being filled, when the pending elicitation is one.
-    ///
-    /// Kept separately from `pending_elicitation` because the TUI edits it
-    /// with navigation keys rather than reading one line of free text.
-    pending_mcp_form: Option<crate::mcp_elicitation::McpFormState>,
-    /// Confirmation bus for interactive permission requests.
-    confirmation_bus: Option<ConfirmationBus>,
     /// Receiver for cron job fire events.
     cron_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(String, String)>>,
     /// Teleport manager for session sharing and directory switching.
     teleport_manager: Option<codape_bridge::teleport::TeleportManager>,
-    /// Skip permission prompts (--dangerously-skip-permissions).
-    skip_permissions: bool,
-    /// Permission mode override (--permissions).
-    permission_mode: Option<PermissionMode>,
-    /// Settings-defined allow/deny/ask rules, installed once by
-    /// `apply_cli_config`.
-    permission_rules: Option<codape_config::PermissionsSettings>,
-    /// Whether the rules above have already been compiled into the checker.
-    permission_rules_installed: bool,
-    /// Disable session persistence (--no-session-persistence).
-    no_persistence: bool,
+    /// Session-shaping flags from the command line, resolved into feature flags.
+    options: SessionOptions,
     /// The interactive transcript's writer, started on the first persist.
     ///
     /// A mutex because the persist call sites take `&self`; nothing else
     /// contends for it, and the lock is never held across an `.await`.
     transcript: std::sync::Mutex<Option<TranscriptSink>>,
+    /// Shared enable bit of the already-registered Workflow tool.
+    ///
+    /// The registry is built before `--betas` is applied and cannot be
+    /// mutated afterwards, so the tool reads this bit on every call.
+    workflow_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Terminal preferences: keybindings, theme and the elapsed-time clock.
+    ui: UiPreferences,
+}
+
+/// In-flight tool calls, so the activity rows can report duration and labels.
+struct ToolActivity {
+    /// In-flight tool calls, keyed by call id, for duration/success events.
+    starts: std::collections::HashMap<String, (String, std::time::Instant)>,
+    /// Model-written labels from `ToolUseSummary`, keyed by tool-call id.
+    ///
+    /// `ToolCallStart` consumes the entry so the activity row shows the
+    /// summary the engine produced under `tool_use_summaries`; when the flag
+    /// is off the map stays empty and the start event's own label is used.
+    use_summaries: std::collections::HashMap<String, String>,
+    /// Names of in-flight tool calls, keyed by call id, so a failure can say
+    /// *which* tool failed. `ToolCallEnd` carries only the result.
+    names: std::collections::HashMap<String, String>,
+    /// Session usage at the end of the previous turn, for per-turn deltas.
+    last_usage: codape_core::types::UsageSummary,
+}
+
+/// Shell and agent work running off the turn's critical path.
+struct BackgroundWork {
+    /// Active background tasks (observable + cancelable).
+    tasks: Vec<BackgroundTask>,
+    /// Sender for background task results back to the UI thread.
+    results_tx: Option<mpsc::UnboundedSender<BackgroundTaskResult>>,
+    /// Receiver for background task results.
+    results_rx: Option<mpsc::UnboundedReceiver<BackgroundTaskResult>>,
+}
+
+/// The tool dispatcher and the sub-agent handles built on top of it.
+struct AgentRuntime {
+    /// Primary tool executor (stored so plugin fallback can be layered on top).
+    _primary_executor: Option<Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync>>,
+    /// Dispatcher reference for setting per-turn state (e.g., elicitation channel).
+    dispatcher: Option<Arc<RegistryToolDispatcher>>,
+    /// Sub-agent lifecycle manager shared with the registered Agent tool.
+    manager: Option<Arc<tokio::sync::Mutex<AgentManager>>>,
+    /// Parent conversation snapshot read by the Agent tool when it forks a
+    /// sub-agent. Updated immediately before each turn so a spawn reuses the
+    /// conversation as it was when the turn started.
+    parent_snapshot: Arc<std::sync::Mutex<Option<ParentContextSnapshot>>>,
+    /// Filtered broadcast subscription used to observe sub-agent events
+    /// directly (as opposed to lifecycle events forwarded through the parent
+    /// engine bus).
+    observable_rx: Option<AgentSubscription>,
+}
+
+/// The artifact server, kept alive for the session, and where it writes.
+struct ArtifactPublishing {
+    /// The server artifacts are published to, kept alive for the session.
+    ///
+    /// Dropping it would leave the model publishing pages nobody can open.
+    server: Option<codape_artifacts::ArtifactServer>,
+    /// Where artifacts are stored, when it is not the default location.
+    store_root: Option<std::path::PathBuf>,
+}
+
+/// The engine and everything the CLI talks to it through.
+struct SessionHandles {
+    /// QueryEngine for processing user queries (14.1 wired).
+    engine: Option<QueryEngine>,
+    /// Event receiver for streaming output.
+    event_rx: Option<mpsc::UnboundedReceiver<EngineEvent>>,
+    /// Session-level effects from commands.
+    effects: SessionEffects,
+    /// API client for orchestrator side-queries (title, permission explain, etc.).
+    api_client: Option<Box<dyn ApiClient>>,
+    /// Orchestrator for routing AI calls through product-level entry points.
+    orchestrator: Option<codape_core::orchestrator::Orchestrator>,
+}
+
+/// Session-shaping flags from the command line, resolved into feature flags.
+struct SessionOptions {
+    /// Disable session persistence (--no-session-persistence).
+    no_persistence: bool,
     /// Disable slash commands (--disable-slash-commands).
     no_slash_commands: bool,
     /// JSON schema for structured output (--json-schema).
@@ -2549,11 +2467,6 @@ pub struct ReplLoop {
     /// Feature flags resolved for this session: the environment plus
     /// `--betas` overrides.
     feature_flags: codape_config::flags::FeatureFlags,
-    /// Shared enable bit of the already-registered Workflow tool.
-    ///
-    /// The registry is built before `--betas` is applied and cannot be
-    /// mutated afterwards, so the tool reads this bit on every call.
-    workflow_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Capabilities derived from [`Self::feature_flags`].
     capabilities: codape_config::flags::CapabilitySet,
     /// Settings-file context-window overrides, layered into the engine's
@@ -2581,6 +2494,12 @@ pub struct ReplLoop {
     tmux_enabled: bool,
     /// Debug file path (--debug-file).
     debug_file: Option<std::path::PathBuf>,
+    /// Session id to resume into the current interactive loop.
+    resume_session: Option<String>,
+}
+
+/// Terminal preferences: keybindings, theme and the elapsed-time clock.
+struct UiPreferences {
     /// When the current query started (for elapsed-time display).
     query_start_time: Option<std::time::Instant>,
     /// Whether Vim keybindings are enabled for interactive input.
@@ -2596,8 +2515,173 @@ pub struct ReplLoop {
     /// The directory `--worktree` moved the session out of, replayed into
     /// `CwdChanged` once the hooks are installed.
     worktree_previous_cwd: Option<std::path::PathBuf>,
-    /// Session id to resume into the current interactive loop.
-    resume_session: Option<String>,
+}
+
+/// Which model to call, how much it may emit, and whether it was chosen.
+struct ModelSettings {
+    /// Current model.
+    current: ModelId,
+    /// Model to retry with once when the primary model is unavailable
+    /// (`--fallback-model`).
+    fallback_model: Option<ModelId>,
+    /// Maximum output tokens per provider request.
+    ///
+    /// A named custom agent may set this; `CODAPE_MAX_TOKENS` may set it too.
+    /// The definition wins, because it was written for this session while the
+    /// variable is ambient. [`Self::max_tokens_from_agent`] records which
+    /// happened, so the environment is not applied over a definition that
+    /// happens to equal the default.
+    max_tokens: u32,
+    /// True when a named agent definition supplied [`Self::max_tokens`].
+    max_tokens_from_agent: bool,
+    /// True when `--model` was given. A named custom agent's `model` must not
+    /// override an explicitly chosen session model.
+    explicit_model_override: bool,
+}
+
+/// What the active plugins contributed: agents, themes, LSP servers and so on.
+struct PluginState {
+    /// Agent definitions contributed by active plugins.
+    agents: Vec<(String, serde_json::Value)>,
+    /// Named workflow scripts contributed by plugins (shared with the tool).
+    workflows: Option<Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>>,
+    /// Plugin themes, as `(name, theme JSON)`.
+    themes: Vec<(String, serde_json::Value)>,
+    /// Plugin output styles, as `(name, style document)`.
+    output_styles: Vec<(String, serde_json::Value)>,
+    /// Plugin monitor declarations, started with the session.
+    monitors: Option<serde_json::Value>,
+    /// The running monitor supervisor, when any monitor was armed.
+    supervisor: Option<crate::plugin_monitors::PluginMonitorSupervisor>,
+    /// Plugin LSP server configurations, as `(name, config)`.
+    lsp_servers: Vec<(String, serde_json::Value)>,
+    /// Default the `LSP` tool applies when a call names no server.
+    lsp_defaults: Arc<std::sync::RwLock<Option<PluginLspDefaults>>>,
+    /// Plugin channels, types, binaries and experimental data, for `/plugin`.
+    other_components: Vec<(String, Vec<String>)>,
+    /// Plugin manager for dynamic plugin commands and tools.
+    manager: Option<Arc<codape_plugins::plugins::PluginManager>>,
+}
+
+/// How tool calls are approved for this session.
+struct SessionPermissions {
+    /// Whether a headless turn negotiates tool approvals over stdin.
+    ///
+    /// Enabled only when the host can answer (see
+    /// [`with_headless_permission_control`](ReplLoop::with_headless_permission_control)):
+    /// a `can_use_tool` request goes out on the protocol sink and a
+    /// `control_response` line is read from stdin. When this is off, an `Ask`
+    /// keeps the pre-existing headless behaviour (the tool does not run).
+    headless_control: bool,
+    /// Pending destructive command awaiting confirmation.
+    pending_destructive_cmd: Option<(String, Vec<String>)>,
+    /// Confirmation bus for interactive permission requests.
+    confirmation_bus: Option<ConfirmationBus>,
+    /// Skip permission prompts (--dangerously-skip-permissions).
+    skip: bool,
+    /// Permission mode override (--permissions).
+    mode: Option<PermissionMode>,
+    /// Settings-defined allow/deny/ask rules, installed once by
+    /// `apply_cli_config`.
+    rules: Option<codape_config::PermissionsSettings>,
+    /// Whether the rules above have already been compiled into the checker.
+    rules_installed: bool,
+}
+
+/// Lifecycle hooks: what was configured, and how many the executor runs.
+struct HookState {
+    /// Lifecycle hooks from settings, installed on the engine by
+    /// [`apply_cli_config`](ReplLoop::apply_cli_config).
+    settings: Option<serde_json::Value>,
+    /// The same hooks split by source tier, when the settings service resolved
+    /// them.
+    ///
+    /// [`settings`](HookState::settings) is the merged view kept for
+    /// compatibility. When this is present it is authoritative for
+    /// installation: managed hooks are installed as
+    /// [`HookTier::Managed`](codape_hooks::HookTier::Managed) and the core
+    /// document is installed as `Core`, so a managed hook neither loses its
+    /// position nor runs a second time through the merged document.
+    layers: Option<codape_config::settings::HookLayers>,
+    /// How many hooks the installed executor is actually running.
+    ///
+    /// `/hooks` and `/status` used to read `CommandContext.active_hooks`,
+    /// which nothing ever assigned, so they always reported zero.
+    active: usize,
+}
+
+/// Mod runtime state: the UI handle, the submit queue and the loop guard.
+struct ModState {
+    /// Handle for delivering mod UI button activations to the mod worker.
+    ///
+    /// Kept after the executor is installed so the terminal can press a
+    /// button without reaching into the engine.
+    ui_handle: Option<codape_mods::ModUiHandle>,
+    /// Messages mods queued with `$.session.submit(text)`.
+    ///
+    /// The engine never drains this queue. The turn loop takes from it at an
+    /// idle boundary and submits each message as an ordinary user turn. When
+    /// mods are not installed it stays empty.
+    submit_queue: codape_mods::ModSubmitQueue,
+    /// Consecutive mod-submitted turns since the last person-initiated prompt.
+    ///
+    /// The loop guard reads this through [`plan_mod_drain`]. Reset when a
+    /// person submits a prompt.
+    auto_turns: usize,
+    /// Mod messages already drained since the last person-initiated prompt.
+    prompts_this_turn: usize,
+    /// Whether the person has already been told that the timeout breaker
+    /// disabled mods. The breaker is sticky, so the message is shown once.
+    disabled_reported: bool,
+}
+
+/// MCP servers, their prompts, and anything waiting on an answer.
+struct McpState {
+    /// The live MCP servers, filled in by `with_mcp_manager`.
+    ///
+    /// A slot rather than a plain field because the sub-agent tool factory is
+    /// built before the MCP servers are attached, and reads this when it later
+    /// builds a child registry.
+    manager: Arc<std::sync::RwLock<Option<Arc<codape_mcp::manager::McpManager>>>>,
+    /// Slash-command names already registered for discovered MCP prompts.
+    ///
+    /// The command registry is append-only, so a refresh records what it has
+    /// already added instead of registering the same prompt twice. A prompt
+    /// that disappears from a server keeps its command; invoking it fails with
+    /// that server's error.
+    prompt_commands: std::collections::HashSet<String>,
+    /// Session handler for questions MCP servers ask, when one was installed.
+    ///
+    /// The manager already holds the inbound half; the TUI needs the same
+    /// object to register its question channel, so the session keeps it too.
+    elicitation: Option<Arc<SessionElicitationHandler>>,
+    /// Pending elicitation response sender — when set, user input is treated as an answer.
+    pending_elicitation: Option<tokio::sync::oneshot::Sender<serde_json::Value>>,
+    /// The multi-field form being filled, when the pending elicitation is one.
+    ///
+    /// Kept separately from `pending_elicitation` because the TUI edits it
+    /// with navigation keys rather than reading one line of free text.
+    pending_form: Option<crate::mcp_elicitation::McpFormState>,
+}
+
+/// Session and long-term memory, and the consolidation service behind them.
+struct MemoryState {
+    /// Session memory store for persisting session facts.
+    session_store: Option<Arc<SessionMemoryStore>>,
+    /// Long-term memory store for extracted memories.
+    long_term: Option<Arc<LongTermStore>>,
+    /// Session ID for memory operations.
+    session_id: Option<uuid::Uuid>,
+    /// Auto-dream manager for background session consolidation.
+    auto_dream: Option<Arc<AutoDream>>,
+    /// Shutdown signal for the auto-dream watcher.
+    dream_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Team memory sync service for cross-repo memory sharing.
+    team_sync: Option<Arc<TeamMemorySyncService>>,
+    /// Whether the memory tools may write. Cleared by
+    /// `--no-session-persistence`, which arrives after the tools are
+    /// registered, so the tools read it at call time.
+    writable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 // Manual impl: many fields (trait objects, channels, locks) are not `Debug`,
@@ -2785,76 +2869,104 @@ impl ReplLoop {
         codape_commands::registry::register_all_commands(&mut commands);
         let mut this = Self {
             commands,
-            model,
-            fallback_model: None,
+            model: ModelSettings {
+                current: model,
+                fallback_model: None,
+                max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
+                max_tokens_from_agent: false,
+                explicit_model_override: false,
+            },
             telemetry: None,
-            plugin_agents: Vec::new(),
-            plugin_workflows: None,
-            plugin_themes: Vec::new(),
-            plugin_output_styles: Vec::new(),
-            plugin_monitors: None,
-            monitor_supervisor: None,
-            plugin_lsp_servers: Vec::new(),
-            lsp_defaults: Arc::new(std::sync::RwLock::new(None)),
-            plugin_other_components: Vec::new(),
-            tool_starts: std::collections::HashMap::new(),
-            tool_use_summaries: std::collections::HashMap::new(),
-            tool_names: std::collections::HashMap::new(),
-            last_usage: codape_core::types::UsageSummary::default(),
-            max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
-            max_tokens_from_agent: false,
-            explicit_model_override: false,
+            plugins: PluginState {
+                agents: Vec::new(),
+                workflows: None,
+                themes: Vec::new(),
+                output_styles: Vec::new(),
+                monitors: None,
+                supervisor: None,
+                lsp_servers: Vec::new(),
+                lsp_defaults: Arc::new(std::sync::RwLock::new(None)),
+                other_components: Vec::new(),
+                manager: None,
+            },
+            tools: ToolActivity {
+                starts: std::collections::HashMap::new(),
+                use_summaries: std::collections::HashMap::new(),
+                names: std::collections::HashMap::new(),
+                last_usage: codape_core::types::UsageSummary::default(),
+            },
             cwd,
             running: true,
             setup_error: None,
             history: Vec::new(),
-            engine: None,
-            event_rx: None,
-            session_effects: SessionEffects::default(),
-            api_client: None,
-            orchestrator: None,
-            background_tasks: Vec::new(),
-            background_results_tx: None,
-            background_results_rx: None,
-            session_memory_store: None,
-            long_term_store: None,
-            session_id: None,
-            auto_dream: None,
-            dream_shutdown_tx: None,
-            team_memory_service: None,
-            memory_writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            session: SessionHandles {
+                engine: None,
+                event_rx: None,
+                effects: SessionEffects::default(),
+                api_client: None,
+                orchestrator: None,
+            },
+            background: BackgroundWork {
+                tasks: Vec::new(),
+                results_tx: None,
+                results_rx: None,
+            },
+            memory: MemoryState {
+                session_store: None,
+                long_term: None,
+                session_id: None,
+                auto_dream: None,
+                dream_shutdown: None,
+                team_sync: None,
+                writable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
             workflow_enabled: Arc::new(std::sync::atomic::AtomicBool::new(
                 codape_config::flags::FeatureFlags::from_env().workflow_scripts,
             )),
             command_history: CommandHistory::new(1000),
             macro_registry: MacroRegistry::new(),
-            hooks_settings: None,
-            hook_layers: None,
-            active_hooks: 0,
-            mod_ui_handle: None,
-            mod_submit_queue: codape_mods::ModSubmitQueue::default(),
-            mod_auto_turns: 0,
-            mod_prompts_this_turn: 0,
-            mods_disabled_reported: false,
+            hooks: HookState {
+                settings: None,
+                layers: None,
+                active: 0,
+            },
+            mods: ModState {
+                ui_handle: None,
+                submit_queue: codape_mods::ModSubmitQueue::default(),
+                auto_turns: 0,
+                prompts_this_turn: 0,
+                disabled_reported: false,
+            },
             checkpoint_store: None,
             protocol_sink: None,
-            headless_permission_control: false,
-            pending_destructive_cmd: None,
-            plugin_manager: None,
-            _primary_tool_executor: None,
-            dispatcher: None,
-            agent_manager: None,
-            parent_context_snapshot: Arc::new(std::sync::Mutex::new(None)),
-            agent_observable_rx: None,
-            mcp_manager: Arc::new(std::sync::RwLock::new(None)),
-            mcp_prompt_commands: std::collections::HashSet::new(),
-            mcp_elicitation: None,
-            artifact_server: None,
-            artifact_store_root: None,
+            permissions: SessionPermissions {
+                headless_control: false,
+                pending_destructive_cmd: None,
+                confirmation_bus: None,
+                skip: false,
+                mode: None,
+                rules: None,
+                rules_installed: false,
+            },
+            agents: AgentRuntime {
+                _primary_executor: None,
+                dispatcher: None,
+                manager: None,
+                parent_snapshot: Arc::new(std::sync::Mutex::new(None)),
+                observable_rx: None,
+            },
+            mcp: McpState {
+                manager: Arc::new(std::sync::RwLock::new(None)),
+                prompt_commands: std::collections::HashSet::new(),
+                elicitation: None,
+                pending_elicitation: None,
+                pending_form: None,
+            },
+            artifacts: ArtifactPublishing {
+                server: None,
+                store_root: None,
+            },
             running_query: None,
-            pending_elicitation: None,
-            pending_mcp_form: None,
-            confirmation_bus: None,
             cron_rx: None,
             teleport_manager: Some(codape_bridge::teleport::TeleportManager::from_env()),
             #[cfg(feature = "hot-reload")]
@@ -2863,45 +2975,45 @@ impl ReplLoop {
             config_changed_rx: None,
             pending_setup: None,
             last_backfill: None,
-            skip_permissions: false,
-            permission_mode: None,
-            permission_rules: None,
-            permission_rules_installed: false,
-            no_persistence: false,
+            options: SessionOptions {
+                no_persistence: false,
+                no_slash_commands: false,
+                json_schema: None,
+                max_budget_usd: None,
+                max_turns: None,
+                time_budget: None,
+                require_artifacts: Vec::new(),
+                verify_on_finish: false,
+                verbose_tool_input: false,
+                replay_user_messages: false,
+                include_partial_messages: false,
+                betas: Vec::new(),
+                feature_flags: codape_config::flags::FeatureFlags::from_env(),
+                capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
+                context_window_settings: codape_core::types::ContextWindowOverrides::default(),
+                pr_context: None,
+                chrome_enabled: true,
+                agent: None,
+                worktree: false,
+                fork_session: None,
+                from_pr: None,
+                session_name: None,
+                add_dir: Vec::new(),
+                input_format: "text".into(),
+                tmux_enabled: false,
+                debug_file: None,
+                resume_session: None,
+            },
             transcript: std::sync::Mutex::new(None),
-            no_slash_commands: false,
-            json_schema: None,
-            max_budget_usd: None,
-            max_turns: None,
-            time_budget: None,
-            require_artifacts: Vec::new(),
-            verify_on_finish: false,
-            verbose_tool_input: false,
-            replay_user_messages: false,
-            include_partial_messages: false,
-            betas: Vec::new(),
-            feature_flags: codape_config::flags::FeatureFlags::from_env(),
-            capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
-            context_window_settings: codape_core::types::ContextWindowOverrides::default(),
-            pr_context: None,
-            chrome_enabled: true,
-            agent: None,
-            worktree: false,
-            fork_session: None,
-            from_pr: None,
-            session_name: None,
-            add_dir: Vec::new(),
-            input_format: "text".into(),
-            tmux_enabled: false,
-            debug_file: None,
-            query_start_time: None,
-            vim_mode_enabled: false,
-            current_theme: "dark".into(),
-            settings_vim_mode: None,
-            settings_statusline_theme: None,
-            settings_statusline_format: None,
-            worktree_previous_cwd: None,
-            resume_session: None,
+            ui: UiPreferences {
+                query_start_time: None,
+                vim_mode_enabled: false,
+                current_theme: "dark".into(),
+                settings_vim_mode: None,
+                settings_statusline_theme: None,
+                settings_statusline_format: None,
+                worktree_previous_cwd: None,
+            },
         };
         this.init_command_persistence();
         this
@@ -2912,7 +3024,7 @@ impl ReplLoop {
         &mut self,
         overrides: codape_core::types::ContextWindowOverrides,
     ) {
-        self.context_window_settings = overrides;
+        self.options.context_window_settings = overrides;
     }
 
     /// Create a new REPL loop wired to a QueryEngine (14.1).
@@ -3198,74 +3310,102 @@ impl ReplLoop {
 
         let mut this = Self {
             commands,
-            model,
-            fallback_model: None,
+            model: ModelSettings {
+                current: model,
+                fallback_model: None,
+                max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
+                max_tokens_from_agent: false,
+                explicit_model_override: false,
+            },
             telemetry: None,
-            plugin_agents: Vec::new(),
-            plugin_workflows: Some(workflow_scripts),
-            plugin_themes: Vec::new(),
-            plugin_output_styles: Vec::new(),
-            plugin_monitors: None,
-            monitor_supervisor: None,
-            plugin_lsp_servers: Vec::new(),
-            lsp_defaults,
-            plugin_other_components: Vec::new(),
-            tool_starts: std::collections::HashMap::new(),
-            tool_use_summaries: std::collections::HashMap::new(),
-            tool_names: std::collections::HashMap::new(),
-            last_usage: codape_core::types::UsageSummary::default(),
-            max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
-            max_tokens_from_agent: false,
-            explicit_model_override: false,
+            plugins: PluginState {
+                agents: Vec::new(),
+                workflows: Some(workflow_scripts),
+                themes: Vec::new(),
+                output_styles: Vec::new(),
+                monitors: None,
+                supervisor: None,
+                lsp_servers: Vec::new(),
+                lsp_defaults,
+                other_components: Vec::new(),
+                manager: None,
+            },
+            tools: ToolActivity {
+                starts: std::collections::HashMap::new(),
+                use_summaries: std::collections::HashMap::new(),
+                names: std::collections::HashMap::new(),
+                last_usage: codape_core::types::UsageSummary::default(),
+            },
             cwd,
             running: true,
             setup_error: None,
             history: Vec::new(),
-            engine: Some(engine),
-            event_rx: Some(event_rx),
-            session_effects: SessionEffects::default(),
-            api_client: Some(api_client),
-            orchestrator: Some(orchestrator),
-            background_tasks: Vec::new(),
-            background_results_tx: Some(bg_tx),
-            background_results_rx: Some(bg_rx),
-            session_memory_store: Some(session_memory_store),
-            long_term_store: Some(long_term_store),
-            session_id: Some(session_id),
-            auto_dream: Some(auto_dream),
-            dream_shutdown_tx: None,
-            team_memory_service: Some(team_memory_service),
-            memory_writable,
+            session: SessionHandles {
+                engine: Some(engine),
+                event_rx: Some(event_rx),
+                effects: SessionEffects::default(),
+                api_client: Some(api_client),
+                orchestrator: Some(orchestrator),
+            },
+            background: BackgroundWork {
+                tasks: Vec::new(),
+                results_tx: Some(bg_tx),
+                results_rx: Some(bg_rx),
+            },
+            memory: MemoryState {
+                session_store: Some(session_memory_store),
+                long_term: Some(long_term_store),
+                session_id: Some(session_id),
+                auto_dream: Some(auto_dream),
+                dream_shutdown: None,
+                team_sync: Some(team_memory_service),
+                writable: memory_writable,
+            },
             workflow_enabled,
             command_history: CommandHistory::new(1000),
             macro_registry: MacroRegistry::new(),
-            hooks_settings: None,
-            hook_layers: None,
-            active_hooks: 0,
-            mod_ui_handle: None,
-            mod_submit_queue: codape_mods::ModSubmitQueue::default(),
-            mod_auto_turns: 0,
-            mod_prompts_this_turn: 0,
-            mods_disabled_reported: false,
+            hooks: HookState {
+                settings: None,
+                layers: None,
+                active: 0,
+            },
+            mods: ModState {
+                ui_handle: None,
+                submit_queue: codape_mods::ModSubmitQueue::default(),
+                auto_turns: 0,
+                prompts_this_turn: 0,
+                disabled_reported: false,
+            },
             checkpoint_store,
             protocol_sink: None,
-            headless_permission_control: false,
-            pending_destructive_cmd: None,
-            plugin_manager: None,
-            _primary_tool_executor: Some(primary_executor),
-            dispatcher: Some(dispatcher),
-            agent_manager: Some(agent_manager),
-            parent_context_snapshot: Arc::clone(&parent_context_snapshot),
-            agent_observable_rx,
-            mcp_manager: mcp_slot,
-            mcp_prompt_commands: std::collections::HashSet::new(),
-            mcp_elicitation: None,
-            artifact_server: None,
-            artifact_store_root: None,
+            permissions: SessionPermissions {
+                headless_control: false,
+                pending_destructive_cmd: None,
+                confirmation_bus: Some(confirmation_bus),
+                skip: false,
+                mode: None,
+                rules: None,
+                rules_installed: false,
+            },
+            agents: AgentRuntime {
+                _primary_executor: Some(primary_executor),
+                dispatcher: Some(dispatcher),
+                manager: Some(agent_manager),
+                parent_snapshot: Arc::clone(&parent_context_snapshot),
+                observable_rx: agent_observable_rx,
+            },
+            mcp: McpState {
+                manager: mcp_slot,
+                prompt_commands: std::collections::HashSet::new(),
+                elicitation: None,
+                pending_elicitation: None,
+                pending_form: None,
+            },
+            artifacts: ArtifactPublishing {
+                server: None,
+                store_root: None,
+            },
             running_query: None,
-            pending_elicitation: None,
-            pending_mcp_form: None,
-            confirmation_bus: Some(confirmation_bus),
             cron_rx: Some(cron_rx),
             teleport_manager: Some(codape_bridge::teleport::TeleportManager::from_env()),
             #[cfg(feature = "hot-reload")]
@@ -3274,45 +3414,45 @@ impl ReplLoop {
             config_changed_rx,
             pending_setup: None,
             last_backfill: None,
-            skip_permissions: false,
-            permission_mode: None,
-            permission_rules: None,
-            permission_rules_installed: false,
-            no_persistence: false,
+            options: SessionOptions {
+                no_persistence: false,
+                no_slash_commands: false,
+                json_schema: None,
+                max_budget_usd: None,
+                max_turns: None,
+                time_budget: None,
+                require_artifacts: Vec::new(),
+                verify_on_finish: false,
+                verbose_tool_input: false,
+                replay_user_messages: false,
+                include_partial_messages: false,
+                betas: Vec::new(),
+                feature_flags: codape_config::flags::FeatureFlags::from_env(),
+                capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
+                context_window_settings: codape_core::types::ContextWindowOverrides::default(),
+                pr_context: None,
+                chrome_enabled: true,
+                agent: None,
+                worktree: false,
+                fork_session: None,
+                from_pr: None,
+                session_name: None,
+                add_dir: Vec::new(),
+                input_format: "text".into(),
+                tmux_enabled: false,
+                debug_file: None,
+                resume_session: None,
+            },
             transcript: std::sync::Mutex::new(None),
-            no_slash_commands: false,
-            json_schema: None,
-            max_budget_usd: None,
-            max_turns: None,
-            time_budget: None,
-            require_artifacts: Vec::new(),
-            verify_on_finish: false,
-            verbose_tool_input: false,
-            replay_user_messages: false,
-            include_partial_messages: false,
-            betas: Vec::new(),
-            feature_flags: codape_config::flags::FeatureFlags::from_env(),
-            capabilities: codape_config::flags::FeatureFlags::from_env().capabilities(),
-            context_window_settings: codape_core::types::ContextWindowOverrides::default(),
-            pr_context: None,
-            chrome_enabled: true,
-            agent: None,
-            worktree: false,
-            fork_session: None,
-            from_pr: None,
-            session_name: None,
-            add_dir: Vec::new(),
-            input_format: "text".into(),
-            tmux_enabled: false,
-            debug_file: None,
-            query_start_time: None,
-            vim_mode_enabled: false,
-            current_theme: "dark".into(),
-            settings_vim_mode: None,
-            settings_statusline_theme: None,
-            settings_statusline_format: None,
-            worktree_previous_cwd: None,
-            resume_session: None,
+            ui: UiPreferences {
+                query_start_time: None,
+                vim_mode_enabled: false,
+                current_theme: "dark".into(),
+                settings_vim_mode: None,
+                settings_statusline_theme: None,
+                settings_statusline_format: None,
+                worktree_previous_cwd: None,
+            },
         };
         this.init_command_persistence();
         this
@@ -3330,15 +3470,16 @@ impl ReplLoop {
     pub async fn start_artifact_serving(&mut self) {
         // Starting twice would leak the first listener and register the tool
         // family twice; callers can ask unconditionally.
-        if self.artifact_server.is_some() {
+        if self.artifacts.server.is_some() {
             return;
         }
-        let Some(dispatcher) = self.dispatcher.as_ref() else {
+        let Some(dispatcher) = self.agents.dispatcher.as_ref() else {
             return;
         };
 
         let store = codape_artifacts::ArtifactStore::open(
-            self.artifact_store_root
+            self.artifacts
+                .store_root
                 .clone()
                 .unwrap_or_else(codape_artifacts::store::default_root),
         );
@@ -3362,7 +3503,8 @@ impl ReplLoop {
         let service = Arc::new(codape_artifacts::ArtifactService::new(
             store,
             server.origin(),
-            self.session_id
+            self.memory
+                .session_id
                 .map_or_else(|| "local".to_string(), |id| id.to_string()),
         ));
 
@@ -3371,7 +3513,7 @@ impl ReplLoop {
         }
         tracing::info!(origin = server.origin(), "artifacts are served locally");
 
-        self.artifact_server = Some(server);
+        self.artifacts.server = Some(server);
     }
 
     /// Stop the local artifact server, if one is running.
@@ -3379,14 +3521,14 @@ impl ReplLoop {
     /// The server owns a background task, so it is shut down explicitly rather
     /// than left to whether the caller still holds the [`ReplLoop`].
     pub async fn stop_artifact_serving(&mut self) {
-        if let Some(server) = self.artifact_server.take() {
+        if let Some(server) = self.artifacts.server.take() {
             server.shutdown().await;
         }
     }
 
     /// Publish artifacts somewhere other than the default location.
     pub fn with_artifact_store_root(&mut self, root: std::path::PathBuf) {
-        self.artifact_store_root = Some(root);
+        self.artifacts.store_root = Some(root);
     }
 
     /// Wire the MCP manager into this REPL loop.
@@ -3399,10 +3541,10 @@ impl ReplLoop {
     ///
     /// Panics if the MCP slot's lock is poisoned.
     pub fn with_mcp_manager(&mut self, mcp_manager: Arc<codape_mcp::manager::McpManager>) {
-        if let Some(ref dispatcher) = self.dispatcher {
+        if let Some(ref dispatcher) = self.agents.dispatcher {
             mcp_manager.register_tools_into(dispatcher.registry());
         }
-        *self.mcp_manager.write().expect("MCP slot poisoned") = Some(mcp_manager);
+        *self.mcp.manager.write().expect("MCP slot poisoned") = Some(mcp_manager);
         // The manager has already run `start_all` (and therefore discovery) by
         // the time the session attaches it, so the first registration is free.
         self.refresh_mcp_prompt_commands();
@@ -3424,11 +3566,12 @@ impl ReplLoop {
     fn refresh_mcp_prompt_commands(&mut self) {
         // `--disable-slash-commands` clears the registry; registering prompt
         // commands here anyway would resurrect them behind the flag's back.
-        if self.no_slash_commands {
+        if self.options.no_slash_commands {
             return;
         }
         let Some(manager) = self
-            .mcp_manager
+            .mcp
+            .manager
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
@@ -3439,13 +3582,13 @@ impl ReplLoop {
 
         for entry in manager.list_prompts() {
             let command_name = prompt_command_name(&entry.server, &entry.prompt.name);
-            if self.mcp_prompt_commands.contains(&command_name) {
+            if self.mcp.prompt_commands.contains(&command_name) {
                 continue;
             }
             if self.commands.find(&command_name).is_some() {
                 // Somebody else already owns this name; leave it alone but do
                 // not try to register it on every refresh.
-                self.mcp_prompt_commands.insert(command_name);
+                self.mcp.prompt_commands.insert(command_name);
                 continue;
             }
 
@@ -3454,7 +3597,7 @@ impl ReplLoop {
             });
             let name_static: &'static str = Box::leak(command_name.clone().into_boxed_str());
             let description_static: &'static str = Box::leak(description.into_boxed_str());
-            let slot = Arc::clone(&self.mcp_manager);
+            let slot = Arc::clone(&self.mcp.manager);
             let server = entry.server.clone();
             let prompt_name = entry.prompt.name.clone();
             let declared = entry.prompt.arguments.clone();
@@ -3470,7 +3613,7 @@ impl ReplLoop {
                 true,
                 handler,
             ));
-            self.mcp_prompt_commands.insert(command_name);
+            self.mcp.prompt_commands.insert(command_name);
         }
     }
 
@@ -3492,7 +3635,8 @@ impl ReplLoop {
     /// Render discovered prompts grouped by server for `/mcp`.
     fn mcp_prompt_listing(&self) -> String {
         let Some(manager) = self
-            .mcp_manager
+            .mcp
+            .manager
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
@@ -3546,7 +3690,7 @@ impl ReplLoop {
     /// The manager was handed the inbound translation layer during startup;
     /// this is the other end, which `run_tui` attaches to the event loop.
     pub fn with_mcp_elicitation_handler(&mut self, handler: Arc<SessionElicitationHandler>) {
-        self.mcp_elicitation = Some(handler);
+        self.mcp.elicitation = Some(handler);
     }
 
     /// Wire a plugin manager into this REPL loop.
@@ -3564,8 +3708,8 @@ impl ReplLoop {
         );
 
         // If we have a primary tool executor and an engine, layer plugin fallback
-        if let Some(ref dispatcher) = self.dispatcher
-            && let Some(ref mut engine) = self.engine
+        if let Some(ref dispatcher) = self.agents.dispatcher
+            && let Some(ref mut engine) = self.session.engine
         {
             let primary: Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync> =
                 dispatcher.clone();
@@ -3579,17 +3723,17 @@ impl ReplLoop {
             engine.set_tool_executor(Box::new(fallback));
         }
 
-        self.plugin_manager = Some(plugin_manager);
+        self.plugins.manager = Some(plugin_manager);
     }
 
     // ─── CLI Configuration Builder Methods ──────────────────────────────────
 
     pub const fn with_skip_permissions(&mut self, skip: bool) {
-        self.skip_permissions = skip;
+        self.permissions.skip = skip;
     }
 
     pub const fn with_permission_mode(&mut self, mode: Option<PermissionMode>) {
-        self.permission_mode = mode;
+        self.permissions.mode = mode;
     }
 
     /// Install Claude-compatible permission rules from settings.
@@ -3599,8 +3743,8 @@ impl ReplLoop {
         &mut self,
         permissions: Option<codape_config::PermissionsSettings>,
     ) {
-        self.permission_rules = permissions;
-        self.permission_rules_installed = false;
+        self.permissions.rules = permissions;
+        self.permissions.rules_installed = false;
     }
 
     /// Lifecycle hooks from settings, installed by `apply_cli_config`.
@@ -3609,7 +3753,7 @@ impl ReplLoop {
     /// kept its no-op executor, so a configured hook never ran. This is the
     /// value that gets loaded onto the engine.
     pub fn with_hooks(&mut self, hooks: Option<serde_json::Value>) {
-        self.hooks_settings = hooks;
+        self.hooks.settings = hooks;
     }
 
     /// Attach the hook documents split by source tier (see
@@ -3618,7 +3762,7 @@ impl ReplLoop {
     /// When set, this supersedes [`with_hooks`](Self::with_hooks) at
     /// installation time.
     pub fn with_hook_layers(&mut self, layers: Option<codape_config::settings::HookLayers>) {
-        self.hook_layers = layers;
+        self.hooks.layers = layers;
     }
 
     /// Emit the line-delimited protocol on stdout as the turn runs.
@@ -3640,7 +3784,7 @@ impl ReplLoop {
     /// stream-json` with the prompt given positionally. Interactive sessions
     /// and a prompt read from stdin keep it off.
     pub const fn with_headless_permission_control(&mut self, enabled: bool) {
-        self.headless_permission_control = enabled;
+        self.permissions.headless_control = enabled;
     }
 
     /// Test accessor for the gate that
@@ -3648,27 +3792,27 @@ impl ReplLoop {
     /// sets.
     #[cfg(test)]
     pub(crate) const fn headless_permission_control(&self) -> bool {
-        self.headless_permission_control
+        self.permissions.headless_control
     }
 
     pub const fn with_no_persistence(&mut self, no_persist: bool) {
-        self.no_persistence = no_persist;
+        self.options.no_persistence = no_persist;
     }
 
     pub const fn with_no_slash_commands(&mut self, no_slash: bool) {
-        self.no_slash_commands = no_slash;
+        self.options.no_slash_commands = no_slash;
     }
 
     pub fn with_json_schema(&mut self, schema: Option<String>) {
-        self.json_schema = schema;
+        self.options.json_schema = schema;
     }
 
     pub const fn with_max_budget_usd(&mut self, budget: Option<f64>) {
-        self.max_budget_usd = budget;
+        self.options.max_budget_usd = budget;
     }
 
     pub const fn with_max_turns(&mut self, turns: Option<u32>) {
-        self.max_turns = turns;
+        self.options.max_turns = turns;
     }
 
     /// Start the wall-clock budget the model is reminded of (`--time-budget`).
@@ -3678,7 +3822,7 @@ impl ReplLoop {
     /// claims more time was already spent than the agent ever saw would push
     /// it to wrap up for the wrong reason.
     pub fn with_time_budget(&mut self, seconds: Option<u64>) {
-        self.time_budget = seconds.map(|seconds| {
+        self.options.time_budget = seconds.map(|seconds| {
             (
                 std::time::Instant::now(),
                 std::time::Duration::from_secs(seconds),
@@ -3688,19 +3832,19 @@ impl ReplLoop {
 
     /// Set the paths a headless run must produce (`--require-artifact`).
     pub fn with_required_artifacts(&mut self, paths: Vec<std::path::PathBuf>) {
-        self.require_artifacts = paths;
+        self.options.require_artifacts = paths;
     }
 
     /// Ask for a self-review pass before a headless run reports
     /// (`--verify-on-finish`).
     pub const fn with_verify_on_finish(&mut self, verify: bool) {
-        self.verify_on_finish = verify;
+        self.options.verify_on_finish = verify;
     }
 
     /// Send each tool call's own input in stream-json frames
     /// (`--verbose-tool-input`).
     pub const fn with_verbose_tool_input(&mut self, verbose: bool) {
-        self.verbose_tool_input = verbose;
+        self.options.verbose_tool_input = verbose;
     }
 
     /// A turn-end reminder for the artifacts the run owes and has not written.
@@ -3710,7 +3854,7 @@ impl ReplLoop {
     /// at the directory is the same non-delivery with more steps.
     fn missing_required_artifacts(&self) -> Vec<String> {
         let mut missing = Vec::new();
-        for path in &self.require_artifacts {
+        for path in &self.options.require_artifacts {
             match std::fs::metadata(path) {
                 Ok(meta) if meta.is_dir() => {
                     let empty =
@@ -3735,8 +3879,8 @@ impl ReplLoop {
     /// unavailable, then continues the turn and session on the fallback.
     /// Works for interactive and headless sessions alike.
     pub fn with_fallback_model(&mut self, fallback: Option<ModelId>) {
-        self.fallback_model.clone_from(&fallback);
-        if let Some(ref mut engine) = self.engine {
+        self.model.fallback_model.clone_from(&fallback);
+        if let Some(ref mut engine) = self.session.engine {
             engine.set_fallback_model(fallback);
         }
     }
@@ -3744,15 +3888,15 @@ impl ReplLoop {
     /// Test accessor for the configured fallback model.
     #[cfg(test)]
     pub(crate) const fn fallback_model(&self) -> Option<&ModelId> {
-        self.fallback_model.as_ref()
+        self.model.fallback_model.as_ref()
     }
 
     pub const fn with_replay_user_messages(&mut self, replay: bool) {
-        self.replay_user_messages = replay;
+        self.options.replay_user_messages = replay;
     }
 
     pub const fn with_include_partial_messages(&mut self, include: bool) {
-        self.include_partial_messages = include;
+        self.options.include_partial_messages = include;
     }
 
     /// Startup preferences persisted in settings.
@@ -3767,7 +3911,7 @@ impl ReplLoop {
 
     /// Agent definitions contributed by active plugins.
     pub fn with_plugin_agents(&mut self, agents: Vec<(String, serde_json::Value)>) {
-        self.plugin_agents = agents;
+        self.plugins.agents = agents;
     }
 
     /// Components contributed by active plugins.
@@ -3783,9 +3927,9 @@ impl ReplLoop {
         lsp_servers: Vec<(String, serde_json::Value)>,
         other: Vec<(String, Vec<String>)>,
     ) {
-        self.plugin_themes = themes;
-        self.plugin_output_styles = output_styles;
-        if let Some(map) = self.plugin_workflows.as_ref() {
+        self.plugins.themes = themes;
+        self.plugins.output_styles = output_styles;
+        if let Some(map) = self.plugins.workflows.as_ref() {
             let mut map = map
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3793,7 +3937,7 @@ impl ReplLoop {
                 map.insert(name, script);
             }
         }
-        self.plugin_monitors = monitors;
+        self.plugins.monitors = monitors;
         // The first configured server becomes the LSP tool's default. The
         // reference shape is `{command, args?, root_uri?}`; an `.lsp.json`
         // path was already read into this map by the plugin crate.
@@ -3821,12 +3965,13 @@ impl ReplLoop {
         });
         if first_server.is_some() {
             *self
+                .plugins
                 .lsp_defaults
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = first_server;
         }
-        self.plugin_lsp_servers = lsp_servers;
-        self.plugin_other_components = other;
+        self.plugins.lsp_servers = lsp_servers;
+        self.plugins.other_components = other;
     }
 
     pub fn with_startup_preferences(
@@ -3835,13 +3980,13 @@ impl ReplLoop {
         statusline_theme: Option<String>,
         statusline_format: Option<String>,
     ) {
-        self.settings_vim_mode = vim_mode;
-        self.settings_statusline_theme = statusline_theme;
-        self.settings_statusline_format = statusline_format;
+        self.ui.settings_vim_mode = vim_mode;
+        self.ui.settings_statusline_theme = statusline_theme;
+        self.ui.settings_statusline_format = statusline_format;
     }
 
     pub fn with_betas(&mut self, betas: Vec<String>) {
-        self.betas = betas;
+        self.options.betas = betas;
     }
 
     /// Replace the base system prompt (`--system-prompt`).
@@ -3850,7 +3995,7 @@ impl ReplLoop {
     /// `configure_repl`;
     /// without the setter the flag was parsed and then silently ignored.
     pub fn with_system_prompt(&mut self, prompt: Option<String>) {
-        self.session_effects.override_system_prompt = prompt;
+        self.session.effects.override_system_prompt = prompt;
     }
 
     /// Append text to the system prompt (`--append-system-prompt`).
@@ -3859,7 +4004,7 @@ impl ReplLoop {
     /// may be set, in which case the replacement supplies the base prompt and
     /// this text is applied on top of it.
     pub fn with_append_system_prompt(&mut self, prompt: Option<String>) {
-        self.session_effects.append_system_prompt = prompt;
+        self.session.effects.append_system_prompt = prompt;
     }
 
     /// Test accessor for the two system-prompt effects.
@@ -3868,20 +4013,20 @@ impl ReplLoop {
     #[cfg(test)]
     pub(crate) fn system_prompt_effects_for_test(&self) -> (Option<&str>, Option<&str>) {
         (
-            self.session_effects.override_system_prompt.as_deref(),
-            self.session_effects.append_system_prompt.as_deref(),
+            self.session.effects.override_system_prompt.as_deref(),
+            self.session.effects.append_system_prompt.as_deref(),
         )
     }
 
     /// Attach pull-request context fetched for `--from-pr`.
     pub fn with_pr_context(&mut self, context: Option<String>) {
-        self.pr_context = context;
+        self.options.pr_context = context;
     }
 
     /// The feature flags resolved for this session.
     #[must_use]
     pub const fn feature_flags(&self) -> &codape_config::flags::FeatureFlags {
-        &self.feature_flags
+        &self.options.feature_flags
     }
 
     /// The command context, for tests outside this module.
@@ -3897,21 +4042,21 @@ impl ReplLoop {
     pub(crate) const fn hook_layers_for_test(
         &self,
     ) -> Option<&codape_config::settings::HookLayers> {
-        self.hook_layers.as_ref()
+        self.hooks.layers.as_ref()
     }
 
     /// The capability set derived from the session's feature flags.
     #[must_use]
     pub const fn capabilities(&self) -> codape_config::flags::CapabilitySet {
-        self.capabilities
+        self.options.capabilities
     }
 
     pub const fn with_chrome_enabled(&mut self, enabled: bool) {
-        self.chrome_enabled = enabled;
+        self.options.chrome_enabled = enabled;
     }
 
     pub fn with_agent(&mut self, agent: Option<String>) {
-        self.agent = agent;
+        self.options.agent = agent;
     }
 
     /// Record whether `--model` was given explicitly.
@@ -3919,58 +4064,58 @@ impl ReplLoop {
     /// A named custom agent supplies a default model, but an explicit CLI
     /// choice is more specific and must win.
     pub const fn with_explicit_model_override(&mut self, explicit: bool) {
-        self.explicit_model_override = explicit;
+        self.model.explicit_model_override = explicit;
     }
 
     pub const fn with_worktree(&mut self, worktree: bool) {
-        self.worktree = worktree;
+        self.options.worktree = worktree;
     }
 
     pub fn with_fork_session(&mut self, fork: Option<String>) {
-        self.fork_session = fork;
+        self.options.fork_session = fork;
     }
 
     pub fn with_resume_session(&mut self, session_id: Option<String>) {
-        self.resume_session = session_id;
+        self.options.resume_session = session_id;
     }
 
     pub fn with_from_pr(&mut self, from_pr: Option<String>) {
-        self.from_pr = from_pr;
+        self.options.from_pr = from_pr;
     }
 
     pub fn with_session_name(&mut self, name: Option<String>) {
-        self.session_name = name;
+        self.options.session_name = name;
     }
 
     pub fn with_add_dir(&mut self, dirs: Vec<String>) {
-        self.add_dir = dirs;
+        self.options.add_dir = dirs;
     }
 
     pub fn with_input_format(&mut self, format: String) {
-        self.input_format = format;
+        self.options.input_format = format;
     }
 
     pub const fn with_tmux_enabled(&mut self, tmux: bool) {
-        self.tmux_enabled = tmux;
+        self.options.tmux_enabled = tmux;
     }
 
     pub fn with_debug_file(&mut self, path: Option<std::path::PathBuf>) {
-        self.debug_file = path;
+        self.options.debug_file = path;
     }
 
     pub fn with_allowed_tools(&mut self, tools: Vec<String>) {
-        self.session_effects.allowed_tools_override = Some(tools);
+        self.session.effects.allowed_tools_override = Some(tools);
     }
 
     /// Apply all CLI configuration settings to the engine, dispatcher, and session.
     /// Must be called after `with_engine` (or `new`) and before `run_tui`/`run_headless`.
     pub fn apply_cli_config(&mut self) {
         // Persisted startup preferences come from settings, not from a flag.
-        if let Some(vim_mode) = self.settings_vim_mode {
-            self.vim_mode_enabled = vim_mode;
+        if let Some(vim_mode) = self.ui.settings_vim_mode {
+            self.ui.vim_mode_enabled = vim_mode;
         }
-        if let Some(ref theme) = self.settings_statusline_theme {
-            self.current_theme = theme.clone();
+        if let Some(ref theme) = self.ui.settings_statusline_theme {
+            self.ui.current_theme = theme.clone();
         }
 
         // 0. Named custom agent. The orchestrator rejects unknown names before
@@ -3986,14 +4131,14 @@ impl ReplLoop {
         self.apply_plugin_agents();
 
         // 1. Permission mode
-        if self.skip_permissions {
-            if let Some(ref mut engine) = self.engine {
+        if self.permissions.skip {
+            if let Some(ref mut engine) = self.session.engine {
                 let checker = engine.permission_checker();
                 let mut c = checker.lock().unwrap();
                 c.set_mode(PermissionMode::BypassPermissions);
             }
-        } else if let Some(mode) = self.permission_mode
-            && let Some(ref mut engine) = self.engine
+        } else if let Some(mode) = self.permissions.mode
+            && let Some(ref mut engine) = self.session.engine
         {
             let checker = engine.permission_checker();
             let mut c = checker.lock().unwrap();
@@ -4002,9 +4147,9 @@ impl ReplLoop {
 
         // 1b. Settings-defined permission rules. Installed once, after the
         // mode, so a later `apply_cli_config` call does not duplicate them.
-        if !self.permission_rules_installed {
-            let rules = self.permission_rules.clone();
-            if let (Some(rules), Some(engine)) = (rules, self.engine.as_ref()) {
+        if !self.permissions.rules_installed {
+            let rules = self.permissions.rules.clone();
+            if let (Some(rules), Some(engine)) = (rules, self.session.engine.as_ref()) {
                 let checker = engine.permission_checker();
                 let mut guard = checker.lock().unwrap();
                 match codape_config::permission_rules::install_settings_rules(
@@ -4019,29 +4164,30 @@ impl ReplLoop {
                     }
                 }
             }
-            self.permission_rules_installed = true;
+            self.permissions.rules_installed = true;
         }
 
         // 2. Disable slash commands
-        if self.no_slash_commands {
+        if self.options.no_slash_commands {
             self.commands.clear();
         }
 
         // 2b. Disable session persistence — clear memory stores so nothing writes to disk
-        if self.no_persistence {
-            self.session_memory_store = None;
-            self.long_term_store = None;
-            self.auto_dream = None;
-            self.team_memory_service = None;
+        if self.options.no_persistence {
+            self.memory.session_store = None;
+            self.memory.long_term = None;
+            self.memory.auto_dream = None;
+            self.memory.team_sync = None;
             // The memory tools hold their own handle to the stores, so
             // dropping the fields above does not stop them writing.
-            self.memory_writable
+            self.memory
+                .writable
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ref mut engine) = self.engine {
+            if let Some(ref mut engine) = self.session.engine {
                 engine.clear_transcript_path();
             }
             tracing::info!("Session persistence disabled — memory stores cleared");
-        } else if let Some(ref mut engine) = self.engine {
+        } else if let Some(ref mut engine) = self.session.engine {
             // Compaction backs the transcript up before overwriting it, but
             // only when it knows where transcripts live. The CLI persists them
             // here; without this the engine's backup path stayed `None` and
@@ -4052,13 +4198,13 @@ impl ReplLoop {
         // 3. Chrome integration. The dispatcher is behind an Arc with clones
         // (the engine and the agent manager), so `Arc::get_mut` never succeeds;
         // the flag is shared instead and both listing and execution honour it.
-        if let Some(ref dispatcher) = self.dispatcher {
-            dispatcher.set_chrome_enabled(self.chrome_enabled);
+        if let Some(ref dispatcher) = self.agents.dispatcher {
+            dispatcher.set_chrome_enabled(self.options.chrome_enabled);
         }
 
         // 4. Session name / title
-        if let Some(ref name) = self.session_name
-            && let Some(ref mut engine) = self.engine
+        if let Some(ref name) = self.options.session_name
+            && let Some(ref mut engine) = self.session.engine
         {
             let mut session = engine.session().clone();
             session.title = Some(name.clone());
@@ -4073,31 +4219,31 @@ impl ReplLoop {
         // creates one now, and the session is pointed at it. A failure is
         // reported rather than papered over: silently working in the checkout
         // is the thing the flag exists to prevent.
-        if self.worktree {
+        if self.options.worktree {
             let previous = std::path::PathBuf::from(&self.cwd);
             self.enter_worktree_mode();
             // The hooks are installed later in this function; `set_cwd` fired
             // `CwdChanged` when there was no executor to receive it. Remember
             // the move so the install step can replay it.
             if self.cwd != previous.to_string_lossy() {
-                self.worktree_previous_cwd = Some(previous);
+                self.ui.worktree_previous_cwd = Some(previous);
             }
         }
 
         // 6. Resume or fork an existing transcript into the current engine session
-        if let Some(session_id) = self.resume_session.clone() {
+        if let Some(session_id) = self.options.resume_session.clone() {
             if let Err(err) = self.load_session_state(&session_id, true) {
                 tracing::warn!("Failed to restore resumed session {session_id}: {err}");
             }
-        } else if let Some(fork_id) = self.fork_session.clone()
+        } else if let Some(fork_id) = self.options.fork_session.clone()
             && let Err(err) = self.load_session_state(&fork_id, false)
         {
             tracing::warn!("Failed to load fork session {fork_id}: {err}");
         }
 
         // 7. Replay user messages from most recent session
-        if self.replay_user_messages
-            && let Some(ref mut engine) = self.engine
+        if self.options.replay_user_messages
+            && let Some(ref mut engine) = self.session.engine
             && let Some(session_id) = session_resume::latest_session_id(&self.cwd)
             && let Ok(msgs) = session_resume::load_resume_messages(&self.cwd, &session_id)
         {
@@ -4111,11 +4257,12 @@ impl ReplLoop {
         }
 
         // 8. Add directory contents to extra context
-        for dir in &self.add_dir {
+        for dir in &self.options.add_dir {
             let path = std::path::Path::new(dir);
             if path.exists() && path.is_dir() {
                 let listing = Self::list_directory_contents(path);
-                self.session_effects
+                self.session
+                    .effects
                     .extra_context
                     .push(format!("Directory listing for {dir}:\n{listing}"));
             }
@@ -4126,15 +4273,15 @@ impl ReplLoop {
         // `FeatureFlags` and `CapabilitySet`. A typo is a startup failure, not
         // a warning, because silently dropping a mistyped name looks identical
         // to the flag not existing.
-        if !self.betas.is_empty() {
-            let raw = self.betas.join(",");
+        if !self.options.betas.is_empty() {
+            let raw = self.options.betas.join(",");
             let mut flags = codape_config::flags::FeatureFlags::from_env();
             match flags.apply_comma_list(&raw) {
                 Ok(()) => {
-                    self.feature_flags = flags;
-                    self.capabilities = self.feature_flags.capabilities();
+                    self.options.feature_flags = flags;
+                    self.options.capabilities = self.options.feature_flags.capabilities();
                     tracing::info!(
-                        capabilities = ?self.capabilities,
+                        capabilities = ?self.options.capabilities,
                         "--betas applied to the session capability set"
                     );
                 }
@@ -4151,7 +4298,7 @@ impl ReplLoop {
         // compatibility but nothing in this build reads them; saying so once
         // at startup is better than letting `--betas` imply an effect it does
         // not have.
-        for flag in self.feature_flags.inert_flags() {
+        for flag in self.options.feature_flags.inert_flags() {
             tracing::warn!(
                 flag,
                 "feature flag is accepted for compatibility but has no effect in this build"
@@ -4167,20 +4314,20 @@ impl ReplLoop {
         // was resolved. Both bits are shared, so the session's final flag set
         // still decides whether the tools are offered and callable.
         self.workflow_enabled.store(
-            self.feature_flags.workflow_scripts,
+            self.options.feature_flags.workflow_scripts,
             std::sync::atomic::Ordering::Relaxed,
         );
-        if let Some(dispatcher) = &self.dispatcher {
-            dispatcher.set_feature_flags(self.feature_flags.clone());
+        if let Some(dispatcher) = &self.agents.dispatcher {
+            dispatcher.set_feature_flags(self.options.feature_flags.clone());
         }
 
         // 9b. Context-window overrides. The engine already honors the
         // environment, client-data file and built-in table; settings and
         // experiment values are only reachable here, where both are resolved.
-        if let Some(ref mut engine) = self.engine {
+        if let Some(ref mut engine) = self.session.engine {
             let resolver = codape_core::types::ContextWindowResolver::from_env_and_client_data()
-                .with_settings(self.context_window_settings.clone())
-                .with_experiment(self.feature_flags.experiment_context_windows());
+                .with_settings(self.options.context_window_settings.clone())
+                .with_experiment(self.options.feature_flags.experiment_context_windows());
             engine.set_context_window_resolver(resolver);
             // A window the provider states should be waiting for the next
             // session instead of being learned by a rejection every time.
@@ -4192,30 +4339,30 @@ impl ReplLoop {
         // 9c. Engine flag behaviours. `coordinator_mode` and `history_snip`
         // are engine behaviours the engine exposes setters for; the session's
         // flag set is only final here, after `--betas` has been applied.
-        if let Some(ref mut engine) = self.engine {
+        if let Some(ref mut engine) = self.session.engine {
             let memory_base = std::path::PathBuf::from(&self.cwd)
                 .join(".codape")
                 .join("memory");
-            apply_engine_flag_behaviours(engine, &self.feature_flags, Some(&memory_base));
+            apply_engine_flag_behaviours(engine, &self.options.feature_flags, Some(&memory_base));
         }
 
         // 9d. Auto-dream. The manager is built at construction, before `--betas`
         // is resolved, so the flag is applied here. With `auto_dream` off there
         // is no dream manager and `/auto-dream` reports as much instead of
         // starting a background consolidation the user did not ask for.
-        if !self.feature_flags.auto_dream {
-            self.auto_dream = None;
+        if !self.options.feature_flags.auto_dream {
+            self.memory.auto_dream = None;
         }
 
         // 10. Pull-request context. The orchestrator fetches this before the
         // REPL exists; the fallback here keeps a direct `with_from_pr` caller
         // honest, and a fetch failure stops startup rather than continuing
         // without the context the flag promised.
-        if self.pr_context.is_none()
-            && let Some(ref url) = self.from_pr
+        if self.options.pr_context.is_none()
+            && let Some(ref url) = self.options.from_pr
         {
             match crate::from_pr::fetch(url) {
-                Ok(context) => self.pr_context = Some(context.block),
+                Ok(context) => self.options.pr_context = Some(context.block),
                 Err(error) => {
                     let message = format!("--from-pr: {error:#}");
                     eprintln!("{message}");
@@ -4224,11 +4371,11 @@ impl ReplLoop {
                 }
             }
         }
-        if let Some(ref context) = self.pr_context {
-            self.session_effects.extra_context.push(context.clone());
+        if let Some(ref context) = self.options.pr_context {
+            self.session.effects.extra_context.push(context.clone());
         }
 
-        if self.tmux_enabled {
+        if self.options.tmux_enabled {
             tracing::debug!("tmux session/title was applied before startup");
         }
 
@@ -4238,7 +4385,7 @@ impl ReplLoop {
         // is nothing else to install here.
 
         // 14. Debug file — log that it would be configured
-        if let Some(ref debug_path) = self.debug_file {
+        if let Some(ref debug_path) = self.options.debug_file {
             tracing::info!("Debug output file configured: {debug_path:?}");
         }
 
@@ -4256,11 +4403,11 @@ impl ReplLoop {
         // documents are never combined first: doing that would either demote
         // the managed hooks or run them twice.
         //
-        // `hook_layers` is the resolved split. `hooks_settings` alone is the
-        // compatibility path for a hand-built `Settings` (and for callers of
-        // `with_hooks`), where the merged value is treated as core.
+        // `self.hooks.layers` is the resolved split. `self.hooks.settings`
+        // alone is the compatibility path for a hand-built `Settings` (and for
+        // callers of `with_hooks`), where the merged value is treated as core.
         let mut hook_sources: Vec<(codape_hooks::HookTier, serde_json::Value)> = Vec::new();
-        if let Some(layers) = self.hook_layers.as_ref() {
+        if let Some(layers) = self.hooks.layers.as_ref() {
             if let Some(value) = &layers.managed {
                 hook_sources.push((codape_hooks::HookTier::Managed, value.clone()));
             }
@@ -4270,7 +4417,7 @@ impl ReplLoop {
             if let Some(value) = &layers.core {
                 hook_sources.push((codape_hooks::HookTier::Core, value.clone()));
             }
-        } else if let Some(hooks) = &self.hooks_settings {
+        } else if let Some(hooks) = &self.hooks.settings {
             hook_sources.push((codape_hooks::HookTier::Core, hooks.clone()));
         }
 
@@ -4281,7 +4428,7 @@ impl ReplLoop {
         // agent hook cannot run; the other four kinds are untouched. Saying so
         // out loud keeps a silently-dropped hook from looking like one that ran.
         let mut skipped_agent_hooks = 0;
-        if !self.feature_flags.agent_triggers {
+        if !self.options.feature_flags.agent_triggers {
             for (_, value) in &mut hook_sources {
                 let (filtered, skipped) = strip_agent_hooks(value);
                 *value = filtered;
@@ -4307,7 +4454,7 @@ impl ReplLoop {
                 .iter()
                 .map(|(_, value)| count_configured_hooks(value))
                 .sum();
-            if let Some(ref mut engine) = self.engine {
+            if let Some(ref mut engine) = self.session.engine {
                 match codape_hooks::HookRegistry::from_settings_sources(
                     hook_sources.iter().map(|(tier, value)| (*tier, value)),
                 ) {
@@ -4317,15 +4464,16 @@ impl ReplLoop {
                         // crate cannot reach. Without this they load and then
                         // fail, which denies on a gating event.
                         let mut registry = registry;
-                        if let (Some(api), Some(dispatcher)) =
-                            (self.api_client.as_ref(), self.dispatcher.as_ref())
-                        {
+                        if let (Some(api), Some(dispatcher)) = (
+                            self.session.api_client.as_ref(),
+                            self.agents.dispatcher.as_ref(),
+                        ) {
                             registry.set_action_runner(Arc::new(
                                 crate::hook_actions::SessionHookActionRunner::new(
                                     api.clone_box(),
                                     Arc::clone(dispatcher)
                                         as Arc<dyn crate::hook_actions::HookToolCaller>,
-                                    self.model.clone(),
+                                    self.model.current.clone(),
                                 ),
                             ));
                         }
@@ -4390,8 +4538,8 @@ impl ReplLoop {
                                     );
                                     tracing::info!("{line}");
                                     eprintln!("{line}");
-                                    self.mod_ui_handle = Some(executor.ui_handle());
-                                    self.mod_submit_queue = executor.submit_queue();
+                                    self.mods.ui_handle = Some(executor.ui_handle());
+                                    self.mods.submit_queue = executor.submit_queue();
                                     Arc::new(executor)
                                 }
                                 Some(Err(error)) => {
@@ -4413,16 +4561,16 @@ impl ReplLoop {
                         // allocation.
                         let plain: Arc<dyn codape_core::hook_executor::HookExecutor> =
                             Arc::clone(&hooks) as _;
-                        if let Some(ref dispatcher) = self.dispatcher {
+                        if let Some(ref dispatcher) = self.agents.dispatcher {
                             dispatcher.set_hooks(Arc::clone(&plain));
                             // `--worktree` moved the session before this point,
                             // when no executor existed to hear `CwdChanged`.
                             // Replay that one move now.
-                            if let Some(previous) = self.worktree_previous_cwd.take() {
+                            if let Some(previous) = self.ui.worktree_previous_cwd.take() {
                                 dispatcher.refire_cwd_changed(previous);
                             }
                         }
-                        if let Some(ref manager) = self.agent_manager {
+                        if let Some(ref manager) = self.agents.manager {
                             if let Ok(mut manager) = manager.try_lock() {
                                 manager.set_hooks(Arc::clone(&plain));
                             } else {
@@ -4437,7 +4585,7 @@ impl ReplLoop {
                 }
             }
         }
-        self.active_hooks = installed_hook_count;
+        self.hooks.active = installed_hook_count;
     }
 
     /// Apply the named custom agent selected with `--agent`.
@@ -4450,13 +4598,13 @@ impl ReplLoop {
     /// logged rather than silently running the default agent.
     /// Register agent definitions contributed by active plugins.
     fn apply_plugin_agents(&self) {
-        if self.plugin_agents.is_empty() {
+        if self.plugins.agents.is_empty() {
             return;
         }
-        let Some(manager) = self.agent_manager.as_ref() else {
+        let Some(manager) = self.agents.manager.as_ref() else {
             return;
         };
-        for (name, value) in &self.plugin_agents {
+        for (name, value) in &self.plugins.agents {
             let mut value = value.clone();
             if value
                 .get("name")
@@ -4487,7 +4635,7 @@ impl ReplLoop {
     }
 
     fn apply_agent_selection(&mut self) {
-        let Some(name) = self.agent.clone() else {
+        let Some(name) = self.options.agent.clone() else {
             return;
         };
         match crate::agent_selection::resolve_agent(&name) {
@@ -4501,12 +4649,12 @@ impl ReplLoop {
     /// Split from [`Self::apply_agent_selection`] so the precedence rules can
     /// be tested without reading the user's `~/.codape/agents/`.
     fn apply_resolved_agent(&mut self, agent: crate::agent_selection::ResolvedAgent) {
-        if self.session_effects.override_system_prompt.is_none() {
-            self.session_effects.override_system_prompt = Some(agent.system_prompt);
+        if self.session.effects.override_system_prompt.is_none() {
+            self.session.effects.override_system_prompt = Some(agent.system_prompt);
         }
-        if self.session_effects.allowed_tools_override.is_none() && !agent.allowed_tools.is_empty()
+        if self.session.effects.allowed_tools_override.is_none() && !agent.allowed_tools.is_empty()
         {
-            self.session_effects.allowed_tools_override = Some(agent.allowed_tools);
+            self.session.effects.allowed_tools_override = Some(agent.allowed_tools);
         }
 
         // Resource defaults from the definition apply unless the person chose
@@ -4514,18 +4662,18 @@ impl ReplLoop {
         // the definition's limit beats both the engine default and
         // `CODAPE_MAX_TOKENS`, so the flag recorded here protects it from
         // [`Self::apply_output_ceiling`].
-        if !self.explicit_model_override
+        if !self.model.explicit_model_override
             && let Some(model) = agent.model
         {
-            self.model = ModelId(model);
+            self.model.current = ModelId(model);
         }
         if let Some(max_tokens) = agent.max_tokens.filter(|limit| *limit > 0) {
-            self.max_tokens = max_tokens;
-            self.max_tokens_from_agent = true;
+            self.model.max_tokens = max_tokens;
+            self.model.max_tokens_from_agent = true;
         }
-        if let Some(ref mut engine) = self.engine {
-            engine.set_model(self.model.clone());
-            engine.set_max_tokens(self.max_tokens);
+        if let Some(ref mut engine) = self.session.engine {
+            engine.set_model(self.model.current.clone());
+            engine.set_max_tokens(self.model.max_tokens);
         }
     }
 
@@ -4547,21 +4695,21 @@ impl ReplLoop {
     /// default reserve accounts for, and it is why this is opt-in rather than
     /// the default.
     fn apply_output_ceiling(&mut self) {
-        if self.max_tokens_from_agent {
+        if self.model.max_tokens_from_agent {
             return;
         }
         // The engine already knows its window through the resolver the CLI
         // installed, which also covers settings and experiment values. A
         // `ReplLoop` built without an engine only has the environment and the
         // built-in table, which is the next best thing.
-        let window = match self.engine {
+        let window = match self.session.engine {
             Some(ref engine) => engine.context_window(),
-            None => crate::output_ceiling::window_for(&self.model),
+            None => crate::output_ceiling::window_for(&self.model.current),
         };
         let ceiling =
             crate::output_ceiling::resolve_ceiling(QueryEngine::DEFAULT_MAX_TOKENS, window);
-        self.max_tokens = ceiling;
-        if let Some(ref mut engine) = self.engine {
+        self.model.max_tokens = ceiling;
+        if let Some(ref mut engine) = self.session.engine {
             engine.set_max_tokens(ceiling);
         }
     }
@@ -4614,7 +4762,7 @@ impl ReplLoop {
             }
         };
 
-        if let Some(ref mut engine) = self.engine {
+        if let Some(ref mut engine) = self.session.engine {
             let mut session = engine.session().clone();
             session.active_worktree = Some(codape_core::state::WorktreeState {
                 path: created.path.clone(),
@@ -4630,7 +4778,7 @@ impl ReplLoop {
 
         // The tools have to run there too, or the session is isolated in name
         // only.
-        if let Some(ref dispatcher) = self.dispatcher {
+        if let Some(ref dispatcher) = self.agents.dispatcher {
             dispatcher.set_cwd(created.path.clone());
         }
         self.cwd = created.path.to_string_lossy().to_string();
@@ -4658,13 +4806,15 @@ impl ReplLoop {
     }
 
     fn current_session_id(&self) -> Option<String> {
-        self.engine
+        self.session
+            .engine
             .as_ref()
             .map(|engine| engine.session().session_id.to_string())
     }
 
     fn current_session_title(&self) -> Option<String> {
-        self.engine
+        self.session
+            .engine
             .as_ref()
             .and_then(|engine| engine.session().title.clone())
     }
@@ -4684,7 +4834,7 @@ impl ReplLoop {
             .map_err(|e| e.to_string())?;
         let snapshot = session_resume::load_snapshot(&self.cwd, session_id);
 
-        if let Some(ref mut engine) = self.engine {
+        if let Some(ref mut engine) = self.session.engine {
             let mut session = engine.session().clone();
             if replace_session_id && let Ok(parsed) = uuid::Uuid::parse_str(session_id) {
                 session.session_id = parsed;
@@ -4760,10 +4910,10 @@ impl ReplLoop {
     }
 
     fn persist_interactive_snapshot(&self, ui_state: &codape_ui::state::UiState) {
-        if self.no_persistence {
+        if self.options.no_persistence {
             return;
         }
-        let Some(engine) = self.engine.as_ref() else {
+        let Some(engine) = self.session.engine.as_ref() else {
             return;
         };
         let session = engine.session();
@@ -4844,7 +4994,7 @@ impl ReplLoop {
     }
 
     fn clear_interactive_snapshot(&self, session_id: Option<&str>) {
-        if self.no_persistence {
+        if self.options.no_persistence {
             return;
         }
         let session_id = session_id
@@ -5018,7 +5168,7 @@ impl ReplLoop {
     /// TUI calls this at start-up and again when a turn releases the engine.
     #[cfg(feature = "hot-reload")]
     fn sync_hook_watch_paths(&mut self) {
-        let Some(engine) = self.engine.as_ref() else {
+        let Some(engine) = self.session.engine.as_ref() else {
             return;
         };
         let paths: Vec<std::path::PathBuf> = engine
@@ -5039,7 +5189,7 @@ impl ReplLoop {
     /// the engine the turn is using.
     #[cfg(feature = "hot-reload")]
     async fn spawn_headless_file_watcher(&mut self) -> Option<HeadlessHookWatcher> {
-        let engine = self.engine.as_mut()?;
+        let engine = self.session.engine.as_mut()?;
         engine.ensure_session_started().await;
 
         let hooks = engine.hook_executor();
@@ -5115,13 +5265,13 @@ impl ReplLoop {
                 // also carries the summary. Holding it here keeps
                 // the two events from producing duplicate rows
                 // while still letting this event drive the label.
-                self.tool_use_summaries.insert(id, summary);
+                self.tools.use_summaries.insert(id, summary);
             }
             EngineEvent::ToolCallStart {
                 id, name, summary, ..
             } => {
-                let summary = self.tool_use_summaries.remove(&id).unwrap_or(summary);
-                self.tool_names.insert(id.clone(), name.clone());
+                let summary = self.tools.use_summaries.remove(&id).unwrap_or(summary);
+                self.tools.names.insert(id.clone(), name.clone());
                 live.phase.note_tool_start(&summary);
                 set_plan_step(ui_state, &summary);
                 // The log feeds `/activity`; the transcript row is
@@ -5140,9 +5290,10 @@ impl ReplLoop {
             EngineEvent::ToolCallEnd { id, result } => {
                 // A call blocked before its start event never
                 // consumed its label; drop it here.
-                self.tool_use_summaries.remove(&id);
+                self.tools.use_summaries.remove(&id);
                 let tool_name = self
-                    .tool_names
+                    .tools
+                    .names
                     .remove(&id)
                     .unwrap_or_else(|| "Tool".to_string());
                 live.phase.note_tool_end();
@@ -5357,23 +5508,23 @@ impl ReplLoop {
         self.apply_startup_theme(&mut ui_state);
         // Plugin monitors are persistent watch scripts: arm them with the
         // session and let the supervisor stop them when the loop ends.
-        if let Some(monitors) = self.plugin_monitors.clone() {
+        if let Some(monitors) = self.plugins.monitors.clone() {
             match crate::plugin_monitors::PluginMonitorSupervisor::start(
                 &monitors,
                 std::path::Path::new(&self.cwd),
             ) {
                 Ok(supervisor) => {
                     tracing::info!(count = supervisor.running(), "plugin monitors armed");
-                    self.monitor_supervisor = Some(supervisor);
+                    self.plugins.supervisor = Some(supervisor);
                 }
                 Err(error) => tracing::warn!(%error, "plugin monitors were not started"),
             }
         }
-        let mut confirmation_rx = if let Some(bus) = self.confirmation_bus.clone() {
-            if let Some(engine) = self.engine.as_mut() {
+        let mut confirmation_rx = if let Some(bus) = self.permissions.confirmation_bus.clone() {
+            if let Some(engine) = self.session.engine.as_mut() {
                 engine.set_confirmation_bus(bus.clone());
             }
-            if let Some(manager) = self.agent_manager.as_ref() {
+            if let Some(manager) = self.agents.manager.as_ref() {
                 manager.lock().await.set_confirmation_bus(bus.clone());
             }
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ConfirmationRequest>();
@@ -5392,7 +5543,7 @@ impl ReplLoop {
         // A fresh session leaves the transcript empty; the TUI then paints its
         // welcome page (name, version, model, mascot) instead of a banner
         // message that would scroll away with the first turn.
-        if let Some(ref engine) = self.engine
+        if let Some(ref engine) = self.session.engine
             && !engine.session().messages.is_empty()
         {
             let snapshot =
@@ -5402,7 +5553,7 @@ impl ReplLoop {
                 &engine.session().messages,
                 snapshot.as_ref(),
             );
-            if self.resume_session.is_some() {
+            if self.options.resume_session.is_some() {
                 let mut note = format!(
                     "Resumed session: {}\nLoaded {} messages from transcript.",
                     engine.session().session_id,
@@ -5464,7 +5615,7 @@ impl ReplLoop {
             }
         });
 
-        let mut event_rx = self.event_rx.take();
+        let mut event_rx = self.session.event_rx.take();
         // Take the file-change receiver out of `self` before the loop: the
         // other `select!` branches borrow `self` mutably, so polling a
         // receiver through `self` for the whole loop would fight them. The
@@ -5488,8 +5639,8 @@ impl ReplLoop {
         // The sender lives in the session handler the manager already has.
         let (mcp_elicit_tx, mut mcp_elicit_rx) =
             tokio::sync::mpsc::channel::<TuiElicitationRequest>(4);
-        let mcp_elicitation_active = self.mcp_elicitation.is_some();
-        if let Some(ref handler) = self.mcp_elicitation {
+        let mcp_elicitation_active = self.mcp.elicitation.is_some();
+        if let Some(ref handler) = self.mcp.elicitation {
             handler.set_tui_sender(mcp_elicit_tx);
         }
         let mut queued_prompts = std::collections::VecDeque::<String>::new();
@@ -5552,13 +5703,14 @@ impl ReplLoop {
 
             // The timeout circuit breaker is sticky. Tell the person once,
             // without printing on every loop iteration, when it has tripped.
-            if !self.mods_disabled_reported {
+            if !self.mods.disabled_reported {
                 let reason = self
-                    .mod_ui_handle
+                    .mods
+                    .ui_handle
                     .as_ref()
                     .and_then(codape_mods::ModUiHandle::disabled_reason);
                 if let Some(reason) = reason {
-                    self.mods_disabled_reported = true;
+                    self.mods.disabled_reported = true;
                     tracing::warn!("{reason}");
                     ui_state.messages.push(Message {
                         role: MessageRole::System,
@@ -5602,16 +5754,16 @@ impl ReplLoop {
             if !thinking
                 && query_done_rx.is_none()
                 && live.pending_confirmation.is_none()
-                && self.pending_elicitation.is_none()
-                && self.engine.is_some()
+                && self.mcp.pending_elicitation.is_none()
+                && self.session.engine.is_some()
                 && !ui_state.overlays.is_active()
             {
                 if let Some(person_prompt) = queued_prompts.pop_front() {
                     // The person's message was added when they typed it; do
                     // not add a second copy here. Their prompt resets the
                     // loop guard.
-                    self.mod_auto_turns = 0;
-                    self.mod_prompts_this_turn = 0;
+                    self.mods.auto_turns = 0;
+                    self.mods.prompts_this_turn = 0;
                     self.start_tui_query(
                         person_prompt,
                         &mut ui_state,
@@ -5624,12 +5776,12 @@ impl ReplLoop {
                     continue;
                 }
 
-                mod_pending.extend(self.mod_submit_queue.take());
+                mod_pending.extend(self.mods.submit_queue.take());
                 if !mod_pending.is_empty() {
                     let actions = plan_mod_drain(
                         &mut mod_pending,
-                        self.mod_auto_turns,
-                        self.mod_prompts_this_turn,
+                        self.mods.auto_turns,
+                        self.mods.prompts_this_turn,
                     );
                     let mut submissions = Vec::new();
                     for action in actions {
@@ -5653,13 +5805,13 @@ impl ReplLoop {
                         for extra in submissions.into_iter().rev() {
                             mod_pending.push_front(extra);
                         }
-                        self.mod_auto_turns += 1;
-                        self.mod_prompts_this_turn += 1;
+                        self.mods.auto_turns += 1;
+                        self.mods.prompts_this_turn += 1;
                         ui_state.messages.push(Message {
                             role: MessageRole::System,
                             content: format!(
                                 "[mod] Auto-submitted turn {}/{} from a queued message",
-                                self.mod_auto_turns, MAX_AUTO_MOD_TURNS
+                                self.mods.auto_turns, MAX_AUTO_MOD_TURNS
                             )
                             .into(),
                             tool_name: None,
@@ -5711,7 +5863,7 @@ impl ReplLoop {
                 ui_state.statusline.thinking_label = None;
                 ui_state.statusline.spinner_frame = 0;
                 if ui_state.statusline.thinking_started.is_some() {
-                    if let Some(start) = self.query_start_time {
+                    if let Some(start) = self.ui.query_start_time {
                         ui_state.statusline.last_duration = Some(start.elapsed());
                     }
                     ui_state.statusline.thinking_started = None;
@@ -5820,7 +5972,7 @@ impl ReplLoop {
                             };
                             // A multi-field MCP form owns the keyboard while
                             // it is open: navigation, editing, submit, cancel.
-                            if self.pending_mcp_form.is_some()
+                            if self.mcp.pending_form.is_some()
                                 && self.handle_mcp_form_key(&key, &mut ui_state)
                             {
                                 continue;
@@ -5930,7 +6082,7 @@ impl ReplLoop {
                             // Shift+Tab: cycle permission mode
                             if key.code == KeyCode::BackTab {
                                 ui_state.permission_bar.cycle_mode();
-                                if let Some(ref mut engine) = self.engine {
+                                if let Some(ref mut engine) = self.session.engine {
                                     let checker = engine.permission_checker();
                                     if let Ok(mut c) = checker.lock() {
                                         c.set_mode(ui_state.permission_bar.mode);
@@ -5982,13 +6134,13 @@ impl ReplLoop {
                                 match key.code {
                                     KeyCode::Char('y' | 'Y') => {
                                         ui_state.overlays.pop();
-                                        if let Some((cmd, args)) = self.pending_destructive_cmd.take() {
+                                        if let Some((cmd, args)) = self.permissions.pending_destructive_cmd.take() {
                                             self.execute_and_display_command(&cmd, &args, &mut ui_state);
                                         }
                                     }
                                     KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                                         ui_state.overlays.pop();
-                                        self.pending_destructive_cmd = None;
+                                        self.permissions.pending_destructive_cmd = None;
                                         ui_state.messages.push(codape_ui::message_list::Message {
                                             role: codape_ui::message_list::MessageRole::System,
                                             content: "Command cancelled.".into(),
@@ -6083,7 +6235,7 @@ impl ReplLoop {
                                 }
                             }
 
-                            if !self.vim_mode_enabled && key.code == KeyCode::Esc {
+                            if !self.ui.vim_mode_enabled && key.code == KeyCode::Esc {
                                 // Esc means "stop the run" whether or not Vim
                                 // mode is on. Only the Vim path used to reach
                                 // the interrupt, so in the default mode Esc did
@@ -6195,7 +6347,7 @@ impl ReplLoop {
                                             }
                                             _ => {}
                                         }
-                                    } else if self.vim_mode_enabled {
+                                    } else if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
@@ -6397,7 +6549,7 @@ impl ReplLoop {
                                 | VimAction::Ignore
                                 => {}
                                 VimAction::Append => {
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         // `a` inserts after the character under
                                         // the cursor — never onto the next line
                                         // and never into the middle of a
@@ -6417,19 +6569,19 @@ impl ReplLoop {
                                 // `o`/`O` open a real line below/above the
                                 // current one and enter insert mode on it.
                                 VimAction::OpenLineBelow => {
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         ui_state.input.open_line_below();
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
                                 VimAction::OpenLineAbove => {
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         ui_state.input.open_line_above();
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
                                 VimAction::InsertAtEnd => {
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         // End of the cursor's line, not of the
                                         // buffer.
                                         ui_state.input.apply(&InputAction::MoveToEnd);
@@ -6437,7 +6589,7 @@ impl ReplLoop {
                                     }
                                 }
                                 VimAction::InsertAtStart => {
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         ui_state.input.apply(&InputAction::MoveToStart);
                                         vim.mode = VimMode::Insert;
                                     }
@@ -6514,25 +6666,25 @@ impl ReplLoop {
                                         vim.yank(&text);
                                         vim.yank_linewise = linewise;
                                     }
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
                                 VimAction::ChangeLine(count) => {
                                     ui_state.input.change_lines(count);
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
                                 VimAction::ChangeWord => {
                                     ui_state.input.delete_word_end();
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
                                 VimAction::ChangeToEnd => {
                                     ui_state.input.apply(&InputAction::KillToEnd);
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
@@ -6540,7 +6692,7 @@ impl ReplLoop {
                                     for _ in 0..count {
                                         ui_state.input.apply(&InputAction::Delete);
                                     }
-                                    if self.vim_mode_enabled {
+                                    if self.ui.vim_mode_enabled {
                                         vim.mode = VimMode::Insert;
                                     }
                                 }
@@ -6574,7 +6726,7 @@ impl ReplLoop {
                                 MouseEventKind::Down(MouseButton::Left)
                                     if !ui_state.overlays.is_active()
                                         && live.pending_confirmation.is_none()
-                                        && self.pending_mcp_form.is_none() =>
+                                        && self.mcp.pending_form.is_none() =>
                                 {
                                     let target = terminal_ui
                                         .mod_ui_hit_regions()
@@ -6674,7 +6826,7 @@ impl ReplLoop {
                     // first reported a healthy tool turn as "no visible
                     // response".
                     && event_rx.as_ref().is_none_or(tokio::sync::mpsc::UnboundedReceiver::is_empty) => {
-                    self.engine = Some(engine);
+                    self.session.engine = Some(engine);
                     // The turn may have run `SessionStart` for the first time;
                     // its `watchPaths` are known now, so add them to the live
                     // watcher.
@@ -6684,9 +6836,9 @@ impl ReplLoop {
                     query_done_rx = None;
                     elicit_rx = None;
                     tui_elicit_rx = None;
-                    self.pending_elicitation = None;
+                    self.mcp.pending_elicitation = None;
                     self.record_turn_telemetry(&result);
-                    self.pending_mcp_form = None;
+                    self.mcp.pending_form = None;
                     live.pending_confirmation = None;
                     thinking = false;
                     live.phase.reset();
@@ -6820,7 +6972,7 @@ impl ReplLoop {
                         folded: false,
                     });
                     if let Some(scheduler) =
-                        self.dispatcher.as_ref().and_then(|d| d.cron_scheduler())
+                        self.agents.dispatcher.as_ref().and_then(|d| d.cron_scheduler())
                     {
                         scheduler.mark_fired(&job_id);
                     }
@@ -6862,7 +7014,7 @@ impl ReplLoop {
                         streaming: false,
                         folded: false,
                     });
-                    self.pending_elicitation = Some(request.response_tx);
+                    self.mcp.pending_elicitation = Some(request.response_tx);
                 }
 
                 Some(request) = async {
@@ -6880,7 +7032,7 @@ impl ReplLoop {
                         last.streaming = false;
                     }
                     ui_state.notifications.info(&request.prompt);
-                    self.pending_elicitation = Some(request.response_tx);
+                    self.mcp.pending_elicitation = Some(request.response_tx);
                 }
 
                 // A server is blocked inside its tool call until this is
@@ -6931,14 +7083,14 @@ impl ReplLoop {
                         });
                         let state = crate::mcp_elicitation::McpFormState::new(form);
                         ui_state.notifications.info(state.focus_hint());
-                        self.pending_mcp_form = Some(state);
+                        self.mcp.pending_form = Some(state);
                     } else {
-                        self.pending_mcp_form = None;
+                        self.mcp.pending_form = None;
                         ui_state
                             .notifications
                             .info("An MCP server is waiting for an answer");
                     }
-                    self.pending_elicitation = Some(request.response_tx);
+                    self.mcp.pending_elicitation = Some(request.response_tx);
                 }
 
                 // A watched file changed. This main loop drains the shared
@@ -6964,14 +7116,14 @@ impl ReplLoop {
         };
 
         // Cleanup
-        if let Some(ref handler) = self.mcp_elicitation {
+        if let Some(ref handler) = self.mcp.elicitation {
             // The event loop is going away; later server questions must not
             // wait on a channel nobody is reading.
             handler.clear_tui_sender();
         }
         let _ = terminal_ui.exit();
         let _ = disable_raw_mode();
-        self.event_rx = event_rx;
+        self.session.event_rx = event_rx;
         self.stop_artifact_serving().await;
 
         if let Some(code) = signal_exit {
@@ -6999,12 +7151,12 @@ impl ReplLoop {
             tracing::info!("{notification}");
             eprintln!("{notification}");
         }
-        if let Some(monitors) = self.plugin_monitors.clone() {
+        if let Some(monitors) = self.plugins.monitors.clone() {
             match crate::plugin_monitors::PluginMonitorSupervisor::start(
                 &monitors,
                 std::path::Path::new(&self.cwd),
             ) {
-                Ok(supervisor) => self.monitor_supervisor = Some(supervisor),
+                Ok(supervisor) => self.plugins.supervisor = Some(supervisor),
                 Err(error) => tracing::warn!(%error, "plugin monitors were not started"),
             }
         }
@@ -7020,11 +7172,11 @@ impl ReplLoop {
             let mut output = first.clone();
             let mut failure = None;
             let mut pending: std::collections::VecDeque<String> =
-                self.mod_submit_queue.take().into();
+                self.mods.submit_queue.take().into();
             let mut auto_turns = 0usize;
             let mut submitted = 0usize;
             loop {
-                pending.extend(self.mod_submit_queue.take());
+                pending.extend(self.mods.submit_queue.take());
                 let mut submissions = Vec::new();
                 for action in plan_mod_drain(&mut pending, auto_turns, submitted) {
                     match action {
@@ -7071,7 +7223,7 @@ impl ReplLoop {
         // tree back against the task and repair once if the review finds a
         // problem. A run that already failed stays failed: there is nothing
         // to review, and its error is the result.
-        if self.verify_on_finish && result.is_ok() {
+        if self.options.verify_on_finish && result.is_ok() {
             let answer = result.unwrap_or_default();
             match self.run_verification_pass(prompt).await {
                 Ok(report) => result = Ok(join_verification_report(&answer, &report)),
@@ -7090,7 +7242,7 @@ impl ReplLoop {
         // sessions could not be resumed or found by `/resume`. Persist what
         // the turn produced; slash-command-only runs are covered too.
         self.persist_headless_session();
-        if let Some(mut supervisor) = self.monitor_supervisor.take() {
+        if let Some(mut supervisor) = self.plugins.supervisor.take() {
             supervisor.stop().await;
         }
         self.stop_artifact_serving().await;
@@ -7213,10 +7365,10 @@ impl ReplLoop {
 
     /// Write the transcript and index entry for a headless session.
     fn persist_headless_session(&self) {
-        if self.no_persistence {
+        if self.options.no_persistence {
             return;
         }
-        let Some(engine) = self.engine.as_ref() else {
+        let Some(engine) = self.session.engine.as_ref() else {
             return;
         };
         let session = engine.session();
@@ -7311,7 +7463,7 @@ impl ReplLoop {
             return Ok(String::from_utf8_lossy(&buffer).into_owned());
         }
 
-        if self.engine.is_none() {
+        if self.session.engine.is_none() {
             return Err(anyhow::anyhow!(
                 "No QueryEngine configured. Set ANTHROPIC_API_KEY or run `codape --api-key <key>`"
             ));
@@ -7365,8 +7517,9 @@ impl ReplLoop {
         session_id: &str,
     ) {
         // Collect first: recording needs `&mut self`, while the receiver
-        // borrows `self.event_rx`.
+        // borrows `self.session.event_rx`.
         let events: Vec<EngineEvent> = self
+            .session
             .event_rx
             .as_mut()
             .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).collect())
@@ -7374,7 +7527,8 @@ impl ReplLoop {
         for event in events {
             self.record_engine_event_telemetry(&event);
             if let Some(sink) = protocol.as_mut()
-                && let Some(frame) = protocol_frame(&event, session_id, self.verbose_tool_input)
+                && let Some(frame) =
+                    protocol_frame(&event, session_id, self.options.verbose_tool_input)
                 && let Err(error) = sink.emit(&frame)
             {
                 tracing::warn!("could not write a protocol frame: {error}");
@@ -7832,7 +7986,7 @@ impl ReplLoop {
         focus: &mut ModUiFocus,
         id: String,
     ) {
-        let outcome = match self.mod_ui_handle.clone() {
+        let outcome = match self.mods.ui_handle.clone() {
             Some(handle) => match tokio::task::spawn_blocking(move || handle.activate(&id)).await {
                 Ok(result) => result,
                 Err(error) => Err(format!("the activation task failed: {error}")),
@@ -7918,11 +8072,12 @@ impl ReplLoop {
         };
         match event {
             EngineEvent::ToolCallStart { id, name, .. } => {
-                self.tool_starts
+                self.tools
+                    .starts
                     .insert(id.clone(), (name.clone(), std::time::Instant::now()));
             }
             EngineEvent::ToolCallEnd { id, result } => {
-                if let Some((tool_name, started)) = self.tool_starts.remove(id) {
+                if let Some((tool_name, started)) = self.tools.starts.remove(id) {
                     handle.record(codape_telemetry::TelemetryEvent::ToolUsed {
                         tool_name,
                         success: !result.is_error,
@@ -7941,29 +8096,29 @@ impl ReplLoop {
         let Some(ref handle) = self.telemetry else {
             return;
         };
-        if let Some(engine) = self.engine.as_ref() {
+        if let Some(engine) = self.session.engine.as_ref() {
             let usage = engine.total_usage();
             let tokens_in = usage
                 .input_tokens
-                .saturating_sub(self.last_usage.input_tokens);
+                .saturating_sub(self.tools.last_usage.input_tokens);
             let tokens_out = usage
                 .output_tokens
-                .saturating_sub(self.last_usage.output_tokens);
+                .saturating_sub(self.tools.last_usage.output_tokens);
             if tokens_in > 0 || tokens_out > 0 {
-                let provider = if self.model.0.starts_with("claude") {
+                let provider = if self.model.current.0.starts_with("claude") {
                     "anthropic"
                 } else {
                     "custom"
                 };
                 handle.record(codape_telemetry::TelemetryEvent::ApiCall {
                     provider: provider.to_string(),
-                    model: self.model.0.clone(),
+                    model: self.model.current.0.clone(),
                     tokens_in: u32::try_from(tokens_in).unwrap_or(u32::MAX),
                     tokens_out: u32::try_from(tokens_out).unwrap_or(u32::MAX),
                     timestamp: chrono::Utc::now(),
                 });
             }
-            self.last_usage = usage;
+            self.tools.last_usage = usage;
         }
 
         let (error_type, message) = match result {
@@ -7993,7 +8148,7 @@ impl ReplLoop {
     /// it drained prevents the broadcast buffer from growing and records
     /// sub-agent activity in debug logs.
     fn drain_agent_observable_events(&mut self) {
-        let Some(rx) = self.agent_observable_rx.as_mut() else {
+        let Some(rx) = self.agents.observable_rx.as_mut() else {
             return;
         };
         loop {
@@ -8008,7 +8163,7 @@ impl ReplLoop {
                     tracing::warn!(skipped, "sub-agent event stream lagged");
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                    self.agent_observable_rx = None;
+                    self.agents.observable_rx = None;
                     break;
                 }
             }
@@ -8046,15 +8201,16 @@ impl ReplLoop {
             kind: QueryKind::MainAgent,
             user_prompt: String::new(), // filled at submit time
             // If override is set, it replaces the base prompt; otherwise None
-            custom_system_prompt: self.session_effects.override_system_prompt.clone(),
-            append_system_prompt: self.session_effects.append_system_prompt.clone(),
+            custom_system_prompt: self.session.effects.override_system_prompt.clone(),
+            append_system_prompt: self.session.effects.append_system_prompt.clone(),
             prompt_profile: self
-                .session_effects
+                .session
+                .effects
                 .prompt_profiles
                 .last()
                 .copied()
                 .unwrap_or_default(),
-            allowed_tools: self.session_effects.allowed_tools_override.clone(),
+            allowed_tools: self.session.effects.allowed_tools_override.clone(),
             model_profile: ModelProfile::Main,
             inherit_session: true,
             stream: true,
@@ -8070,26 +8226,26 @@ impl ReplLoop {
     /// and tool whitelists are applied consistently with side/forked queries.
     fn build_submit_options(&mut self) -> SubmitOptions {
         let request = self.build_query_request_for_main_agent();
-        let mut options = if let Some(ref orchestrator) = self.orchestrator {
+        let mut options = if let Some(ref orchestrator) = self.session.orchestrator {
             orchestrator.build_submit_options(&request)
         } else {
             // Fallback when no orchestrator is available
             let mut opts = SubmitOptions::default();
-            if let Some(ref override_prompt) = self.session_effects.override_system_prompt {
+            if let Some(ref override_prompt) = self.session.effects.override_system_prompt {
                 // Override takes precedence over profile-based composition
                 opts.custom_system_prompt = Some(override_prompt.clone());
-            } else if !self.session_effects.prompt_profiles.is_empty() {
+            } else if !self.session.effects.prompt_profiles.is_empty() {
                 opts.custom_system_prompt = Some(prompts::compose_system_prompt_for_profiles(
-                    &self.session_effects.prompt_profiles,
+                    &self.session.effects.prompt_profiles,
                 ));
             }
-            if let Some(ref prompt) = self.session_effects.append_system_prompt {
+            if let Some(ref prompt) = self.session.effects.append_system_prompt {
                 opts.append_system_prompt = Some(prompt.clone());
             }
-            if let Some(ref tools) = self.session_effects.allowed_tools_override {
+            if let Some(ref tools) = self.session.effects.allowed_tools_override {
                 opts.allowed_tools_override = Some(tools.clone());
             } else if let Some(default_tools) =
-                prompts::default_allowed_tools_for_profiles(&self.session_effects.prompt_profiles)
+                prompts::default_allowed_tools_for_profiles(&self.session.effects.prompt_profiles)
             {
                 opts.allowed_tools_override = Some(default_tools);
             }
@@ -8097,9 +8253,10 @@ impl ReplLoop {
         };
 
         // REPL-specific: extra context from commands is not part of QueryRequest
-        if !self.session_effects.extra_context.is_empty() {
+        if !self.session.effects.extra_context.is_empty() {
             options.replay_user_messages = Some(
-                self.session_effects
+                self.session
+                    .effects
                     .extra_context
                     .iter()
                     .map(|ctx| Message::user(format!("Additional context: {ctx}")))
@@ -8108,7 +8265,7 @@ impl ReplLoop {
         }
 
         // Apply CLI flag overrides
-        if let Some(ref schema) = self.json_schema {
+        if let Some(ref schema) = self.options.json_schema {
             let schema_val: Result<serde_json::Value, _> =
                 serde_json::from_str::<serde_json::Value>(schema).or_else(|_| {
                     let contents = std::fs::read_to_string(schema)
@@ -8118,12 +8275,12 @@ impl ReplLoop {
             if let Ok(val) = schema_val {
                 options.json_schema = Some(val.clone());
                 // Configure the engine's structured output validator
-                if let Some(ref mut engine) = self.engine {
+                if let Some(ref mut engine) = self.session.engine {
                     engine.set_structured_output(val);
                 }
             }
         }
-        if let Some(budget_usd) = self.max_budget_usd
+        if let Some(budget_usd) = self.options.max_budget_usd
             && budget_usd > 0.0
         {
             // Convert USD to tokens using a conservative rate ($3 per 1M tokens)
@@ -8133,15 +8290,15 @@ impl ReplLoop {
             let tokens = ((budget_usd / 3.0) * 1_000_000.0).max(1.0) as u64;
             options.task_budget_tokens = tokens;
         }
-        if let Some(turns) = self.max_turns {
+        if let Some(turns) = self.options.max_turns {
             options.max_turns = turns;
         }
-        if let Some((started, budget)) = self.time_budget
-            && let Some(ref mut engine) = self.engine
+        if let Some((started, budget)) = self.options.time_budget
+            && let Some(ref mut engine) = self.session.engine
         {
             engine.set_time_budget(started, budget);
         }
-        options.include_partial_messages = self.include_partial_messages;
+        options.include_partial_messages = self.options.include_partial_messages;
         // In the interactive REPL, assistant clarification questions should stay in the
         // transcript as normal messages. The engine's fallback elicitation prompt writes to
         // stderr/stdin directly, which breaks the TUI and duplicates the normal next-turn flow.
@@ -8151,7 +8308,7 @@ impl ReplLoop {
         // sub-agent. This runs immediately before the turn is submitted, so a
         // delegation inside the turn reuses the parent's prefix as it was
         // when the turn began.
-        if let Some(ref engine) = self.engine {
+        if let Some(ref engine) = self.session.engine {
             let messages: Vec<serde_json::Value> = engine
                 .session()
                 .messages
@@ -8159,6 +8316,7 @@ impl ReplLoop {
                 .filter_map(|message| serde_json::to_value(message).ok())
                 .collect();
             let tool_names = self
+                .agents
                 .dispatcher
                 .as_ref()
                 .map(|dispatcher| {
@@ -8171,11 +8329,11 @@ impl ReplLoop {
                 .unwrap_or_default();
             let snapshot = ParentContextSnapshot::new(
                 messages,
-                self.model.0.clone(),
+                self.model.current.0.clone(),
                 options.custom_system_prompt.clone().unwrap_or_default(),
                 tool_names,
             );
-            *self.parent_context_snapshot.lock().unwrap() = Some(snapshot);
+            *self.agents.parent_snapshot.lock().unwrap() = Some(snapshot);
         }
 
         options
@@ -8183,14 +8341,14 @@ impl ReplLoop {
 
     /// Trigger background features after a successful turn.
     ///
-    /// Tasks are tracked in `self.background_tasks` with cancellation tokens.
-    /// Results are delivered asynchronously via `self.background_results_rx`.
+    /// Tasks are tracked in `self.background.tasks` with cancellation tokens.
+    /// Results are delivered asynchronously via `self.background.results_rx`.
     fn trigger_background_features(&mut self, _user_prompt: &str) {
-        let client = match &self.api_client {
+        let client = match &self.session.api_client {
             Some(c) => c.clone_box(),
             None => return,
         };
-        let tx = match &self.background_results_tx {
+        let tx = match &self.background.results_tx {
             Some(t) => t.clone(),
             None => return,
         };
@@ -8243,7 +8401,7 @@ impl ReplLoop {
         let task_id = id.to_string();
         let task_cancel = cancel_token.clone();
 
-        self.background_tasks.push(BackgroundTask {
+        self.background.tasks.push(BackgroundTask {
             id: task_id.clone(),
             kind,
             cancel_token,
@@ -8278,23 +8436,24 @@ impl ReplLoop {
 
     /// Cancel all running background tasks.
     fn cancel_background_tasks(&mut self) {
-        for task in &self.background_tasks {
+        for task in &self.background.tasks {
             task.cancel_token.cancel();
             tracing::info!("Cancelled background task: {} ({:?})", task.id, task.kind);
         }
-        self.background_tasks.clear();
+        self.background.tasks.clear();
     }
 
     /// Remove finished (cancelled or completed) background tasks from tracking.
     fn cleanup_finished_background_tasks(&mut self) {
-        self.background_tasks
+        self.background
+            .tasks
             .retain(|t| !t.cancel_token.is_cancelled());
     }
 
     /// Poll for completed background task results and return them.
     fn poll_background_results(&mut self) -> Vec<BackgroundTaskResult> {
         let mut results = Vec::new();
-        if let Some(ref mut rx) = self.background_results_rx {
+        if let Some(ref mut rx) = self.background.results_rx {
             while let Ok(result) = rx.try_recv() {
                 results.push(result);
             }
@@ -8304,7 +8463,7 @@ impl ReplLoop {
 
     /// Run agent generation synchronously and return the result.
     async fn run_agent_generation(&self, description: &str) -> String {
-        let Some(ref client) = self.api_client else {
+        let Some(ref client) = self.session.api_client else {
             return "No API client configured.".into();
         };
         match codape_core::prompts::generate_agent(client.as_ref(), description).await {
@@ -8325,7 +8484,7 @@ impl ReplLoop {
     /// Compact the session context by truncating older messages.
     /// Keeps the first user message and the most recent 3 turns.
     fn compact_context(&mut self, ui_state: &mut codape_ui::state::UiState) -> String {
-        let Some(engine) = self.engine.as_mut() else {
+        let Some(engine) = self.session.engine.as_mut() else {
             return "No engine configured.".into();
         };
         let result = engine.compact_session_messages(3);
@@ -8344,7 +8503,7 @@ impl ReplLoop {
 
     /// Compact context in non-TUI mode.
     fn compact_context_non_tui(&mut self) -> String {
-        let Some(ref mut engine) = self.engine else {
+        let Some(ref mut engine) = self.session.engine else {
             return "No engine configured.".into();
         };
         let result = engine.compact_session_messages(3);
@@ -8360,19 +8519,19 @@ impl ReplLoop {
 
     /// Spawn a background task that updates session memory via ai_workflow.
     fn spawn_memory_update_task(&mut self) -> String {
-        let client = match &self.api_client {
+        let client = match &self.session.api_client {
             Some(c) => c.clone_box(),
             None => return "No API client configured.".into(),
         };
-        let tx = match &self.background_results_tx {
+        let tx = match &self.background.results_tx {
             Some(t) => t.clone(),
             None => return "Background task channel not available.".into(),
         };
-        let store = match &self.session_memory_store {
+        let store = match &self.memory.session_store {
             Some(s) => Arc::clone(s),
             None => return "Session memory store not available.".into(),
         };
-        let Some(session_id) = self.session_id else {
+        let Some(session_id) = self.memory.session_id else {
             return "Session ID not available.".into();
         };
         let conversation = self
@@ -8391,10 +8550,10 @@ impl ReplLoop {
             .join("\n");
 
         self.cleanup_finished_background_tasks();
-        let task_id = format!("memory_update_{}", self.background_tasks.len());
+        let task_id = format!("memory_update_{}", self.background.tasks.len());
         let cancel_token = CancellationToken::new();
         let task_cancel = cancel_token.clone();
-        self.background_tasks.push(BackgroundTask {
+        self.background.tasks.push(BackgroundTask {
             id: task_id.clone(),
             kind: BackgroundFeatureKind::SessionMemoryUpdate,
             cancel_token,
@@ -8429,15 +8588,15 @@ impl ReplLoop {
 
     /// Spawn a background task that extracts long-term memories via ai_workflow.
     fn spawn_memory_extraction_task(&mut self) -> String {
-        let client = match &self.api_client {
+        let client = match &self.session.api_client {
             Some(c) => c.clone_box(),
             None => return "No API client configured.".into(),
         };
-        let tx = match &self.background_results_tx {
+        let tx = match &self.background.results_tx {
             Some(t) => t.clone(),
             None => return "Background task channel not available.".into(),
         };
-        let store = match &self.long_term_store {
+        let store = match &self.memory.long_term {
             Some(s) => Arc::clone(s),
             None => return "Long-term memory store not available.".into(),
         };
@@ -8451,10 +8610,10 @@ impl ReplLoop {
             .join("\n");
 
         self.cleanup_finished_background_tasks();
-        let task_id = format!("memory_extraction_{}", self.background_tasks.len());
+        let task_id = format!("memory_extraction_{}", self.background.tasks.len());
         let cancel_token = CancellationToken::new();
         let task_cancel = cancel_token.clone();
-        self.background_tasks.push(BackgroundTask {
+        self.background.tasks.push(BackgroundTask {
             id: task_id.clone(),
             kind: BackgroundFeatureKind::MemoryExtraction,
             cancel_token,
@@ -8499,11 +8658,11 @@ impl ReplLoop {
         kind: BackgroundFeatureKind,
         user_prompt: String,
     ) -> String {
-        let client = match &self.api_client {
+        let client = match &self.session.api_client {
             Some(c) => c.clone_box(),
             None => return "No API client configured.".into(),
         };
-        let tx = match &self.background_results_tx {
+        let tx = match &self.background.results_tx {
             Some(t) => t.clone(),
             None => return "Background task channel not available.".into(),
         };
@@ -8583,7 +8742,7 @@ impl ReplLoop {
         let id = format!(
             "{}_{}",
             background_feature_label(kind),
-            self.background_tasks.len()
+            self.background.tasks.len()
         );
         self.spawn_background_task(&id, kind, client, request, tx);
         format!("Background task started: {id}")
@@ -8592,28 +8751,28 @@ impl ReplLoop {
     /// Apply effects from a CommandResult to session state.
     fn apply_command_effects(&mut self, result: &CommandResult) {
         if let Some(profile) = result.prompt_profile
-            && !self.session_effects.prompt_profiles.contains(&profile)
+            && !self.session.effects.prompt_profiles.contains(&profile)
         {
-            self.session_effects.prompt_profiles.push(profile);
+            self.session.effects.prompt_profiles.push(profile);
         }
 
         if let Some(ref prompt) = result.override_system_prompt {
             // Override takes precedence: replace the base prompt entirely
-            self.session_effects.override_system_prompt = Some(prompt.clone());
+            self.session.effects.override_system_prompt = Some(prompt.clone());
         } else if let Some(ref prompt) = result.append_system_prompt {
-            if let Some(ref existing) = self.session_effects.append_system_prompt {
-                self.session_effects.append_system_prompt = Some(format!("{existing}\n{prompt}"));
+            if let Some(ref existing) = self.session.effects.append_system_prompt {
+                self.session.effects.append_system_prompt = Some(format!("{existing}\n{prompt}"));
             } else {
-                self.session_effects.append_system_prompt = Some(prompt.clone());
+                self.session.effects.append_system_prompt = Some(prompt.clone());
             }
         }
 
         if let Some(ref ctx) = result.extra_context {
-            self.session_effects.extra_context.push(ctx.clone());
+            self.session.effects.extra_context.push(ctx.clone());
         }
 
         if let Some(ref tools) = result.allowed_tools_override {
-            self.session_effects.allowed_tools_override = Some(tools.clone());
+            self.session.effects.allowed_tools_override = Some(tools.clone());
         }
     }
 
@@ -8635,7 +8794,7 @@ impl ReplLoop {
         }
 
         if cmd_name == "vim" && result.state_changed {
-            self.vim_mode_enabled = !self.vim_mode_enabled;
+            self.ui.vim_mode_enabled = !self.ui.vim_mode_enabled;
             return true;
         }
 
@@ -8643,7 +8802,7 @@ impl ReplLoop {
             && result.state_changed
             && let Some(theme_name) = result.output.strip_prefix("Theme changed to: ")
         {
-            self.current_theme = theme_name.trim().to_string();
+            self.ui.current_theme = theme_name.trim().to_string();
             return true;
         }
 
@@ -8708,7 +8867,7 @@ impl ReplLoop {
         let Some(command) = self.pending_setup.take() else {
             return;
         };
-        let Some(ref engine) = self.engine else {
+        let Some(ref engine) = self.session.engine else {
             return;
         };
         let mut context = std::collections::HashMap::new();
@@ -8729,7 +8888,7 @@ impl ReplLoop {
     /// see a rename's two paths together.
     #[cfg(feature = "hot-reload")]
     async fn fire_file_changed_hook(&self, batch: &FileChangeBatch) {
-        let Some(ref engine) = self.engine else {
+        let Some(ref engine) = self.session.engine else {
             return;
         };
         let hooks = engine.hook_executor();
@@ -8773,7 +8932,7 @@ impl ReplLoop {
         // Plugin themes are part of the session's registry, so `/theme` can
         // select them like a built-in. Registering after the files lets a
         // plugin override a file of the same name.
-        for (name, value) in &self.plugin_themes {
+        for (name, value) in &self.plugins.themes {
             if let Err(error) = manager.register_json(name, value) {
                 tracing::warn!(theme = %name, %error, "plugin theme was not registered");
             }
@@ -8783,7 +8942,7 @@ impl ReplLoop {
 
     /// Apply the persisted statusline theme at startup, including plugins.
     fn apply_startup_theme(&self, ui_state: &mut codape_ui::state::UiState) {
-        let name = self.current_theme.clone();
+        let name = self.ui.current_theme.clone();
         if !self.apply_tui_theme(ui_state, &name) && name != "dark" {
             tracing::warn!(theme = %name, "configured theme was not found");
         }
@@ -8793,7 +8952,7 @@ impl ReplLoop {
         let (elicit_tx, mut elicit_rx) =
             tokio::sync::mpsc::channel::<codape_tools::ElicitRequest>(4);
 
-        if let Some(ref dispatcher) = self.dispatcher {
+        if let Some(ref dispatcher) = self.agents.dispatcher {
             dispatcher.set_elicit_tx(Some(elicit_tx));
         }
 
@@ -8816,9 +8975,9 @@ impl ReplLoop {
         // is deliberate: a timeout would turn a slow person into a silent
         // denial. Turn shutdown and process exit drop the pending responders
         // with the bus.
-        let permission_bus = if self.headless_permission_control && protocol.is_some() {
+        let permission_bus = if self.permissions.headless_control && protocol.is_some() {
             let bus = ConfirmationBus::new(16);
-            self.confirmation_bus = Some(bus.clone());
+            self.permissions.confirmation_bus = Some(bus.clone());
             Some(bus)
         } else {
             None
@@ -8844,10 +9003,10 @@ impl ReplLoop {
         let turn_started = std::time::Instant::now();
         // Watched in the loop rather than drained at the end, so the host sees
         // the turn as it happens instead of all at once when it is over.
-        let mut live_events = self.event_rx.take();
+        let mut live_events = self.session.event_rx.take();
 
         let options = self.build_submit_options();
-        let mut engine = self.engine.take().unwrap();
+        let mut engine = self.session.engine.take().unwrap();
         // Where this turn starts counting. `current_turn` is cumulative across
         // the session, so the turns this call consumed is the difference after
         // it returns. Every closing frame below used to report a hardcoded 1,
@@ -8863,7 +9022,7 @@ impl ReplLoop {
         // Reapply the session's fallback model: the engine crosses the task
         // boundary below, and an agent selection or `/model` may have rebuilt
         // the engine's model after `configure_repl` ran.
-        engine.set_fallback_model(self.fallback_model.clone());
+        engine.set_fallback_model(self.model.fallback_model.clone());
         // Installed before the turn task starts so an `Ask` on the very first
         // tool call sees the bus.
         if let Some(bus) = permission_bus.as_ref() {
@@ -8944,7 +9103,7 @@ impl ReplLoop {
                 }
             }, if live_events.is_some() => {
                 if let Some(sink) = protocol.as_mut()
-                    && let Some(frame) = protocol_frame(&event, &session_id, self.verbose_tool_input)
+                    && let Some(frame) = protocol_frame(&event, &session_id, self.options.verbose_tool_input)
                         && let Err(error) = sink.emit(&frame) {
                             tracing::warn!("could not write a protocol frame: {error}");
                         }
@@ -9012,7 +9171,7 @@ impl ReplLoop {
                         handle.abort();
                     }
                     if permission_bus.is_some() {
-                        self.confirmation_bus = None;
+                        self.permissions.confirmation_bus = None;
                     }
                     // The turn never reached its normal closing path; a
                     // stream-json consumer still needs exactly one
@@ -9056,11 +9215,11 @@ impl ReplLoop {
         // listening and wait forever.
         if permission_bus.is_some() {
             engine.clear_confirmation_bus();
-            self.confirmation_bus = None;
+            self.permissions.confirmation_bus = None;
         }
 
-        self.engine = Some(engine);
-        self.event_rx = live_events;
+        self.session.engine = Some(engine);
+        self.session.event_rx = live_events;
 
         self.record_turn_telemetry(&result);
         if headless_mode {
@@ -9218,13 +9377,13 @@ impl ReplLoop {
         // every test passed. `path-tracing` in the eleventh terminal-bench
         // batch is exactly that: `result: success` at 892.9 s, SIGTERM at
         // 900 s, exit 124.
-        if !self.no_persistence
-            && !self.session_effects.title_generated
-            && let Some(ref client) = self.api_client
+        if !self.options.no_persistence
+            && !self.session.effects.title_generated
+            && let Some(ref client) = self.session.api_client
             && let Ok(title) = prompts::generate_session_title(client.as_ref(), prompt).await
         {
-            self.session_effects.title_generated = true;
-            if let Some(ref mut engine) = self.engine {
+            self.session.effects.title_generated = true;
+            if let Some(ref mut engine) = self.session.engine {
                 let mut session = engine.session().clone();
                 if session.title.is_none() {
                     session.title = Some(title);
@@ -9249,11 +9408,11 @@ impl ReplLoop {
 
     /// Sync REPL state into the TUI statusline.
     fn sync_statusline(&self, statusline: &mut codape_ui::statusline::Statusline) {
-        statusline.model.clone_from(&self.model.0);
+        statusline.model.clone_from(&self.model.current.0);
         statusline
             .format
-            .clone_from(&self.settings_statusline_format);
-        statusline.session_title = if self.session_effects.title_generated {
+            .clone_from(&self.ui.settings_statusline_format);
+        statusline.session_title = if self.session.effects.title_generated {
             "Active".into()
         } else {
             "New Session".into()
@@ -9265,7 +9424,7 @@ impl ReplLoop {
 
     /// Sync current permission mode into the TUI permission bar.
     fn sync_permission_bar(&self, bar: &mut codape_ui::permission_bar::PermissionBar) {
-        if let Some(ref engine) = self.engine {
+        if let Some(ref engine) = self.session.engine {
             let checker = engine.permission_checker();
             if let Ok(c) = checker.lock() {
                 bar.mode = c.mode();
@@ -9319,7 +9478,7 @@ impl ReplLoop {
     ) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        if self.pending_mcp_form.is_none() {
+        if self.mcp.pending_form.is_none() {
             return false;
         }
 
@@ -9327,8 +9486,8 @@ impl ReplLoop {
             KeyCode::Esc | KeyCode::Char('c')
                 if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
             {
-                self.pending_mcp_form = None;
-                if let Some(tx) = self.pending_elicitation.take() {
+                self.mcp.pending_form = None;
+                if let Some(tx) = self.mcp.pending_elicitation.take() {
                     let _ = tx.send(serde_json::json!({ "cancelled": true }));
                 }
                 ui_state.messages.push(codape_ui::message_list::Message {
@@ -9340,22 +9499,22 @@ impl ReplLoop {
                 });
             }
             KeyCode::Tab | KeyCode::Down => {
-                if let Some(form) = self.pending_mcp_form.as_mut() {
+                if let Some(form) = self.mcp.pending_form.as_mut() {
                     form.move_focus(1);
                     ui_state.notifications.info(form.focus_hint());
                 }
             }
             KeyCode::BackTab | KeyCode::Up => {
-                if let Some(form) = self.pending_mcp_form.as_mut() {
+                if let Some(form) = self.mcp.pending_form.as_mut() {
                     form.move_focus(-1);
                     ui_state.notifications.info(form.focus_hint());
                 }
             }
             KeyCode::Enter => {
-                let mut form = self.pending_mcp_form.take().expect("form is open");
+                let mut form = self.mcp.pending_form.take().expect("form is open");
                 match form.submit() {
                     Ok(content) => {
-                        if let Some(tx) = self.pending_elicitation.take() {
+                        if let Some(tx) = self.mcp.pending_elicitation.take() {
                             let _ = tx.send(serde_json::json!({ "content": content }));
                         }
                         ui_state.messages.push(codape_ui::message_list::Message {
@@ -9376,17 +9535,17 @@ impl ReplLoop {
                             streaming: false,
                             folded: false,
                         });
-                        self.pending_mcp_form = Some(form);
+                        self.mcp.pending_form = Some(form);
                     }
                 }
             }
             KeyCode::Backspace => {
-                if let Some(form) = self.pending_mcp_form.as_mut() {
+                if let Some(form) = self.mcp.pending_form.as_mut() {
                     form.backspace();
                 }
             }
             KeyCode::Delete => {
-                if let Some(form) = self.pending_mcp_form.as_mut() {
+                if let Some(form) = self.mcp.pending_form.as_mut() {
                     form.clear_field();
                 }
             }
@@ -9394,7 +9553,7 @@ impl ReplLoop {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                if let Some(form) = self.pending_mcp_form.as_mut() {
+                if let Some(form) = self.mcp.pending_form.as_mut() {
                     form.insert_char(c);
                 }
             }
@@ -9426,12 +9585,12 @@ impl ReplLoop {
 
         // A multi-field form is edited by the key handler, not by submitting
         // the main input line.
-        if self.pending_mcp_form.is_some() {
+        if self.mcp.pending_form.is_some() {
             return;
         }
 
         // If there's a pending elicitation, treat this input as the answer.
-        if let Some(tx) = self.pending_elicitation.take() {
+        if let Some(tx) = self.mcp.pending_elicitation.take() {
             self.history.push(text.to_string());
             ui_state.messages.push(codape_ui::message_list::Message {
                 role: codape_ui::message_list::MessageRole::User,
@@ -9483,7 +9642,7 @@ impl ReplLoop {
             // commands disabled none of these run either: they are still slash
             // commands, and executing them anyway made the flag only hide
             // them from `/help` (the non-TUI path already skipped them).
-            if !self.no_slash_commands {
+            if !self.options.no_slash_commands {
                 match cmd_name {
                     "exit" | "quit" => {
                         self.running = false;
@@ -9524,7 +9683,7 @@ impl ReplLoop {
                                 "haiku" => ModelId::haiku(),
                                 other => ModelId(other.to_string()),
                             };
-                            self.model = mapped;
+                            self.model.current = mapped;
                         }
                         self.execute_and_display_command(cmd_name, &args, ui_state);
                         return;
@@ -9682,7 +9841,7 @@ impl ReplLoop {
 
             // Check for macro expansion first. A macro expands into slash
             // commands, so it is subject to the same switch.
-            if !self.no_slash_commands
+            if !self.options.no_slash_commands
                 && self.macro_registry.has(cmd_name)
                 && let Some(commands) = self.macro_registry.get(cmd_name)
             {
@@ -9703,7 +9862,7 @@ impl ReplLoop {
             if let Some(cmd) = self.commands.find(cmd_name)
                 && cmd.destructive
             {
-                self.pending_destructive_cmd = Some((cmd_name.to_string(), args));
+                self.permissions.pending_destructive_cmd = Some((cmd_name.to_string(), args));
                 ui_state
                     .overlays
                     .push(codape_ui::overlay::Overlay::Confirm {
@@ -9717,10 +9876,10 @@ impl ReplLoop {
 
             // Execute the command directly
             self.execute_and_display_command(cmd_name, &args, ui_state);
-        } else if self.engine.is_some() {
+        } else if self.session.engine.is_some() {
             // A person submitted a prompt: the auto-turn chain starts over.
-            self.mod_auto_turns = 0;
-            self.mod_prompts_this_turn = 0;
+            self.mods.auto_turns = 0;
+            self.mods.prompts_this_turn = 0;
             self.start_tui_query(
                 text.to_string(),
                 ui_state,
@@ -9733,8 +9892,8 @@ impl ReplLoop {
         } else if *thinking || query_done_rx.is_some() {
             // A person submitted a prompt, even though it waits for the
             // running turn; it resets the loop guard when it is started.
-            self.mod_auto_turns = 0;
-            self.mod_prompts_this_turn = 0;
+            self.mods.auto_turns = 0;
+            self.mods.prompts_this_turn = 0;
             queued_prompts.push_back(text.to_string());
             ui_state.messages.push(codape_ui::message_list::Message {
                 role: codape_ui::message_list::MessageRole::System,
@@ -9779,8 +9938,8 @@ impl ReplLoop {
         });
 
         let options = self.build_submit_options();
-        let mut engine = self.engine.take().unwrap();
-        engine.set_fallback_model(self.fallback_model.clone());
+        let mut engine = self.session.engine.take().unwrap();
+        engine.set_fallback_model(self.model.fallback_model.clone());
         // The engine moves into the task below, so the handle is what Ctrl+C
         // can reach: without it the key abandoned the result while the work
         // carried on.
@@ -9789,10 +9948,10 @@ impl ReplLoop {
         let (elicit_tx, erx) = tokio::sync::mpsc::channel(4);
         let (tui_elicit_tx, terx) = tokio::sync::mpsc::channel(1);
         engine.set_elicitation_handler(Box::new(TuiElicitationHandler::new(tui_elicit_tx)));
-        if let Some(ref dispatcher) = self.dispatcher {
+        if let Some(ref dispatcher) = self.agents.dispatcher {
             dispatcher.set_elicit_tx(Some(elicit_tx));
         }
-        self.query_start_time = Some(std::time::Instant::now());
+        self.ui.query_start_time = Some(std::time::Instant::now());
         ui_state.plan.reset();
         ui_state.permission_bar.clear_status();
         set_plan_step(ui_state, "Planning next step");
@@ -9816,7 +9975,7 @@ impl ReplLoop {
         ui_state: &mut codape_ui::state::UiState,
         phase: &mut InteractivePhase,
     ) {
-        if let Some(bus) = self.confirmation_bus.as_ref() {
+        if let Some(bus) = self.permissions.confirmation_bus.as_ref() {
             let _ = bus.respond(&request.id, response).await;
         }
 
@@ -9885,8 +10044,8 @@ impl ReplLoop {
         let _ = query_done_rx;
         *elicit_rx = None;
         *tui_elicit_rx = None;
-        self.pending_elicitation = None;
-        self.pending_mcp_form = None;
+        self.mcp.pending_elicitation = None;
+        self.mcp.pending_form = None;
         clear_permission_overlay(ui_state);
         if let Some(last) = ui_state.messages.messages.iter_mut().rev().find(|msg| {
             msg.role == codape_ui::message_list::MessageRole::Assistant && msg.streaming
@@ -9896,7 +10055,7 @@ impl ReplLoop {
             msg.push_str(marker);
             last.content = msg.into();
         }
-        if let Some(ref dispatcher) = self.dispatcher {
+        if let Some(ref dispatcher) = self.agents.dispatcher {
             dispatcher.set_elicit_tx(None);
         }
     }
@@ -9986,17 +10145,18 @@ impl ReplLoop {
     /// into exactly that: only the interactive one cleared anything.
     fn perform_session_clear(&mut self) -> String {
         let removed = self
+            .session
             .engine
             .as_ref()
             .map_or(0, |engine| engine.session().messages.len());
 
-        if let Some(ref mut engine) = self.engine {
+        if let Some(ref mut engine) = self.session.engine {
             let mut session = engine.session().clone();
             session.messages.clear();
             engine.set_session(session);
         }
         self.history.clear();
-        self.session_effects = SessionEffects::default();
+        self.session.effects = SessionEffects::default();
 
         if removed == 0 {
             "Session cleared. (There was nothing in it.)".to_string()
@@ -10116,7 +10276,7 @@ impl ReplLoop {
     ///
     /// Returns `(messages_removed, files_restored, created_files_removed)`.
     fn perform_rewind(&mut self, n: usize) -> Result<(usize, usize, usize), String> {
-        let Some(engine) = self.engine.as_mut() else {
+        let Some(engine) = self.session.engine.as_mut() else {
             return Err("No engine configured.".to_string());
         };
         let mut session = engine.session().clone();
@@ -10192,7 +10352,7 @@ impl ReplLoop {
 
         // Check for macro expansion. A macro expands into slash commands, so
         // it follows the same switch as the built-ins below.
-        if !self.no_slash_commands
+        if !self.options.no_slash_commands
             && self.macro_registry.has(cmd_name)
             && let Some(commands) = self.macro_registry.get(cmd_name)
         {
@@ -10210,7 +10370,7 @@ impl ReplLoop {
         // A session with slash commands turned off has none of these either:
         // the built-ins are still slash commands, and running one anyway made
         // `--no-slash-commands` a setting that only hid them from /help.
-        if !self.no_slash_commands {
+        if !self.options.no_slash_commands {
             match cmd_name {
                 "exit" | "quit" => {
                     self.running = false;
@@ -10380,7 +10540,7 @@ impl ReplLoop {
                         writeln!(stdout, "Usage: /rename <new-title>")?;
                     } else {
                         let new_title = args.join(" ");
-                        if let Some(ref mut engine) = self.engine {
+                        if let Some(ref mut engine) = self.session.engine {
                             let mut session = engine.session().clone();
                             session.title = Some(new_title.clone());
                             engine.set_session(session);
@@ -10412,24 +10572,24 @@ impl ReplLoop {
                 }
                 "model" => {
                     if args.is_empty() {
-                        writeln!(stdout, "Current model: {}", self.model.0)?;
+                        writeln!(stdout, "Current model: {}", self.model.current.0)?;
                     } else {
                         let model_name = args[0].clone();
-                        self.model = ModelId(model_name.clone());
+                        self.model.current = ModelId(model_name.clone());
                         writeln!(stdout, "Model switched to: {model_name}")?;
                     }
                     return Ok(());
                 }
                 "permissions" => {
                     if args.is_empty() {
-                        let mode = if let Some(ref engine) = self.engine {
+                        let mode = if let Some(ref engine) = self.session.engine {
                             engine
                                 .permission_checker()
                                 .lock()
                                 .map(|c| c.mode())
                                 .unwrap_or_default()
                         } else {
-                            self.permission_mode.unwrap_or_default()
+                            self.permissions.mode.unwrap_or_default()
                         };
                         writeln!(stdout, "Current permission mode: {mode:?}")?;
                     } else {
@@ -10451,18 +10611,18 @@ impl ReplLoop {
                                 return Ok(());
                             }
                         };
-                        if let Some(ref engine) = self.engine
+                        if let Some(ref engine) = self.session.engine
                             && let Ok(mut checker) = engine.permission_checker().lock()
                         {
                             checker.set_mode(mode);
                         }
-                        self.permission_mode = Some(mode);
+                        self.permissions.mode = Some(mode);
                         writeln!(stdout, "Permission mode set to: {mode:?}")?;
                     }
                     return Ok(());
                 }
                 "break-cache" => {
-                    if let Some(ref mut engine) = self.engine {
+                    if let Some(ref mut engine) = self.session.engine {
                         let mut session = engine.session().clone();
                         let previous = session.usage.cache_read_tokens;
                         session.usage.cache_read_tokens = 0;
@@ -10576,11 +10736,12 @@ impl ReplLoop {
     /// Values may be a string or an object with `prompt`/`content`/`text`.
     fn handle_output_style_command(&mut self, args: &[String]) -> String {
         if args.is_empty() {
-            if self.plugin_output_styles.is_empty() {
+            if self.plugins.output_styles.is_empty() {
                 return "No output styles available.".to_string();
             }
             let names: Vec<&str> = self
-                .plugin_output_styles
+                .plugins
+                .output_styles
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect();
@@ -10591,12 +10752,14 @@ impl ReplLoop {
         }
         let name = args[0].as_str();
         let Some((_, value)) = self
-            .plugin_output_styles
+            .plugins
+            .output_styles
             .iter()
             .find(|(style, _)| style == name)
         else {
             let names: Vec<&str> = self
-                .plugin_output_styles
+                .plugins
+                .output_styles
                 .iter()
                 .map(|(style, _)| style.as_str())
                 .collect();
@@ -10616,7 +10779,7 @@ impl ReplLoop {
         let Some(prompt) = prompt else {
             return format!("Output style '{name}' has no prompt text.");
         };
-        self.session_effects.append_system_prompt = Some(prompt);
+        self.session.effects.append_system_prompt = Some(prompt);
         format!("Output style '{name}' applied to the system prompt.")
     }
 
@@ -10695,7 +10858,7 @@ impl ReplLoop {
     }
 
     fn handle_auto_dream_command(&mut self, args: &[String]) -> String {
-        let Some(dream) = &self.auto_dream else {
+        let Some(dream) = &self.memory.auto_dream else {
             return "Auto-dream is not initialized.".into();
         };
 
@@ -10721,13 +10884,13 @@ impl ReplLoop {
                 let _ = dream.record_session();
 
                 // Spawn the watcher if API client is available
-                if let Some(api) = &self.api_client {
+                if let Some(api) = &self.session.api_client {
                     let dream = dream.clone();
                     let api = api.clone_box();
-                    let model = self.model.clone();
+                    let model = self.model.current.clone();
                     let _memory_dir = dream.memory_dir.clone();
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-                    self.dream_shutdown_tx = Some(shutdown_tx);
+                    self.memory.dream_shutdown = Some(shutdown_tx);
 
                     tokio::spawn(async move {
                         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
@@ -10766,7 +10929,7 @@ impl ReplLoop {
                     "Auto-dream requires an API client and memory store.".into()
                 }
             }
-            "disable" => self.dream_shutdown_tx.take().map_or_else(
+            "disable" => self.memory.dream_shutdown.take().map_or_else(
                 || "Auto-dream is not running.".into(),
                 |tx| {
                     let _ = tx.send(());
@@ -10775,7 +10938,7 @@ impl ReplLoop {
             ),
             "status" => {
                 let config = &dream.config;
-                let running = self.dream_shutdown_tx.is_some();
+                let running = self.memory.dream_shutdown.is_some();
                 let threshold = dream.check_threshold();
                 let threshold_msg = match threshold {
                     DreamCheckResult::ShouldDream {
@@ -10800,7 +10963,7 @@ impl ReplLoop {
 
     /// Handle /team-memory command.
     fn handle_team_memory_command(&self, args: &[String]) -> String {
-        let Some(svc) = &self.team_memory_service else {
+        let Some(svc) = &self.memory.team_sync else {
             return "Team memory sync is not initialized.".into();
         };
 
@@ -11023,7 +11186,7 @@ impl ReplLoop {
         if text.is_empty() {
             return "Use /feedback <message> to generate a title for your feedback.".into();
         }
-        let Some(ref client) = self.api_client else {
+        let Some(ref client) = self.session.api_client else {
             return "No API client available.".into();
         };
         match codape_core::prompts::generate_session_title(client.as_ref(), &text).await {
@@ -11049,7 +11212,8 @@ impl ReplLoop {
 
         match args[0].as_str() {
             "--share" => {
-                let Some(session) = self.engine.as_ref().map(|e| e.session().clone()) else {
+                let Some(session) = self.session.engine.as_ref().map(|e| e.session().clone())
+                else {
                     return "No active session to share.".into();
                 };
                 match mgr.share(&session).await {
@@ -11075,7 +11239,7 @@ impl ReplLoop {
                         let new_cwd = state.cwd.to_string_lossy().to_string();
                         self.cwd.clone_from(&new_cwd);
                         let _ = std::env::set_current_dir(&new_cwd);
-                        if let Some(ref mut engine) = self.engine {
+                        if let Some(ref mut engine) = self.session.engine {
                             engine.set_session(state);
                         }
                         format!("Joined shared session. CWD: {new_cwd}")
@@ -11118,7 +11282,7 @@ impl ReplLoop {
                 }
 
                 // Save current session to current directory
-                if let Some(ref engine) = self.engine {
+                if let Some(ref engine) = self.session.engine {
                     let session = engine.session().clone();
                     if let Err(e) = mgr.save_to_directory(&session, std::path::Path::new(&self.cwd))
                     {
@@ -11141,7 +11305,7 @@ impl ReplLoop {
                 self.cwd.clone_from(&new_cwd);
                 let _ = std::env::set_current_dir(&new_cwd);
 
-                if let Some(ref mut engine) = self.engine {
+                if let Some(ref mut engine) = self.session.engine {
                     if let Some(state) = loaded {
                         engine.set_session(state);
                     } else {
@@ -11167,7 +11331,7 @@ impl ReplLoop {
     ///   single agent (or back at all of them). This is the production user of
     ///   the per-agent filter that used to be exercised only by tests.
     async fn handle_agents_command(&mut self, args: &[String]) -> String {
-        let Some(manager) = self.agent_manager.as_ref().map(Arc::clone) else {
+        let Some(manager) = self.agents.manager.as_ref().map(Arc::clone) else {
             return "Agent manager not initialized.".into();
         };
 
@@ -11231,7 +11395,7 @@ impl ReplLoop {
                 drop(manager);
                 match subscription {
                     Some(rx) => {
-                        self.agent_observable_rx = Some(rx);
+                        self.agents.observable_rx = Some(rx);
                         if target == "all" {
                             "Following observable events from all agents.".into()
                         } else {
@@ -11250,7 +11414,8 @@ impl ReplLoop {
     /// Connection state and server/conflict lists for the command context.
     fn mcp_state(&self) -> (bool, Vec<String>, Vec<String>) {
         let slot = self
-            .mcp_manager
+            .mcp
+            .manager
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(manager) = slot.as_ref() else {
@@ -11265,7 +11430,7 @@ impl ReplLoop {
 
     fn build_context(&self) -> CommandContext {
         let (session_id, session_title, message_count, permission_mode) =
-            self.engine.as_ref().map_or_else(
+            self.session.engine.as_ref().map_or_else(
                 || {
                     (
                         "repl_session".to_string(),
@@ -11297,50 +11462,51 @@ impl ReplLoop {
             self.cwd.clone(),
             session_id,
             session_title,
-            self.model.clone(),
+            self.model.current.clone(),
         );
         ctx.message_count = message_count;
         ctx.permission_mode = permission_mode;
-        ctx.vim_mode = self.vim_mode_enabled;
-        ctx.theme.clone_from(&self.current_theme);
+        ctx.vim_mode = self.ui.vim_mode_enabled;
+        ctx.theme.clone_from(&self.ui.current_theme);
         ctx.git_branch = current_git_branch(&self.cwd);
         ctx.version = env!("CARGO_PKG_VERSION").to_string();
         // Commands gate themselves by name (`is_feature_enabled`), so the
         // resolved flags have to reach the context. Leaving this empty made
         // every flag-gated command dead in production, even when the user
         // passed `--betas` or `CODAPE_FEATURE_FLAGS`.
-        ctx.feature_flags = self.feature_flags.as_map();
+        ctx.feature_flags = self.options.feature_flags.as_map();
         // These two fields were never assigned, so `/mcp`, `/status`,
         // `/doctor`, `/config` always said "disconnected" and `/hooks`
         // always said zero.
-        ctx.active_hooks = self.active_hooks;
+        ctx.active_hooks = self.hooks.active;
         let (mcp_connected, mcp_servers, mcp_conflicts) = self.mcp_state();
         ctx.mcp_connected = mcp_connected;
         ctx.mcp_servers = mcp_servers;
         ctx.mcp_conflicts = mcp_conflicts;
         let mut components: Vec<(String, String)> = Vec::new();
-        for (name, _) in &self.plugin_themes {
+        for (name, _) in &self.plugins.themes {
             components.push(("theme".into(), name.clone()));
         }
-        for (name, _) in &self.plugin_output_styles {
+        for (name, _) in &self.plugins.output_styles {
             components.push(("output-style".into(), name.clone()));
         }
-        for (name, _) in &self.plugin_lsp_servers {
+        for (name, _) in &self.plugins.lsp_servers {
             components.push(("lsp-server".into(), name.clone()));
         }
-        if let Some(monitors) = self.plugin_monitors.as_ref().and_then(|m| m.as_object()) {
+        if let Some(monitors) = self.plugins.monitors.as_ref().and_then(|m| m.as_object()) {
             for name in monitors.keys() {
                 components.push(("monitor".into(), name.clone()));
             }
         }
-        for (kind, names) in &self.plugin_other_components {
+        for (kind, names) in &self.plugins.other_components {
             for name in names {
                 components.push((kind.clone(), name.clone()));
             }
         }
         ctx.plugin_components = components;
         ctx.plugin_themes = self
-            .plugin_themes
+            .plugins
+            .themes
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
@@ -11360,9 +11526,12 @@ impl ReplLoop {
                 }
             })
             .collect();
-        ctx.api_key_set = self.api_client.is_some();
-        ctx.elapsed_secs = self.query_start_time.map_or(0, |t| t.elapsed().as_secs());
-        if let Some(ref engine) = self.engine {
+        ctx.api_key_set = self.session.api_client.is_some();
+        ctx.elapsed_secs = self
+            .ui
+            .query_start_time
+            .map_or(0, |t| t.elapsed().as_secs());
+        if let Some(ref engine) = self.session.engine {
             ctx.cost_summary = engine.cost_summary();
             let usage = engine.total_usage();
             ctx.input_tokens = usage.input_tokens;
@@ -11730,7 +11899,8 @@ mod tests {
         );
         let recorder = RecordingHookExecutor::default();
         let events = Arc::clone(&recorder.events);
-        repl.engine
+        repl.session
+            .engine
             .as_mut()
             .expect("with_engine installs an engine")
             .set_hooks(Arc::new(recorder));
@@ -11773,7 +11943,8 @@ mod tests {
         // The command context used to be built with an empty map, so a command
         // that asked whether its flag was on always heard "no".
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        repl.feature_flags = codape_config::flags::FeatureFlags::parse("+voice_mode,+heapdump");
+        repl.options.feature_flags =
+            codape_config::flags::FeatureFlags::parse("+voice_mode,+heapdump");
         let ctx = repl.build_context();
         assert!(ctx.is_feature_enabled("voice_mode"));
         assert!(ctx.is_feature_enabled("heapdump"));
@@ -11850,7 +12021,7 @@ mod tests {
             .unwrap();
         assert!(String::from_utf8_lossy(&out).contains("agent-42"));
         assert_eq!(
-            repl.agent_observable_rx.as_ref().unwrap().agent_id(),
+            repl.agents.observable_rx.as_ref().unwrap().agent_id(),
             Some("agent-42"),
             "the production subscription should be filtered to the followed agent"
         );
@@ -11861,7 +12032,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            repl.agent_observable_rx
+            repl.agents
+                .observable_rx
                 .as_ref()
                 .unwrap()
                 .agent_id()
@@ -11933,8 +12105,8 @@ mod tests {
             Some("[model] [branch]".into()),
         );
         repl.apply_cli_config();
-        assert!(repl.vim_mode_enabled, "vim_mode was not applied");
-        assert_eq!(repl.current_theme, "light");
+        assert!(repl.ui.vim_mode_enabled, "vim_mode was not applied");
+        assert_eq!(repl.ui.current_theme, "light");
         let mut statusline = codape_ui::statusline::Statusline::new();
         repl.sync_statusline(&mut statusline);
         assert_eq!(
@@ -12154,7 +12326,7 @@ mod tests {
     #[test]
     fn command_context_reports_installed_hooks_and_mcp_state() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        repl.active_hooks = 2;
+        repl.hooks.active = 2;
         let ctx = repl.build_context();
         assert_eq!(ctx.active_hooks, 2, "the hook count was not reported");
         assert!(
@@ -12709,7 +12881,7 @@ mod tests {
     async fn headless_output_contains_a_rendered_mod_ui_block() {
         let mut repl = ReplLoop::new("/src".into(), ModelId::sonnet());
         let (tx, rx) = mpsc::unbounded_channel();
-        repl.event_rx = Some(rx);
+        repl.session.event_rx = Some(rx);
         tx.send(EngineEvent::ModUi(vec![
             codape_core::ui_protocol::UiElement::Box {
                 title: Some("Mods".to_string()),
@@ -12735,7 +12907,7 @@ mod tests {
     async fn headless_output_contains_a_mod_notice() {
         let mut repl = ReplLoop::new("/src".into(), ModelId::sonnet());
         let (tx, rx) = mpsc::unbounded_channel();
-        repl.event_rx = Some(rx);
+        repl.session.event_rx = Some(rx);
         tx.send(EngineEvent::ModUi(vec![
             codape_core::ui_protocol::UiElement::Text {
                 text: "the mod noticed something".to_string(),
@@ -12834,9 +13006,9 @@ mod tests {
         let result = CommandResult::success("advisor mode")
             .with_prompt_profile(codape_core::query_profiles::PromptProfile::Advisor);
         loop_obj.apply_command_effects(&result);
-        assert_eq!(loop_obj.session_effects.prompt_profiles.len(), 1);
+        assert_eq!(loop_obj.session.effects.prompt_profiles.len(), 1);
         assert_eq!(
-            loop_obj.session_effects.prompt_profiles[0],
+            loop_obj.session.effects.prompt_profiles[0],
             codape_core::query_profiles::PromptProfile::Advisor
         );
     }
@@ -12844,7 +13016,7 @@ mod tests {
     #[test]
     fn build_submit_options_includes_effects() {
         let mut loop_obj = ReplLoop::new("/src".into(), ModelId::sonnet());
-        loop_obj.session_effects.prompt_profiles = vec![
+        loop_obj.session.effects.prompt_profiles = vec![
             codape_core::query_profiles::PromptProfile::Advisor,
             codape_core::query_profiles::PromptProfile::Reviewer,
         ];
@@ -12920,7 +13092,8 @@ mod tests {
         );
         let recorder = RecordingHookExecutor::default();
         let events = Arc::clone(&recorder.events);
-        repl.engine
+        repl.session
+            .engine
             .as_mut()
             .expect("with_engine installs an engine")
             .set_hooks(Arc::new(recorder));
@@ -13673,8 +13846,8 @@ mod tests {
             temp.path().to_string_lossy().into_owned(),
             ModelId::sonnet(),
         );
-        let dispatcher = repl.dispatcher.take().unwrap();
-        let manager = repl.agent_manager.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
+        let manager = repl.agents.manager.take().unwrap();
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -13714,7 +13887,7 @@ mod tests {
 
         let mut saw_started = false;
         let mut saw_completed = false;
-        while let Ok(event) = repl.event_rx.as_mut().unwrap().try_recv() {
+        while let Ok(event) = repl.session.event_rx.as_mut().unwrap().try_recv() {
             if let EngineEvent::AgentEvent { event, .. } = event {
                 match event {
                     codape_core::types::AgentLifecycleEvent::Started => saw_started = true,
@@ -13771,10 +13944,10 @@ mod tests {
         // The base comes from the session's cwd, not the process's: this is
         // the `--directory /repo --worktree` case, and the test process is not
         // in the repo.
-        let before = repl.dispatcher.as_ref().unwrap().cwd();
+        let before = repl.agents.dispatcher.as_ref().unwrap().cwd();
         repl.enter_worktree_mode();
 
-        let session = repl.engine.as_ref().unwrap().session().clone();
+        let session = repl.session.engine.as_ref().unwrap().session().clone();
         let active = session
             .active_worktree
             .expect("--worktree recorded no worktree");
@@ -13793,7 +13966,7 @@ mod tests {
             active.path.display()
         );
         assert_eq!(
-            repl.dispatcher.as_ref().unwrap().cwd(),
+            repl.agents.dispatcher.as_ref().unwrap().cwd(),
             active.path,
             "the tools still run in the original checkout"
         );
@@ -13825,7 +13998,7 @@ mod tests {
         repl.apply_cli_config();
         let expected = crate::session_resume::transcript_dir(&cwd);
         assert_eq!(
-            repl.engine.as_ref().unwrap().transcript_path(),
+            repl.session.engine.as_ref().unwrap().transcript_path(),
             Some(expected.as_path()),
             "the engine was not told where transcripts live"
         );
@@ -13833,7 +14006,12 @@ mod tests {
         repl.with_no_persistence(true);
         repl.apply_cli_config();
         assert!(
-            repl.engine.as_ref().unwrap().transcript_path().is_none(),
+            repl.session
+                .engine
+                .as_ref()
+                .unwrap()
+                .transcript_path()
+                .is_none(),
             "--no-session-persistence must also disable the engine's backup"
         );
     }
@@ -13851,17 +14029,17 @@ mod tests {
             max_tokens: None,
         });
         assert_eq!(
-            repl.session_effects.override_system_prompt.as_deref(),
+            repl.session.effects.override_system_prompt.as_deref(),
             Some("You review code.")
         );
         assert_eq!(
-            repl.session_effects.allowed_tools_override,
+            repl.session.effects.allowed_tools_override,
             Some(vec!["Read".into(), "Grep".into()])
         );
 
         // Explicit CLI flags are more specific than the agent file.
-        repl.session_effects.override_system_prompt = Some("explicit prompt".into());
-        repl.session_effects.allowed_tools_override = Some(vec!["Bash".into()]);
+        repl.session.effects.override_system_prompt = Some("explicit prompt".into());
+        repl.session.effects.allowed_tools_override = Some(vec!["Bash".into()]);
         repl.apply_resolved_agent(ResolvedAgent {
             name: "reviewer".into(),
             system_prompt: "You review code.".into(),
@@ -13870,17 +14048,17 @@ mod tests {
             max_tokens: None,
         });
         assert_eq!(
-            repl.session_effects.override_system_prompt.as_deref(),
+            repl.session.effects.override_system_prompt.as_deref(),
             Some("explicit prompt")
         );
         assert_eq!(
-            repl.session_effects.allowed_tools_override,
+            repl.session.effects.allowed_tools_override,
             Some(vec!["Bash".into()])
         );
 
         // An explicitly empty whitelist denies every tool; the agent file
         // must not silently re-grant its own list.
-        repl.session_effects.allowed_tools_override = Some(Vec::new());
+        repl.session.effects.allowed_tools_override = Some(Vec::new());
         repl.apply_resolved_agent(ResolvedAgent {
             name: "reviewer".into(),
             system_prompt: "You review code.".into(),
@@ -13889,7 +14067,7 @@ mod tests {
             max_tokens: None,
         });
         assert_eq!(
-            repl.session_effects.allowed_tools_override,
+            repl.session.effects.allowed_tools_override,
             Some(Vec::new())
         );
     }
@@ -13911,17 +14089,17 @@ mod tests {
     fn resolved_agent_model_and_max_tokens_apply_unless_cli_model_wins() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.apply_resolved_agent(custom_agent(Some("agent-model"), Some(2048)));
-        assert_eq!(repl.model.0, "agent-model");
-        assert_eq!(repl.max_tokens, 2048);
+        assert_eq!(repl.model.current.0, "agent-model");
+        assert_eq!(repl.model.max_tokens, 2048);
 
         // `--model` is more specific than the agent file.
         let cli_model = ModelId::sonnet();
         let mut explicit = ReplLoop::new("/tmp".into(), cli_model.clone());
         explicit.with_explicit_model_override(true);
         explicit.apply_resolved_agent(custom_agent(Some("agent-model"), Some(2048)));
-        assert_eq!(explicit.model, cli_model);
+        assert_eq!(explicit.model.current, cli_model);
         assert_eq!(
-            explicit.max_tokens, 2048,
+            explicit.model.max_tokens, 2048,
             "there is no CLI max-token override; the definition still applies"
         );
     }
@@ -13937,7 +14115,7 @@ mod tests {
 
         repl.apply_resolved_agent(custom_agent(Some("agent-model"), Some(2048)));
 
-        let engine = repl.engine.as_ref().expect("engine is wired");
+        let engine = repl.session.engine.as_ref().expect("engine is wired");
         assert_eq!(engine.model().0, "agent-model");
         assert_eq!(engine.max_tokens(), 2048);
     }
@@ -13949,7 +14127,8 @@ mod tests {
         let mut repl =
             ReplLoop::with_engine(Box::new(CountingApi::new()), cwd.clone(), ModelId::sonnet());
         let manager = Arc::clone(
-            repl.agent_manager
+            repl.agents
+                .manager
                 .as_ref()
                 .expect("with_engine installs an agent manager"),
         );
@@ -13974,7 +14153,7 @@ mod tests {
         };
 
         let mut saw_idle = false;
-        while let Ok(event) = repl.event_rx.as_mut().unwrap().try_recv() {
+        while let Ok(event) = repl.session.event_rx.as_mut().unwrap().try_recv() {
             if let EngineEvent::AgentEvent {
                 agent_id: seen,
                 event: AgentLifecycleEvent::Idle { reason },
@@ -14032,15 +14211,16 @@ mod tests {
             ModelId::sonnet(),
         );
 
-        let mut session = repl.engine.as_ref().unwrap().session().clone();
+        let mut session = repl.session.engine.as_ref().unwrap().session().clone();
         session.messages.push(Message::user("earlier turn"));
-        repl.engine.as_mut().unwrap().set_session(session);
+        repl.session.engine.as_mut().unwrap().set_session(session);
 
-        let expected_model = repl.model.0.clone();
+        let expected_model = repl.model.current.0.clone();
         let options = repl.build_submit_options();
         let expected_prompt = options.custom_system_prompt.unwrap_or_default();
         let snapshot = repl
-            .parent_context_snapshot
+            .agents
+            .parent_snapshot
             .lock()
             .unwrap()
             .clone()
@@ -14105,7 +14285,7 @@ mod tests {
             ModelId::sonnet(),
         );
         // Off by default: a workflow spawns agents.
-        let dispatcher = repl.dispatcher.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
         let tool = dispatcher.registry().get_tool_arc("Workflow").unwrap();
         let refused = tool
             .execute(
@@ -14136,11 +14316,11 @@ mod tests {
 
         repl.start_artifact_serving().await;
         assert!(
-            repl.artifact_server.is_some(),
+            repl.artifacts.server.is_some(),
             "the artifact server did not start"
         );
 
-        let dispatcher = repl.dispatcher.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
         let registry = dispatcher.registry();
         for name in [
             "Artifact",
@@ -14188,7 +14368,7 @@ mod tests {
         let body = reqwest::get(&url).await.unwrap().text().await.unwrap();
         assert!(body.contains("hello"), "{body}");
 
-        if let Some(server) = repl.artifact_server.take() {
+        if let Some(server) = repl.artifacts.server.take() {
             server.shutdown().await;
         }
     }
@@ -14202,7 +14382,11 @@ mod tests {
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
         let store = tempfile::tempdir().unwrap();
         repl.with_artifact_store_root(store.path().to_path_buf());
-        let dispatcher = repl.dispatcher.clone().expect("engine has a dispatcher");
+        let dispatcher = repl
+            .agents
+            .dispatcher
+            .clone()
+            .expect("engine has a dispatcher");
 
         // A slash command completes a headless turn without an API call.
         let output = repl.run_headless("/status").await.unwrap();
@@ -14222,7 +14406,7 @@ mod tests {
 
         // The server is stopped on exit, and stopping again is harmless.
         assert!(
-            repl.artifact_server.is_none(),
+            repl.artifacts.server.is_none(),
             "the artifact server outlived the headless turn"
         );
         repl.stop_artifact_serving().await;
@@ -14470,7 +14654,7 @@ mod tests {
         );
         off.apply_cli_config();
         assert!(
-            off.auto_dream.is_none(),
+            off.memory.auto_dream.is_none(),
             "auto_dream is off by default and must leave no manager behind"
         );
         assert_eq!(
@@ -14486,7 +14670,7 @@ mod tests {
         on.with_betas(vec!["+auto_dream".into()]);
         on.apply_cli_config();
         assert!(
-            on.auto_dream.is_some(),
+            on.memory.auto_dream.is_some(),
             "enabling auto_dream must keep the dream manager"
         );
     }
@@ -14503,7 +14687,12 @@ mod tests {
         );
         off.apply_cli_config();
         assert!(
-            off.engine.as_ref().expect("engine").coordinator().is_none(),
+            off.session
+                .engine
+                .as_ref()
+                .expect("engine")
+                .coordinator()
+                .is_none(),
             "no coordinator is installed while coordinator_mode is off"
         );
 
@@ -14515,6 +14704,7 @@ mod tests {
         on.with_betas(vec!["+coordinator_mode".into()]);
         on.apply_cli_config();
         let coordinator = on
+            .session
             .engine
             .as_ref()
             .expect("engine")
@@ -14541,7 +14731,7 @@ mod tests {
         );
         off.apply_cli_config();
         assert!(
-            !off.engine.as_ref().expect("engine").history_snip(),
+            !off.session.engine.as_ref().expect("engine").history_snip(),
             "snip preference is off by default"
         );
 
@@ -14553,7 +14743,7 @@ mod tests {
         on.with_betas(vec!["+history_snip".into()]);
         on.apply_cli_config();
         assert!(
-            on.engine.as_ref().expect("engine").history_snip(),
+            on.session.engine.as_ref().expect("engine").history_snip(),
             "history_snip must reach the engine's compaction config"
         );
     }
@@ -14576,7 +14766,7 @@ mod tests {
         off.with_hooks(Some(hooks.clone()));
         off.apply_cli_config();
         assert_eq!(
-            off.active_hooks, 1,
+            off.hooks.active, 1,
             "the agent hook must be dropped while the flag is off"
         );
 
@@ -14588,7 +14778,7 @@ mod tests {
         on.with_hooks(Some(hooks));
         on.with_betas(vec!["+agent_triggers".into()]);
         on.apply_cli_config();
-        assert_eq!(on.active_hooks, 2, "both hooks install once the flag is on");
+        assert_eq!(on.hooks.active, 2, "both hooks install once the flag is on");
     }
 
     /// `--betas` arrives after the tool registry is shared. The Workflow tool
@@ -14600,7 +14790,11 @@ mod tests {
             "/tmp".into(),
             ModelId::sonnet(),
         );
-        let dispatcher = repl.dispatcher.clone().expect("engine has a dispatcher");
+        let dispatcher = repl
+            .agents
+            .dispatcher
+            .clone()
+            .expect("engine has a dispatcher");
         let tool = dispatcher
             .registry()
             .get_tool_arc("Workflow")
@@ -14692,7 +14886,8 @@ mod tests {
         repl.apply_cli_config();
 
         assert!(
-            repl.session_effects
+            repl.session
+                .effects
                 .extra_context
                 .iter()
                 .any(|context| context.contains("the PR")),
@@ -14718,7 +14913,7 @@ mod tests {
 
         repl.with_mcp_manager(Arc::clone(&manager));
 
-        let dispatcher = repl.dispatcher.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
         let registry = dispatcher.registry();
         assert!(
             registry.get_tool_arc("mcp__mock__ping").is_some(),
@@ -14740,17 +14935,17 @@ mod tests {
         repl.with_system_prompt(Some("replace the prompt".into()));
         repl.with_append_system_prompt(Some("add this".into()));
         assert_eq!(
-            repl.session_effects.override_system_prompt.as_deref(),
+            repl.session.effects.override_system_prompt.as_deref(),
             Some("replace the prompt")
         );
         assert_eq!(
-            repl.session_effects.append_system_prompt.as_deref(),
+            repl.session.effects.append_system_prompt.as_deref(),
             Some("add this")
         );
 
         // Explicit option values can be cleared, too.
         repl.with_system_prompt(None);
-        assert!(repl.session_effects.override_system_prompt.is_none());
+        assert!(repl.session.effects.override_system_prompt.is_none());
     }
 
     /// The baseline team tools are replaced with ones that own a real
@@ -14763,7 +14958,7 @@ mod tests {
             expected_contents: "unused",
         };
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
-        let dispatcher = repl.dispatcher.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
         let registry = dispatcher.registry();
         let ctx = codape_tools::ToolContext::new(
             codape_tools::ExecutionContext::Normal,
@@ -14810,7 +15005,7 @@ mod tests {
             expected_contents: "unused",
         };
         let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
-        let dispatcher = repl.dispatcher.take().unwrap();
+        let dispatcher = repl.agents.dispatcher.take().unwrap();
         let ctx = codape_tools::ToolContext::new(
             codape_tools::ExecutionContext::Normal,
             std::path::Path::new("/tmp"),
