@@ -10,6 +10,28 @@ runtime rather than letting the caller assume otherwise. On Windows, confinement
 requires the AppContainer APIs; when they are missing, creating a confined
 sandbox fails rather than silently degrading.
 
+## Read isolation is not the same on every backend
+
+The backends do not enforce the same set of operations. Read the table before
+relying on "the command cannot see outside the workspace":
+
+| Backend | Write confined to the sandbox roots | Read confined to the sandbox roots | Network |
+|---|---|---|---|
+| macOS Seatbelt | yes | **yes** — the profile names every readable subpath | `(deny network*)` when off |
+| Linux Landlock | yes | **yes** — `READ_FILE`/`READ_DIR` are granted per path | ABI 4+ when off, else the seccomp table |
+| Linux bubblewrap | yes | **no** — the whole root is bound read-only | `--unshare-net` when off |
+| Windows AppContainer | yes | yes | per the AppContainer capability set |
+
+On bubblewrap the root filesystem is mounted `--ro-bind / /` and only the
+configured write paths are re-bound writable, so a command can open any file
+the user can read; it simply cannot change anything but the write set. That is
+a deliberate trade — a mount-namespace root that omits what the loader needs
+fails to start anything — but it means bubblewrap gives you **write** isolation
+and network isolation, not read isolation. Use Landlock when read confinement
+matters, or set `CODAPE_BWRAP=0` and let the Landlock path take over.
+`filesystem_isolation()` reports the backend that is in force, so callers that
+care can say which of the two they have.
+
 ## Where it is wired
 
 | Piece | Location |
@@ -27,7 +49,9 @@ sandbox fails rather than silently degrading.
 Sandboxing is on by default (`ExecutionConfig::sandbox_enabled = true`, the
 `Default` impl in `crates/tools/src/executor.rs`). The default policy for `Bash`
 allows reads and writes under the working directory, executing `/bin`, `/usr/bin`
-and `/usr/local/bin`, and no network.
+and `/usr/local/bin`, and no network. What "allows reads … under the working
+directory" means in enforcement depends on the backend — see the matrix above;
+only Seatbelt, Landlock and AppContainer refuse a read outside it.
 
 ## What the kernel enforces
 

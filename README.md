@@ -113,12 +113,15 @@ also set `permission_mode`, but only user, flag and managed layers may select
 either.
 
 The sandbox is a second, independent layer, and it is on by default: commands
-run confined to the workspace, and a command that tries to reach outside it is
+run confined to the workspace, and a command that tries to write outside it is
 stopped by the kernel rather than by a string check. On Linux that is bubblewrap
-when installed and Landlock otherwise; macOS uses Seatbelt. `CODAPE_BWRAP=0` and
-`CODAPE_LANDLOCK=0` switch a backend off, and `CODAPE_REQUIRE_SANDBOX=1` turns
-"no backend available" from a warning into a refusal. Details in
-[docs/sandbox.md](docs/sandbox.md) and [docs/core.md](docs/core.md).
+when installed and Landlock otherwise; macOS uses Seatbelt. Which backends also
+confine *reads* differs — Seatbelt, Landlock and the Windows AppContainer do,
+bubblewrap does not — and [docs/sandbox.md](docs/sandbox.md) states exactly what
+each one enforces. `CODAPE_BWRAP=0` and `CODAPE_LANDLOCK=0` switch a backend off,
+and `CODAPE_REQUIRE_SANDBOX=1` turns "no backend available" from a warning into a
+refusal. Details in [docs/sandbox.md](docs/sandbox.md) and
+[docs/core.md](docs/core.md).
 
 ## Configure
 
