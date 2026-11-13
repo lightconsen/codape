@@ -1164,7 +1164,9 @@ impl StartupOrchestrator {
             Ok(key) => config_service.with_managed_settings_registry_key(key),
             Err(_) => config_service,
         };
-        let mut settings = config_service.resolve()?;
+        let workspace_trusted =
+            self.resolve_workspace_trust(&config_service, std::path::Path::new(&self.ctx.cwd));
+        let mut settings = config_service.resolve_with_workspace_trust(workspace_trusted)?;
         let plugin_host = config_service.load_plugin_host_config();
         self.ctx.plugin_settings = plugin_host.plugins;
         self.ctx.marketplaces = plugin_host.marketplaces;
@@ -1400,6 +1402,101 @@ impl StartupOrchestrator {
             None
         };
         Some((handle, uploader))
+    }
+
+    /// Ask whether this workspace's own settings may be applied.
+    ///
+    /// The question only exists because `.codape/settings.json` is committed to
+    /// the repository: `git clone` + `codape` would otherwise run whoever wrote
+    /// that repository's hooks. It prints the count of what is at stake rather
+    /// than a generic yes/no, so the answer is informed.
+    fn prompt_workspace_trust(summary: &str, settings_path: &std::path::Path) -> bool {
+        if !std::io::stdin().is_terminal() {
+            return false;
+        }
+        eprintln!();
+        eprintln!("This workspace ships its own Codape settings.");
+        eprintln!("  file: {}", settings_path.display());
+        eprintln!("  It contains {summary}.");
+        eprintln!(
+            "  Applying it means running commands from a file the repository\n  \
+             controls, not one you wrote."
+        );
+        eprintln!("  You can change the answer with /trust in the REPL, or with");
+        eprintln!("  CODAPE_TRUST_WORKSPACE=1 when there is nobody to ask.");
+        eprint!("Trust this workspace? [y/N]: ");
+
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_err() {
+            return false;
+        }
+        // The safe default is "no": an empty answer or a closed stdin must not
+        // be read as consent to run a repository's hooks.
+        input.trim().eq_ignore_ascii_case("y")
+    }
+
+    /// Decide workspace trust, prompting once, and record the answer.
+    ///
+    /// Returns whether the repository-controlled layers may bring `hooks`,
+    /// `permissions.allow` and `mcp_servers`.
+    fn resolve_workspace_trust(
+        &self,
+        config_service: &ConfigService,
+        workspace: &std::path::Path,
+    ) -> bool {
+        let request = config_service.workspace_trust_request();
+        if request.is_empty() {
+            return true;
+        }
+
+        let record_path = codape_config::trust_record_path(&codape_config::config_home());
+        let mut record = codape_config::TrustRecord::load(&record_path);
+
+        // Key the decision by the workspace itself, not the settings file: the
+        // repository's settings path is one directory inside it, and a move of
+        // that directory should not silently inherit a trust decision.
+        let key = workspace.to_string_lossy().to_string();
+        let env = std::env::var(codape_config::TRUST_ENV).ok();
+        let pre_trusted = codape_config::pre_trust_from_env(env.as_deref());
+        let requested = request.clone();
+        let settings_path = config_service
+            .project_config_path()
+            .unwrap_or(workspace)
+            .to_path_buf();
+
+        let trusted = codape_config::workspace_is_trusted(
+            &key,
+            &requested,
+            &record,
+            !self.ctx.non_interactive,
+            pre_trusted,
+            &mut |summary: &str| Self::prompt_workspace_trust(summary, &settings_path),
+        );
+
+        // Only a real answer is persisted. An unattended run that had no
+        // record and no environment answer refused for this run; writing that
+        // "no" down would silently override the person's next interactive run.
+        if pre_trusted.is_some() || !self.ctx.non_interactive {
+            if record.decision(&key) != Some(trusted) {
+                record.set(&key, trusted);
+                if let Err(error) = record.save(&record_path) {
+                    tracing::warn!("could not save the workspace trust record: {error}");
+                }
+            }
+            if !trusted {
+                eprintln!(
+                    "codape: this workspace is not trusted — ignoring {}",
+                    request.summary()
+                );
+            }
+        } else if !trusted {
+            eprintln!(
+                "codape: this workspace is not trusted and there is nobody to ask — ignoring {}. \
+                 Set CODAPE_TRUST_WORKSPACE=1 to allow it.",
+                request.summary()
+            );
+        }
+        trusted
     }
 
     /// Prompt the user for telemetry consent on first run.
@@ -3311,7 +3408,7 @@ impl StartupOrchestrator {
         };
 
         let config = ServerConfig {
-            valid_keys,
+            valid_keys: valid_keys.clone(),
             allow_anonymous: false,
             idle_timeout: std::time::Duration::from_secs(idle_timeout),
             max_sessions: 100,
@@ -3365,11 +3462,24 @@ impl StartupOrchestrator {
         tracing::info!(
             "Server config: idle_timeout={idle_timeout}s, max_sessions=100, port={port}"
         );
-        println!("Codape server running on ws://0.0.0.0:{port}");
+
+        // The listener address and the exposure check come from one place, so
+        // `serve` cannot drift from the other services: loopback by default,
+        // and a non-loopback bind without keys is refused before anything is
+        // printed as running.
+        let addr = codape_server::resolve_bind_addr(None, port).map_err(|e| anyhow::anyhow!(e))?;
+        let service_auth = if valid_keys.is_empty() {
+            codape_server::ServiceAuth::default()
+        } else {
+            codape_server::ServiceAuth::new(valid_keys)
+        };
+        codape_server::ensure_exposure_is_authenticated(&addr, &service_auth, "server")
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        println!("Codape server running on ws://{addr}");
         println!("Sessions: 0 active");
         println!("Press Ctrl+C to stop");
 
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
         let result = server.run(addr).await.map_err(|e| anyhow::anyhow!(e));
 
         // Clean up PID file on shutdown
@@ -4221,9 +4331,10 @@ impl StartupOrchestrator {
 /// live runs out.
 async fn run_teleport_service(port: u16, ttl_secs: u64) -> Result<()> {
     let ttl = std::time::Duration::from_secs(ttl_secs);
-    let service = codape_server::teleport::TeleportService::with_ttl(port, ttl);
+    let auth = codape_server::ServiceAuth::from_env();
+    let service = codape_server::teleport::TeleportService::with_ttl(port, ttl).with_auth(auth);
     println!(
-        "Serving teleport shares on http://0.0.0.0:{port}/teleport/shares (ttl {ttl_secs}s). \
+        "Serving teleport shares on port {port}/teleport/shares (ttl {ttl_secs}s). \
          Point clients at it with CODAPE_TELEPORT_URL."
     );
     service.run().await.map_err(|error| anyhow::anyhow!(error))
@@ -4268,11 +4379,13 @@ fn run_plugin_typecheck(dir: Option<std::path::PathBuf>) {
 /// requests to that operator (and the answers back).
 async fn run_gateway(port: u16) -> Result<()> {
     println!(
-        "Serving the bridge gateway on http://0.0.0.0:{port} \
+        "Serving the bridge gateway on port {port} \
          (/api/environments/register, /api/environments/<env>/assignments, \
          /api/environments/<env>/frames)."
     );
+    let auth = codape_server::ServiceAuth::from_env();
     codape_server::gateway::GatewayServer::new(port)
+        .with_auth(auth)
         .run()
         .await
         .map_err(|error| anyhow::anyhow!(error))

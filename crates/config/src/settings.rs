@@ -889,6 +889,12 @@ impl ConfigService {
         self.local_config_path.as_deref()
     }
 
+    /// The project settings file path, if one is configured.
+    #[must_use]
+    pub fn project_config_path(&self) -> Option<&Path> {
+        self.project_config_path.as_deref()
+    }
+
     /// Attach a managed-settings file (the "file" enterprise carrier).
     ///
     /// The file is a [`crate::dirs::ManagedSettings`] document — a `settings`
@@ -1095,7 +1101,54 @@ impl ConfigService {
     /// Merge order: built-in defaults → user config → project config → local
     /// config → managed config. Runtime overrides are applied separately via
     /// `RuntimeOverrides::apply`.
+    ///
+    /// This applies the repository-controlled layers without asking, which is
+    /// only right when the caller has already established that the workspace is
+    /// trusted (or that its own settings grant nothing that needs a decision).
+    /// [`Self::workspace_trust_request`] answers whether that is the case;
+    /// [`Self::resolve_with_workspace_trust`] takes the answer.
     pub fn resolve(&self) -> Result<Settings, ConfigError> {
+        self.resolve_with_workspace_trust(true)
+    }
+
+    /// Read what the repository-controlled layers would grant.
+    ///
+    /// Reads the files as raw JSON rather than through [`Settings`] on purpose:
+    /// a document the typed parse would reject still counts, so a repository
+    /// cannot slip hooks past the gate by making the file fail validation.
+    /// A file that cannot be read at all contributes nothing here and nothing
+    /// to `resolve`, which is consistent.
+    #[must_use]
+    pub fn workspace_trust_request(&self) -> crate::workspace_trust::TrustRequest {
+        let mut request = crate::workspace_trust::TrustRequest::default();
+        for path in [&self.project_config_path, &self.local_config_path]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                // Unparsable JSON cannot be applied either, so it grants
+                // nothing. It is reported by `resolve` on its own.
+                continue;
+            };
+            request = request.union(&crate::workspace_trust::TrustRequest::from_settings_json(
+                &value,
+            ));
+        }
+        request
+    }
+
+    /// Resolve settings, deciding separately whether the repository-controlled
+    /// layers may bring `hooks`, `permissions.allow` and `mcp_servers`.
+    ///
+    /// `trusted` is the workspace-trust decision for the project and
+    /// project-local files. When it is false those three keys are dropped from
+    /// both layers and every other key still applies — a repository that sets a
+    /// model and a deny rule keeps both, and loses only the parts that would
+    /// run a command or skip a prompt.
+    pub fn resolve_with_workspace_trust(&self, trusted: bool) -> Result<Settings, ConfigError> {
         let defaults = Settings::defaults();
 
         let user = self
@@ -1125,6 +1178,15 @@ impl ConfigService {
         project.env = None;
         local.provider = None;
         local.env = None;
+
+        // The repository's own settings file is not a trusted document until
+        // the person opening the workspace says it is. Unlike `provider` and
+        // `env`, which are dropped outright, these keys are dropped only when
+        // the decision is "no": a trusted workspace keeps them.
+        if !trusted {
+            strip_untrusted_grants(&mut project);
+            strip_untrusted_grants(&mut local);
+        }
 
         let managed = self
             .load_managed_config()
@@ -1228,6 +1290,37 @@ fn enforce_permission_source_policy(settings: &mut Settings, source: &str) {
             "settings permission_mode '{mode}' ignored — only user/flag/managed settings may enable it ({source} settings are repository-controllable)"
         );
         settings.permission_mode = None;
+    }
+}
+
+/// Drop the parts of a repository-controlled settings layer that need a
+/// workspace-trust decision.
+///
+/// `hooks` is dropped entirely and `permissions` keeps only its `deny` and
+/// `ask` rules; `mcp_servers` is dropped. Everything else in the layer — model,
+/// budget, vim mode, a deny rule — is unaffected, so refusing a workspace costs
+/// it nothing except the parts that would run a command or skip a prompt.
+fn strip_untrusted_grants(settings: &mut Settings) {
+    let dropped_hooks = settings.hooks.is_some();
+    let dropped_mcp = settings.mcp_servers.is_some();
+    settings.hooks = None;
+    settings.mcp_servers = None;
+    let dropped_allow = settings.permissions.as_mut().is_some_and(|permissions| {
+        let had_allow = !permissions.allow.is_empty();
+        permissions.allow.clear();
+        had_allow
+    });
+    if settings
+        .permissions
+        .as_ref()
+        .is_some_and(PermissionsSettings::is_empty)
+    {
+        settings.permissions = None;
+    }
+    if dropped_hooks || dropped_mcp || dropped_allow {
+        tracing::warn!(
+            "workspace is not trusted — ignoring its hooks, permissions.allow and mcp_servers"
+        );
     }
 }
 

@@ -9,6 +9,7 @@ pub mod managed;
 pub mod permission_rules;
 pub mod secret_store;
 pub mod settings;
+pub mod workspace_trust;
 
 #[cfg(feature = "enterprise")]
 pub mod org_policy;
@@ -37,4 +38,8 @@ pub use settings::{
 pub use trusted_device::{
     DeviceRecord, TrustStatus, TrustedDeviceError, TrustedDeviceRegistry,
     default_device_store_path, machine_fingerprint,
+};
+pub use workspace_trust::{
+    TRUST_ENV, TRUST_RECORD_FILE, TrustRecord, TrustRequest, TrustedCapability, forget,
+    pre_trust_from_env, trust_record_path, workspace_is_trusted,
 };

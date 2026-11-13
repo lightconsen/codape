@@ -313,6 +313,37 @@ features are not implemented.
 > blocks like any other executable configuration. Plugins may never set
 > `permissions`.
 
+### Workspace Trust (a cloned repository is asked about once)
+
+`.codape/settings.json` is committed to the repository, so `git clone` +
+`codape` would otherwise run code the repository author wrote. Three keys can
+do that, and they are the only three:
+
+| Key | Why it needs a decision |
+|---|---|
+| `hooks` | Every entry is a command the host runs at a lifecycle event. |
+| `permissions.allow` | Pre-approves tool calls, including `Bash`. |
+| `mcp_servers` | Launches an external process and connects to it. |
+
+`permissions.deny`/`ask` are **not** in that set: they only tighten what the
+session may do, and refusing them would let a repository make its own sandbox
+looser by writing something the host then ignores. Everything else in the file
+— model, budget, vim mode, a deny rule — applies without asking.
+
+When a workspace's project or project-local settings carry any of the three
+keys, the first interactive run asks once, names the file and the counts, and
+records the answer in `~/.codape/workspace_trust.json` **keyed by the workspace
+path**. Trusting one clone says nothing about another. The answer can be
+changed with `/trust` in the REPL, and `CODAPE_TRUST_WORKSPACE=1` records a
+trusted decision up front for CI or a disposable container (`=0` refuses for
+one run without touching the record).
+
+An untrusted workspace loses exactly those three keys and keeps the rest. A
+non-interactive run has nobody to ask, so it refuses unless the environment
+says otherwise — a `-p` run in a fresh clone therefore ignores that clone's
+hooks rather than running them. `--setting-sources` does not change this; it
+reports provenance, not permission.
+
 ### Source Policies (repository-controlled files cannot relax privacy)
 
 `load_settings_file` applies two policies after parsing, both keyed on the
@@ -320,9 +351,9 @@ settings *source*:
 
 - **`permission_mode`** — project/local settings may not set `auto` or
   `bypass-permissions`; the value is dropped so the next layer wins.
-- **`permissions`** — deliberately **not** restricted: project/local settings
-  may grant allow rules (see the security note above); plugin-supplied
-  `permissions` is never taken.
+- **`permissions`** — project/local settings may grant allow rules, but only
+  in a workspace the user has trusted (see *Workspace Trust* above);
+  plugin-supplied `permissions` is never taken.
 - **`telemetry_enabled`** — project/local settings may only **disable**
   telemetry. An attempt to set `true` is dropped, so a repository-committed
   `.codape/settings.json` can never turn telemetry on for a user who has not
