@@ -851,6 +851,11 @@ enum Tool {
     },
 }
 
+// A fixture, not product code: the body is one `if p.contains("…") { vec![…] }`
+// arm per recorded prompt in the cassette, so splitting it would only move the
+// same match arms into more functions. It is exempt for that reason, and this
+// is a test-support binary that ships in no release archive.
+#[allow(clippy::too_many_lines)]
 fn select_tools(prompt: &str) -> Vec<Tool> {
     let p = prompt.to_lowercase();
 

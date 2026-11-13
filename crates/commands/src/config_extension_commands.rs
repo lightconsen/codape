@@ -234,6 +234,13 @@ fn read_memory_entries() -> Vec<String> {
 }
 
 /// Register config extension commands.
+//
+// Just over the 400-line limit, and all of it is `registry.register(...)`
+// blocks — one per command, each a description plus a handler. Splitting it
+// would move registrations to another file, not shorten them; the function is
+// a table, and a table is read in one place. Exempted until that table moves
+// to data.
+#[allow(clippy::too_many_lines)]
 pub fn register(registry: &mut CommandRegistry) {
     // /theme — switch/view theme
     registry.register(
