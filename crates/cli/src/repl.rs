@@ -929,6 +929,46 @@ impl InteractivePhase {
     }
 }
 
+/// Which terminal-notification mechanisms the environment supports.
+///
+/// Probed once when `run_tui` takes over the terminal, then passed to the
+/// event handlers so they do not each re-derive it.
+#[derive(Debug, Clone, Copy)]
+struct NotificationSupport {
+    osc9: bool,
+    progress: bool,
+    inside_tmux: bool,
+}
+
+/// The mutable state `run_tui`'s loop carries between iterations.
+///
+/// These four travelled as separate locals through every handler, which is why
+/// each one needed `&mut` arguments threaded through it. Grouping them lets a
+/// handler take one borrow, and keeps the "is a permission dialog open?" pairs
+/// (`pending_confirmation` and the phase) in step: they are set and cleared
+/// together and a split between them is what a stuck dialog looks like.
+struct InteractiveLive {
+    phase: InteractivePhase,
+    /// A permission request that is on screen and still awaiting an answer.
+    pending_confirmation: Option<ConfirmationRequest>,
+    /// Which button a mod-rendered pane currently has focused.
+    mod_ui_focus: ModUiFocus,
+    /// When the transcript was last written during streaming. The 1 s gate
+    /// keeps a long turn from rewriting the file on every delta.
+    last_stream_snapshot: std::time::Instant,
+}
+
+impl InteractiveLive {
+    fn new() -> Self {
+        Self {
+            phase: InteractivePhase::Idle,
+            pending_confirmation: None,
+            mod_ui_focus: ModUiFocus::default(),
+            last_stream_snapshot: std::time::Instant::now(),
+        }
+    }
+}
+
 fn permission_activity_label(summary: &str) -> String {
     if summary.is_empty() {
         "Waiting for permission...".into()
@@ -5031,7 +5071,219 @@ impl ReplLoop {
         })
     }
 
+    /// Apply one engine event to the transcript and to the loop's state.
+    ///
+    /// This was the `select!` arm inside `run_tui`, indented twenty levels
+    /// deep in an 1,800-line function. The rules it encodes — which rows an
+    /// event adds, when the transcript is written, which pair of state fields
+    /// moves together — are the whole behaviour of a running turn, and they
+    /// are readable on their own only once they are out of that loop.
+    fn apply_engine_event(
+        &mut self,
+        engine_event: EngineEvent,
+        live: &mut InteractiveLive,
+        ui_state: &mut codape_ui::state::UiState,
+        notify: NotificationSupport,
+    ) {
+        use codape_ui::message_list::{Message, MessageRole};
+        use codape_ui::overlay::Overlay;
+        use std::time::{Duration, Instant};
+
+        self.record_engine_event_telemetry(&engine_event);
+        match engine_event {
+            EngineEvent::TextDelta(delta) => {
+                live.phase.note_text_delta();
+                set_plan_step(ui_state, "Thinking through response");
+                if let Some(last) = ui_state
+                    .messages
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|msg| msg.role == MessageRole::Assistant)
+                {
+                    let mut content = last.content.to_string();
+                    content.push_str(&delta);
+                    last.content = content.into();
+                    last.streaming = true;
+                }
+                if live.last_stream_snapshot.elapsed() >= Duration::from_secs(1) {
+                    self.persist_interactive_snapshot(ui_state);
+                    live.last_stream_snapshot = Instant::now();
+                }
+            }
+            EngineEvent::ToolUseSummary { id, summary, .. } => {
+                // Render with the matching `ToolCallStart`, which
+                // also carries the summary. Holding it here keeps
+                // the two events from producing duplicate rows
+                // while still letting this event drive the label.
+                self.tool_use_summaries.insert(id, summary);
+            }
+            EngineEvent::ToolCallStart {
+                id, name, summary, ..
+            } => {
+                let summary = self.tool_use_summaries.remove(&id).unwrap_or(summary);
+                self.tool_names.insert(id.clone(), name.clone());
+                live.phase.note_tool_start(&summary);
+                set_plan_step(ui_state, &summary);
+                // The log feeds `/activity`; the transcript row is
+                // the ToolCall message below, so this must not add
+                // a second visible row.
+                record_activity(ui_state, &summary);
+                ui_state.messages.push(Message {
+                    role: MessageRole::ToolCall,
+                    content: summary.into(),
+                    tool_name: Some(name.into()),
+                    streaming: false,
+                    folded: false,
+                });
+                self.persist_interactive_snapshot(ui_state);
+            }
+            EngineEvent::ToolCallEnd { id, result } => {
+                // A call blocked before its start event never
+                // consumed its label; drop it here.
+                self.tool_use_summaries.remove(&id);
+                let tool_name = self
+                    .tool_names
+                    .remove(&id)
+                    .unwrap_or_else(|| "Tool".to_string());
+                live.phase.note_tool_end();
+                complete_plan(ui_state);
+                live.pending_confirmation = None;
+                clear_permission_overlay(ui_state);
+                let content = if result.is_error {
+                    // Name the tool and the first line of the
+                    // error: "Tool failed" alone cannot be acted
+                    // on, and the output lives further up the
+                    // transcript.
+                    let reason = result
+                        .output
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .chars()
+                        .take(80)
+                        .collect::<String>();
+                    let reason = if reason.is_empty() {
+                        "no output".to_string()
+                    } else {
+                        reason
+                    };
+                    ui_state
+                        .notifications
+                        .err(format!("{tool_name} failed: {reason}"));
+                    format!("Error: {}", result.output)
+                } else {
+                    ui_state
+                        .notifications
+                        .success(format!("{tool_name} completed"));
+                    result.output
+                };
+                ui_state.messages.push(Message {
+                    role: MessageRole::ToolResult,
+                    content: content.into(),
+                    // Kept for syntax highlighting and future
+                    // per-tool rendering; the result row does not
+                    // print a second `[name]` label.
+                    tool_name: Some(tool_name.into()),
+                    streaming: false,
+                    folded: false,
+                });
+                self.persist_interactive_snapshot(ui_state);
+            }
+            EngineEvent::PermissionRequest { tool, args, .. } => {
+                let label = permission_activity_label(&ToolCall::summarize_activity(&tool, &args));
+                live.phase.note_permission_request(&tool, &args);
+                set_plan_step(ui_state, &label);
+                push_activity_row(ui_state, &label);
+                ui_state.permission_bar.set_pending(label.clone());
+                sync_permission_overlay(
+                    ui_state,
+                    &tool,
+                    &args.to_string(),
+                    "Awaiting approval",
+                    true,
+                );
+                ui_state.notifications.warn(label.clone());
+                codape_ui::terminal_notification::emit(
+                    "Codape",
+                    &format!("Permission needed: {label}"),
+                    notify.osc9,
+                    notify.inside_tmux,
+                );
+                self.persist_interactive_snapshot(ui_state);
+            }
+            EngineEvent::AgentEvent { agent_id, event } => {
+                apply_agent_event(ui_state, &agent_id, &event);
+                self.persist_interactive_snapshot(ui_state);
+            }
+            EngineEvent::ModUi(elements) => {
+                // A mod rendered UI during a hook. The tree is a
+                // snapshot, so it renders here without touching
+                // the mod runtime. It belongs in the transcript,
+                // not on stdout interleaved with the turn.
+                let rendered = codape_ui::mod_elements::render_mod_ui_text(
+                    &elements,
+                    codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
+                );
+                if rendered.is_empty() {
+                    // An empty tree clears what was focusable: there
+                    // is no block to route input to.
+                    live.mod_ui_focus = ModUiFocus::default();
+                } else {
+                    ui_state.messages.push(Message {
+                        role: MessageRole::System,
+                        content: rendered.into(),
+                        tool_name: None,
+                        streaming: false,
+                        folded: false,
+                    });
+                    let index = ui_state.messages.messages.len().saturating_sub(1);
+                    live.mod_ui_focus.reset(&elements, index);
+                    self.persist_interactive_snapshot(ui_state);
+                }
+            }
+            EngineEvent::PermissionExplanation { tool, explanation } => {
+                // The Risk line carries the deterministic shell
+                // analysis when there is one ("Dangerous: rm -rf
+                // ..."). The explanation is model prose and arrives
+                // on its own schedule; replacing the analysis with
+                // it left the user approving a dangerous command
+                // whose danger was no longer on screen. It fills
+                // the line only when nothing else does.
+                let has_analysis = ui_state.permission_detail.as_ref().is_some_and(|detail| {
+                    detail.tool.eq_ignore_ascii_case(&tool)
+                        && !matches!(detail.risk_summary.trim(), "" | "Awaiting approval")
+                });
+                if !has_analysis {
+                    if let Some(detail) = ui_state.permission_detail.as_mut()
+                        && detail.tool.eq_ignore_ascii_case(&tool)
+                    {
+                        detail.risk_summary.clone_from(&explanation);
+                    }
+                    if let Some(Overlay::PermissionDialog {
+                        tool: open_tool,
+                        risk_summary,
+                        ..
+                    }) = ui_state.overlays.top_mut()
+                        && open_tool.eq_ignore_ascii_case(&tool)
+                    {
+                        risk_summary.clone_from(&explanation);
+                    }
+                }
+                self.persist_interactive_snapshot(ui_state);
+            }
+            _ => {}
+        }
+    }
+
     /// Run the interactive REPL with full ratatui TUI.
+    //
+    // Still ~1,600 lines: the engine-event arm is out (see
+    // `apply_engine_event`), the input and draw paths are not. Exempted so the
+    // rest of the workspace can be held to the 400-line limit while this one
+    // is split, rather than keeping the lint off everywhere.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_tui(&mut self) -> Result<()> {
         use codape_ui::input::{InputAction, InputBuffer};
         use codape_ui::message_list::{Message, MessageRole};
@@ -5042,7 +5294,7 @@ impl ReplLoop {
         use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
         use std::fmt::Write as _;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         // A configuration failure that happened during `apply_cli_config`
         // (`--betas` typo, `--from-pr` fetch, `--worktree`) must stop the
@@ -5205,7 +5457,6 @@ impl ReplLoop {
         let mut config_changed_rx: Option<mpsc::UnboundedReceiver<FileChangeBatch>> = None;
         let mut vim = VimState::new_insert();
         let mut thinking = false;
-        let mut phase = InteractivePhase::Idle;
         let mut query_done_rx: Option<
             tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
         > = None;
@@ -5225,9 +5476,9 @@ impl ReplLoop {
         // They live here across iterations so a queue accumulated during one
         // turn is drained one auto-turn at a time rather than all at once.
         let mut mod_pending = std::collections::VecDeque::<String>::new();
-        let mut pending_confirmation: Option<ConfirmationRequest> = None;
-        let mut mod_ui_focus = ModUiFocus::default();
-        let mut last_stream_snapshot = Instant::now();
+        // The loop's own mutable state, grouped so the per-event handlers can
+        // take one borrow of it instead of six separate `&mut` arguments.
+        let mut live = InteractiveLive::new();
 
         // A signalled TUI must not leave the terminal in the alternate screen
         // with raw mode on. Exit through the same cleanup path as Ctrl+D and
@@ -5247,9 +5498,11 @@ impl ReplLoop {
 
         // Terminal notifications are a property of the environment, computed
         // once. Unsupported terminals simply get no sequence.
-        let notify_osc9 = codape_ui::terminal_notification::env_supports_osc9_notification();
-        let notify_progress = codape_ui::terminal_notification::env_supports_terminal_progress();
-        let notify_tmux = codape_ui::terminal_notification::env_is_inside_tmux();
+        let notify = NotificationSupport {
+            osc9: codape_ui::terminal_notification::env_supports_osc9_notification(),
+            progress: codape_ui::terminal_notification::env_supports_terminal_progress(),
+            inside_tmux: codape_ui::terminal_notification::env_is_inside_tmux(),
+        };
         let mut progress_active = false;
 
         let result = loop {
@@ -5261,11 +5514,16 @@ impl ReplLoop {
             // turn ends, on terminals where OSC 9;4 is safe.
             if thinking != progress_active {
                 progress_active = thinking;
-                if notify_progress {
+                if notify.progress {
                     let sequence = if thinking {
-                        codape_ui::terminal_notification::progress_sequence(None, notify_tmux)
+                        codape_ui::terminal_notification::progress_sequence(
+                            None,
+                            notify.inside_tmux,
+                        )
                     } else {
-                        codape_ui::terminal_notification::clear_progress_sequence(notify_tmux)
+                        codape_ui::terminal_notification::clear_progress_sequence(
+                            notify.inside_tmux,
+                        )
                     };
                     let _ = codape_ui::terminal_notification::write_sequences(&[sequence]);
                 }
@@ -5322,7 +5580,7 @@ impl ReplLoop {
             }
             if !thinking
                 && query_done_rx.is_none()
-                && pending_confirmation.is_none()
+                && live.pending_confirmation.is_none()
                 && self.pending_elicitation.is_none()
                 && self.engine.is_some()
                 && !ui_state.overlays.is_active()
@@ -5337,7 +5595,7 @@ impl ReplLoop {
                         person_prompt,
                         &mut ui_state,
                         &mut thinking,
-                        &mut phase,
+                        &mut live.phase,
                         &mut query_done_rx,
                         &mut elicit_rx,
                         &mut tui_elicit_rx,
@@ -5400,7 +5658,7 @@ impl ReplLoop {
                             next,
                             &mut ui_state,
                             &mut thinking,
-                            &mut phase,
+                            &mut live.phase,
                             &mut query_done_rx,
                             &mut elicit_rx,
                             &mut tui_elicit_rx,
@@ -5421,8 +5679,10 @@ impl ReplLoop {
             if thinking {
                 ui_state.statusline.spinner_frame =
                     ui_state.statusline.spinner_frame.wrapping_add(1);
-                ui_state.statusline.thinking_label =
-                    phase.status_label().or_else(|| Some("Thinking...".into()));
+                ui_state.statusline.thinking_label = live
+                    .phase
+                    .status_label()
+                    .or_else(|| Some("Thinking...".into()));
                 if ui_state.statusline.thinking_started.is_none() {
                     ui_state.statusline.thinking_started = Some(std::time::Instant::now());
                 }
@@ -5495,7 +5755,7 @@ impl ReplLoop {
             // Draw frame. The block spec lets the transcript render the live
             // mod UI tree at the pane's width and record where each button
             // landed, so the mouse handler can hit-test the frame the user saw.
-            let mod_ui_block = mod_ui_focus.spec();
+            let mod_ui_block = live.mod_ui_focus.spec();
             if let Err(e) = terminal_ui.draw_with_mod_ui(&mut ui_state, mod_ui_block.as_slice()) {
                 tracing::warn!("TUI draw error: {e}");
             }
@@ -5517,202 +5777,8 @@ impl ReplLoop {
                 Some(engine_event) = async {
                     event_rx.as_mut().unwrap().recv().await
                 }, if event_rx.is_some() => {
-                    self.record_engine_event_telemetry(&engine_event);
-                    match engine_event {
-                        EngineEvent::TextDelta(delta) => {
-                            phase.note_text_delta();
-                            set_plan_step(&mut ui_state, "Thinking through response");
-                            if let Some(last) = ui_state
-                                .messages
-                                .messages
-                                .iter_mut()
-                                .rev()
-                                .find(|msg| msg.role == MessageRole::Assistant)
-                            {
-                                let mut content = last.content.to_string();
-                                content.push_str(&delta);
-                                last.content = content.into();
-                                last.streaming = true;
-                            }
-                            if last_stream_snapshot.elapsed() >= Duration::from_secs(1) {
-                                self.persist_interactive_snapshot(&ui_state);
-                                last_stream_snapshot = Instant::now();
-                            }
-                        }
-                        EngineEvent::ToolUseSummary { id, summary, .. } => {
-                            // Render with the matching `ToolCallStart`, which
-                            // also carries the summary. Holding it here keeps
-                            // the two events from producing duplicate rows
-                            // while still letting this event drive the label.
-                            self.tool_use_summaries.insert(id, summary);
-                        }
-                        EngineEvent::ToolCallStart {
-                            id,
-                            name,
-                            summary,
-                            ..
-                        } => {
-                            let summary = self.tool_use_summaries.remove(&id).unwrap_or(summary);
-                            self.tool_names.insert(id.clone(), name.clone());
-                            phase.note_tool_start(&summary);
-                            set_plan_step(&mut ui_state, &summary);
-                            // The log feeds `/activity`; the transcript row is
-                            // the ToolCall message below, so this must not add
-                            // a second visible row.
-                            record_activity(&mut ui_state, &summary);
-                            ui_state.messages.push(Message {
-                                role: MessageRole::ToolCall,
-                                content: summary.into(),
-                                tool_name: Some(name.into()),
-                                streaming: false,
-                                folded: false,
-                            });
-                            self.persist_interactive_snapshot(&ui_state);
-                        }
-                        EngineEvent::ToolCallEnd { id, result } => {
-                            // A call blocked before its start event never
-                            // consumed its label; drop it here.
-                            self.tool_use_summaries.remove(&id);
-                            let tool_name = self
-                                .tool_names
-                                .remove(&id)
-                                .unwrap_or_else(|| "Tool".to_string());
-                            phase.note_tool_end();
-                            complete_plan(&mut ui_state);
-                            pending_confirmation = None;
-                            clear_permission_overlay(&mut ui_state);
-                            let content = if result.is_error {
-                                // Name the tool and the first line of the
-                                // error: "Tool failed" alone cannot be acted
-                                // on, and the output lives further up the
-                                // transcript.
-                                let reason = result
-                                    .output
-                                    .lines()
-                                    .next()
-                                    .unwrap_or_default()
-                                    .trim()
-                                    .chars()
-                                    .take(80)
-                                    .collect::<String>();
-                                let reason = if reason.is_empty() {
-                                    "no output".to_string()
-                                } else {
-                                    reason
-                                };
-                                ui_state
-                                    .notifications
-                                    .err(format!("{tool_name} failed: {reason}"));
-                                format!("Error: {}", result.output)
-                            } else {
-                                ui_state
-                                    .notifications
-                                    .success(format!("{tool_name} completed"));
-                                result.output
-                            };
-                            ui_state.messages.push(Message {
-                                role: MessageRole::ToolResult,
-                                content: content.into(),
-                                // Kept for syntax highlighting and future
-                                // per-tool rendering; the result row does not
-                                // print a second `[name]` label.
-                                tool_name: Some(tool_name.into()),
-                                streaming: false,
-                                folded: false,
-                            });
-                            self.persist_interactive_snapshot(&ui_state);
-                        }
-                        EngineEvent::PermissionRequest { tool, args, .. } => {
-                            let label =
-                                permission_activity_label(&ToolCall::summarize_activity(&tool, &args));
-                            phase.note_permission_request(&tool, &args);
-                            set_plan_step(&mut ui_state, &label);
-                            push_activity_row(&mut ui_state, &label);
-                            ui_state.permission_bar.set_pending(label.clone());
-                            sync_permission_overlay(
-                                &mut ui_state,
-                                &tool,
-                                &args.to_string(),
-                                "Awaiting approval",
-                                true,
-                            );
-                            ui_state.notifications.warn(label.clone());
-                            codape_ui::terminal_notification::emit(
-                                "Codape",
-                                &format!("Permission needed: {label}"),
-                                notify_osc9,
-                                notify_tmux,
-                            );
-                            self.persist_interactive_snapshot(&ui_state);
-                        }
-                        EngineEvent::AgentEvent { agent_id, event } => {
-                            apply_agent_event(&mut ui_state, &agent_id, &event);
-                            self.persist_interactive_snapshot(&ui_state);
-                        }
-                        EngineEvent::ModUi(elements) => {
-                            // A mod rendered UI during a hook. The tree is a
-                            // snapshot, so it renders here without touching
-                            // the mod runtime. It belongs in the transcript,
-                            // not on stdout interleaved with the turn.
-                            let rendered = codape_ui::mod_elements::render_mod_ui_text(
-                                &elements,
-                                codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
-                            );
-                            if rendered.is_empty() {
-                                // An empty tree clears what was focusable: there
-                                // is no block to route input to.
-                                mod_ui_focus = ModUiFocus::default();
-                            } else {
-                                ui_state.messages.push(Message {
-                                    role: MessageRole::System,
-                                    content: rendered.into(),
-                                    tool_name: None,
-                                    streaming: false,
-                                    folded: false,
-                                });
-                                let index = ui_state.messages.messages.len().saturating_sub(1);
-                                mod_ui_focus.reset(&elements, index);
-                                self.persist_interactive_snapshot(&ui_state);
-                            }
-                        }
-                        EngineEvent::PermissionExplanation { tool, explanation } => {
-                            // The Risk line carries the deterministic shell
-                            // analysis when there is one ("Dangerous: rm -rf
-                            // ..."). The explanation is model prose and arrives
-                            // on its own schedule; replacing the analysis with
-                            // it left the user approving a dangerous command
-                            // whose danger was no longer on screen. It fills
-                            // the line only when nothing else does.
-                            let has_analysis =
-                                ui_state.permission_detail.as_ref().is_some_and(|detail| {
-                                    detail.tool.eq_ignore_ascii_case(&tool)
-                                        && !matches!(
-                                            detail.risk_summary.trim(),
-                                            "" | "Awaiting approval"
-                                        )
-                                });
-                            if !has_analysis {
-                                if let Some(detail) = ui_state.permission_detail.as_mut()
-                                    && detail.tool.eq_ignore_ascii_case(&tool)
-                                {
-                                    detail.risk_summary.clone_from(&explanation);
-                                }
-                                if let Some(Overlay::PermissionDialog {
-                                    tool: open_tool,
-                                    risk_summary,
-                                    ..
-                                }) = ui_state.overlays.top_mut()
-                                    && open_tool.eq_ignore_ascii_case(&tool)
-                                {
-                                    risk_summary.clone_from(&explanation);
-                                }
-                            }
-                            self.persist_interactive_snapshot(&ui_state);
-                        }
-                        _ => {}
-                    }
+                    self.apply_engine_event(engine_event, &mut live, &mut ui_state, notify);
                 }
-
                 Some(event) = ct_rx.recv() => {
                     match event {
                         Event::Key(key) => {
@@ -5732,12 +5798,12 @@ impl ReplLoop {
                             if key.code == KeyCode::Char('c')
                                 && key.modifiers.contains(KeyModifiers::CONTROL)
                             {
-                                if let Some(request) = pending_confirmation.take() {
+                                if let Some(request) = live.pending_confirmation.take() {
                                     self.respond_to_confirmation(
                                         request,
                                         ConfirmationResponse::Denied,
                                         &mut ui_state,
-                                        &mut phase,
+                                        &mut live.phase,
                                     )
                                     .await;
                                     continue;
@@ -5746,13 +5812,13 @@ impl ReplLoop {
                                     self.stop_running_query(
                                         &mut ui_state,
                                         &mut thinking,
-                                        &mut phase,
+                                        &mut live.phase,
                                         &mut query_done_rx,
                                         &mut elicit_rx,
                                         &mut tui_elicit_rx,
                                         " (interrupted)",
                                     );
-                                    pending_confirmation = None;
+                                    live.pending_confirmation = None;
                                     continue;
                                 }
                                 if !ui_state.input.text.is_empty() {
@@ -5791,37 +5857,37 @@ impl ReplLoop {
                             // only when it has focus and no overlay is asking
                             // for the keyboard. Ordinary characters are never
                             // consumed here, so typing still reaches the line.
-                            if !ui_state.overlays.is_active() && pending_confirmation.is_none()
+                            if !ui_state.overlays.is_active() && live.pending_confirmation.is_none()
                                 && let Some(action) = mod_ui_key_action(
                                     key.code,
                                     key.modifiers,
-                                    mod_ui_focus.focused,
-                                    mod_ui_focus.button_count(),
+                                    live.mod_ui_focus.focused,
+                                    live.mod_ui_focus.button_count(),
                                 ) {
                                     match action {
                                         ModUiKeyAction::FocusNext
                                         | ModUiKeyAction::FocusPrevious => {
-                                            mod_ui_focus
+                                            live.mod_ui_focus
                                                 .cycle(matches!(action, ModUiKeyAction::FocusNext));
                                             self.redraw_mod_ui_focus(
                                                 &mut ui_state,
-                                                &mut mod_ui_focus,
+                                                &mut live.mod_ui_focus,
                                             );
                                         }
                                         ModUiKeyAction::ClearFocus => {
-                                            mod_ui_focus.clear_focus();
+                                            live.mod_ui_focus.clear_focus();
                                             self.redraw_mod_ui_focus(
                                                 &mut ui_state,
-                                                &mut mod_ui_focus,
+                                                &mut live.mod_ui_focus,
                                             );
                                         }
                                         ModUiKeyAction::Activate => {
                                             if let Some(id) =
-                                                mod_ui_focus.focused_id().map(str::to_string)
+                                                live.mod_ui_focus.focused_id().map(str::to_string)
                                             {
                                                 self.activate_mod_ui_button(
                                                     &mut ui_state,
-                                                    &mut mod_ui_focus,
+                                                    &mut live.mod_ui_focus,
                                                     id,
                                                 )
                                                 .await;
@@ -5912,34 +5978,34 @@ impl ReplLoop {
                             ) {
                                 match key.code {
                                     KeyCode::Char('a') => {
-                                        if let Some(request) = pending_confirmation.take() {
+                                        if let Some(request) = live.pending_confirmation.take() {
                                             self.respond_to_confirmation(
                                                 request,
                                                 ConfirmationResponse::Approved,
                                                 &mut ui_state,
-                                                &mut phase,
+                                                &mut live.phase,
                                             )
                                             .await;
                                         }
                                     }
                                     KeyCode::Char('A') => {
-                                        if let Some(request) = pending_confirmation.take() {
+                                        if let Some(request) = live.pending_confirmation.take() {
                                             self.respond_to_confirmation(
                                                 request,
                                                 ConfirmationResponse::ApproveSession,
                                                 &mut ui_state,
-                                                &mut phase,
+                                                &mut live.phase,
                                             )
                                             .await;
                                         }
                                     }
                                     KeyCode::Char('d' | 'D') | KeyCode::Esc => {
-                                        if let Some(request) = pending_confirmation.take() {
+                                        if let Some(request) = live.pending_confirmation.take() {
                                             self.respond_to_confirmation(
                                                 request,
                                                 ConfirmationResponse::Denied,
                                                 &mut ui_state,
-                                                &mut phase,
+                                                &mut live.phase,
                                             )
                                             .await;
                                         } else {
@@ -5997,13 +6063,13 @@ impl ReplLoop {
                                     self.stop_running_query(
                                         &mut ui_state,
                                         &mut thinking,
-                                        &mut phase,
+                                        &mut live.phase,
                                         &mut query_done_rx,
                                         &mut elicit_rx,
                                         &mut tui_elicit_rx,
                                         " (interrupted)",
                                     );
-                                    pending_confirmation = None;
+                                    live.pending_confirmation = None;
                                     continue;
                                 }
                                 if ui_state.overlays.is_active() {
@@ -6021,7 +6087,7 @@ impl ReplLoop {
                                             &text,
                                             &mut ui_state,
                                             &mut thinking,
-                                            &mut phase,
+                                            &mut live.phase,
                                             &mut query_done_rx,
                                             &mut elicit_rx,
                                             &mut tui_elicit_rx,
@@ -6039,13 +6105,13 @@ impl ReplLoop {
                                         self.stop_running_query(
                                             &mut ui_state,
                                             &mut thinking,
-                                            &mut phase,
+                                            &mut live.phase,
                                             &mut query_done_rx,
                                             &mut elicit_rx,
                                             &mut tui_elicit_rx,
                                             " (cancelled)",
                                         );
-                                        pending_confirmation = None;
+                                        live.pending_confirmation = None;
                                     } else if vim.mode == VimMode::Normal {
                                         ui_state.overlays.clear();
                                         ui_state.active_view = ViewMode::MainRepl;
@@ -6477,7 +6543,7 @@ impl ReplLoop {
                                 }
                                 MouseEventKind::Down(MouseButton::Left)
                                     if !ui_state.overlays.is_active()
-                                        && pending_confirmation.is_none()
+                                        && live.pending_confirmation.is_none()
                                         && self.pending_mcp_form.is_none() =>
                                 {
                                     let target = terminal_ui
@@ -6497,7 +6563,7 @@ impl ReplLoop {
                                     if let Some(id) = target {
                                         self.activate_mod_ui_button(
                                             &mut ui_state,
-                                            &mut mod_ui_focus,
+                                            &mut live.mod_ui_focus,
                                             id,
                                         )
                                         .await;
@@ -6553,7 +6619,7 @@ impl ReplLoop {
                     let args = permission_request_args(&request.arguments);
                     let label =
                         permission_activity_label(&ToolCall::summarize_activity(&request.tool_name, &args));
-                    phase.note_permission_request(&request.tool_name, &args);
+                    live.phase.note_permission_request(&request.tool_name, &args);
                     set_plan_step(&mut ui_state, &label);
                     push_activity_row(&mut ui_state, &label);
                     ui_state.permission_bar.set_pending(label.clone());
@@ -6565,7 +6631,7 @@ impl ReplLoop {
                         request.allow_session,
                     );
                     ui_state.notifications.warn(&label);
-                    pending_confirmation = Some(request);
+                    live.pending_confirmation = Some(request);
                     self.persist_interactive_snapshot(&ui_state);
                 }
 
@@ -6591,9 +6657,9 @@ impl ReplLoop {
                     self.pending_elicitation = None;
                     self.record_turn_telemetry(&result);
                     self.pending_mcp_form = None;
-                    pending_confirmation = None;
+                    live.pending_confirmation = None;
                     thinking = false;
-                    phase.reset();
+                    live.phase.reset();
                     complete_plan(&mut ui_state);
                     clear_permission_overlay(&mut ui_state);
 
@@ -6654,8 +6720,8 @@ impl ReplLoop {
                             codape_ui::terminal_notification::emit(
                                 "Codape",
                                 "Turn completed",
-                                notify_osc9,
-                                notify_tmux,
+                                notify.osc9,
+                                notify.inside_tmux,
                             );
                             // Trigger background features after successful turn
                             let prompt_text = self.history.last().cloned().unwrap_or_default();
@@ -6666,8 +6732,8 @@ impl ReplLoop {
                             codape_ui::terminal_notification::emit(
                                 "Codape",
                                 &format!("Turn failed: {e}"),
-                                notify_osc9,
-                                notify_tmux,
+                                notify.osc9,
+                                notify.inside_tmux,
                             );
                             ui_state.messages.push(Message {
                                 role: MessageRole::System,
@@ -6749,7 +6815,7 @@ impl ReplLoop {
                     tui_elicit_rx.as_mut().unwrap().recv().await
                 }, if tui_elicit_rx.is_some() => {
                     thinking = false;
-                    phase.reset();
+                    live.phase.reset();
                     if let Some(last) = ui_state
                         .messages
                         .messages

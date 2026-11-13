@@ -8,7 +8,7 @@ The main binary crate. Parses CLI arguments, bootstraps the REPL, wires together
 
 - **`Cli`** (`cli.rs`) — Clap argument struct with 40+ flags and subcommands matching Claude Code's interface.
 - **`Command`** (`cli.rs`) — Subcommands: `Repl`, `Serve`, `ServeStop`, `ServeStatus`, `Agents`, `Auth`, `Doctor`, `Update`, `Mcp`, `Plugin`, `AutoMode`, `Telemetry` (`preview-crash`), `Bridge`.
-- **`ReplLoop`** (`repl.rs`) — Main REPL event loop: reads keys, dispatches to Vim handler, updates UI state, orchestrates queries and commands.
+- **`ReplLoop`** (`repl.rs`) — Main REPL event loop: reads keys, dispatches to Vim handler, updates UI state, orchestrates queries and commands. `run_tui` is the interactive loop itself; `apply_engine_event` is the handler that turns one engine event into transcript rows and state changes.
 - **`StartupOrchestrator`** (`orchestrator.rs`) — Bridges REPL to `QueryEngine`. Manages startup phases, API client creation, mode routing (TUI, headless, server, resume), telemetry init, and CLI flag application.
 
 ## Main Flow
