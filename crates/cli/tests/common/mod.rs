@@ -57,6 +57,13 @@ impl Cassette {
         cmd.env("ANTHROPIC_MODEL", MODEL);
         cmd.env("CLAUDE_CONFIG_DIR", self.config_home.path());
         cmd.env("CODAPE_CUSTOM_HEADERS", test_header());
+        // Every suite writes its own `.codape/settings.json` fixtures. The
+        // workspace trust gate is a real user's protection against a cloned
+        // repository, and no test has a person at the other end of stdin to
+        // answer it — an unrecorded workspace would be refused, which is
+        // correct for a user and wrong for a fixture that was just written by
+        // the test itself.
+        cmd.env("CODAPE_TRUST_WORKSPACE", "1");
         for key in [
             "OPENAI_API_KEY",
             "OPENAI_BASE_URL",

@@ -79,6 +79,9 @@ fn run(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> String {
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CODAPE_LOG", "off")
+        // The workspace this test writes is its own fixture; the trust gate
+        // protects a real user, and is not the property under test here.
+        .env("CODAPE_TRUST_WORKSPACE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -116,6 +119,9 @@ fn run_denying(cwd: &Path, home: &Path, base_url: &str, prompt: &str) -> (String
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CODAPE_LOG", "off")
+        // The workspace this test writes is its own fixture; the trust gate
+        // protects a real user, and is not the property under test here.
+        .env("CODAPE_TRUST_WORKSPACE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

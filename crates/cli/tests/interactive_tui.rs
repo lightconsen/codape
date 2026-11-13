@@ -269,6 +269,10 @@ impl PtySession {
         }
         cmd.cwd(cwd);
         cmd.env("CODAPE_LOG", "off");
+        // Some fixtures commit `.codape/settings.json`. The workspace trust
+        // gate asks before applying one, and a PTY test has no one to answer
+        // it: without this the child would sit on the prompt and never draw.
+        cmd.env("CODAPE_TRUST_WORKSPACE", "1");
         // A config home of its own: the CLI looks here for settings, and the
         // first-run consent gate writes here. Pointing it at the developer's
         // real `~/.codape` would make every test depend on their settings —

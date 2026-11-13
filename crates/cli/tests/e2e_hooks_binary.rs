@@ -97,6 +97,9 @@ fn run(
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CODAPE_LOG", "off")
+        // The workspace this test writes is its own fixture; the trust gate
+        // protects a real user, and is not the property under test here.
+        .env("CODAPE_TRUST_WORKSPACE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -478,6 +481,9 @@ fn run_spawned(
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CODAPE_LOG", "off")
+        // The workspace this test writes is its own fixture; the trust gate
+        // protects a real user, and is not the property under test here.
+        .env("CODAPE_TRUST_WORKSPACE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1102,6 +1108,9 @@ fn failure_and_compaction_events_reach_their_hooks() {
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
         .env("CODAPE_LOG", "off")
+        // The workspace this test writes is its own fixture; the trust gate
+        // protects a real user, and is not the property under test here.
+        .env("CODAPE_TRUST_WORKSPACE", "1")
         .env("CODAPE_CONTEXT_WINDOW", "1000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
