@@ -9975,6 +9975,11 @@ impl ReplLoop {
                     writeln!(stdout, "{msg}")?;
                     return Ok(());
                 }
+                "trust" => {
+                    let msg = self.handle_trust_command(&args);
+                    writeln!(stdout, "{msg}")?;
+                    return Ok(());
+                }
                 "update-check" => {
                     let msg = self.handle_update_check_command().await;
                     writeln!(stdout, "{msg}")?;
@@ -10556,6 +10561,96 @@ impl ReplLoop {
             .unwrap_or_else(|_| target.to_path_buf());
         let old = std::mem::replace(&mut self.cwd, abs.to_string_lossy().to_string());
         format!("Workspace switched: {old} → {}", self.cwd)
+    }
+
+    /// Handle /trust — report or change this workspace's trust decision.
+    ///
+    /// The decision is what lets a repository's `.codape/settings.json` bring
+    /// `hooks`, `permissions.allow` and `mcp_servers`. Changing it does not
+    /// reload the running session: the hooks were installed at startup, and
+    /// pretending otherwise would show a decision the process is not honouring.
+    fn handle_trust_command(&self, args: &[String]) -> String {
+        self.handle_trust_command_at(args, &codape_config::config_home())
+    }
+
+    /// `/trust` against a given config home. The seam exists so a test can
+    /// read and write a trust record without touching the real one.
+    fn handle_trust_command_at(&self, args: &[String], config_dir: &std::path::Path) -> String {
+        let record_path = codape_config::trust_record_path(config_dir);
+        let mut record = codape_config::TrustRecord::load(&record_path);
+        let key = self.cwd.clone();
+
+        match args.first().map(String::as_str) {
+            None => {
+                let request = self.workspace_trust_request();
+                let standing = match record.decision(&key) {
+                    Some(true) => "trusted".to_string(),
+                    Some(false) => "not trusted".to_string(),
+                    None => "no decision recorded".to_string(),
+                };
+                if request.is_empty() {
+                    format!(
+                        "Workspace {}: {standing}. Its settings grant nothing that needs a \
+                         decision (no hooks, no allow rules, no MCP servers).",
+                        self.cwd
+                    )
+                } else {
+                    format!(
+                        "Workspace {}: {standing}. Its settings carry {}.\n\
+                         Use /trust yes or /trust no to change it; this session keeps the \
+                         decision it started with.",
+                        self.cwd,
+                        request.summary()
+                    )
+                }
+            }
+            Some("yes" | "on" | "true") => {
+                record.set(&key, true);
+                match record.save(&record_path) {
+                    Ok(()) => format!(
+                        "Workspace {} is trusted. Restart to apply settings that were \
+                         withheld at startup.",
+                        self.cwd
+                    ),
+                    Err(error) => format!("Could not save the trust record: {error}"),
+                }
+            }
+            Some("no" | "off" | "false" | "forget") => {
+                let changed = codape_config::forget(&mut record, &key);
+                if !changed {
+                    return format!("Workspace {} had no recorded decision.", self.cwd);
+                }
+                match record.save(&record_path) {
+                    Ok(()) => format!(
+                        "Workspace {} is no longer trusted. Restart to stop applying its \
+                         hooks, allow rules and MCP servers.",
+                        self.cwd
+                    ),
+                    Err(error) => format!("Could not save the trust record: {error}"),
+                }
+            }
+            Some(other) => format!("Usage: /trust [yes|no] (got '{other}')"),
+        }
+    }
+
+    /// What this workspace's own settings would grant if it were trusted.
+    ///
+    /// Read from the files rather than from the resolved settings: the resolved
+    /// view has the untrusted keys already removed, so it cannot describe what
+    /// a decision would cover.
+    fn workspace_trust_request(&self) -> codape_config::TrustRequest {
+        let mut request = codape_config::TrustRequest::default();
+        for name in ["settings.json", "settings.local.json"] {
+            let path = std::path::Path::new(&self.cwd).join(".codape").join(name);
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            request = request.union(&codape_config::TrustRequest::from_settings_json(&value));
+        }
+        request
     }
 
     /// Handle /recover command — restore session from crash recovery snapshot.
@@ -11575,6 +11670,144 @@ mod tests {
         let manager = repl.theme_manager_at(tmp.path().to_path_buf());
         assert!(manager.get_theme("my-theme").is_some());
         assert!(manager.get_theme("dark").is_some());
+    }
+
+    /// `/trust` is the only way to change the decision from inside a session,
+    /// so it has to say what the standing decision is, write the new one, and
+    /// admit that the running session still holds the old one.
+    #[test]
+    fn the_trust_command_reports_changes_and_admits_a_restart_is_needed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(workspace.path().join(".codape")).unwrap();
+        std::fs::write(
+            workspace.path().join(".codape/settings.json"),
+            serde_json::json!({
+                "config_version": 4,
+                "hooks": [{"event": "PreToolUse", "command": "true"}],
+                "permissions": {"allow": ["Bash(npm test)"]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let repl = ReplLoop::new(cwd.clone(), ModelId::sonnet());
+        let record_path = codape_config::trust_record_path(config.path());
+
+        // Before any decision, the report names what is at stake.
+        let report = repl.handle_trust_command_at(&[], config.path());
+        assert!(report.contains("no decision recorded"), "{report}");
+        assert!(report.contains("hook"), "{report}");
+        assert!(report.contains("pre-approved"), "{report}");
+
+        let trusted = repl.handle_trust_command_at(&["yes".into()], config.path());
+        assert!(trusted.contains("Restart"), "{trusted}");
+        assert_eq!(
+            codape_config::TrustRecord::load(&record_path).decision(&cwd),
+            Some(true)
+        );
+
+        // Asking again now reports the decision this session was started with,
+        // and that asking to change it still costs a restart.
+        assert!(
+            repl.handle_trust_command_at(&[], config.path())
+                .contains("trusted")
+        );
+
+        let forgotten = repl.handle_trust_command_at(&["no".into()], config.path());
+        assert!(forgotten.contains("Restart"), "{forgotten}");
+        assert_eq!(
+            codape_config::TrustRecord::load(&record_path).decision(&cwd),
+            None,
+            "forget should remove the key, not record a \"no\""
+        );
+        // Forgetting twice is not an error, just a no-op worth saying.
+        assert!(
+            repl.handle_trust_command_at(&["no".into()], config.path())
+                .contains("no recorded decision")
+        );
+
+        let usage = repl.handle_trust_command_at(&["maybe".into()], config.path());
+        assert!(usage.contains("Usage: /trust"), "{usage}");
+    }
+
+    /// The transcript must end up holding exactly the session history, while
+    /// the UI only ever hands over the tail. Appending a tail to a file that
+    /// already has it would duplicate every message; appending after a
+    /// compaction would keep a tail the session dropped.
+    #[test]
+    fn the_transcript_writer_appends_tails_and_rewrites_after_a_shrink() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        let repl = ReplLoop::new(cwd.clone(), ModelId::sonnet());
+        let store =
+            codape_memory::transcript::TranscriptStore::new(session_resume::transcript_dir(&cwd));
+        let session_id = "session-under-test";
+
+        let history =
+            |n: usize| -> Vec<Message> { (0..n).map(|i| Message::user(format!("m{i}"))).collect() };
+        let texts = |messages: Vec<Message>| -> Vec<String> {
+            messages
+                .into_iter()
+                .map(|message| match message.content {
+                    codape_core::types::MessageContent::Text(text) => text,
+                    _ => String::new(),
+                })
+                .collect()
+        };
+
+        // First write is a rewrite: nothing is known to exist yet.
+        repl.persist_transcript(session_id, &history(2));
+        // Then two tails of one message each.
+        repl.persist_transcript(session_id, &history(3));
+        repl.persist_transcript(session_id, &history(4));
+        // And a compaction that leaves one message.
+        repl.persist_transcript(session_id, &history(1));
+
+        // Dropping the sink joins the writer, so the queue is on disk.
+        *repl.transcript.lock().unwrap() = None;
+
+        let on_disk = texts(store.read_all(session_id).expect("transcript reads back"));
+        assert_eq!(
+            on_disk,
+            ["m0"],
+            "a rewind left a stale tail in the transcript"
+        );
+    }
+
+    /// A sink writing the same history twice must not duplicate it: the
+    /// per-second streaming snapshot calls this repeatedly with no change.
+    #[test]
+    fn persisting_an_unchanged_history_writes_nothing() {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path().to_string_lossy().into_owned();
+        let repl = ReplLoop::new(cwd.clone(), ModelId::sonnet());
+        let store =
+            codape_memory::transcript::TranscriptStore::new(session_resume::transcript_dir(&cwd));
+        let messages = vec![Message::user("only"), Message::assistant("once")];
+
+        repl.persist_transcript("s", &messages);
+        repl.persist_transcript("s", &messages);
+        repl.persist_transcript("s", &messages);
+        *repl.transcript.lock().unwrap() = None;
+
+        assert_eq!(store.read_all("s").expect("transcript reads back").len(), 2);
+    }
+
+    /// A workspace that grants nothing is never asked about, so `/trust` says
+    /// that instead of implying a decision is pending.
+    #[test]
+    fn the_trust_command_says_a_quiet_workspace_needs_no_decision() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let repl = ReplLoop::new(
+            workspace.path().to_string_lossy().into_owned(),
+            ModelId::sonnet(),
+        );
+
+        let report = repl.handle_trust_command_at(&[], config.path());
+        assert!(report.contains("grant nothing"), "{report}");
     }
 
     #[test]

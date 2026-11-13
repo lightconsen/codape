@@ -90,6 +90,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - Command chaining via `|` operator (e.g., `/diff | /commit`) passes output between commands.
 - Command history is recorded for built-ins and registry commands alike (both REPL paths record before dispatch) and persisted; `/history` reads it, with `[n]` and `search <query>`.
 - `/macro define|list|run|delete` is a REPL built-in backed by `~/.codape/macros.json`; macro names also expand directly.
+- `/trust` is a REPL built-in that reports or changes this workspace's trust decision — the one that lets a repository's `.codape/settings.json` bring `hooks`, `permissions.allow` and `mcp_servers`. `/trust` alone reports the standing decision and what the workspace asks for; `/trust yes` and `/trust no` record a new one. Neither reloads the session, because the hooks were installed at startup, and the output says a restart is needed rather than claiming the change took effect. See [config.md](config.md) → *Workspace Trust*.
 - All commands have basic error handling with usage messages.
 
 ### Feature-Gated Commands
