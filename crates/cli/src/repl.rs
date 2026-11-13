@@ -1514,7 +1514,6 @@ fn build_interactive_snapshot(
 
 /// Result from a completed background task, delivered to the UI.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct BackgroundTaskResult {
     /// The task ID.
     id: String,
@@ -5723,6 +5722,15 @@ impl ReplLoop {
 
             // Poll for completed background tasks and route by kind
             for result in self.poll_background_results() {
+                // The id is what ties a result to the task whose progress was
+                // shown, and it is the only handle on a task that has already
+                // been cleaned up by the time its result arrives.
+                tracing::debug!(
+                    task_id = %result.id,
+                    kind = ?result.kind,
+                    success = result.success,
+                    "background task finished"
+                );
                 match result.kind {
                     BackgroundFeatureKind::PromptSuggestion => {
                         if result.success {
@@ -8316,7 +8324,6 @@ impl ReplLoop {
 
     /// Compact the session context by truncating older messages.
     /// Keeps the first user message and the most recent 3 turns.
-    #[allow(dead_code)]
     fn compact_context(&mut self, ui_state: &mut codape_ui::state::UiState) -> String {
         let Some(engine) = self.engine.as_mut() else {
             return "No engine configured.".into();

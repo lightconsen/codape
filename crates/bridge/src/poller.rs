@@ -476,11 +476,14 @@ impl ServerAssignment {
 }
 
 /// Server response from the assignments endpoint.
+///
+/// The body also carries `count`; it is a total the caller does not act on
+/// (the page size is what `max_concurrent` bounds), and the struct omits it
+/// rather than holding a field nothing reads. `serde` ignores unknown keys, so
+/// the omission is not a compatibility risk.
 #[derive(Debug, Clone, Deserialize)]
 struct AssignmentsResponse {
     assignments: Vec<ServerAssignment>,
-    #[allow(dead_code)]
-    count: usize,
 }
 
 impl BridgeWorkPoller {

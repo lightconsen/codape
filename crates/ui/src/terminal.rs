@@ -85,7 +85,6 @@ const WELCOME_CARD_HEIGHT: usize = 16;
 #[allow(missing_debug_implementations)]
 pub struct TerminalUi {
     terminal: ratatui::Terminal<CrosstermBackend<Stdout>>,
-    #[allow(dead_code)]
     alternate: bool,
     profile: TerminalProfile,
     keyboard_pushed: bool,
