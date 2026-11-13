@@ -39,7 +39,12 @@ local work.
 CI runs the same script on every push and pull request (job `Coverage`):
 
 - the workspace total is compared with the baseline recorded in this file, and
-  a drop below `COVERAGE_MIN` (85%) fails the job;
+  the job fails when it drops more than `COVERAGE_DRIFT` (0.5 points) below
+  that baseline. The floor therefore moves with the baseline instead of being
+  a fixed number: with a fixed `COVERAGE_MIN` (85%) the project could drift
+  down 2.4 points below the 87.4% baseline without CI saying anything. The
+  same `COVERAGE_MIN` remains as a backstop for when the baseline line cannot
+  be read, and it never raises the floor above `baseline − drift`;
 - the `lcov.info` and the summary are uploaded as the `coverage-lcov`
   artifact;
 - on a pull request from this repository, a sticky comment reports the total,

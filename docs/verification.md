@@ -40,9 +40,10 @@ this table is what they check):
 | `cross-check-musl` | `cargo check --workspace --target x86_64-unknown-linux-musl` — the release matrix's musl target, whose libc differs from glibc in ways a gnu build cannot see |
 | `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p codape-bridge --test ssh_spawn` — the SSH spawn path against a real server |
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` (the backlog is zero, so a warning fails) |
+| `msrv` | `cargo check --workspace` on **1.97**, the `rust-version` the crates declare. Compiling only: the claim is that a consumer on that toolchain can build the workspace. Nothing checked it before, so the declaration was unverified |
 | `test` | `cargo nextest run --workspace --no-fail-fast` on Linux; the macOS plist carrier and the live benchmark replay run in `test-macos`, the Windows runtime sandbox tests in `test-windows`, and the SSH spawn path in `ssh-integration` |
 | `doctests` | `cargo test --doc --workspace` — `nextest` does not run doctests, so a doc example that stops compiling is caught here rather than by a reader |
-| `coverage` | `scripts/coverage.sh`; fails below an 85% workspace floor, uploads `coverage-lcov`, and comments the total and delta on pull requests |
+| `coverage` | `scripts/coverage.sh`; the floor is the baseline in [coverage.md](coverage.md) minus 0.5 points (so it moves when coverage improves), with an 85% backstop for when the baseline cannot be read; uploads `coverage-lcov` and comments the total, baseline and delta on pull requests |
 | `doc` | `cargo doc` with `RUSTDOCFLAGS="-D warnings"` |
 | `audit` / `deny` | `cargo audit`, `cargo deny check licenses bans sources` |
 | `Nightly Soak & Fuzz` | scheduled: `scripts/soak.py`, both race soaks, `scripts/fuzz.sh` |
@@ -61,6 +62,7 @@ The `main` ruleset (`protect-main-2026`) requires these checks:
 | `Format` | job `fmt` |
 | `Cassette metadata` | job `cassettes` |
 | `Clippy` | job `clippy` |
+| `MSRV (1.97)` | job `msrv` |
 | `Test` | job `test` |
 | `Doctests` | job `doctests` |
 | `Cross-check (musl)` | job `cross-check-musl` |
@@ -142,8 +144,21 @@ dependency is a policy decision, not a config edit.
 Both are clean, and `scripts/verify.sh` now fails on any warning. The
 workspace lints in `Cargo.toml` allow a small, documented set of lints whose
 suggested rewrite is worse than the code (`assert_is_empty`,
-`significant_drop_tightening`, `await_holding_lock`, `option_if_let_else`,
+`significant_drop_tightening`, `option_if_let_else`,
 `cast_possible_truncation`, `type_complexity`, `needless_pass_by_value`).
+
+Two more are `warn` rather than `allow`, so new code cannot quietly grow the
+problem:
+
+- `await_holding_lock` — a production `std::sync::Mutex` held across an
+  `.await` is the deadlock the lint exists to catch. The handful of tests that
+  hold one on purpose (to serialise `PATH` mutation) carry a file-local
+  `#![allow]` with the reason next to it.
+- `too_many_lines` — the threshold is 400 lines (`clippy.toml`). The three
+  functions still over it (`run_tui`, `select_tools` in the cassette fixture,
+  and the config-extension command table) carry a site-local `#[allow]` saying
+  why they have not been split yet. Before this was an `allow`, `run_tui` grew
+  to 1,834 lines without a single warning.
 
 ## Keeping it clean
 

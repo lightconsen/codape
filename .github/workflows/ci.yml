@@ -116,6 +116,29 @@ jobs:
       - name: Check optional features compile
         run: cargo check --workspace --all-features --locked
 
+  # `rust-version = "1.97"` is a promise to every crate consumer: the
+  # workspace compiles on 1.97. It was only ever checked on 1.99.1 (the pinned
+  # toolchain), which makes the claim untestable rather than true. This job
+  # compiles on the declared MSRV and nothing else — no tests, since the
+  # promise is about compiling, and the point is to fail on a dependency or
+  # language feature that crept past the floor.
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # A separate cache: reusing the 1.99 artifacts here would hide
+          # exactly the failure this job exists to find.
+          key: msrv
+      - uses: dtolnay/rust-toolchain@1.97
+      - uses: ./.github/actions/linux-deps
+      - name: Compile on the declared MSRV
+        run: cargo check --workspace --locked
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -453,12 +476,19 @@ jobs:
 
   # Line coverage, uploaded as an artifact and reported on pull requests.
   #
-  # The number is compared with the baseline recorded in docs/coverage.md
-  # (updated when the figure moves) so a PR sees "87.0% -> 86.4%". A drop
-  # below COVERAGE_MIN fails the job; a downward drift above it is reported
-  # rather than failed, because a refactor can legitimately move coverage
-  # around. The comment is posted only for pull requests from this repository:
-  # a fork's pull request has a read-only token.
+  # The floor is derived from the baseline in docs/coverage.md rather than
+  # being a fixed number: the baseline moves when coverage improves, and a
+  # fixed floor then leaves a gap the project can silently drift down through
+  # (the floor was 85 while the baseline was 87.4, so 2.4 points could be lost
+  # unnoticed). The floor is therefore the baseline minus COVERAGE_DRIFT, where
+  # COVERAGE_DRIFT is the amount of movement a single refactor may cause. The
+  # next PR after a genuine improvement still sees the new, tighter floor.
+  #
+  # COVERAGE_MIN is an absolute backstop used only when the baseline line is
+  # missing or unreadable; it never raises the floor above what the baseline
+  # says, so a stale docs figure cannot make the gate impossible to pass. The
+  # comment is posted only for pull requests from this repository: a fork's
+  # pull request has a read-only token.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -468,7 +498,10 @@ jobs:
       pull-requests: write
     env:
       CARGO_BUILD_JOBS: '2'
+      # Absolute backstop, used only when the baseline cannot be read.
       COVERAGE_MIN: '85'
+      # How far a single change may move coverage below the recorded baseline.
+      COVERAGE_DRIFT: '0.5'
     steps:
       - uses: actions/checkout@v7
       # `cache-on-failure` matters here more than in any other job: `Measure`
@@ -500,10 +533,16 @@ jobs:
           baseline=$(sed -n 's/.*= \([0-9][0-9.]*\)%.*/\1/p' docs/coverage.md | head -1)
           baseline="${baseline:-0}"
           delta=$(awk -v t="$total" -v b="$baseline" 'BEGIN {printf "%+.1f", t - b}')
+          # Baseline − drift. The backstop applies only when no baseline could
+          # be read: taking the larger of the two would let a stale docs figure
+          # set a floor no run can clear.
+          min=$(awk -v b="$baseline" -v d="$COVERAGE_DRIFT" -v f="$COVERAGE_MIN" \
+            'BEGIN { if (b <= 0) { printf "%.1f", f } else { printf "%.1f", b - d } }')
           echo "total=$total" >> "$GITHUB_OUTPUT"
           echo "baseline=$baseline" >> "$GITHUB_OUTPUT"
           echo "delta=$delta" >> "$GITHUB_OUTPUT"
-          echo "workspace coverage: ${total}% (baseline ${baseline}%, ${delta} points)"
+          echo "min=$min" >> "$GITHUB_OUTPUT"
+          echo "workspace coverage: ${total}% (baseline ${baseline}%, ${delta} points, floor ${min}%)"
           {
             echo "<!-- codape-coverage -->"
             echo "### Coverage"
@@ -521,9 +560,10 @@ jobs:
       - name: Enforce the floor
         run: |
           total="${{ steps.compare.outputs.total }}"
-          min="$COVERAGE_MIN"
+          min="${{ steps.compare.outputs.min }}"
+          baseline="${{ steps.compare.outputs.baseline }}"
           if awk -v t="$total" -v m="$min" 'BEGIN {exit !(t < m)}'; then
-            echo "coverage ${total}% is below the ${min}% floor" >&2
+            echo "coverage ${total}% is below the ${min}% floor (baseline ${baseline}% minus drift, see docs/coverage.md)" >&2
             exit 1
           fi
       - name: Upload coverage report

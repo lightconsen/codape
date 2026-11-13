@@ -23,6 +23,11 @@ clippy and rustdoc run with `-D warnings` in CI and a new stable release that
 adds a lint would fail a build unrelated to the change under review. Bump it
 together with the version named in `.github/workflows/*.yml`.
 
+The 1.97 figure is checked, not just declared: the `MSRV (1.97)` job compiles
+the whole workspace on 1.97 and nothing else. It runs no tests — the promise is
+that the workspace *compiles* on that toolchain, which is what a consumer
+needs.
+
 ## Routes
 
 ### `scripts/build.sh` (recommended)
