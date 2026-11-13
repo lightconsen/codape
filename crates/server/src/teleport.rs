@@ -21,8 +21,8 @@
 //! The service is deliberately small enough to run on a laptop: no TLS, no
 //! accounts. Put it behind the deployment's own TLS (a reverse proxy, a private
 //! network). The share token is a capability, and anyone who has it can read
-//! the session — which is why [`ShareInfo`] does not repeat it back: a listing
-//! nobody authenticated for must not hand out working capabilities.
+//! the session — so [`ShareInfo`] repeating it back is only safe because the
+//! listing is behind the service token; see that type for why.
 
 use std::collections::HashMap;
 use std::sync::Arc;
