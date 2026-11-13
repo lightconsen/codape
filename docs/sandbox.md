@@ -27,10 +27,18 @@ configured write paths are re-bound writable, so a command can open any file
 the user can read; it simply cannot change anything but the write set. That is
 a deliberate trade — a mount-namespace root that omits what the loader needs
 fails to start anything — but it means bubblewrap gives you **write** isolation
-and network isolation, not read isolation. Use Landlock when read confinement
-matters, or set `CODAPE_BWRAP=0` and let the Landlock path take over.
-`filesystem_isolation()` reports the backend that is in force, so callers that
-care can say which of the two they have.
+and network isolation, not read isolation. Read confinement on Linux therefore
+means the Landlock backend, and Landlock is a fallback rather than a setting you
+turn on: it is in force only when bubblewrap is not, so on a host that has
+`bwrap` the `CODAPE_BWRAP=0` switch is what actually selects it. That trade has
+a second edge worth knowing before you make it — Landlock grants reads beneath
+the configured paths and the fixed system roots only, and the default policy
+names just the working directory, so a toolchain installed under `$HOME`
+(rustup's `~/.cargo/bin`, its registry, `~/.rustup`) is outside the plan for a
+workspace anywhere else and a build fails with `EACCES`. Bubblewrap binds the
+whole root read-only for exactly that reason: it starts anything, at the cost
+of letting the command read anything. `filesystem_isolation()` reports whether
+a backend is in force, so callers that care can say which of the two they have.
 
 ## Where it is wired
 
