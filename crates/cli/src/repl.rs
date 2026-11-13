@@ -5243,6 +5243,28 @@ impl ReplLoop {
                     self.persist_interactive_snapshot(ui_state);
                 }
             }
+            EngineEvent::StreamInterrupted {
+                reason,
+                partial_len,
+                will_retry,
+            } => {
+                // Only the retry case belongs here. A terminal interruption
+                // also ends the turn with `IncompleteAnswer` (or
+                // `TokenLimitStop`), and the turn-result handler says so once —
+                // repeating it from this event would print the same warning
+                // twice. A retry is transient and nothing else reports it, so
+                // the person sees *why* the answer pauses instead of a stalled
+                // spinner.
+                if will_retry {
+                    tracing::info!(reason = %reason, partial_len, "stream interrupted; retrying");
+                    set_plan_step(
+                        ui_state,
+                        &format!(
+                            "Connection interrupted after {partial_len} characters — retrying"
+                        ),
+                    );
+                }
+            }
             EngineEvent::PermissionExplanation { tool, explanation } => {
                 // The Risk line carries the deterministic shell
                 // analysis when there is one ("Dangerous: rm -rf
@@ -6685,6 +6707,30 @@ impl ReplLoop {
                             folded: false,
                             });
                         }
+                        // The answer is on screen but the stream died
+                        // before the provider said it was finished. Say so
+                        // next to it: the text above is what arrived, and
+                        // silently treating it as the whole answer is the
+                        // failure this arm exists to prevent.
+                        Ok(TerminalReason::IncompleteAnswer { message }) => {
+                            let notice = format!(
+                                "The response ended early — the AI service's connection dropped before the answer finished, so the text above may be incomplete.\n({message})"
+                            );
+                            ui_state.notifications.warn("Response may be incomplete");
+                            ui_state.messages.push(Message {
+                                role: MessageRole::System,
+                                content: notice.clone().into(),
+                                tool_name: None,
+                                streaming: false,
+                                folded: false,
+                            });
+                            codape_ui::terminal_notification::emit(
+                                "Codape",
+                                "Response may be incomplete",
+                                notify.osc9,
+                                notify.inside_tmux,
+                            );
+                        }
                         Ok(_) => {
                             let turn_start = ui_state
                                 .messages
@@ -7915,6 +7961,12 @@ impl ReplLoop {
         let (error_type, message) = match result {
             Ok(TerminalReason::Error(message)) => ("turn_error", message.clone()),
             Ok(TerminalReason::ApiUnavailable { message }) => ("api_unavailable", message.clone()),
+            // A partial answer whose stream died is a transport failure, and
+            // the count of them is the only way to notice a provider that is
+            // flaky without the user reporting it.
+            Ok(TerminalReason::IncompleteAnswer { message }) => {
+                ("stream_interrupted", message.clone())
+            }
             Err(message) => ("fatal", message.clone()),
             _ => return,
         };
@@ -7963,12 +8015,20 @@ impl ReplLoop {
     /// model's bytes: a prompt that says "read src/lib.rs" must not turn into
     /// file content the model never emitted.
     fn headless_final_output(output: String, reason: &TerminalReason) -> String {
+        // A stream that died mid-answer gets a sentence a reader can act on
+        // rather than a `Debug` dump: the text above it is theirs, and the
+        // question they have is whether it is finished.
+        let note = match reason {
+            TerminalReason::Completed => return output,
+            TerminalReason::IncompleteAnswer { .. } => {
+                "Query ended early — the response may be incomplete".to_string()
+            }
+            other => format!("Query completed ({other:?})"),
+        };
         if output.is_empty() {
             format!("Query completed ({reason:?})")
-        } else if !matches!(reason, TerminalReason::Completed) {
-            format!("{output}\nQuery completed ({reason:?})")
         } else {
-            output
+            format!("{output}\n{note}")
         }
     }
 
@@ -9087,6 +9147,26 @@ impl ReplLoop {
                     frame
                         .data
                         .insert("error".to_string(), serde_json::Value::String(message));
+                    frame
+                }
+                // A stream that died mid-answer is not a success either: the
+                // text above is what arrived before the connection dropped,
+                // and a host reading `subtype: success` would present it as the
+                // whole answer. It gets its own subtype because the remedy
+                // differs from a truncated one — nothing was cut at a ceiling,
+                // the transport failed, so re-running is reasonable.
+                Ok(TerminalReason::IncompleteAnswer { message }) => {
+                    let mut frame = codape_events::ResultFrame::error(
+                        session_id.clone(),
+                        codape_events::protocol::result_subtype::ERROR_STREAM_INTERRUPTED,
+                        u64::try_from(turn_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        turns_used,
+                    );
+                    frame.result = Some(output.trim().to_string());
+                    frame.data.insert(
+                        "error".to_string(),
+                        serde_json::Value::String(message.clone()),
+                    );
                     frame
                 }
                 Ok(_) => codape_events::ResultFrame::success(
@@ -12706,6 +12786,26 @@ mod tests {
         );
         assert!(formatted.starts_with("partial answer"));
         assert!(formatted.contains("MaxTurnsReached"));
+    }
+
+    /// A headless answer whose stream died says so in words a reader can act
+    /// on, and the partial text still comes first.
+    #[test]
+    fn headless_output_says_when_an_answer_may_be_incomplete() {
+        let formatted = ReplLoop::headless_final_output(
+            "the first half".to_string(),
+            &TerminalReason::IncompleteAnswer {
+                message: "connection reset mid-body".to_string(),
+            },
+        );
+        assert!(formatted.starts_with("the first half"), "{formatted:?}");
+        assert!(
+            formatted.contains("may be incomplete"),
+            "the reader was not told the answer might be cut short: {formatted:?}"
+        );
+        // A `Debug` dump of the transport error is noise in a piped answer;
+        // the sentence above it is what the reader needs.
+        assert!(!formatted.contains("connection reset"), "{formatted:?}");
     }
 
     #[test]

@@ -559,6 +559,16 @@ pub enum TerminalReason {
     /// the same request again. Not an end: the loop re-sends with the same
     /// context, and this is the signal that says so.
     Resume,
+    /// The stream died mid-answer and what had arrived was kept.
+    ///
+    /// The answer text is real and worth showing; it is just not known to be
+    /// the whole answer. This exists because the fail-open path reports the
+    /// provider's stop reason as `end_turn` (there is none to report), so
+    /// nothing downstream could tell a finished turn from a severed one.
+    IncompleteAnswer {
+        /// What the stream reported before it died.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for TerminalReason {
@@ -593,6 +603,9 @@ impl std::fmt::Display for TerminalReason {
                 write!(f, "api unavailable: {message}")
             }
             Self::Resume => write!(f, "resumed"),
+            Self::IncompleteAnswer { message } => {
+                write!(f, "incomplete answer: {message}")
+            }
         }
     }
 }
@@ -1229,6 +1242,16 @@ struct StreamedResponse {
     early_results: Vec<ToolResult>,
     usage: UsageSummary,
     stop_reason: String,
+    /// Why the stream died before the provider finished the answer, when it
+    /// did and what had arrived was returned anyway.
+    ///
+    /// This cannot be read off `stop_reason`: the fail-open path has no
+    /// provider stop reason to report, so it fills in `"end_turn"` — the same
+    /// word a finished answer carries. Without this field a caller cannot tell
+    /// "the model finished" from "the connection dropped at 60 %", which is
+    /// exactly the distinction a reader needs to decide whether to trust the
+    /// text.
+    stream_error: Option<String>,
     /// A thinking block the provider requires to be passed back, if any.
     thinking: Option<ThinkingBlock>,
 }
@@ -1963,6 +1986,7 @@ fn next_loop_step_unlogged(
             | TerminalReason::TokenLimitStop { .. }
             | TerminalReason::LoopDetected { .. }
             | TerminalReason::ApiUnavailable { .. }
+            | TerminalReason::IncompleteAnswer { .. }
     ) {
         if matches!(reason, TerminalReason::Completed) && last_message_is_tool_result {
             LoopStep::Continue
@@ -4293,6 +4317,7 @@ impl QueryEngine {
             mut early_results,
             mut usage,
             mut stop_reason,
+            mut stream_error,
             thinking,
         } = streamed;
         turn.last_stop_reason = Some(stop_reason.clone());
@@ -4345,6 +4370,7 @@ impl QueryEngine {
                 early_results = answered.early_results;
                 usage = answered.usage;
                 stop_reason = answered.stop_reason;
+                stream_error = answered.stream_error;
                 self.push_thinking_message(turn, answered.thinking);
                 turn.last_stop_reason = Some(stop_reason.clone());
                 self.push_visible_assistant_message(turn, content.clone());
@@ -4450,6 +4476,29 @@ impl QueryEngine {
                         &usage,
                         &pending_for_loop,
                         TerminalReason::BudgetExhausted,
+                    )
+                    .await);
+            }
+            // A stream that died before the provider finished produced a
+            // partial answer, and that has to be said out loud: `stop_reason`
+            // was filled in with `end_turn` on that path, so `reason_for` would
+            // report a finished turn. The reason carries the error rather than
+            // replacing the answer — the text above is kept, it is simply not
+            // known to be complete.
+            //
+            // Only the no-tool-call case is reported. When the model did emit
+            // calls, the loop runs them and asks again, and the turn goes on:
+            // ending it here would throw away work the model can still
+            // complete.
+            if let Some(message) = stream_error {
+                return Ok(self
+                    .finish_turn(
+                        turn,
+                        turn_number,
+                        &stop_reason,
+                        &usage,
+                        &pending_for_loop,
+                        TerminalReason::IncompleteAnswer { message },
                     )
                     .await);
             }
@@ -6783,6 +6832,9 @@ impl QueryEngine {
                         early_results: Vec::new(),
                         usage: resp.usage,
                         stop_reason: resp.stop_reason,
+                        // The blocking path completed: whatever it reports
+                        // about the answer is its own.
+                        stream_error: None,
                         thinking: resp.thinking,
                     });
                 }
@@ -6807,6 +6859,9 @@ impl QueryEngine {
                     early_results,
                     usage,
                     stop_reason: stop_reason.unwrap_or_else(|| "interrupted".to_string()),
+                    // Not truncation: the person asked for the answer to
+                    // stop, and `UserInterrupted` is what reports that.
+                    stream_error: None,
                     thinking: assembler.thinking(),
                 });
             }
@@ -6915,6 +6970,7 @@ impl QueryEngine {
                             early_results: Vec::new(),
                             usage: retried.usage,
                             stop_reason: retried.stop_reason,
+                            stream_error: None,
                             thinking: retried.thinking,
                         });
                     }
@@ -6935,6 +6991,7 @@ impl QueryEngine {
                         early_results: Vec::new(),
                         usage: retried.usage,
                         stop_reason,
+                        stream_error: None,
                         thinking: retried.thinking,
                     });
                 }
@@ -6950,6 +7007,8 @@ impl QueryEngine {
                         early_results,
                         usage,
                         stop_reason: stop_reason.unwrap_or_else(|| "end_turn".to_string()),
+                        // Empty: there is no answer to call incomplete.
+                        stream_error: None,
                         thinking: assembler.thinking(),
                     });
                 }
@@ -6965,6 +7024,7 @@ impl QueryEngine {
                         early_results: Vec::new(),
                         usage: retried.usage,
                         stop_reason: retried.stop_reason,
+                        stream_error: None,
                         thinking: retried.thinking,
                     });
                 }
@@ -6979,7 +7039,13 @@ impl QueryEngine {
                 early_calls,
                 early_results,
                 usage,
+                // The fail-open path is why this field exists. A stream that
+                // died without saying whether it was done has no stop reason
+                // of its own, so `end_turn` is filled in — the word a
+                // finished answer uses. `stream_error` carries the fact the
+                // stop reason cannot.
                 stop_reason: stop_reason.unwrap_or_else(|| "end_turn".to_string()),
+                stream_error,
                 thinking: assembler.thinking(),
             });
         }
@@ -8372,6 +8438,99 @@ mod tests {
         assert!(
             matches!(blocked, TerminalReason::TokenLimitStop { produced: true }),
             "blocking reported {blocked:?}"
+        );
+    }
+
+    /// A stream that dies mid-answer reports the answer as incomplete, not as
+    /// a finished one.
+    ///
+    /// The fail-open path keeps the partial text, which is right, but it has no
+    /// provider stop reason to report and fills in `end_turn`. Before this the
+    /// turn then closed as `Completed`: a reader was handed 60 % of an answer
+    /// with nothing saying so.
+    #[tokio::test]
+    async fn a_stream_that_dies_mid_answer_reports_an_incomplete_answer() {
+        /// Answers half of it, then the connection drops for good.
+        struct SeveredMock;
+
+        fn severed() -> crate::api_client::ApiError {
+            crate::api_client::ApiError::Response {
+                status: 500,
+                message: "connection reset mid-body".into(),
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ApiClient for SeveredMock {
+            fn clone_box(&self) -> Box<dyn ApiClient> {
+                Box::new(Self)
+            }
+
+            async fn create_message(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> Result<ApiResponse, crate::api_client::ApiError> {
+                // The non-streaming recovery must not rescue this: the point
+                // is what the streaming path reports on its own.
+                Err(severed())
+            }
+
+            async fn create_message_streaming(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> std::pin::Pin<
+                Box<dyn futures::Stream<Item = crate::api_client::StreamEvent> + Send + 'static>,
+            > {
+                // 500 is not retryable, so the stream gives up on the first
+                // attempt and fail-open returns what it has.
+                Box::pin(futures::stream::iter(vec![
+                    crate::api_client::StreamEvent::TextDelta("the first half".into()),
+                    crate::api_client::StreamEvent::Error(severed()),
+                ]))
+            }
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let session = SessionState::new(std::path::PathBuf::from("/tmp/test"));
+        let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+        let mut engine = QueryEngine::new(
+            Box::new(SeveredMock),
+            ModelId::sonnet(),
+            session,
+            PermissionEngine::new(checker),
+            tx,
+        );
+
+        let reason = engine
+            .submit_streaming("explain something".into(), SubmitOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(reason, TerminalReason::IncompleteAnswer { .. }),
+            "a severed stream reported {reason:?}"
+        );
+        // The text that did arrive is kept: throwing it away would lose work
+        // the run already paid for.
+        let text = engine
+            .session()
+            .messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                crate::types::MessageContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            text.contains("the first half"),
+            "the partial answer was dropped: {text:?}"
         );
     }
 

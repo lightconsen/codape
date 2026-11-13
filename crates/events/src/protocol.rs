@@ -56,6 +56,14 @@ pub mod result_subtype {
     /// answer usually just wants a shorter answer — which is why a host gets
     /// its own word for it.
     pub const ERROR_NO_OUTPUT: &str = "error_no_output";
+    /// The provider's stream died mid-answer and the partial answer was kept.
+    ///
+    /// Distinct from [`ERROR_DURING_EXECUTION`]: nothing in the run failed.
+    /// Distinct from [`ERROR_MAX_OUTPUT_TOKENS`]: the provider never said it
+    /// was done, so no ceiling was reached. The text is real and incomplete,
+    /// and a host that shows it should say so rather than present it as the
+    /// whole answer.
+    pub const ERROR_STREAM_INTERRUPTED: &str = "error_stream_interrupted";
     /// The repetitive-tool-call detector ended the run.
     ///
     /// The run stopped on purpose, but the work the model was doing was not

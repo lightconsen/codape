@@ -129,8 +129,8 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
   round-trips untouched rather than being rejected.
 - **`result` subtype is a `String`, not a closed enum.** `result_subtype`
   names `success`, `error_max_turns`, `error_during_execution`,
-  `error_max_output_tokens`, `error_no_output` and `error_loop_detected`;
-  other termination reasons pass through.
+  `error_max_output_tokens`, `error_no_output`, `error_loop_detected` and
+  `error_stream_interrupted`; other termination reasons pass through.
 - **A truncated answer and a turn that produced nothing are separate
   subtypes.** Both arrive as a `max_tokens` stop, but
   `error_max_output_tokens` means an answer exists and was cut short, while
@@ -143,10 +143,21 @@ would hand it `stdout` (`StdoutSink` is the alias for that case).
 - **`is_error` is truthful.** `success` is only for a run that ended because
   the model finished. A run the provider cut off (`error_max_output_tokens`),
   a run that spent its ceiling and produced nothing (`error_no_output`), a
-  detected tool loop (`error_loop_detected`) and a turn a gate stopped
+  detected tool loop (`error_loop_detected`), a stream that died mid-answer
+  (`error_stream_interrupted`) and a turn a gate stopped
   (`error_during_execution`) carry `is_error: true` and keep whatever text the
   model produced in `result`, so a host can tell a truncated run from a
   completed one without parsing the answer.
+- **A severed stream is not a `max_tokens` truncation.** When the
+  connection drops after part of the answer has arrived, the engine keeps what
+  it has rather than discarding paid-for tokens. It has no provider stop
+  reason to report, so it fills one in — and that used to be `end_turn`, which
+  made the partial answer indistinguishable from a finished one. The turn now
+  closes with `TerminalReason::IncompleteAnswer`, which the host sees as
+  `error_stream_interrupted` with the transport error in `data.error`. The
+  `EngineEvent::StreamInterrupted` frame is emitted for a retry
+  (`will_retry: true`) or for a legitimate `max_tokens` stop; a terminal
+  failure is reported once, by the result frame.
 - **The transcript mirror is not implemented here.** The protocol is the
   reporting path; nothing in this crate writes a transcript.
 - **The CLI is the consumer.** `--output-format stream-json` constructs a
