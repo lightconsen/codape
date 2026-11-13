@@ -252,6 +252,7 @@ impl PermissionEngine {
 
     /// Evaluate a permission request through the full pipeline.
     ///
+    /// 0. Apply explicit `deny` rules; a match returns immediately
     /// 1. Run hooks (first hook returning `Some` short-circuits)
     /// 2. Fall back to the permission checker
     /// 3. If result is `Ask` and a [`ConfirmationBus`] is configured, send the
@@ -299,6 +300,35 @@ impl PermissionEngine {
             created_at: Utc::now(),
         };
 
+        // The caller may have supplied only a path; add it to the subjects so
+        // programmatic callers keep their path rules working. Done before the
+        // deny pass, so a path-only deny rule sees the same subjects the
+        // checker would.
+        if let Some(path) = request.path.as_ref() {
+            add_request_path(&mut subjects, path);
+        }
+
+        // Phase 0: explicit deny rules
+        //
+        // `deny` is documented to win over everything, and the checker applies
+        // it first — but the checker is phase 2 here. Without this pass a hook
+        // that returns `Allow` (the auto-classifier's "safe" verdict is the
+        // live example) short-circuits before the rule is ever looked at, and
+        // the deny rule silently stops meaning anything in `auto` mode.
+        //
+        // Mode overrides are respected: `bypass-permissions` is a deliberate
+        // opt-out of the rule set, so it skips the pass entirely, exactly as
+        // the checker does.
+        if !mode.bypasses_all() && !mode.denies_all() {
+            let denied = {
+                let checker = self.checker.lock().unwrap();
+                checker.deny_rule_for(tool_name, &subjects)
+            };
+            if let Some(denied) = denied {
+                return Ok((request, denied));
+            }
+        }
+
         // Phase 1: Hook short-circuit
         //
         // A hook may still deny an opaque call; it may not auto-approve one.
@@ -323,11 +353,6 @@ impl PermissionEngine {
         let arguments: serde_json::Value =
             serde_json::from_str(&request.arguments).unwrap_or(serde_json::Value::Null);
         let exemptions = self.exemptions_for(tool_name, &arguments);
-        // The caller may have supplied only a path; add it to the subjects so
-        // programmatic callers keep their path rules working.
-        if let Some(path) = request.path.as_ref() {
-            add_request_path(&mut subjects, path);
-        }
         let result = {
             let checker = self.checker.lock().unwrap();
             checker.check_with_subjects(tool_name, &subjects, Some(exemptions))

@@ -887,6 +887,35 @@ impl PermissionChecker {
         self.check_with_subjects(tool_name, &subjects, exemptions)
     }
 
+    /// The explicit deny rule that matches this call, if any.
+    ///
+    /// `deny` is the one rule action that is meant to win over everything the
+    /// pipeline can decide — `check_with_subjects` applies it first, and the
+    /// [`PermissionEngine`](crate::permission_engine::PermissionEngine) calls
+    /// this before its hooks so a hook cannot approve a call a deny rule
+    /// refuses. Both paths use this one implementation, so "deny wins" cannot
+    /// mean two different things.
+    ///
+    /// Mode overrides are not consulted here: `bypass-permissions` and
+    /// `dont-ask` are hard mode overrides in the checker, and the engine asks
+    /// for this only in modes where a rule is meaningful.
+    #[must_use]
+    pub fn deny_rule_for(
+        &self,
+        tool_name: &str,
+        subjects: &[RuleSubject],
+    ) -> Option<PermissionResult> {
+        self.rules
+            .iter()
+            .find(|rule| {
+                rule.action == PermissionAction::Deny
+                    && Self::rule_matches_any(rule, tool_name, subjects)
+            })
+            .map(|rule| PermissionResult::Deny {
+                reason: Self::rule_reason(rule, tool_name),
+            })
+    }
+
     /// Check a call against explicit rule subjects.
     ///
     /// Subjects are what a rule is judged against: the Bash command, the
@@ -917,14 +946,8 @@ impl PermissionChecker {
         let opaque_reason = subjects.iter().find_map(|subject| subject.opaque.clone());
 
         // Deny rules first: deny always wins over ask and allow.
-        for rule in &self.rules {
-            if rule.action == PermissionAction::Deny
-                && Self::rule_matches_any(rule, tool_name, subjects)
-            {
-                return PermissionResult::Deny {
-                    reason: Self::rule_reason(rule, tool_name),
-                };
-            }
+        if let Some(denied) = self.deny_rule_for(tool_name, subjects) {
+            return denied;
         }
 
         if self.mode.is_read_only() {

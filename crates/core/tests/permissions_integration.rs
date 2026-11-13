@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use codape_core::permission_engine::{
-    AutoApproveHook, BackgroundAgentDenyHook, NoOpPermissionHook, PermissionEngine,
+    AutoApproveHook, BackgroundAgentDenyHook, NoOpPermissionHook, PermissionEngine, PermissionHook,
+    PermissionRequest, PermissionRequestError,
 };
 use codape_core::permissions::{
     PermissionAction, PermissionChecker, PermissionMode, PermissionResult, PermissionRule,
@@ -462,6 +463,113 @@ async fn auto_mode_dangerous_tools_require_approval() {
     assert!(
         matches!(result, PermissionResult::Ask { .. }),
         "Bash should require approval in Auto mode"
+    );
+}
+
+/// A hook that approves everything, standing in for the auto-classifier's
+/// "safe" verdict. The real classifier can only reach this state for a call its
+/// static analysis did not find destructive, which is exactly the case a deny
+/// rule must still win.
+struct ApproveAllHook;
+
+#[async_trait::async_trait]
+impl PermissionHook for ApproveAllHook {
+    async fn evaluate(
+        &self,
+        _request: &PermissionRequest,
+        _mode: PermissionMode,
+    ) -> Result<Option<PermissionResult>, PermissionRequestError> {
+        Ok(Some(PermissionResult::Allow))
+    }
+}
+
+#[tokio::test]
+async fn a_deny_rule_survives_an_approving_hook() {
+    // The regression this guards: the hook phase ran before the checker, so a
+    // "safe" verdict returned Allow and the deny rule was never consulted.
+    let mut engine = engine_with_rules(
+        &[rule("Bash(rm:*)", PermissionAction::Deny)],
+        Path::new("/proj"),
+    );
+    engine.add_hook(std::sync::Arc::new(ApproveAllHook));
+
+    let (_req, result) = engine
+        .evaluate_with_subjects(
+            "Bash",
+            r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            None,
+            ctx(),
+            vec!["rm -rf /tmp/x".into()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PermissionResult::Deny { .. }),
+        "an approving hook overrode a deny rule: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deny_rule_survives_an_approving_hook_in_auto_mode() {
+    let mut checker = PermissionChecker::new(PermissionMode::Auto);
+    checker
+        .add_specs(
+            &[rule("Bash(rm:*)", PermissionAction::Deny)],
+            &RuleCompileContext {
+                cwd: Path::new("/proj"),
+                home: None,
+            },
+        )
+        .unwrap();
+    let mut engine = PermissionEngine::new(checker);
+    engine.add_hook(std::sync::Arc::new(ApproveAllHook));
+
+    let (_req, result) = engine
+        .evaluate_with_subjects(
+            "Bash",
+            r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            None,
+            ctx(),
+            vec!["rm -rf /tmp/x".into()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PermissionResult::Deny { .. }),
+        "auto mode defeated a deny rule: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn bypass_permissions_still_ignores_a_deny_rule() {
+    // The deliberate escape hatch: `--dangerously-skip-permissions` remains a
+    // hard override, so the new deny pass must not touch it.
+    let mut checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+    checker
+        .add_specs(
+            &[rule("Bash(rm:*)", PermissionAction::Deny)],
+            &RuleCompileContext {
+                cwd: Path::new("/proj"),
+                home: None,
+            },
+        )
+        .unwrap();
+    let mut engine = PermissionEngine::new(checker);
+    engine.add_hook(std::sync::Arc::new(ApproveAllHook));
+
+    let (_req, result) = engine
+        .evaluate_with_subjects(
+            "Bash",
+            r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            None,
+            ctx(),
+            vec!["rm -rf /tmp/x".into()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.is_allowed(),
+        "bypass-permissions must stay a hard override: {result:?}"
     );
 }
 
