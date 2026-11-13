@@ -498,6 +498,10 @@ fn run_spawned(
     child
 }
 
+/// How long the little HTTP endpoint waits, across read timeouts, for the rest
+/// of one request before it gives up on the connection.
+const REQUEST_READ_BUDGET: Duration = Duration::from_secs(20);
+
 /// A tiny HTTP endpoint that answers every hook request with `stop`.
 struct HookHttpServer {
     url: String,
@@ -506,9 +510,40 @@ struct HookHttpServer {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Read one piece of a request, retrying the read timeout a loaded machine
+/// produces rather than mistaking it for end of input.
+///
+/// A single `read` can also return before the body is complete, so callers
+/// loop until they have what the headers promised. Treating the timeout as
+/// EOF is what made the HTTP hook test record an empty body under a full-
+/// suite run, when every core is busy and the request arrives in pieces.
+///
+/// The retries give up after [`REQUEST_READ_BUDGET`], so a client that
+/// connects and then says nothing cannot pin the server thread and hang the
+/// drop-time join.
+fn read_request_part(socket: &mut std::net::TcpStream, chunk: &mut [u8]) -> Option<usize> {
+    use std::io::Read;
+
+    let deadline = std::time::Instant::now() + REQUEST_READ_BUDGET;
+    loop {
+        match socket.read(chunk) {
+            Ok(read) if read > 0 => return Some(read),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && std::time::Instant::now() < deadline => {}
+            // End of input, a read that failed for a reason retrying will not
+            // fix, or a client that used up its budget without saying
+            // anything more.
+            Ok(_) | Err(_) => return None,
+        }
+    }
+}
+
 impl HookHttpServer {
     fn start() -> Self {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind hook server");
@@ -533,16 +568,14 @@ impl HookHttpServer {
                 let mut chunk = [0_u8; 4096];
                 let mut header_end = None;
                 while header_end.is_none() {
-                    match socket.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => {
-                            buffer.extend_from_slice(&chunk[..read]);
-                            header_end = buffer
-                                .windows(4)
-                                .position(|window| window == b"\r\n\r\n")
-                                .map(|position| position + 4);
-                        }
-                    }
+                    let Some(read) = read_request_part(&mut socket, &mut chunk) else {
+                        break;
+                    };
+                    buffer.extend_from_slice(&chunk[..read]);
+                    header_end = buffer
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|position| position + 4);
                 }
                 let Some(header_end) = header_end else {
                     continue;
@@ -558,13 +591,14 @@ impl HookHttpServer {
                     })
                     .unwrap_or(0);
                 while buffer.len() < header_end + length {
-                    match socket.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(read) => buffer.extend_from_slice(&chunk[..read]),
-                    }
+                    let Some(read) = read_request_part(&mut socket, &mut chunk) else {
+                        break;
+                    };
+                    buffer.extend_from_slice(&chunk[..read]);
                 }
+                let end = (header_end + length).min(buffer.len());
                 *body_thread.lock().unwrap() =
-                    String::from_utf8_lossy(&buffer[header_end..header_end + length]).into_owned();
+                    String::from_utf8_lossy(&buffer[header_end..end]).into_owned();
                 let response = r#"{"action":"stop","additional_context":"http hook"}"#;
                 let _ = socket.write_all(
                     format!(
@@ -609,7 +643,10 @@ fn an_http_pretooluse_hook_can_block_the_tool() {
             "type": "http",
             "if": "Write(*)",
             "url": server.url,
-            "timeout_ms": 5000
+            // The same budget the prompt/agent hook tests use: this budget
+            // covers process startup through the POST, and a full-suite run
+            // has every core busy when this test starts.
+            "timeout_ms": 10000
         }]
     });
     let home = seed_config(&settings);
