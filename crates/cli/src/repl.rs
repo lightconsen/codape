@@ -969,6 +969,15 @@ impl InteractiveLive {
     }
 }
 
+/// What the interactive loop should do after a key was handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiKeyFlow {
+    /// The key was consumed; keep looping.
+    Handled,
+    /// Ctrl+D: leave the session.
+    Quit,
+}
+
 fn permission_activity_label(summary: &str) -> String {
     if summary.is_empty() {
         "Waiting for permission...".into()
@@ -5449,21 +5458,786 @@ impl ReplLoop {
         }
     }
 
+    /// Handle one key press from the interactive loop.
+    ///
+    /// Returns [`TuiKeyFlow::Handled`] for every key it consumed and
+    /// [`TuiKeyFlow::Quit`] only for Ctrl+D, which is the one key that ends
+    /// the session. Anything else is left to the caller to act on.
+    ///
+    /// Extracted from `run_tui` so the loop reads as one `select!` over its
+    /// sources; the key map is a page of its own here instead of a thousand
+    /// lines inside it. Still over the 400-line limit: the insert-mode key map
+    /// and the Vim action arms are one dispatch table, and splitting them
+    /// again would scatter `vim.mode` transitions across functions.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    async fn handle_key_event(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ui_state: &mut codape_ui::state::UiState,
+        live: &mut InteractiveLive,
+        vim: &mut codape_ui::vim::VimState,
+        thinking: &mut bool,
+        query_done_rx: &mut Option<
+            tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
+        >,
+        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
+        tui_elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
+        queued_prompts: &mut std::collections::VecDeque<String>,
+    ) -> TuiKeyFlow {
+        use codape_ui::input::{InputAction, InputBuffer};
+        use codape_ui::message_list::MessageRole;
+        use codape_ui::overlay::Overlay;
+        use codape_ui::state::ViewMode;
+        use codape_ui::vim::{VimAction, VimMode};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Windows always reports key releases, and the
+        // disambiguated protocol can too; acting on them
+        // types every character twice.
+        let Some(key) = codape_ui::input::key_press(key) else {
+            return TuiKeyFlow::Handled;
+        };
+        // A multi-field MCP form owns the keyboard while
+        // it is open: navigation, editing, submit, cancel.
+        if self.mcp.pending_form.is_some() && self.handle_mcp_form_key(&key, ui_state) {
+            return TuiKeyFlow::Handled;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(request) = live.pending_confirmation.take() {
+                self.respond_to_confirmation(
+                    request,
+                    ConfirmationResponse::Denied,
+                    ui_state,
+                    &mut live.phase,
+                )
+                .await;
+                return TuiKeyFlow::Handled;
+            }
+            if *thinking {
+                self.stop_running_query(
+                    ui_state,
+                    thinking,
+                    &mut live.phase,
+                    query_done_rx,
+                    elicit_rx,
+                    tui_elicit_rx,
+                    " (interrupted)",
+                );
+                live.pending_confirmation = None;
+                return TuiKeyFlow::Handled;
+            }
+            if !ui_state.input.text.is_empty() {
+                // Clear the line but keep what was
+                // submitted: Up should still recall it.
+                let history = ui_state.input.history.clone();
+                ui_state.input = InputBuffer::new();
+                ui_state.input.history = history;
+            } else if ui_state.overlays.is_active() {
+                ui_state.overlays.clear();
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return TuiKeyFlow::Quit;
+        }
+
+        // Informational overlays do not own the keyboard.
+        // Dismiss one on the next key and handle that key
+        // normally, so typing `/status` after a failure
+        // both closes the dialog and reaches the input.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(
+                codape_ui::overlay::Overlay::Detail { .. }
+                    | codape_ui::overlay::Overlay::Notification { .. }
+            )
+        ) {
+            ui_state.overlays.clear();
+        }
+
+        // A mod UI block owns Tab/Shift+Tab, Enter and Esc
+        // only when it has focus and no overlay is asking
+        // for the keyboard. Ordinary characters are never
+        // consumed here, so typing still reaches the line.
+        if !ui_state.overlays.is_active()
+            && live.pending_confirmation.is_none()
+            && let Some(action) = mod_ui_key_action(
+                key.code,
+                key.modifiers,
+                live.mod_ui_focus.focused,
+                live.mod_ui_focus.button_count(),
+            )
+        {
+            match action {
+                ModUiKeyAction::FocusNext | ModUiKeyAction::FocusPrevious => {
+                    live.mod_ui_focus
+                        .cycle(matches!(action, ModUiKeyAction::FocusNext));
+                    self.redraw_mod_ui_focus(ui_state, &mut live.mod_ui_focus);
+                }
+                ModUiKeyAction::ClearFocus => {
+                    live.mod_ui_focus.clear_focus();
+                    self.redraw_mod_ui_focus(ui_state, &mut live.mod_ui_focus);
+                }
+                ModUiKeyAction::Activate => {
+                    if let Some(id) = live.mod_ui_focus.focused_id().map(str::to_string) {
+                        self.activate_mod_ui_button(ui_state, &mut live.mod_ui_focus, id)
+                            .await;
+                    }
+                }
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        // Shift+Tab: cycle permission mode
+        if key.code == KeyCode::BackTab {
+            ui_state.permission_bar.cycle_mode();
+            if let Some(ref mut engine) = self.session.engine {
+                let checker = engine.permission_checker();
+                if let Ok(mut c) = checker.lock() {
+                    c.set_mode(ui_state.permission_bar.mode);
+                }
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        // Ctrl+O: fold or unfold every tool call/result row.
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            let fold = ui_state.messages.messages.iter().any(|message| {
+                matches!(
+                    message.role,
+                    MessageRole::ToolCall | MessageRole::ToolResult
+                ) && !message.folded
+            });
+            for message in &mut ui_state.messages.messages {
+                if matches!(
+                    message.role,
+                    MessageRole::ToolCall | MessageRole::ToolResult
+                ) {
+                    message.folded = fold;
+                }
+            }
+            ui_state.notifications.info(if fold {
+                "Tool output folded (Ctrl+O to expand)"
+            } else {
+                "Tool output expanded"
+            });
+            return TuiKeyFlow::Handled;
+        }
+
+        // Ctrl+Shift+S: toggle split-pane view
+        if key.code == KeyCode::Char('S') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            use codape_ui::state::LayoutMode;
+            ui_state.layout_mode = match ui_state.layout_mode {
+                LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
+                LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
+            };
+            return TuiKeyFlow::Handled;
+        }
+
+        // Handle Confirm overlay for destructive commands
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::Confirm { .. })
+        ) {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    ui_state.overlays.pop();
+                    if let Some((cmd, args)) = self.permissions.pending_destructive_cmd.take() {
+                        self.execute_and_display_command(&cmd, &args, ui_state);
+                    }
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    ui_state.overlays.pop();
+                    self.permissions.pending_destructive_cmd = None;
+                    ui_state.messages.push(codape_ui::message_list::Message {
+                        role: codape_ui::message_list::MessageRole::System,
+                        content: "Command cancelled.".into(),
+                        tool_name: None,
+                        streaming: false,
+                        folded: false,
+                    });
+                }
+                _ => {}
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
+        ) {
+            match key.code {
+                KeyCode::Char('a') => {
+                    if let Some(request) = live.pending_confirmation.take() {
+                        self.respond_to_confirmation(
+                            request,
+                            ConfirmationResponse::Approved,
+                            ui_state,
+                            &mut live.phase,
+                        )
+                        .await;
+                    }
+                }
+                KeyCode::Char('A') => {
+                    if let Some(request) = live.pending_confirmation.take() {
+                        self.respond_to_confirmation(
+                            request,
+                            ConfirmationResponse::ApproveSession,
+                            ui_state,
+                            &mut live.phase,
+                        )
+                        .await;
+                    }
+                }
+                KeyCode::Char('d' | 'D') | KeyCode::Esc => {
+                    if let Some(request) = live.pending_confirmation.take() {
+                        self.respond_to_confirmation(
+                            request,
+                            ConfirmationResponse::Denied,
+                            ui_state,
+                            &mut live.phase,
+                        )
+                        .await;
+                    } else {
+                        clear_permission_overlay(ui_state);
+                    }
+                }
+                _ => {}
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        let inline_palette_active = matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::CommandPalette { query, .. })
+                if query.starts_with('/')
+        );
+        if inline_palette_active {
+            match key.code {
+                KeyCode::Up => {
+                    ui_state.overlays.move_palette_selection(-1);
+                    return TuiKeyFlow::Handled;
+                }
+                KeyCode::Down => {
+                    ui_state.overlays.move_palette_selection(1);
+                    return TuiKeyFlow::Handled;
+                }
+                KeyCode::Tab => {
+                    if let Some(command) = selected_palette_command(ui_state) {
+                        ui_state.input.text = format!("{command} ");
+                        ui_state.input.cursor = ui_state.input.text.len();
+                        self.update_slash_suggestions(ui_state);
+                    }
+                    return TuiKeyFlow::Handled;
+                }
+                KeyCode::Esc if vim.is_insert() => {
+                    if matches!(
+                        ui_state.overlays.top(),
+                        Some(codape_ui::overlay::Overlay::CommandPalette { .. })
+                    ) {
+                        ui_state.overlays.pop();
+                    }
+                    return TuiKeyFlow::Handled;
+                }
+                _ => {}
+            }
+        }
+
+        if !self.ui.vim_mode_enabled && key.code == KeyCode::Esc {
+            // Esc means "stop the run" whether or not Vim
+            // mode is on. Only the Vim path used to reach
+            // the interrupt, so in the default mode Esc did
+            // nothing while the model was answering — the
+            // one moment a person most wants it to.
+            if *thinking {
+                self.stop_running_query(
+                    ui_state,
+                    thinking,
+                    &mut live.phase,
+                    query_done_rx,
+                    elicit_rx,
+                    tui_elicit_rx,
+                    " (interrupted)",
+                );
+                live.pending_confirmation = None;
+                return TuiKeyFlow::Handled;
+            }
+            if ui_state.overlays.is_active() {
+                ui_state.overlays.clear();
+            }
+            ui_state.active_view = ViewMode::MainRepl;
+            return TuiKeyFlow::Handled;
+        }
+
+        let action = vim.handle_key(key);
+        match action {
+            VimAction::Submit => {
+                if let Some(text) = ui_state.input.take() {
+                    self.process_tui_input(
+                        &text,
+                        ui_state,
+                        thinking,
+                        &mut live.phase,
+                        query_done_rx,
+                        elicit_rx,
+                        tui_elicit_rx,
+                        queued_prompts,
+                    );
+                    // A successful `/init` queued `Setup`
+                    // inside the synchronous dispatch;
+                    // this is the async drain point for
+                    // the TUI.
+                    self.drain_pending_setup_hook().await;
+                }
+            }
+            VimAction::Escape => {
+                if *thinking {
+                    self.stop_running_query(
+                        ui_state,
+                        thinking,
+                        &mut live.phase,
+                        query_done_rx,
+                        elicit_rx,
+                        tui_elicit_rx,
+                        " (cancelled)",
+                    );
+                    live.pending_confirmation = None;
+                } else if vim.mode == VimMode::Normal {
+                    ui_state.overlays.clear();
+                    ui_state.active_view = ViewMode::MainRepl;
+                }
+            }
+            VimAction::Insert => {
+                if vim.is_insert() {
+                    match key.code {
+                        // A control character never enters the
+                        // single-line buffer, whichever encoding
+                        // delivered it. `key_event_to_action` guards
+                        // this at the other input boundary; this
+                        // inline Vim insert path has to apply the
+                        // same rule.
+                        KeyCode::Char(c) if !c.is_control() => {
+                            ui_state.input.apply(&InputAction::InsertChar(c));
+                        }
+                        KeyCode::Backspace => {
+                            ui_state.input.apply(&InputAction::Backspace);
+                        }
+                        KeyCode::Delete => {
+                            ui_state.input.apply(&InputAction::Delete);
+                        }
+                        KeyCode::Left => {
+                            ui_state.input.apply(&InputAction::CursorLeft);
+                        }
+                        KeyCode::Right => {
+                            ui_state.input.apply(&InputAction::CursorRight);
+                        }
+                        KeyCode::Up => {
+                            ui_state.input.apply(&InputAction::HistoryUp);
+                        }
+                        KeyCode::Down => {
+                            ui_state.input.apply(&InputAction::HistoryDown);
+                        }
+                        KeyCode::Home => {
+                            ui_state.input.apply(&InputAction::MoveToStart);
+                        }
+                        KeyCode::End => {
+                            ui_state.input.apply(&InputAction::MoveToEnd);
+                        }
+                        KeyCode::PageUp => {
+                            let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
+                            ui_state.messages.scroll_up(page);
+                        }
+                        KeyCode::PageDown => {
+                            let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
+                            ui_state.messages.scroll_down_by(page);
+                        }
+                        _ => {}
+                    }
+                } else if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::Left(count) => {
+                for _ in 0..count {
+                    ui_state.input.apply(&InputAction::CursorLeft);
+                }
+            }
+            VimAction::Right(count) => {
+                for _ in 0..count {
+                    ui_state.input.apply(&InputAction::CursorRight);
+                }
+            }
+            VimAction::Up(count) => {
+                // `k` moves to the line above once the
+                // buffer has one. A single-line buffer has
+                // no line above, so it keeps its original
+                // meaning: walk back through history. A
+                // Visual selection must never be replaced
+                // by a history entry. The count applies to
+                // both meanings, as `3k` does in Vim.
+                if vim.is_visual() || ui_state.input.line_count() > 1 {
+                    for _ in 0..count {
+                        ui_state.input.move_line(-1);
+                    }
+                } else {
+                    for _ in 0..count {
+                        ui_state.input.apply(&InputAction::HistoryUp);
+                    }
+                }
+            }
+            VimAction::Down(count) => {
+                if vim.is_visual() || ui_state.input.line_count() > 1 {
+                    for _ in 0..count {
+                        ui_state.input.move_line(1);
+                    }
+                } else {
+                    for _ in 0..count {
+                        ui_state.input.apply(&InputAction::HistoryDown);
+                    }
+                }
+            }
+            VimAction::JumpToStart => {
+                ui_state.input.apply(&InputAction::MoveToStart);
+            }
+            VimAction::JumpToEnd => {
+                ui_state.input.apply(&InputAction::MoveToEnd);
+            }
+            VimAction::DeleteToEnd => {
+                ui_state.input.apply(&InputAction::KillToEnd);
+            }
+            VimAction::DeleteLine(count) => {
+                // `dd` is a delete *and* a yank, so the
+                // removed lines can be put back with `p`.
+                let (yanked, linewise) = ui_state.input.yank_lines(count);
+                vim.yank(&yanked);
+                vim.yank_linewise = linewise;
+                ui_state.input.delete_lines(count);
+            }
+            VimAction::DeleteWordForward(count) => {
+                ui_state.input.delete_to_word_forward(count);
+            }
+            VimAction::DeleteWordBackward(count) => {
+                ui_state.input.delete_to_word_backward(count);
+            }
+            VimAction::DeleteChar(count) => {
+                for _ in 0..count {
+                    ui_state.input.apply(&InputAction::Delete);
+                }
+            }
+            VimAction::YankLine(count) => {
+                let (yanked, linewise) = ui_state.input.yank_lines(count);
+                vim.yank(&yanked);
+                vim.yank_linewise = linewise;
+            }
+            VimAction::Paste(count) => {
+                let yanked = vim.yanked().to_string();
+                if vim.yank_linewise {
+                    // A linewise register is put back as
+                    // whole lines below the cursor line.
+                    ui_state.input.paste_linewise(&yanked, count, true);
+                } else {
+                    // The register is text from this buffer
+                    // today, but paste is still an
+                    // insertion path: never let it carry a
+                    // control character in.
+                    let clean: String = yanked.chars().filter(|c| !c.is_control()).collect();
+                    for _ in 0..count {
+                        ui_state.input.paste(&clean);
+                    }
+                }
+            }
+            VimAction::Undo => {
+                if let Some(prev) = vim.pop_undo() {
+                    vim.push_undo(&ui_state.input.text);
+                    ui_state.input.text = prev;
+                    ui_state.input.cursor = ui_state.input.text.len();
+                }
+            }
+            VimAction::PageUp => {
+                let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
+                ui_state.messages.scroll_up(page);
+            }
+            VimAction::PageDown => {
+                let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
+                ui_state.messages.scroll_down_by(page);
+            }
+            VimAction::HalfPageUp => {
+                let half_page = (ui_state.messages.viewport_height / 2).max(1);
+                ui_state.messages.scroll_up(half_page);
+            }
+            VimAction::HalfPageDown => {
+                let half_page = (ui_state.messages.viewport_height / 2).max(1);
+                ui_state.messages.scroll_down_by(half_page);
+            }
+            VimAction::JumpTop => {
+                if vim.is_visual() || ui_state.input.line_count() > 1 {
+                    // `gg` moves to the first line of the
+                    // buffer.
+                    ui_state.input.move_to_buffer_start();
+                } else {
+                    ui_state.messages.start = 0;
+                    ui_state.messages.scroll_offset = usize::MAX;
+                }
+            }
+            VimAction::JumpBottom => {
+                if vim.is_visual() || ui_state.input.line_count() > 1 {
+                    ui_state.input.move_to_buffer_end();
+                } else {
+                    ui_state.messages.scroll_to_bottom();
+                }
+            }
+            VimAction::Command => {
+                let cmds: Vec<String> = self
+                    .commands
+                    .list()
+                    .iter()
+                    .map(|c| format!("/{} - {}", c.name, c.description))
+                    .collect();
+                ui_state.overlays.push(Overlay::CommandPalette {
+                    query: ":".into(),
+                    commands: cmds,
+                    selected: 0,
+                });
+            }
+            VimAction::Search => {
+                ui_state.active_view = ViewMode::Search;
+            }
+            VimAction::ToggleFold => {
+                // Toggle fold on the last visible message (or focused if selector active)
+                if let Some(msg) = ui_state.messages.messages.last_mut() {
+                    msg.folded = !msg.folded;
+                }
+            }
+            VimAction::ToggleSplit => {
+                use codape_ui::state::LayoutMode;
+                ui_state.layout_mode = match ui_state.layout_mode {
+                    LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
+                    LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
+                };
+            }
+            VimAction::SearchNext => {
+                ui_state.search.next();
+            }
+            VimAction::SearchPrev => {
+                ui_state.search.prev();
+            }
+            VimAction::ExportCopy => {
+                use codape_ui::export::{ExportFormat, copy_to_clipboard, export_messages};
+                use codape_ui::selector::MessageSelector;
+                let core_msgs: Vec<codape_core::types::Message> = ui_state
+                    .messages
+                    .messages
+                    .iter()
+                    .map(|m| {
+                        let role = match m.role {
+                            codape_ui::message_list::MessageRole::User => {
+                                codape_core::types::Role::User
+                            }
+                            codape_ui::message_list::MessageRole::Assistant => {
+                                codape_core::types::Role::Assistant
+                            }
+                            codape_ui::message_list::MessageRole::System => {
+                                codape_core::types::Role::System
+                            }
+                            codape_ui::message_list::MessageRole::ToolCall
+                            | codape_ui::message_list::MessageRole::ToolResult => {
+                                codape_core::types::Role::Tool
+                            }
+                        };
+                        codape_core::types::Message {
+                            role,
+                            content: codape_core::types::MessageContent::Text(
+                                m.content.to_string(),
+                            ),
+                        }
+                    })
+                    .collect();
+                let selector = MessageSelector::new(core_msgs.len());
+                let exported = export_messages(&core_msgs, &selector, ExportFormat::PlainText);
+                if let Err(e) = copy_to_clipboard(&exported) {
+                    ui_state.notifications.err(format!("Copy failed: {e}"));
+                } else {
+                    ui_state.notifications.success("Copied to clipboard");
+                }
+            }
+            VimAction::Repeat | VimAction::Ignore => {}
+            VimAction::Append => {
+                if self.ui.vim_mode_enabled {
+                    // `a` inserts after the character under
+                    // the cursor — never onto the next line
+                    // and never into the middle of a
+                    // multi-byte character.
+                    let (_, line_end) = ui_state.input.current_line();
+                    let cursor = ui_state.input.cursor;
+                    if cursor < line_end {
+                        let advance = ui_state.input.text[cursor..]
+                            .chars()
+                            .next()
+                            .map_or(1, char::len_utf8);
+                        ui_state.input.cursor = cursor + advance;
+                    }
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            // `o`/`O` open a real line below/above the
+            // current one and enter insert mode on it.
+            VimAction::OpenLineBelow => {
+                if self.ui.vim_mode_enabled {
+                    ui_state.input.open_line_below();
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::OpenLineAbove => {
+                if self.ui.vim_mode_enabled {
+                    ui_state.input.open_line_above();
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::InsertAtEnd => {
+                if self.ui.vim_mode_enabled {
+                    // End of the cursor's line, not of the
+                    // buffer.
+                    ui_state.input.apply(&InputAction::MoveToEnd);
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::InsertAtStart => {
+                if self.ui.vim_mode_enabled {
+                    ui_state.input.apply(&InputAction::MoveToStart);
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::EnterVisual => {
+                ui_state.input.start_visual(false);
+            }
+            VimAction::EnterVisualLine => {
+                ui_state.input.start_visual(true);
+            }
+            VimAction::ExitVisual => {
+                let linewise = ui_state.input.visual_linewise;
+                let anchor = ui_state.input.visual_anchor;
+                // Vim leaves the cursor at the low end of
+                // the range when Visual mode ends: the
+                // first line of a linewise selection, the
+                // earlier end otherwise.
+                let linewise_start = ui_state.input.selection_range().map(|(start, _)| start);
+                ui_state.input.clear_visual_selection();
+                if linewise {
+                    ui_state.input.cursor = linewise_start.unwrap_or(ui_state.input.cursor);
+                } else if let Some(anchor) = anchor {
+                    ui_state.input.cursor = anchor.min(ui_state.input.cursor);
+                }
+            }
+            VimAction::WordForward(count) => {
+                for _ in 0..count {
+                    ui_state.input.word_forward();
+                }
+            }
+            VimAction::WordBackward(count) => {
+                for _ in 0..count {
+                    ui_state.input.word_backward();
+                }
+            }
+            VimAction::WordEnd(count) => {
+                for _ in 0..count {
+                    ui_state.input.word_end();
+                }
+            }
+            VimAction::YankSelection => {
+                let linewise = ui_state.input.visual_linewise;
+                if let Some(text) = ui_state.input.yank_selection() {
+                    vim.yank(&text);
+                    vim.yank_linewise = linewise;
+                }
+            }
+            VimAction::DeleteSelection => {
+                let linewise = ui_state.input.visual_linewise;
+                if let Some(text) = ui_state.input.delete_selection() {
+                    vim.yank(&text);
+                    vim.yank_linewise = linewise;
+                }
+            }
+            VimAction::PasteOverSelection => {
+                let yanked: String = vim
+                    .yanked()
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .collect();
+                if let Some(replaced) = ui_state.input.replace_selection(&yanked) {
+                    vim.yank(&replaced);
+                }
+            }
+            VimAction::ChangeSelection => {
+                let linewise = ui_state.input.visual_linewise;
+                if let Some(text) = ui_state.input.delete_selection() {
+                    vim.yank(&text);
+                    vim.yank_linewise = linewise;
+                }
+                if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::ChangeLine(count) => {
+                ui_state.input.change_lines(count);
+                if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::ChangeWord => {
+                ui_state.input.delete_word_end();
+                if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::ChangeToEnd => {
+                ui_state.input.apply(&InputAction::KillToEnd);
+                if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::Substitute(count) => {
+                for _ in 0..count {
+                    ui_state.input.apply(&InputAction::Delete);
+                }
+                if self.ui.vim_mode_enabled {
+                    vim.mode = VimMode::Insert;
+                }
+            }
+            VimAction::Indent(count) => {
+                ui_state.input.indent(count);
+                // `>` ends the Visual range, like every
+                // other operator; the badge and highlight
+                // must not outlive the mode.
+                ui_state.input.clear_visual_selection();
+            }
+            VimAction::Outdent(count) => {
+                ui_state.input.outdent(count);
+                ui_state.input.clear_visual_selection();
+            }
+        }
+
+        // Sync slash-command suggestion overlay when typing in insert mode.
+        if vim.is_insert() {
+            self.update_slash_suggestions(ui_state);
+        }
+        TuiKeyFlow::Handled
+    }
+
     /// Run the interactive REPL with full ratatui TUI.
     //
-    // Still ~1,600 lines: the engine-event arm is out (see
-    // `apply_engine_event`), the input and draw paths are not. Exempted so the
-    // rest of the workspace can be held to the 400-line limit while this one
-    // is split, rather than keeping the lint off everywhere.
+    // Still under 1,000 lines and over the 400-line limit: the engine and key
+    // arms are out (see `apply_engine_event` and `handle_key_event`), the
+    // draw path is not. Exempted so the rest of the workspace can be held to
+    // the limit while this one is split, rather than keeping the lint off
+    // everywhere.
     #[allow(clippy::too_many_lines)]
     pub async fn run_tui(&mut self) -> Result<()> {
-        use codape_ui::input::{InputAction, InputBuffer};
         use codape_ui::message_list::{Message, MessageRole};
-        use codape_ui::overlay::Overlay;
-        use codape_ui::state::{TextSelection, UiState, ViewMode};
+        use codape_ui::state::{TextSelection, UiState};
         use codape_ui::terminal::TerminalUi;
-        use codape_ui::vim::{VimAction, VimMode, VimState};
-        use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+        use codape_ui::vim::VimState;
+        use crossterm::event::{Event, MouseButton, MouseEventKind};
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
         use std::fmt::Write as _;
         use std::time::Duration;
@@ -5964,754 +6738,27 @@ impl ReplLoop {
                 Some(event) = ct_rx.recv() => {
                     match event {
                         Event::Key(key) => {
-                            // Windows always reports key releases, and the
-                            // disambiguated protocol can too; acting on them
-                            // types every character twice.
+                            // Windows always reports key releases, and the disambiguated
+                            // protocol can too; acting on them types every character twice.
                             let Some(key) = codape_ui::input::key_press(key) else {
                                 continue;
                             };
-                            // A multi-field MCP form owns the keyboard while
-                            // it is open: navigation, editing, submit, cancel.
-                            if self.mcp.pending_form.is_some()
-                                && self.handle_mcp_form_key(&key, &mut ui_state)
-                            {
-                                continue;
-                            }
-                            if key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                if let Some(request) = live.pending_confirmation.take() {
-                                    self.respond_to_confirmation(
-                                        request,
-                                        ConfirmationResponse::Denied,
-                                        &mut ui_state,
-                                        &mut live.phase,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                if thinking {
-                                    self.stop_running_query(
-                                        &mut ui_state,
-                                        &mut thinking,
-                                        &mut live.phase,
-                                        &mut query_done_rx,
-                                        &mut elicit_rx,
-                                        &mut tui_elicit_rx,
-                                        " (interrupted)",
-                                    );
-                                    live.pending_confirmation = None;
-                                    continue;
-                                }
-                                if !ui_state.input.text.is_empty() {
-                                    // Clear the line but keep what was
-                                    // submitted: Up should still recall it.
-                                    let history = ui_state.input.history.clone();
-                                    ui_state.input = InputBuffer::new();
-                                    ui_state.input.history = history;
-                                } else if ui_state.overlays.is_active() {
-                                    ui_state.overlays.clear();
-                                }
-                                continue;
-                            }
-
-                            if key.code == KeyCode::Char('d')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
+                            if self
+                                .handle_key_event(
+                                    key,
+                                    &mut ui_state,
+                                    &mut live,
+                                    &mut vim,
+                                    &mut thinking,
+                                    &mut query_done_rx,
+                                    &mut elicit_rx,
+                                    &mut tui_elicit_rx,
+                                    &mut queued_prompts,
+                                )
+                                .await
+                                == TuiKeyFlow::Quit
                             {
                                 break Ok(());
-                            }
-
-                            // Informational overlays do not own the keyboard.
-                            // Dismiss one on the next key and handle that key
-                            // normally, so typing `/status` after a failure
-                            // both closes the dialog and reaches the input.
-                            if matches!(
-                                ui_state.overlays.top(),
-                                Some(
-                                    codape_ui::overlay::Overlay::Detail { .. }
-                                        | codape_ui::overlay::Overlay::Notification { .. }
-                                )
-                            ) {
-                                ui_state.overlays.clear();
-                            }
-
-                            // A mod UI block owns Tab/Shift+Tab, Enter and Esc
-                            // only when it has focus and no overlay is asking
-                            // for the keyboard. Ordinary characters are never
-                            // consumed here, so typing still reaches the line.
-                            if !ui_state.overlays.is_active() && live.pending_confirmation.is_none()
-                                && let Some(action) = mod_ui_key_action(
-                                    key.code,
-                                    key.modifiers,
-                                    live.mod_ui_focus.focused,
-                                    live.mod_ui_focus.button_count(),
-                                ) {
-                                    match action {
-                                        ModUiKeyAction::FocusNext
-                                        | ModUiKeyAction::FocusPrevious => {
-                                            live.mod_ui_focus
-                                                .cycle(matches!(action, ModUiKeyAction::FocusNext));
-                                            self.redraw_mod_ui_focus(
-                                                &mut ui_state,
-                                                &mut live.mod_ui_focus,
-                                            );
-                                        }
-                                        ModUiKeyAction::ClearFocus => {
-                                            live.mod_ui_focus.clear_focus();
-                                            self.redraw_mod_ui_focus(
-                                                &mut ui_state,
-                                                &mut live.mod_ui_focus,
-                                            );
-                                        }
-                                        ModUiKeyAction::Activate => {
-                                            if let Some(id) =
-                                                live.mod_ui_focus.focused_id().map(str::to_string)
-                                            {
-                                                self.activate_mod_ui_button(
-                                                    &mut ui_state,
-                                                    &mut live.mod_ui_focus,
-                                                    id,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    }
-                                    continue;
-                                }
-
-                            // Shift+Tab: cycle permission mode
-                            if key.code == KeyCode::BackTab {
-                                ui_state.permission_bar.cycle_mode();
-                                if let Some(ref mut engine) = self.session.engine {
-                                    let checker = engine.permission_checker();
-                                    if let Ok(mut c) = checker.lock() {
-                                        c.set_mode(ui_state.permission_bar.mode);
-                                    }
-                                }
-                                continue;
-                            }
-
-                            // Ctrl+O: fold or unfold every tool call/result row.
-                            if key.code == KeyCode::Char('o')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                let fold = ui_state.messages.messages.iter().any(|message| {
-                                    matches!(
-                                        message.role,
-                                        MessageRole::ToolCall | MessageRole::ToolResult
-                                    ) && !message.folded
-                                });
-                                for message in &mut ui_state.messages.messages {
-                                    if matches!(
-                                        message.role,
-                                        MessageRole::ToolCall | MessageRole::ToolResult
-                                    ) {
-                                        message.folded = fold;
-                                    }
-                                }
-                                ui_state.notifications.info(if fold {
-                                    "Tool output folded (Ctrl+O to expand)"
-                                } else {
-                                    "Tool output expanded"
-                                });
-                                continue;
-                            }
-
-                            // Ctrl+Shift+S: toggle split-pane view
-                            if key.code == KeyCode::Char('S')
-                                && key.modifiers.contains(KeyModifiers::CONTROL)
-                            {
-                                use codape_ui::state::LayoutMode;
-                                ui_state.layout_mode = match ui_state.layout_mode {
-                                    LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
-                                    LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
-                                };
-                                continue;
-                            }
-
-                            // Handle Confirm overlay for destructive commands
-                            if matches!(ui_state.overlays.top(), Some(codape_ui::overlay::Overlay::Confirm { .. })) {
-                                match key.code {
-                                    KeyCode::Char('y' | 'Y') => {
-                                        ui_state.overlays.pop();
-                                        if let Some((cmd, args)) = self.permissions.pending_destructive_cmd.take() {
-                                            self.execute_and_display_command(&cmd, &args, &mut ui_state);
-                                        }
-                                    }
-                                    KeyCode::Char('n' | 'N') | KeyCode::Esc => {
-                                        ui_state.overlays.pop();
-                                        self.permissions.pending_destructive_cmd = None;
-                                        ui_state.messages.push(codape_ui::message_list::Message {
-                                            role: codape_ui::message_list::MessageRole::System,
-                                            content: "Command cancelled.".into(),
-                                            tool_name: None,
-                                            streaming: false,
-                                            folded: false,
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                                continue;
-                            }
-
-                            if matches!(
-                                ui_state.overlays.top(),
-                                Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
-                            ) {
-                                match key.code {
-                                    KeyCode::Char('a') => {
-                                        if let Some(request) = live.pending_confirmation.take() {
-                                            self.respond_to_confirmation(
-                                                request,
-                                                ConfirmationResponse::Approved,
-                                                &mut ui_state,
-                                                &mut live.phase,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                    KeyCode::Char('A') => {
-                                        if let Some(request) = live.pending_confirmation.take() {
-                                            self.respond_to_confirmation(
-                                                request,
-                                                ConfirmationResponse::ApproveSession,
-                                                &mut ui_state,
-                                                &mut live.phase,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                    KeyCode::Char('d' | 'D') | KeyCode::Esc => {
-                                        if let Some(request) = live.pending_confirmation.take() {
-                                            self.respond_to_confirmation(
-                                                request,
-                                                ConfirmationResponse::Denied,
-                                                &mut ui_state,
-                                                &mut live.phase,
-                                            )
-                                            .await;
-                                        } else {
-                                            clear_permission_overlay(&mut ui_state);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                                continue;
-                            }
-
-                            let inline_palette_active = matches!(
-                                ui_state.overlays.top(),
-                                Some(codape_ui::overlay::Overlay::CommandPalette { query, .. })
-                                    if query.starts_with('/')
-                            );
-                            if inline_palette_active {
-                                match key.code {
-                                    KeyCode::Up => {
-                                        ui_state.overlays.move_palette_selection(-1);
-                                        continue;
-                                    }
-                                    KeyCode::Down => {
-                                        ui_state.overlays.move_palette_selection(1);
-                                        continue;
-                                    }
-                                    KeyCode::Tab => {
-                                        if let Some(command) = selected_palette_command(&ui_state) {
-                                            ui_state.input.text = format!("{command} ");
-                                            ui_state.input.cursor = ui_state.input.text.len();
-                                            self.update_slash_suggestions(&mut ui_state);
-                                        }
-                                        continue;
-                                    }
-                                    KeyCode::Esc if vim.is_insert() => {
-                                        if matches!(
-                                            ui_state.overlays.top(),
-                                            Some(codape_ui::overlay::Overlay::CommandPalette { .. })
-                                        ) {
-                                            ui_state.overlays.pop();
-                                        }
-                                        continue;
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            if !self.ui.vim_mode_enabled && key.code == KeyCode::Esc {
-                                // Esc means "stop the run" whether or not Vim
-                                // mode is on. Only the Vim path used to reach
-                                // the interrupt, so in the default mode Esc did
-                                // nothing while the model was answering — the
-                                // one moment a person most wants it to.
-                                if thinking {
-                                    self.stop_running_query(
-                                        &mut ui_state,
-                                        &mut thinking,
-                                        &mut live.phase,
-                                        &mut query_done_rx,
-                                        &mut elicit_rx,
-                                        &mut tui_elicit_rx,
-                                        " (interrupted)",
-                                    );
-                                    live.pending_confirmation = None;
-                                    continue;
-                                }
-                                if ui_state.overlays.is_active() {
-                                    ui_state.overlays.clear();
-                                }
-                                ui_state.active_view = ViewMode::MainRepl;
-                                continue;
-                            }
-
-                            let action = vim.handle_key(key);
-                            match action {
-                                VimAction::Submit => {
-                                    if let Some(text) = ui_state.input.take() {
-                                        self.process_tui_input(
-                                            &text,
-                                            &mut ui_state,
-                                            &mut thinking,
-                                            &mut live.phase,
-                                            &mut query_done_rx,
-                                            &mut elicit_rx,
-                                            &mut tui_elicit_rx,
-                                            &mut queued_prompts,
-                                        );
-                                        // A successful `/init` queued `Setup`
-                                        // inside the synchronous dispatch;
-                                        // this is the async drain point for
-                                        // the TUI.
-                                        self.drain_pending_setup_hook().await;
-                                    }
-                                }
-                                VimAction::Escape => {
-                                    if thinking {
-                                        self.stop_running_query(
-                                            &mut ui_state,
-                                            &mut thinking,
-                                            &mut live.phase,
-                                            &mut query_done_rx,
-                                            &mut elicit_rx,
-                                            &mut tui_elicit_rx,
-                                            " (cancelled)",
-                                        );
-                                        live.pending_confirmation = None;
-                                    } else if vim.mode == VimMode::Normal {
-                                        ui_state.overlays.clear();
-                                        ui_state.active_view = ViewMode::MainRepl;
-                                    }
-                                }
-                                VimAction::Insert => {
-                                    if vim.is_insert() {
-                                        match key.code {
-                                            // A control character never enters the
-                                            // single-line buffer, whichever encoding
-                                            // delivered it. `key_event_to_action` guards
-                                            // this at the other input boundary; this
-                                            // inline Vim insert path has to apply the
-                                            // same rule.
-                                            KeyCode::Char(c) if !c.is_control() => {
-                                                ui_state.input.apply(&InputAction::InsertChar(c));
-                                            }
-                                            KeyCode::Backspace => {
-                                                ui_state.input.apply(&InputAction::Backspace);
-                                            }
-                                            KeyCode::Delete => {
-                                                ui_state.input.apply(&InputAction::Delete);
-                                            }
-                                            KeyCode::Left => {
-                                                ui_state.input.apply(&InputAction::CursorLeft);
-                                            }
-                                            KeyCode::Right => {
-                                                ui_state.input.apply(&InputAction::CursorRight);
-                                            }
-                                            KeyCode::Up => {
-                                                ui_state.input.apply(&InputAction::HistoryUp);
-                                            }
-                                            KeyCode::Down => {
-                                                ui_state.input.apply(&InputAction::HistoryDown);
-                                            }
-                                            KeyCode::Home => {
-                                                ui_state.input.apply(&InputAction::MoveToStart);
-                                            }
-                                            KeyCode::End => {
-                                                ui_state.input.apply(&InputAction::MoveToEnd);
-                                            }
-                                            KeyCode::PageUp => {
-                                                let page =
-                                                    ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                                                ui_state.messages.scroll_up(page);
-                                            }
-                                            KeyCode::PageDown => {
-                                                let page =
-                                                    ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                                                ui_state.messages.scroll_down_by(page);
-                                            }
-                                            _ => {}
-                                        }
-                                    } else if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::Left(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.apply(&InputAction::CursorLeft);
-                                    }
-                                }
-                                VimAction::Right(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.apply(&InputAction::CursorRight);
-                                    }
-                                }
-                                VimAction::Up(count) => {
-                                    // `k` moves to the line above once the
-                                    // buffer has one. A single-line buffer has
-                                    // no line above, so it keeps its original
-                                    // meaning: walk back through history. A
-                                    // Visual selection must never be replaced
-                                    // by a history entry. The count applies to
-                                    // both meanings, as `3k` does in Vim.
-                                    if vim.is_visual() || ui_state.input.line_count() > 1 {
-                                        for _ in 0..count {
-                                            ui_state.input.move_line(-1);
-                                        }
-                                    } else {
-                                        for _ in 0..count {
-                                            ui_state.input.apply(&InputAction::HistoryUp);
-                                        }
-                                    }
-                                }
-                                VimAction::Down(count) => {
-                                    if vim.is_visual() || ui_state.input.line_count() > 1 {
-                                        for _ in 0..count {
-                                            ui_state.input.move_line(1);
-                                        }
-                                    } else {
-                                        for _ in 0..count {
-                                            ui_state.input.apply(&InputAction::HistoryDown);
-                                        }
-                                    }
-                                }
-                                VimAction::JumpToStart => {
-                                    ui_state.input.apply(&InputAction::MoveToStart);
-                                }
-                                VimAction::JumpToEnd => {
-                                    ui_state.input.apply(&InputAction::MoveToEnd);
-                                }
-                                VimAction::DeleteToEnd => {
-                                    ui_state.input.apply(&InputAction::KillToEnd);
-                                }
-                                VimAction::DeleteLine(count) => {
-                                    // `dd` is a delete *and* a yank, so the
-                                    // removed lines can be put back with `p`.
-                                    let (yanked, linewise) = ui_state.input.yank_lines(count);
-                                    vim.yank(&yanked);
-                                    vim.yank_linewise = linewise;
-                                    ui_state.input.delete_lines(count);
-                                }
-                                VimAction::DeleteWordForward(count) => {
-                                    ui_state.input.delete_to_word_forward(count);
-                                }
-                                VimAction::DeleteWordBackward(count) => {
-                                    ui_state.input.delete_to_word_backward(count);
-                                }
-                                VimAction::DeleteChar(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.apply(&InputAction::Delete);
-                                    }
-                                }
-                                VimAction::YankLine(count) => {
-                                    let (yanked, linewise) = ui_state.input.yank_lines(count);
-                                    vim.yank(&yanked);
-                                    vim.yank_linewise = linewise;
-                                }
-                                VimAction::Paste(count) => {
-                                    let yanked = vim.yanked().to_string();
-                                    if vim.yank_linewise {
-                                        // A linewise register is put back as
-                                        // whole lines below the cursor line.
-                                        ui_state.input.paste_linewise(&yanked, count, true);
-                                    } else {
-                                        // The register is text from this buffer
-                                        // today, but paste is still an
-                                        // insertion path: never let it carry a
-                                        // control character in.
-                                        let clean: String = yanked
-                                            .chars()
-                                            .filter(|c| !c.is_control())
-                                            .collect();
-                                        for _ in 0..count {
-                                            ui_state.input.paste(&clean);
-                                        }
-                                    }
-                                }
-                                VimAction::Undo => {
-                                    if let Some(prev) = vim.pop_undo() {
-                                        vim.push_undo(&ui_state.input.text);
-                                        ui_state.input.text = prev;
-                                        ui_state.input.cursor = ui_state.input.text.len();
-                                    }
-                                }
-                                VimAction::PageUp => {
-                                    let page =
-                                        ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                                    ui_state.messages.scroll_up(page);
-                                }
-                                VimAction::PageDown => {
-                                    let page =
-                                        ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                                    ui_state.messages.scroll_down_by(page);
-                                }
-                                VimAction::HalfPageUp => {
-                                    let half_page =
-                                        (ui_state.messages.viewport_height / 2).max(1);
-                                    ui_state.messages.scroll_up(half_page);
-                                }
-                                VimAction::HalfPageDown => {
-                                    let half_page =
-                                        (ui_state.messages.viewport_height / 2).max(1);
-                                    ui_state.messages.scroll_down_by(half_page);
-                                }
-                                VimAction::JumpTop => {
-                                    if vim.is_visual() || ui_state.input.line_count() > 1 {
-                                        // `gg` moves to the first line of the
-                                        // buffer.
-                                        ui_state.input.move_to_buffer_start();
-                                    } else {
-                                        ui_state.messages.start = 0;
-                                        ui_state.messages.scroll_offset = usize::MAX;
-                                    }
-                                }
-                                VimAction::JumpBottom => {
-                                    if vim.is_visual() || ui_state.input.line_count() > 1 {
-                                        ui_state.input.move_to_buffer_end();
-                                    } else {
-                                        ui_state.messages.scroll_to_bottom();
-                                    }
-                                }
-                                VimAction::Command => {
-                                    let cmds: Vec<String> = self
-                                        .commands
-                                        .list()
-                                        .iter()
-                                        .map(|c| format!("/{} - {}", c.name, c.description))
-                                        .collect();
-                                    ui_state.overlays.push(Overlay::CommandPalette {
-                                        query: ":".into(),
-                                        commands: cmds,
-                                        selected: 0,
-                                    });
-                                }
-                                VimAction::Search => {
-                                    ui_state.active_view = ViewMode::Search;
-                                }
-                                VimAction::ToggleFold => {
-                                    // Toggle fold on the last visible message (or focused if selector active)
-                                    if let Some(msg) = ui_state.messages.messages.last_mut() {
-                                        msg.folded = !msg.folded;
-                                    }
-                                }
-                                VimAction::ToggleSplit => {
-                                    use codape_ui::state::LayoutMode;
-                                    ui_state.layout_mode = match ui_state.layout_mode {
-                                        LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
-                                        LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
-                                    };
-                                }
-                                VimAction::SearchNext => {
-                                    ui_state.search.next();
-                                }
-                                VimAction::SearchPrev => {
-                                    ui_state.search.prev();
-                                }
-                                VimAction::ExportCopy => {
-                                    use codape_ui::export::{ExportFormat, export_messages, copy_to_clipboard};
-                                    use codape_ui::selector::MessageSelector;
-                                    let core_msgs: Vec<codape_core::types::Message> = ui_state.messages.messages.iter().map(|m| {
-                                        let role = match m.role {
-                                            codape_ui::message_list::MessageRole::User => codape_core::types::Role::User,
-                                            codape_ui::message_list::MessageRole::Assistant => codape_core::types::Role::Assistant,
-                                            codape_ui::message_list::MessageRole::System => codape_core::types::Role::System,
-                                            codape_ui::message_list::MessageRole::ToolCall | codape_ui::message_list::MessageRole::ToolResult => codape_core::types::Role::Tool,
-                                        };
-                                        codape_core::types::Message {
-                                            role,
-                                            content: codape_core::types::MessageContent::Text(m.content.to_string()),
-                                        }
-                                    }).collect();
-                                    let selector = MessageSelector::new(core_msgs.len());
-                                    let exported = export_messages(&core_msgs, &selector, ExportFormat::PlainText);
-                                    if let Err(e) = copy_to_clipboard(&exported) {
-                                        ui_state.notifications.err(format!("Copy failed: {e}"));
-                                    } else {
-                                        ui_state.notifications.success("Copied to clipboard");
-                                    }
-                                }
-                                VimAction::Repeat
-                                | VimAction::Ignore
-                                => {}
-                                VimAction::Append => {
-                                    if self.ui.vim_mode_enabled {
-                                        // `a` inserts after the character under
-                                        // the cursor — never onto the next line
-                                        // and never into the middle of a
-                                        // multi-byte character.
-                                        let (_, line_end) = ui_state.input.current_line();
-                                        let cursor = ui_state.input.cursor;
-                                        if cursor < line_end {
-                                            let advance = ui_state.input.text[cursor..]
-                                                .chars()
-                                                .next()
-                                                .map_or(1, char::len_utf8);
-                                            ui_state.input.cursor = cursor + advance;
-                                        }
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                // `o`/`O` open a real line below/above the
-                                // current one and enter insert mode on it.
-                                VimAction::OpenLineBelow => {
-                                    if self.ui.vim_mode_enabled {
-                                        ui_state.input.open_line_below();
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::OpenLineAbove => {
-                                    if self.ui.vim_mode_enabled {
-                                        ui_state.input.open_line_above();
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::InsertAtEnd => {
-                                    if self.ui.vim_mode_enabled {
-                                        // End of the cursor's line, not of the
-                                        // buffer.
-                                        ui_state.input.apply(&InputAction::MoveToEnd);
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::InsertAtStart => {
-                                    if self.ui.vim_mode_enabled {
-                                        ui_state.input.apply(&InputAction::MoveToStart);
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::EnterVisual => {
-                                    ui_state.input.start_visual(false);
-                                }
-                                VimAction::EnterVisualLine => {
-                                    ui_state.input.start_visual(true);
-                                }
-                                VimAction::ExitVisual => {
-                                    let linewise = ui_state.input.visual_linewise;
-                                    let anchor = ui_state.input.visual_anchor;
-                                    // Vim leaves the cursor at the low end of
-                                    // the range when Visual mode ends: the
-                                    // first line of a linewise selection, the
-                                    // earlier end otherwise.
-                                    let linewise_start = ui_state
-                                        .input
-                                        .selection_range()
-                                        .map(|(start, _)| start);
-                                    ui_state.input.clear_visual_selection();
-                                    if linewise {
-                                        ui_state.input.cursor =
-                                            linewise_start.unwrap_or(ui_state.input.cursor);
-                                    } else if let Some(anchor) = anchor {
-                                        ui_state.input.cursor =
-                                            anchor.min(ui_state.input.cursor);
-                                    }
-                                }
-                                VimAction::WordForward(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.word_forward();
-                                    }
-                                }
-                                VimAction::WordBackward(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.word_backward();
-                                    }
-                                }
-                                VimAction::WordEnd(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.word_end();
-                                    }
-                                }
-                                VimAction::YankSelection => {
-                                    let linewise = ui_state.input.visual_linewise;
-                                    if let Some(text) = ui_state.input.yank_selection() {
-                                        vim.yank(&text);
-                                        vim.yank_linewise = linewise;
-                                    }
-                                }
-                                VimAction::DeleteSelection => {
-                                    let linewise = ui_state.input.visual_linewise;
-                                    if let Some(text) = ui_state.input.delete_selection() {
-                                        vim.yank(&text);
-                                        vim.yank_linewise = linewise;
-                                    }
-                                }
-                                VimAction::PasteOverSelection => {
-                                    let yanked: String = vim
-                                        .yanked()
-                                        .chars()
-                                        .filter(|c| !c.is_control() || *c == '\n')
-                                        .collect();
-                                    if let Some(replaced) = ui_state.input.replace_selection(&yanked)
-                                    {
-                                        vim.yank(&replaced);
-                                    }
-                                }
-                                VimAction::ChangeSelection => {
-                                    let linewise = ui_state.input.visual_linewise;
-                                    if let Some(text) = ui_state.input.delete_selection() {
-                                        vim.yank(&text);
-                                        vim.yank_linewise = linewise;
-                                    }
-                                    if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::ChangeLine(count) => {
-                                    ui_state.input.change_lines(count);
-                                    if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::ChangeWord => {
-                                    ui_state.input.delete_word_end();
-                                    if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::ChangeToEnd => {
-                                    ui_state.input.apply(&InputAction::KillToEnd);
-                                    if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::Substitute(count) => {
-                                    for _ in 0..count {
-                                        ui_state.input.apply(&InputAction::Delete);
-                                    }
-                                    if self.ui.vim_mode_enabled {
-                                        vim.mode = VimMode::Insert;
-                                    }
-                                }
-                                VimAction::Indent(count) => {
-                                    ui_state.input.indent(count);
-                                    // `>` ends the Visual range, like every
-                                    // other operator; the badge and highlight
-                                    // must not outlive the mode.
-                                    ui_state.input.clear_visual_selection();
-                                }
-                                VimAction::Outdent(count) => {
-                                    ui_state.input.outdent(count);
-                                    ui_state.input.clear_visual_selection();
-                                }
-                            }
-
-                            // Sync slash-command suggestion overlay when typing in insert mode.
-                            if vim.is_insert() {
-                                self.update_slash_suggestions(&mut ui_state);
                             }
                         }
                         Event::Mouse(mouse) => {
