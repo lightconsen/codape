@@ -254,3 +254,71 @@ async fn an_error_finish_chunk_becomes_a_stream_error_not_text() {
         "error text must not be rendered as answer text"
     );
 }
+
+/// The engine hands providers Anthropic-shaped messages. This walks a whole
+/// tool round over the wire and checks that the server sees what the OpenAI
+/// chat-completions API actually requires: `tool_calls` on the assistant turn
+/// and a `role: "tool"` message paired by `tool_call_id`.
+#[tokio::test]
+async fn a_full_tool_round_reaches_the_server_in_chat_completions_shape() {
+    let response = json!({
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "It is 18:41 in Tokyo."},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+    .to_string();
+    let (base_url, requests) = serve_once(response, "application/json").await;
+
+    let conversation = vec![
+        json!({"role": "user", "content": "what time is it in Tokyo?"}),
+        json!({"role": "assistant", "content": [
+            {"type": "text", "text": "Checking."},
+            {"type": "tool_use", "id": "call_1", "name": "Bash",
+             "input": {"command": "date -u"}},
+        ]}),
+        json!({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "call_1", "content": "09:41 UTC"},
+        ]}),
+    ];
+
+    let provider = OpenAiCompatibleProvider::new("fake", base_url, "key");
+    provider
+        .create_message(
+            "system",
+            &conversation,
+            &ModelId("fake-model".into()),
+            64,
+            &[],
+        )
+        .await
+        .expect("completion");
+
+    let recorded = requests.lock().expect("requests");
+    let messages = recorded[0]["messages"].as_array().expect("messages");
+    let assistant = messages
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("an assistant turn");
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+    assert_eq!(
+        assistant["tool_calls"][0]["function"]["arguments"],
+        "{\"command\":\"date -u\"}"
+    );
+    let tool = messages
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .expect("a tool result turn");
+    assert_eq!(tool["tool_call_id"], "call_1");
+    assert_eq!(tool["content"], "09:41 UTC");
+    assert!(
+        !recorded[0].to_string().contains("tool_use"),
+        "an Anthropic content block reached an OpenAI endpoint"
+    );
+}

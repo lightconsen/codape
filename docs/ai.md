@@ -577,6 +577,34 @@ Primary path (structured):
 3. Execute tools via normal tool scheduler
 4. Inject `tool_result` back into conversation and continue
 
+### 14.6.1 Message Shapes on the Wire
+
+`Provider::create_message` takes Anthropic-shaped messages (`tool_use` and
+`tool_result` content blocks), because that is what the engine builds. A
+provider whose style is not `anthropic_messages` must convert before it sends.
+`openai_compatible.rs` owns both conversions, as pure functions:
+
+| Anthropic block | `openai_chat` | `openai_responses` |
+|---|---|---|
+| `text` | the turn's `content` string | `content: [{type: "output_text"}]` on an assistant item |
+| `tool_use` | `tool_calls[]` with `function.arguments` as a JSON **string** | a `function_call` item (`call_id`, `name`, `arguments`) |
+| `tool_result` | one `role: "tool"` message per result, paired by `tool_call_id` | a `function_call_output` item (`call_id`, `output`) |
+| `image` | `image_url` part with a `data:` URL | same |
+| `thinking` | dropped | dropped |
+
+Two consequences worth knowing:
+
+- A user turn holding several `tool_result` blocks becomes **several**
+  messages (chat) or items (responses). Every call in the preceding assistant
+  turn must be answered, or the endpoint rejects the request.
+- Text that shared a turn with tool results follows them as its own user
+  message, since a `role: "tool"` message has no room for it.
+
+The old behaviour — forwarding Anthropic blocks verbatim on the chat path, and
+rendering a tool call as the prose `"Tool call {id} {name} {input}"` on the
+responses path — lost the call/result pairing, so a second tool round was
+rejected or silently answered without the result.
+
 Fallback path (compatibility only):
 
 1. Parse inline text call (e.g. `Read({...})`)
@@ -596,7 +624,7 @@ Implemented compatibility paths:
 - Kimi tool suppression with text-tool fallback
 - headless single-read normalization in the CLI for `Read ...` workflows
 
-### 14.6.1 Thinking Blocks (Anthropic-compatible thinking mode)
+### 14.6.2 Thinking Blocks (Anthropic-compatible thinking mode)
 
 A provider in thinking mode returns `{"type":"thinking","thinking":"…","signature":"…"}`
 before the text and tool_use blocks, and requires that block back on the next

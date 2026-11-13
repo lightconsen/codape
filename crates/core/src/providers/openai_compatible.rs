@@ -358,7 +358,7 @@ impl OpenAiCompatibleProvider {
             "role": "system",
             "content": system,
         })];
-        body_messages.extend(messages.iter().cloned());
+        body_messages.extend(anthropic_to_chat(messages));
 
         let mut body = serde_json::json!({
             "model": self.resolve_model_inner(model),
@@ -418,7 +418,7 @@ impl OpenAiCompatibleProvider {
             "role": "system",
             "content": [{"type": "input_text", "text": system}],
         })];
-        input.extend(messages.iter().map(Self::chat_message_to_responses_input));
+        input.extend(anthropic_to_responses(messages));
 
         let mut body = serde_json::json!({
             "model": self.resolve_model_inner(model),
@@ -473,46 +473,6 @@ impl OpenAiCompatibleProvider {
             _ => self.build_chat_request_body(
                 system, messages, model, max_tokens, tools, request_id, stream,
             ),
-        }
-    }
-
-    fn chat_message_to_responses_input(message: &serde_json::Value) -> serde_json::Value {
-        let role = message["role"].as_str().unwrap_or("user");
-        match &message["content"] {
-            serde_json::Value::String(text) => serde_json::json!({
-                "role": role,
-                "content": [{"type": "input_text", "text": text}],
-            }),
-            serde_json::Value::Array(items) => serde_json::json!({
-                "role": role,
-                "content": items.iter().map(|item| {
-                    if item["type"].as_str() == Some("tool_result") {
-                        serde_json::json!({
-                            "type": "input_text",
-                            "text": item["content"].as_str().unwrap_or_default(),
-                        })
-                    } else if item["type"].as_str() == Some("tool_use") {
-                        serde_json::json!({
-                            "type": "input_text",
-                            "text": format!(
-                                "Tool call {} {} {}",
-                                item["id"].as_str().unwrap_or_default(),
-                                item["name"].as_str().unwrap_or_default(),
-                                item["input"]
-                            ),
-                        })
-                    } else {
-                        serde_json::json!({
-                            "type": "input_text",
-                            "text": item["text"].as_str().unwrap_or_default(),
-                        })
-                    }
-                }).collect::<Vec<_>>(),
-            }),
-            _ => serde_json::json!({
-                "role": role,
-                "content": [{"type": "input_text", "text": message["content"].to_string()}],
-            }),
         }
     }
 
@@ -949,6 +909,225 @@ impl Provider for OpenAiCompatibleProvider {
     fn clone_box(&self) -> Box<dyn Provider> {
         Box::new(self.clone())
     }
+}
+
+/// Convert Anthropic wire messages into OpenAI chat-completions messages.
+///
+/// `Provider::create_message` carries Anthropic-shaped JSON — `tool_use` and
+/// `tool_result` content blocks. OpenAI-compatible endpoints understand none
+/// of that: an assistant turn is `tool_calls`, and each result is its own
+/// `role: "tool"` message paired by `tool_call_id`. Without this conversion a
+/// second tool round is rejected or silently answered without the result.
+///
+/// The mapping:
+/// - text blocks → the message's `content` string
+/// - `tool_use` blocks → `tool_calls` entries with stringified `arguments`
+/// - `tool_result` blocks → one `role: "tool"` message each; a user message
+///   that carried several results becomes several messages
+/// - image blocks → `image_url` parts on a user message
+/// - thinking blocks → dropped (OpenAI has no place for them)
+fn anthropic_to_chat(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    // Text and images that shared a message with tool results cannot ride
+    // along with a `role: "tool"` message; they follow it as a user turn.
+    let mut trailing: Vec<serde_json::Value> = Vec::new();
+
+    for message in messages {
+        let role = message["role"].as_str().unwrap_or("user");
+        let Some(blocks) = message["content"].as_array() else {
+            let content = &message["content"];
+            out.push(serde_json::json!({
+                "role": role,
+                "content": match content {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Null => String::new(),
+                    other => other.to_string(),
+                },
+            }));
+            continue;
+        };
+
+        let listed_tools = blocks
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("tool_use"))
+            .map(|block| {
+                serde_json::json!({
+                    "id": block["id"],
+                    "type": "function",
+                    "function": {
+                        "name": block["name"],
+                        "arguments": block["input"].to_string(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let text = blocks
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("text"))
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+
+        if role == "assistant" {
+            if text.is_empty() && listed_tools.is_empty() {
+                // An assistant message with neither is rejected by the chat
+                // completions API, and carries nothing anyway.
+                continue;
+            }
+            let mut turn = serde_json::Map::new();
+            turn.insert("role".into(), "assistant".into());
+            turn.insert(
+                "content".into(),
+                if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    text.into()
+                },
+            );
+            if !listed_tools.is_empty() {
+                turn.insert("tool_calls".into(), listed_tools.into());
+            }
+            out.push(serde_json::Value::Object(turn));
+            continue;
+        }
+
+        let results: Vec<&serde_json::Value> = blocks
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("tool_result"))
+            .collect();
+        for result in &results {
+            out.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": result["tool_use_id"],
+                "content": render_text_content(&result["content"]),
+            }));
+            trailing.extend(image_parts(&result["content"]));
+        }
+        if !text.is_empty() {
+            trailing.insert(0, serde_json::json!({"type": "text", "text": text}));
+        }
+        trailing.extend(image_parts(&message["content"]));
+        if !trailing.is_empty() {
+            out.push(serde_json::json!({
+                "role": "user",
+                "content": std::mem::take(&mut trailing),
+            }));
+        }
+    }
+    out
+}
+
+/// Convert Anthropic wire messages into OpenAI Responses API `input` items.
+///
+/// Same problem, different shape: a tool call is a `function_call` item and
+/// its result is a `function_call_output` item, not text. Rendering the call
+/// as prose (the old behaviour) loses the call/result pairing, so the model
+/// cannot tell which output answers which call.
+fn anthropic_to_responses(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+
+    for message in messages {
+        let role = message["role"].as_str().unwrap_or("user");
+        let Some(blocks) = message["content"].as_array() else {
+            let text_type = if role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            out.push(serde_json::json!({
+                "role": role,
+                "content": [{"type": text_type, "text": message["content"].as_str().unwrap_or_default()}],
+            }));
+            continue;
+        };
+
+        let text = blocks
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("text"))
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("");
+
+        if role == "assistant" {
+            if !text.is_empty() {
+                out.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                }));
+            }
+            for block in blocks
+                .iter()
+                .filter(|block| block["type"].as_str() == Some("tool_use"))
+            {
+                out.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": block["id"],
+                    "name": block["name"],
+                    "arguments": block["input"].to_string(),
+                }));
+            }
+            continue;
+        }
+
+        for block in blocks {
+            if block["type"].as_str() == Some("tool_result") {
+                out.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": block["tool_use_id"],
+                    "output": render_text_content(&block["content"]),
+                }));
+            }
+        }
+
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(serde_json::json!({"type": "input_text", "text": text}));
+        }
+        content.extend(image_parts(&message["content"]));
+        if !content.is_empty() {
+            out.push(serde_json::json!({"role": "user", "content": content}));
+        }
+    }
+    out
+}
+
+/// Render a tool result's `content` (a string, or an array of blocks) as text.
+fn render_text_content(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("text"))
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(""),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// Anthropic `image` blocks as OpenAI `image_url` parts.
+fn image_parts(content: &serde_json::Value) -> Vec<serde_json::Value> {
+    content
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block["type"].as_str() == Some("image"))
+                .map(|block| {
+                    let media_type = block["source"]["media_type"]
+                        .as_str()
+                        .unwrap_or("image/png");
+                    let data = block["source"]["data"].as_str().unwrap_or_default();
+                    serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{media_type};base64,{data}")},
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Default)]
@@ -1417,6 +1596,129 @@ mod tests {
             !body.to_string().contains("cache_control"),
             "OpenAI-compatible providers reject cache_control and cache automatically"
         );
+    }
+
+    /// One Anthropic-shaped conversation: a question, an assistant turn that
+    /// answers it with a tool call, the tool's result, and the answer.
+    /// `tool_use` and `tool_result` blocks are what the engine actually sends.
+    fn anthropic_round_trip() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"role": "user", "content": "what time is it in Tokyo?"}),
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "text", "text": "Checking."},
+                {"type": "tool_use", "id": "call_1", "name": "Bash",
+                 "input": {"command": "date -u"}},
+            ]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "09:41 UTC"},
+            ]}),
+            serde_json::json!({"role": "assistant", "content": "It is 18:41 in Tokyo."}),
+        ]
+    }
+
+    #[test]
+    fn a_tool_round_trip_becomes_chat_completions_shape() {
+        let provider = OpenAiCompatibleProvider::new("openai", "https://api.openai.com", "k");
+        let body = provider.build_chat_request_body(
+            "system",
+            &anthropic_round_trip(),
+            &ModelId("gpt-4o".into()),
+            64,
+            &[],
+            "req-1",
+            false,
+        );
+        let messages = body["messages"].as_array().expect("messages");
+
+        // system, user, assistant, tool, assistant
+        assert_eq!(messages.len(), 5, "{body:#}");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "what time is it in Tokyo?");
+
+        let assistant = &messages[2];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"], "Checking.");
+        assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
+        assert_eq!(assistant["tool_calls"][0]["type"], "function");
+        assert_eq!(assistant["tool_calls"][0]["function"]["name"], "Bash");
+        // `arguments` is a JSON *string* in this API, not an object.
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["arguments"],
+            "{\"command\":\"date -u\"}"
+        );
+
+        let tool = &messages[3];
+        assert_eq!(tool["role"], "tool");
+        assert_eq!(tool["tool_call_id"], "call_1");
+        assert_eq!(tool["content"], "09:41 UTC");
+
+        assert_eq!(messages[4]["role"], "assistant");
+        assert_eq!(messages[4]["content"], "It is 18:41 in Tokyo.");
+
+        // No Anthropic block ever reaches the wire.
+        let rendered = body.to_string();
+        assert!(!rendered.contains("tool_use"), "{rendered}");
+        assert!(!rendered.contains("tool_result"), "{rendered}");
+    }
+
+    #[test]
+    fn a_tool_round_trip_becomes_responses_shape() {
+        let provider = OpenAiCompatibleProvider::new("openai", "https://api.openai.com", "k")
+            .with_provider_profile("openai-responses");
+        let body = provider.build_request_body(
+            "system",
+            &anthropic_round_trip(),
+            &ModelId("gpt-4o".into()),
+            64,
+            &[],
+            "req-1",
+            false,
+        );
+        let input = body["input"].as_array().expect("input");
+
+        let call = input
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("a function_call item");
+        assert_eq!(call["call_id"], "call_1");
+        assert_eq!(call["name"], "Bash");
+        assert_eq!(call["arguments"], "{\"command\":\"date -u\"}");
+
+        let output = input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("a function_call_output item");
+        assert_eq!(output["call_id"], "call_1");
+        assert_eq!(output["output"], "09:41 UTC");
+
+        // The call/result pairing must survive: a model that only sees
+        // "Tool call call_1 Bash {...}" as prose cannot answer it.
+        let rendered = body.to_string();
+        assert!(!rendered.contains("Tool call "), "{rendered}");
+        assert!(!rendered.contains("tool_use"), "{rendered}");
+    }
+
+    /// A single user turn that carried two tool results used to be two
+    /// `role: "user"` messages; each result now gets its own message so both
+    /// calls are answered.
+    #[test]
+    fn two_results_in_one_turn_become_two_tool_messages() {
+        let messages = vec![
+            serde_json::json!({"role": "assistant", "content": [
+                {"type": "tool_use", "id": "a", "name": "Read", "input": {}},
+                {"type": "tool_use", "id": "b", "name": "Read", "input": {}},
+            ]}),
+            serde_json::json!({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+                {"type": "tool_result", "tool_use_id": "b", "content": "two"},
+            ]}),
+        ];
+        let converted = anthropic_to_chat(&messages);
+        assert_eq!(converted.len(), 3, "{converted:?}");
+        assert_eq!(converted[1]["role"], "tool");
+        assert_eq!(converted[1]["tool_call_id"], "a");
+        assert_eq!(converted[2]["tool_call_id"], "b");
+        assert_eq!(converted[0]["tool_calls"].as_array().map(Vec::len), Some(2));
     }
 
     #[test]
