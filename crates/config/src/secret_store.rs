@@ -745,9 +745,15 @@ mod tests {
     }
 
     /// A backend that refuses every operation.
+    ///
+    /// Only the fallback test uses it, and that test is Unix-only (`mode()`,
+    /// which the assertions need, is a Unix permission bit). Without the gate
+    /// this is dead code on Windows and `clippy --all-targets` there fails.
+    #[cfg(unix)]
     #[derive(Debug, Default)]
     struct BrokenBackend;
 
+    #[cfg(unix)]
     impl SecretBackend for BrokenBackend {
         fn get(&self, _account: &str) -> Result<Option<String>, SecretStoreError> {
             Err(SecretStoreError::Keychain("unavailable".into()))

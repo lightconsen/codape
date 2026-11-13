@@ -934,8 +934,12 @@ pub struct AnthropicApiClient {
 impl AnthropicApiClient {
     /// Create a new Anthropic API client with a dedicated `reqwest::Client`.
     ///
-    /// Uses the timeout from `config.request_timeout_secs`. For connection
-    /// pooling across multiple engines, prefer [`Self::new_with_client`].
+    /// Uses the timeout from `config.request_timeout_secs`. The `reqwest::Client`
+    /// is the connection pool, and it is shared by every clone: an engine
+    /// built from this one by [`Self::cloned_with_request_context`] — which is
+    /// what a subagent gets — reuses the connections rather than opening a new
+    /// pool. A second constructor taking a caller-supplied client existed for
+    /// that pooling and had no callers, because cloning already provides it.
     #[must_use]
     pub fn new(config: ApiConfig) -> Self {
         let deadline = Duration::from_secs(config.request_timeout_secs);
@@ -957,19 +961,6 @@ impl AnthropicApiClient {
             config,
             client,
             stream_client,
-        }
-    }
-
-    /// Create a client using an existing `reqwest::Client`.
-    ///
-    /// This enables connection pooling when multiple `AnthropicApiClient`
-    /// instances share the same underlying `reqwest::Client`.
-    #[must_use]
-    pub fn new_with_client(config: ApiConfig, client: Client) -> Self {
-        Self {
-            config,
-            client: client.clone(),
-            stream_client: client,
         }
     }
 
