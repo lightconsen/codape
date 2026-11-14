@@ -113,7 +113,7 @@ syntect = { version = "5", default-features = false, features = [
 compact_str = "0.9"
 smallvec = "1"
 regex = "1"
-base64 = "0.22"
+base64 = "0.23"
 
 # Cryptography & hashing
 sha2 = "0.10"

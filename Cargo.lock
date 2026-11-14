@@ -948,7 +948,7 @@ name = "codape-artifacts"
 version = "0.2.1"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "codape-tools",
  "home",
@@ -967,7 +967,7 @@ name = "codape-bridge"
 version = "0.2.1"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "codape-core",
  "codape-server",
@@ -1372,7 +1372,7 @@ name = "codape-tools"
 version = "0.2.1"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bitflags 2.13.2",
  "cap-std",
  "chrono",
