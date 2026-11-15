@@ -172,6 +172,39 @@ fn an_unpriced_model_reports_tokens_without_inventing_a_cost() {
     );
 }
 
+/// A run reports where its time went, not only how long it took.
+///
+/// `duration_ms` is on the frame already. Two numbers that can be checked
+/// against it are the difference between "the model is slow" and "the tools
+/// are slow", which is the question a benchmark asks when two harnesses
+/// finish the same task in different wall clocks.
+#[test]
+fn a_result_frame_splits_the_run_time_between_model_and_tools() {
+    let frame = result_frame("claude-sonnet-4-6", None);
+
+    let model_ms = frame
+        .get("model_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("no model_ms on the result frame: {frame}"));
+    let tool_ms = frame
+        .get("tool_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("no tool_ms on the result frame: {frame}"));
+    let duration_ms = frame["duration_ms"].as_u64().expect("duration_ms");
+
+    // The provider is the local static server, so this run's model time is
+    // small but real. A zero would mean the request was never timed.
+    assert!(model_ms > 0, "the provider request was not timed: {frame}");
+    // No tool is called, so none of the run's time can be tool time.
+    assert_eq!(tool_ms, 0, "a tool-free run reported tool time: {frame}");
+    // The two are subsets of the turn, not slices that add up to it: context
+    // building, hooks and inter-turn gaps are outside both.
+    assert!(
+        model_ms <= duration_ms,
+        "model time {model_ms}ms exceeded the turn's {duration_ms}ms: {frame}"
+    );
+}
+
 /// A pricing entry in the config home turns the cost column on.
 ///
 /// This is the documented escape hatch, and it is what makes omitting the

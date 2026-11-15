@@ -183,6 +183,10 @@ pub struct CostTracker {
     /// not repeat the guess, so [`known_total_cost`](Self::known_total_cost)
     /// reports `None` once this is set.
     unpriced_usage: bool,
+    /// Provider time accumulated in the current turn, in milliseconds.
+    turn_model_ms: u64,
+    /// Tool time accumulated in the current turn, in milliseconds.
+    turn_tool_ms: u64,
     /// Costs by agent/agent_id.
     agent_costs: HashMap<String, f64>,
     /// Costs by task/task_id.
@@ -204,6 +208,26 @@ pub struct TurnCost {
     pub usage: UsageSummary,
     /// Model used for this turn.
     pub model: String,
+    /// Time spent waiting for the provider, across every request the turn
+    /// made, in milliseconds.
+    ///
+    /// Measured around each request rather than around the turn: a turn that
+    /// re-sends (an elicitation answer, a compaction recovery, a stream retry)
+    /// spent that time too, and leaving it out would attribute it to the tools.
+    /// Where a tool executes inside the stream, its time is subtracted before
+    /// the call is recorded, so the same seconds are not in both figures.
+    pub model_ms: u64,
+    /// Time spent executing tool calls, in milliseconds.
+    ///
+    /// With early execution on, a tool runs while the provider is still
+    /// delivering the rest of the answer, so its wall clock is inside the
+    /// stream's. The engine takes that overlap out of `model_ms` rather than
+    /// letting one call's time appear in both figures.
+    ///
+    /// Neither figure is the turn: context building, hooks, compaction and the
+    /// gap between turns belong to neither, so `model_ms + tool_ms` is at most
+    /// the turn's wall clock and usually less.
+    pub tool_ms: u64,
 }
 
 impl CostTracker {
@@ -219,6 +243,8 @@ impl CostTracker {
             session_cost: 0.0,
             session_usage: UsageSummary::default(),
             unpriced_usage: false,
+            turn_model_ms: 0,
+            turn_tool_ms: 0,
             agent_costs: HashMap::new(),
             task_costs: HashMap::new(),
             turn_history: Vec::new(),
@@ -276,6 +302,8 @@ impl CostTracker {
             cost_usd: cost,
             usage: *usage,
             model: model.0.clone(),
+            model_ms: self.turn_model_ms,
+            tool_ms: self.turn_tool_ms,
         });
 
         // Broadcast to team context if present
@@ -289,9 +317,35 @@ impl CostTracker {
         }
     }
 
-    /// Start a new turn (reset turn-level cost).
+    /// Start a new turn (reset turn-level cost and timings).
     pub const fn start_turn(&mut self) {
         self.turn_cost = 0.0;
+        self.turn_model_ms = 0;
+        self.turn_tool_ms = 0;
+    }
+
+    /// Add one request's provider time to the current turn.
+    ///
+    /// Called once per request rather than once per turn, so a re-send, a
+    /// compaction retry and a stream retry all land in the turn that paid for
+    /// them.
+    pub fn record_model_time(&mut self, elapsed: std::time::Duration) {
+        self.turn_model_ms = self
+            .turn_model_ms
+            .saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    }
+
+    /// Add one batch of tool execution's time to the current turn.
+    pub fn record_tool_time(&mut self, elapsed: std::time::Duration) {
+        self.turn_tool_ms = self
+            .turn_tool_ms
+            .saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    }
+
+    /// Provider time and tool time for the turn in progress, in milliseconds.
+    #[must_use]
+    pub const fn current_turn_timing(&self) -> (u64, u64) {
+        (self.turn_model_ms, self.turn_tool_ms)
     }
 
     /// Add cost to an agent.
@@ -365,6 +419,25 @@ impl CostTracker {
         &self.turn_history
     }
 
+    /// Provider time and tool time summed over every turn after `from_turn`.
+    ///
+    /// `from_turn` is exclusive and 1-indexed, so a caller that captured the
+    /// turn number before a submit gets the submits' own turns. Summing the
+    /// history rather than keeping a second running total keeps one number
+    /// with one source.
+    #[must_use]
+    pub fn timing_since(&self, from_turn: u32) -> (u64, u64) {
+        self.turn_history
+            .iter()
+            .filter(|turn| turn.turn_number > from_turn)
+            .fold((0, 0), |(model, tool), turn| {
+                (
+                    model.saturating_add(turn.model_ms),
+                    tool.saturating_add(turn.tool_ms),
+                )
+            })
+    }
+
     /// Get the number of turns so far.
     #[must_use]
     pub const fn turn_count(&self) -> usize {
@@ -375,13 +448,30 @@ impl CostTracker {
     #[must_use]
     pub fn format_summary(&self) -> String {
         let usage = self.session_usage;
+        let (model_ms, tool_ms) = self.timing_since(0);
         format!(
-            "Session cost: {} ({} turns, {} tokens)",
+            "Session cost: {} ({} turns, {} tokens)\nTime: {} waiting on the provider, {} in tools",
             self.known_total_cost()
                 .map_or_else(|| "unpriced".to_string(), |cost| format!("${cost:.2}")),
             self.turn_history.len(),
             usage.prompt_tokens().saturating_add(usage.output_tokens),
+            format_millis(model_ms),
+            format_millis(tool_ms),
         )
+    }
+}
+
+/// A millisecond count as a human-readable duration.
+///
+/// Integer arithmetic rather than a cast to `f64` seconds: the figures are
+/// milliseconds and a tenth of a second is not worth a precision-loss lint.
+fn format_millis(ms: u64) -> String {
+    let secs = ms / 1000;
+    let tenths = (ms % 1000) / 100;
+    if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}.{tenths}s")
     }
 }
 
@@ -542,6 +632,60 @@ mod tests {
             200,
             "the turn history records the turn's last request, unchanged"
         );
+    }
+
+    /// A turn records the provider time and tool time it spent, and a re-send
+    /// adds to the same turn rather than starting a second one.
+    #[test]
+    fn a_turn_accumulates_provider_and_tool_time() {
+        let mut tracker = CostTracker::new();
+        let usage = UsageSummary::default();
+
+        tracker.start_turn();
+        tracker.record_model_time(std::time::Duration::from_millis(120));
+        tracker.record_tool_time(std::time::Duration::from_millis(80));
+        // An elicitation re-send within the same turn.
+        tracker.record_model_time(std::time::Duration::from_millis(30));
+        assert_eq!(tracker.current_turn_timing(), (150, 80));
+
+        tracker.end_turn(1, &usage, &ModelId::sonnet());
+        let turn = &tracker.get_turn_history()[0];
+        assert_eq!(turn.model_ms, 150, "the re-send was not attributed");
+        assert_eq!(turn.tool_ms, 80);
+    }
+
+    /// A new turn starts from zero rather than carrying the last one's time.
+    #[test]
+    fn starting_a_turn_clears_the_previous_turn_timing() {
+        let mut tracker = CostTracker::new();
+        tracker.start_turn();
+        tracker.record_model_time(std::time::Duration::from_millis(500));
+        tracker.record_tool_time(std::time::Duration::from_millis(400));
+
+        tracker.start_turn();
+        assert_eq!(tracker.current_turn_timing(), (0, 0));
+    }
+
+    /// `timing_since` excludes the turn the caller captured.
+    ///
+    /// The submit boundary is "turns after the one that was already running",
+    /// so an off-by-one here would report the previous submit's time as this
+    /// one's — every single time, and never by a little.
+    #[test]
+    fn timing_since_reports_only_the_turns_after_the_captured_one() {
+        let mut tracker = CostTracker::new();
+        let usage = UsageSummary::default();
+
+        for (turn, model_ms, tool_ms) in [(1u32, 100u64, 10u64), (2, 200, 20), (3, 300, 30)] {
+            tracker.start_turn();
+            tracker.record_model_time(std::time::Duration::from_millis(model_ms));
+            tracker.record_tool_time(std::time::Duration::from_millis(tool_ms));
+            tracker.end_turn(turn, &usage, &ModelId::sonnet());
+        }
+
+        assert_eq!(tracker.timing_since(1), (500, 50));
+        assert_eq!(tracker.timing_since(3), (0, 0));
+        assert_eq!(tracker.timing_since(0), (600, 60));
     }
 
     #[test]

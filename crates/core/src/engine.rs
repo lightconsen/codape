@@ -2194,6 +2194,16 @@ pub struct QueryEngine {
     /// [`EngineEvent::ToolUseSummary`] and uses that summary as the label,
     /// falling back to `activity_summary()` when summarization fails.
     tool_use_summaries: bool,
+    /// Tool time executed inside the stream during the turn, in milliseconds.
+    ///
+    /// With early execution on, a tool call's wall clock overlaps the stream's
+    /// own: the provider keeps delivering the rest of the answer while the
+    /// tool runs. The streaming wrapper subtracts this from the stream's
+    /// elapsed time so `model_ms + tool_ms` stays within the turn.
+    early_tool_time: std::time::Duration,
+    /// When the turn in progress started, for the wall-clock figure `close_turn`
+    /// records alongside the model and tool times.
+    turn_started_at: Option<Instant>,
     /// Optional coordinator state for multi-phase workflows.
     coordinator: Option<crate::coordinator::CoordinatorState>,
     /// Optional persistent session memory that survives compaction.
@@ -2540,6 +2550,8 @@ impl QueryEngine {
             team_context: None,
             streaming_tool_execution: false,
             tool_use_summaries: false,
+            early_tool_time: std::time::Duration::ZERO,
+            turn_started_at: None,
             coordinator: None,
             session_memory: None,
             compaction_backend: None,
@@ -3861,7 +3873,12 @@ impl QueryEngine {
         options: &SubmitOptions,
         turn_number: u32,
     ) -> Result<TerminalReason, TurnError> {
-        let _start = Instant::now();
+        // The turn's own clock. `TurnCost` now carries `model_ms` and
+        // `tool_ms`, but neither is the turn: they are the two things a
+        // benchmark compares, and the wall clock is what that comparison is
+        // against. Logged at the end so a slow turn can be told from a slow
+        // provider without re-running it.
+        self.turn_started_at = Some(Instant::now());
 
         // Phase 1: Initialize → BuildContext
         turn.transition_to(TurnState::BuildContext);
@@ -4217,7 +4234,12 @@ impl QueryEngine {
         options: &SubmitOptions,
         turn_number: u32,
     ) -> Result<TerminalReason, TurnError> {
-        let _start = Instant::now();
+        // The turn's own clock. `TurnCost` now carries `model_ms` and
+        // `tool_ms`, but neither is the turn: they are the two things a
+        // benchmark compares, and the wall clock is what that comparison is
+        // against. Logged at the end so a slow turn can be told from a slow
+        // provider without re-running it.
+        self.turn_started_at = Some(Instant::now());
 
         // Phase 1: Initialize → BuildContext
         turn.transition_to(TurnState::BuildContext);
@@ -4613,6 +4635,16 @@ impl QueryEngine {
         self.run_stop_hooks(turn, turn_number, stop_reason).await;
         turn.transition_to(TurnState::Finalize);
         self.cost_tracker.end_turn(turn_number, usage, &self.model);
+        if let Some(started) = self.turn_started_at.take() {
+            tracing::debug!(
+                turn = turn_number,
+                wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                model_ms = self.cost_tracker.current_turn_timing().0,
+                tool_ms = self.cost_tracker.current_turn_timing().1,
+                stop_reason,
+                "turn timing"
+            );
+        }
         self.sync_session_accounting();
         let _ = self.fire_turn_end_hook(turn_number, stop_reason).await;
 
@@ -6505,7 +6537,24 @@ impl QueryEngine {
     }
 
     /// Send the request to the API.
+    /// Send the request using the blocking API.
+    ///
+    /// Wraps [`send_request_inner`](Self::send_request_inner) to attribute the
+    /// call's wall clock to the turn's provider time. Timing lives here rather
+    /// than at the call sites so the overflow retry, the elicitation re-send
+    /// and the compaction recovery all land in the turn that paid for them.
     async fn send_request(
+        &mut self,
+        turn: &TurnRuntime,
+        options: &SubmitOptions,
+    ) -> Result<ApiResponse, TurnError> {
+        let started = Instant::now();
+        let result = self.send_request_inner(turn, options).await;
+        self.cost_tracker.record_model_time(started.elapsed());
+        result
+    }
+
+    async fn send_request_inner(
         &mut self,
         turn: &TurnRuntime,
         options: &SubmitOptions,
@@ -6575,7 +6624,29 @@ impl QueryEngine {
     ///
     /// Returns the accumulated text content, deferred tool calls (for batch
     /// execution after the stream), early-executed tool results, and usage.
+    ///
+    /// The wrapper attributes the stream's wall clock to the turn's provider
+    /// time, minus any time spent executing tool calls inside the stream: with
+    /// early execution on, a tool runs while the provider is still delivering
+    /// the rest of the answer, and counting that wall clock twice would make
+    /// `model_ms + tool_ms` exceed the turn's total.
     async fn send_request_streaming(
+        &mut self,
+        turn: &mut TurnRuntime,
+        options: &SubmitOptions,
+    ) -> Result<StreamedResponse, TurnError> {
+        let started = Instant::now();
+        let before = self.early_tool_time;
+        let result = self.send_request_streaming_inner(turn, options).await;
+        // This call's own tool time, not the turn's: a re-send inside the turn
+        // must not have its overlap subtracted from the wrong request.
+        let overlapped = self.early_tool_time.saturating_sub(before);
+        self.cost_tracker
+            .record_model_time(started.elapsed().saturating_sub(overlapped));
+        result
+    }
+
+    async fn send_request_streaming_inner(
         &mut self,
         turn: &mut TurnRuntime,
         options: &SubmitOptions,
@@ -6749,7 +6820,10 @@ impl QueryEngine {
                         continue;
                     }
                     let recorded = call.clone();
-                    match self.execute_early_tool_call(turn, call, options).await {
+                    let tool_started = Instant::now();
+                    let outcome = self.execute_early_tool_call(turn, call, options).await;
+                    self.note_early_tool_time(tool_started.elapsed());
+                    match outcome {
                         Ok(Some(result)) => {
                             early_calls.push(recorded);
                             early_results.push(result);
@@ -6784,7 +6858,10 @@ impl QueryEngine {
                         continue;
                     }
                     let recorded = call.clone();
-                    match self.execute_early_tool_call(turn, call, options).await {
+                    let tool_started = Instant::now();
+                    let outcome = self.execute_early_tool_call(turn, call, options).await;
+                    self.note_early_tool_time(tool_started.elapsed());
+                    match outcome {
                         Ok(Some(result)) => {
                             early_calls.push(recorded);
                             early_results.push(result);
@@ -7311,6 +7388,17 @@ impl QueryEngine {
         }
     }
 
+    /// Charge one early tool call's time to the turn and to the stream.
+    ///
+    /// Both books are needed: the tracker's `tool_ms` is what the turn spent
+    /// on tools, and `early_tool_time` is how much of the *stream's* wall clock
+    /// that same work occupied, so the streaming wrapper can subtract it and
+    /// leave `model_ms` measuring only waiting for the provider.
+    fn note_early_tool_time(&mut self, elapsed: std::time::Duration) {
+        self.cost_tracker.record_tool_time(elapsed);
+        self.early_tool_time = self.early_tool_time.saturating_add(elapsed);
+    }
+
     /// Execute pending tool calls with permission checks.
     async fn execute_tool_calls(
         &mut self,
@@ -7350,6 +7438,9 @@ impl QueryEngine {
             }
         }
 
+        // The batch runs after the stream has closed, so this time is the
+        // turn's tool time and nothing else's — no stream overlap to net out.
+        let batch_started = Instant::now();
         let outcome = tool_scheduler::run_tool_calls(
             &turn.pending_tool_calls,
             self.tools.as_ref(),
@@ -7360,7 +7451,9 @@ impl QueryEngine {
             &mut self.denied_tools,
             &summaries,
         )
-        .await?;
+        .await;
+        self.cost_tracker.record_tool_time(batch_started.elapsed());
+        let outcome = outcome?;
 
         let mut results = outcome.results;
         for elevation in outcome.pending_elevations {
@@ -14520,6 +14613,69 @@ mod tests {
         assert_eq!(early.early_results.len(), 1);
         assert_eq!(early.early_results[0].tool_call_id, "tc_stream");
         assert!(early.tool_calls.is_empty());
+    }
+
+    /// Tool time spent inside the stream is not counted as provider time.
+    ///
+    /// With early execution on, a tool runs while the provider is still
+    /// delivering the rest of the answer. The stream's wall clock contains
+    /// that work, and so does `tool_ms`; without netting it out the two
+    /// figures would double-count the same seconds and could exceed the turn.
+    #[tokio::test]
+    async fn early_tool_time_is_not_counted_against_the_provider() {
+        /// A tool that takes long enough to survive the millisecond
+        /// truncation every timing figure goes through.
+        struct SlowToolExecutor;
+
+        #[async_trait::async_trait]
+        impl crate::tool_executor::ToolExecutor for SlowToolExecutor {
+            async fn execute(
+                &self,
+                tool_call_id: &str,
+                tool_name: &str,
+                _input: &serde_json::Value,
+            ) -> crate::tool_executor::ToolDispatchOutcome {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                crate::tool_executor::ToolDispatchOutcome {
+                    result: ToolResult {
+                        tool_call_id: tool_call_id.to_string(),
+                        output: format!("slow ok: {tool_name}"),
+                        is_error: false,
+                        images: Vec::new(),
+                    },
+                }
+            }
+        }
+
+        let (mut engine, _rx) = test_engine_with_api(Box::new(StreamingToolCallApi));
+        engine.set_tool_executor(Box::new(SlowToolExecutor));
+        engine.set_streaming_tool_execution(true);
+        let options = SubmitOptions::default();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        engine
+            .send_request_streaming(&mut turn, &options)
+            .await
+            .unwrap();
+
+        let (model_ms, tool_ms) = engine.cost_tracker().current_turn_timing();
+        let overlapped = u64::try_from(engine.early_tool_time.as_millis()).unwrap_or(u64::MAX);
+        assert!(
+            overlapped >= 30,
+            "the early tool was not timed, so nothing was netted out: {overlapped}ms"
+        );
+        assert_eq!(
+            tool_ms, overlapped,
+            "the early call's time is the turn's tool time"
+        );
+        // The mock answers with no latency, so the stream's whole wall clock
+        // was the tool call. Netting it out must leave the provider with
+        // (near) nothing rather than double-counting the same seconds.
+        assert!(
+            model_ms < overlapped,
+            "provider time {model_ms}ms was not netted against the \
+             {overlapped}ms the tool spent inside the stream"
+        );
     }
 
     /// A provider that rejects the request with a non-retryable 400 in both

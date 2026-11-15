@@ -7611,6 +7611,31 @@ fn attach_usage_to_frame(frame: &mut codape_events::ResultFrame, engine: &QueryE
     }
 }
 
+/// Attach this submit's provider and tool time to a closing `result` frame.
+///
+/// `duration_ms` on the frame already says how long the submit took; it says
+/// nothing about where the time went. Two numbers that add up to no more than
+/// it do, and they are the difference between "the model is slow" and "the
+/// tools are slow" — the question a benchmark asks when one harness finishes a
+/// task in half the wall clock.
+///
+/// Only these two. `duration_ms` also covers context building, hooks,
+/// compaction and the gap between turns, so subtracting them leaves an
+/// "everything else" figure that is not an attributable cost.
+fn attach_timing_to_frame(
+    frame: &mut codape_events::ResultFrame,
+    engine: &QueryEngine,
+    turns_before: u32,
+) {
+    let (model_ms, tool_ms) = engine.cost_tracker().timing_since(turns_before);
+    frame
+        .data
+        .insert("model_ms".to_string(), serde_json::json!(model_ms));
+    frame
+        .data
+        .insert("tool_ms".to_string(), serde_json::json!(tool_ms));
+}
+
 /// The `usage` object a `result` frame carries.
 ///
 /// Field names follow the reference: `input_tokens` and `output_tokens` are
@@ -7647,6 +7672,8 @@ fn write_interrupted_result(
     session_id: &str,
     elapsed: std::time::Duration,
     num_turns: u32,
+    engine: Option<&QueryEngine>,
+    turns_before: u32,
     message: &str,
 ) {
     let Some(sink) = protocol.as_mut() else {
@@ -7663,6 +7690,12 @@ fn write_interrupted_result(
         "error".to_string(),
         serde_json::Value::String(message.to_string()),
     );
+    // A run stopped from outside still spent the time it spent, and the frame
+    // that reports how it ended is the only place that time can be reported.
+    if let Some(engine) = engine {
+        attach_usage_to_frame(&mut frame, engine);
+        attach_timing_to_frame(&mut frame, engine, turns_before);
+    }
     if let Err(error) = turn.emit_turn_complete(frame) {
         tracing::warn!("could not write the interrupted result: {error}");
     }
@@ -9175,6 +9208,8 @@ impl ReplLoop {
                     &session_id,
                     turn_started.elapsed(),
                     turn_counter.consumed_since(turns_before),
+                    self.session.engine.as_ref(),
+                    turns_before,
                     message,
                 );
                 if let Some(handle) = permission_forwarder.take() {
@@ -9450,6 +9485,7 @@ impl ReplLoop {
             };
             if let Some(ref engine) = self.session.engine {
                 attach_usage_to_frame(&mut frame, engine);
+                attach_timing_to_frame(&mut frame, engine, turns_before);
             }
             if let Err(error) = turn.emit_turn_complete(frame) {
                 tracing::warn!("could not close the protocol turn: {error}");
@@ -13667,6 +13703,8 @@ mod tests {
             "session-1",
             std::time::Duration::from_millis(42),
             3,
+            None,
+            0,
             "SIGTERM ended the run before the turn finished",
         );
 
