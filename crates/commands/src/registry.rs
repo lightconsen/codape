@@ -182,8 +182,12 @@ pub struct CommandContext {
     pub cache_read_tokens: usize,
     /// Total cache creation tokens.
     pub cache_creation_tokens: usize,
-    /// Cost in USD.
-    pub cost_usd: f64,
+    /// Session cost in USD, or `None` when the model's price is unknown.
+    ///
+    /// The distinction reaches five commands that print this as money; a
+    /// gateway model priced by falling back to Sonnet's rate would show a
+    /// number that is not its cost.
+    pub cost_usd: Option<f64>,
     /// Session ID.
     pub session_id: String,
     /// Session title.
@@ -233,6 +237,18 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
+    /// The session cost as a display string.
+    ///
+    /// Every command that prints this formats it identically, so an unpriced
+    /// model cannot end up as `$0.000000` in one place and `n/a` in another.
+    #[must_use]
+    pub fn cost_label(&self) -> String {
+        self.cost_usd.map_or_else(
+            || "n/a (model price unknown)".to_string(),
+            |cost| format!("${cost:.6}"),
+        )
+    }
+
     /// Create a new command context.
     #[must_use]
     pub fn new(cwd: String, session_id: String, session_title: String, model: ModelId) -> Self {
@@ -245,7 +261,7 @@ impl CommandContext {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             session_id,
             session_title,
             elapsed_secs: 0,

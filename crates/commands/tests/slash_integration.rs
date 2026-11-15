@@ -26,7 +26,7 @@ fn test_ctx() -> CommandContext {
         output_tokens: 3000,
         cache_read_tokens: 1000,
         cache_creation_tokens: 500,
-        cost_usd: 0.042,
+        cost_usd: Some(0.042),
         ..CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
     }
 }

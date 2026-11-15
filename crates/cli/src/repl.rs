@@ -7590,6 +7590,51 @@ impl ReplLoop {
     }
 }
 
+/// Attach a session's accumulated usage to a closing `result` frame.
+///
+/// The frame's shape is upstream of this crate ([`ResultFrame::data`] is
+/// flattened), so nothing needed to change to add it — which is why its
+/// absence went unnoticed for so long: hosts were reading a field that no
+/// producer wrote. `total_cost_usd` is omitted rather than guessed when a
+/// model has no known price; see [`CostTracker::known_total_cost`].
+///
+/// [`CostTracker::known_total_cost`]: codape_core::cost::CostTracker::known_total_cost
+fn attach_usage_to_frame(frame: &mut codape_events::ResultFrame, engine: &QueryEngine) {
+    let tracker = engine.cost_tracker();
+    frame
+        .data
+        .insert("usage".to_string(), usage_json(&tracker.session_usage()));
+    if let Some(cost) = tracker.known_total_cost() {
+        frame
+            .data
+            .insert("total_cost_usd".to_string(), serde_json::json!(cost));
+    }
+}
+
+/// The `usage` object a `result` frame carries.
+///
+/// Field names follow the reference: `input_tokens` and `output_tokens` are
+/// what the provider billed, and the two cache fields mean what they mean
+/// there — Anthropic reports only the uncached portion as `input_tokens`, so
+/// the four together are the request. A consumer that wants one number wants
+/// [`UsageSummary::prompt_tokens`](codape_core::types::UsageSummary::prompt_tokens)
+/// plus the output count, which is what `format_summary` prints.
+///
+/// Both spellings of the cache keys go out. The reference uses the long form;
+/// this repository's own consumers (`bridge_launcher`, the SWE-bench runner)
+/// accept either, and a host written against one of them should not have to
+/// break because the other was chosen here.
+fn usage_json(usage: &codape_core::types::UsageSummary) -> serde_json::Value {
+    serde_json::json!({
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_input_tokens": usage.cache_read_tokens,
+        "cache_creation_input_tokens": usage.cache_creation_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_creation_tokens": usage.cache_creation_tokens,
+    })
+}
+
 /// Write the one closing `result` for a turn a signal cut short.
 ///
 /// The turn never reaches its normal exit, so nothing else will write this
@@ -9288,7 +9333,7 @@ impl ReplLoop {
         if let Some(mut sink) = protocol {
             let turn = sink.begin_turn(session_id.clone());
             let turns_used = turn_counter.consumed_since(turns_before);
-            let frame = match &result {
+            let mut frame = match &result {
                 Ok(TerminalReason::MaxTurnsReached) => codape_events::ResultFrame::error(
                     session_id.clone(),
                     codape_events::protocol::result_subtype::ERROR_MAX_TURNS,
@@ -9403,6 +9448,9 @@ impl ReplLoop {
                     frame
                 }
             };
+            if let Some(ref engine) = self.session.engine {
+                attach_usage_to_frame(&mut frame, engine);
+            }
             if let Err(error) = turn.emit_turn_complete(frame) {
                 tracing::warn!("could not close the protocol turn: {error}");
             }
@@ -9465,8 +9513,21 @@ impl ReplLoop {
             "New Session".into()
         };
         statusline.git_branch = current_git_branch(&self.cwd);
-        statusline.total_tokens = self.history.len() * 100;
-        statusline.cost_usd = 0.0;
+        // The two numbers here used to be invented: `self.history` is the list
+        // of prompts the user typed, not a token count, and the cost was a
+        // literal 0.0. Both read from the engine now, which is the only place
+        // the provider's own numbers reach. With no engine yet — before the
+        // first turn — there is nothing to report and zero is the truth.
+        let (tokens, cost) = self.session.engine.as_ref().map_or((0, None), |engine| {
+            let tracker = engine.cost_tracker();
+            let usage = tracker.session_usage();
+            (
+                usage.prompt_tokens().saturating_add(usage.output_tokens),
+                tracker.known_total_cost(),
+            )
+        });
+        statusline.total_tokens = tokens;
+        statusline.cost_usd = cost;
     }
 
     /// Sync current permission mode into the TUI permission bar.
@@ -11585,7 +11646,10 @@ impl ReplLoop {
             ctx.output_tokens = usage.output_tokens;
             ctx.cache_read_tokens = usage.cache_read_tokens;
             ctx.cache_creation_tokens = usage.cache_creation_tokens;
-            ctx.cost_usd = engine.session().cost_usd;
+            // `None` when the session touched a model with no known price;
+            // `/cost` prints that as `n/a (model price unknown)` rather than
+            // as a dollar figure built on Sonnet's fallback rate.
+            ctx.cost_usd = engine.cost_tracker().known_total_cost();
         }
         ctx
     }

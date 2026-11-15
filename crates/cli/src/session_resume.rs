@@ -208,7 +208,7 @@ fn try_index_saved_session(
 ///
 /// `index_saved_session` writes the searchable row (and resets usage to
 /// zero), so call this after it. Best-effort, like every index write.
-pub fn index_session_usage(cwd: &str, session_id: &str, cost: f64, tokens: i64) {
+pub fn index_session_usage(cwd: &str, session_id: &str, cost: Option<f64>, tokens: i64) {
     let result = if let Some(index) = cached_index(cwd) {
         index
             .lock()
@@ -399,7 +399,7 @@ fn meta_from_transcript(cwd: &str, path: &Path, modified: SystemTime) -> Option<
         pr_url: None,
         created_at: last_active_at,
         last_active_at,
-        total_cost_usd: 0.0,
+        total_cost_usd: None,
         total_tokens: 0,
     })
 }

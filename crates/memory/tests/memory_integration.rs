@@ -166,7 +166,7 @@ fn session_index_auto_updates_and_lists_recent() {
         pr_url: None,
         created_at: Utc::now(),
         last_active_at: Utc::now(),
-        total_cost_usd: 0.12,
+        total_cost_usd: Some(0.12),
         total_tokens: 1024,
     };
     let mut meta2 = meta1.clone();
@@ -180,7 +180,7 @@ fn session_index_auto_updates_and_lists_recent() {
     // Auto-update: update_last_active and cost
     index.update_last_active("sess-001", &Utc::now()).unwrap();
     index
-        .update_cost_and_tokens("sess-001", 0.25, 2048)
+        .update_cost_and_tokens("sess-001", Some(0.25), 2048)
         .unwrap();
 
     // List recent
@@ -194,7 +194,41 @@ fn session_index_auto_updates_and_lists_recent() {
     // Get single session
     let got = index.get("sess-001").unwrap();
     assert!(got.is_some());
-    assert_eq!(got.unwrap().total_cost_usd, 0.25);
+    assert_eq!(got.unwrap().total_cost_usd, Some(0.25));
+}
+
+/// An unknown price survives the round trip as unknown.
+///
+/// The column used to default to `0.0`, so a session that ran on a model
+/// nobody had priced came back from `/resume` looking free. `NULL` is the one
+/// value that says "nobody told me", and it has to stay readable as such.
+#[test]
+fn an_unknown_cost_is_stored_and_read_back_as_unknown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index = SessionIndex::open(&tmp.path().join("sessions.db")).unwrap();
+
+    let meta = SessionMeta {
+        session_id: "sess-unpriced".into(),
+        project_path: "/projects/beta".into(),
+        ai_title: None,
+        tag: None,
+        pr_url: None,
+        created_at: Utc::now(),
+        last_active_at: Utc::now(),
+        total_cost_usd: None,
+        total_tokens: 0,
+    };
+    index.create(&meta).unwrap();
+    index
+        .update_cost_and_tokens("sess-unpriced", None, 4096)
+        .unwrap();
+
+    let got = index.get("sess-unpriced").unwrap().unwrap();
+    assert_eq!(
+        got.total_cost_usd, None,
+        "an unpriced session was read back as a dollar figure"
+    );
+    assert_eq!(got.total_tokens, 4096, "the token count is still a fact");
 }
 
 #[test]
@@ -211,7 +245,7 @@ fn session_index_search_finds_by_title_and_tag() {
         pr_url: None,
         created_at: Utc::now(),
         last_active_at: Utc::now(),
-        total_cost_usd: 0.05,
+        total_cost_usd: Some(0.05),
         total_tokens: 512,
     };
     let mut meta2 = meta1.clone();

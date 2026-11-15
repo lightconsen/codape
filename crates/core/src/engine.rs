@@ -3539,21 +3539,32 @@ impl QueryEngine {
     }
 
     /// Get the total token usage accumulated across all completed turns.
+    ///
+    /// Read from the cost tracker's own accumulator rather than summed over
+    /// [`TurnCost`](crate::cost::TurnCost) here: a turn that re-sends its
+    /// request records only its last request in the turn history, so the sum
+    /// undercounted every run that answered an elicitation or recovered from a
+    /// context overflow.
     #[must_use]
-    pub fn total_usage(&self) -> UsageSummary {
-        let mut total = UsageSummary {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-        };
-        for turn in self.cost_tracker.get_turn_history() {
-            total.input_tokens += turn.usage.input_tokens;
-            total.output_tokens += turn.usage.output_tokens;
-            total.cache_read_tokens += turn.usage.cache_read_tokens;
-            total.cache_creation_tokens += turn.usage.cache_creation_tokens;
-        }
-        total
+    pub const fn total_usage(&self) -> UsageSummary {
+        self.cost_tracker.session_usage()
+    }
+
+    /// Publish the trackers' numbers into [`SessionState`].
+    ///
+    /// `SessionState.usage` and `SessionState.cost_usd` had no writer in the
+    /// engine at all, so every reader of them — the statusline, the
+    /// `index_session_usage` call that feeds `/resume`, a snapshot taken for
+    /// teleport — saw zeros for a whole session. `CostTracker` is the only
+    /// place the numbers exist; this copies them across at the one point a
+    /// turn's accounting is final.
+    ///
+    /// The cost stays `None` when the session touched a model with no known
+    /// price. Writing `0.0` there would persist "this run was free" into the
+    /// session index, where nobody can tell it from a run that really was.
+    const fn sync_session_accounting(&mut self) {
+        self.session.usage = self.cost_tracker.session_usage();
+        self.session.cost_usd = self.cost_tracker.known_total_cost();
     }
 
     /// Submit a user message and run the full turn loop.
@@ -4602,6 +4613,7 @@ impl QueryEngine {
         self.run_stop_hooks(turn, turn_number, stop_reason).await;
         turn.transition_to(TurnState::Finalize);
         self.cost_tracker.end_turn(turn_number, usage, &self.model);
+        self.sync_session_accounting();
         let _ = self.fire_turn_end_hook(turn_number, stop_reason).await;
 
         // A provider-paused turn is not an empty turn. The model answered and

@@ -70,14 +70,31 @@ impl ModelPricing {
     }
 }
 
-/// Resolve pricing for a given model.
+/// Built-in pricing for a model Codape knows, if it knows one.
+///
+/// `None` is the honest answer for anything else: a gateway model name
+/// (`deepseek-v4.1-flash`) has no Anthropic price, and the difference between
+/// "this costs Sonnet money" and "nobody has told me what this costs" is the
+/// difference between a cost estimate and an invented number. Callers that
+/// report a dollar figure check this first; [`pricing_for_model`] keeps the
+/// lenient behaviour for internal budgeting.
+#[must_use]
+pub fn known_model_pricing(model: &str) -> Option<ModelPricing> {
+    match model {
+        "claude-opus-4-6" => Some(ModelPricing::opus()),
+        "claude-haiku-4-5-20251001" => Some(ModelPricing::haiku()),
+        "claude-sonnet-4-6" => Some(ModelPricing::sonnet()),
+        _ => None,
+    }
+}
+
+/// Resolve pricing for a given model, falling back to Sonnet's.
+///
+/// The fallback is a budgeting heuristic, not a price: use
+/// [`known_model_pricing`] when the number will be shown to someone as money.
 #[must_use]
 pub fn pricing_for_model(model: &ModelId) -> ModelPricing {
-    match model.0.as_str() {
-        "claude-opus-4-6" => ModelPricing::opus(),
-        "claude-haiku-4-5-20251001" => ModelPricing::haiku(),
-        _ => ModelPricing::sonnet(),
-    }
+    known_model_pricing(model.0.as_str()).unwrap_or_else(ModelPricing::sonnet)
 }
 
 /// Load custom pricing from a JSON file.
@@ -116,16 +133,30 @@ pub fn load_pricing_from_path(path: &Path) -> HashMap<String, ModelPricing> {
     }
 }
 
-/// Load pricing from the default user config path (`~/.codape/pricing.json`).
+/// Load pricing from the config home (`pricing.json`).
+///
+/// `CLAUDE_CONFIG_DIR` when set, otherwise `$HOME/.codape`, matching
+/// [`crate::types::context_window_client_data_path`] and every other config
+/// path in the tree. Honouring the override matters beyond tidiness: a test or
+/// a second profile that points the config home somewhere else would otherwise
+/// still read the real user's prices.
 #[must_use]
-pub fn load_user_pricing() -> HashMap<String, ModelPricing> {
-    if let Ok(home) = std::env::var("HOME") {
-        let path = std::path::PathBuf::from(home)
+pub fn user_pricing_path() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return std::path::PathBuf::from(dir).join("pricing.json");
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        return std::path::PathBuf::from(home)
             .join(".codape")
             .join("pricing.json");
-        return load_pricing_from_path(&path);
     }
-    HashMap::new()
+    std::path::PathBuf::from(".codape").join("pricing.json")
+}
+
+/// Load pricing from the config home.
+#[must_use]
+pub fn load_user_pricing() -> HashMap<String, ModelPricing> {
+    load_pricing_from_path(&user_pricing_path())
 }
 
 /// Tracks costs per turn, session, and agent.
@@ -137,6 +168,21 @@ pub struct CostTracker {
     turn_cost: f64,
     /// Total cost for the entire session.
     session_cost: f64,
+    /// Tokens billed for the entire session.
+    ///
+    /// Accumulated at [`record_usage`](Self::record_usage), not summed from
+    /// [`TurnCost`] afterwards: a turn that re-sends its request (an
+    /// elicitation answer, a compaction recovery) bills both requests but
+    /// records only the last one in the turn history, so a sum over
+    /// `turn_history` silently undercounts a long run.
+    session_usage: UsageSummary,
+    /// Some usage was recorded for a model whose price nobody knows.
+    ///
+    /// The cost of that usage is in `session_cost` at Sonnet's rate, because
+    /// that is what budgeting needs; a dollar figure shown to a person must
+    /// not repeat the guess, so [`known_total_cost`](Self::known_total_cost)
+    /// reports `None` once this is set.
+    unpriced_usage: bool,
     /// Costs by agent/agent_id.
     agent_costs: HashMap<String, f64>,
     /// Costs by task/task_id.
@@ -171,6 +217,8 @@ impl CostTracker {
             pricing: load_user_pricing(),
             turn_cost: 0.0,
             session_cost: 0.0,
+            session_usage: UsageSummary::default(),
+            unpriced_usage: false,
             agent_costs: HashMap::new(),
             task_costs: HashMap::new(),
             turn_history: Vec::new(),
@@ -198,15 +246,20 @@ impl CostTracker {
 
     /// Record usage and calculate cost for the current turn.
     pub fn record_usage(&mut self, usage: &UsageSummary, model: &ModelId) -> f64 {
-        let pricing = self
+        let known = self
             .pricing
             .get(&model.0)
             .copied()
-            .unwrap_or_else(|| pricing_for_model(model));
+            .or_else(|| known_model_pricing(model.0.as_str()));
+        if known.is_none() {
+            self.unpriced_usage = true;
+        }
+        let pricing = known.unwrap_or_else(ModelPricing::sonnet);
 
         let cost = pricing.calculate(usage);
         self.turn_cost += cost;
         self.session_cost += cost;
+        self.session_usage = self.session_usage.saturating_add(usage);
         cost
     }
 
@@ -252,9 +305,40 @@ impl CostTracker {
     }
 
     /// Get the total session cost.
+    ///
+    /// This is the budgeting number: it includes usage priced at Sonnet's rate
+    /// because no real price was known. Use [`known_total_cost`](Self::known_total_cost)
+    /// for a figure that will be reported as money.
     #[must_use]
     pub const fn get_total_cost(&self) -> f64 {
         self.session_cost
+    }
+
+    /// The session cost, or `None` once any of it was priced by guesswork.
+    ///
+    /// A dollar figure derived from `pricing_for_model`'s Sonnet fallback is
+    /// not an estimate of what a gateway model costs — it is Sonnet's price
+    /// wearing another model's name. Reporting it is worse than reporting
+    /// nothing, because nothing prompts the reader to look for the real
+    /// number. A pricing entry in the config home's `pricing.json` clears this.
+    ///
+    /// A session that has billed nothing yet reports `$0.00`, not `None`.
+    /// Zero is a known number: the session really has spent nothing so far,
+    /// and the statusline before the first turn would otherwise read `$n/a`
+    /// on a perfectly priced model.
+    #[must_use]
+    pub const fn known_total_cost(&self) -> Option<f64> {
+        if self.unpriced_usage {
+            None
+        } else {
+            Some(self.session_cost)
+        }
+    }
+
+    /// Tokens billed for the session, summed as they were recorded.
+    #[must_use]
+    pub const fn session_usage(&self) -> UsageSummary {
+        self.session_usage
     }
 
     /// Get the current turn cost.
@@ -290,10 +374,13 @@ impl CostTracker {
     /// Format a cost summary for display (e.g., for /cost command).
     #[must_use]
     pub fn format_summary(&self) -> String {
+        let usage = self.session_usage;
         format!(
-            "Session cost: ${:.2} ({} turns)",
-            self.session_cost,
-            self.turn_history.len()
+            "Session cost: {} ({} turns, {} tokens)",
+            self.known_total_cost()
+                .map_or_else(|| "unpriced".to_string(), |cost| format!("${cost:.2}")),
+            self.turn_history.len(),
+            usage.prompt_tokens().saturating_add(usage.output_tokens),
         )
     }
 }
@@ -359,6 +446,121 @@ mod tests {
         let unknown = ModelId("unknown-model".into());
         let p = pricing_for_model(&unknown);
         assert_eq!(p.input_per_million, 3.0);
+    }
+
+    /// The lenient fallback and the honest answer are different questions.
+    ///
+    /// `pricing_for_model` has to return *something* so budgeting can run; a
+    /// dollar figure built on that answer is Sonnet's price wearing another
+    /// model's name, which is what `known_model_pricing` exists to prevent.
+    #[test]
+    fn known_model_pricing_refuses_to_name_a_price_it_does_not_know() {
+        assert!(known_model_pricing("claude-sonnet-4-6").is_some());
+        assert!(known_model_pricing("claude-opus-4-6").is_some());
+        assert!(known_model_pricing("claude-haiku-4-5-20251001").is_some());
+        assert!(
+            known_model_pricing("deepseek-v4.1-flash").is_none(),
+            "a gateway model has no Anthropic price; none may be invented"
+        );
+    }
+
+    /// A fresh session has spent nothing, and that is a number.
+    ///
+    /// "No price is known" and "no tokens have been billed" are different
+    /// facts, and collapsing them made the statusline read `$n/a` on a known
+    /// model before its first turn.
+    #[test]
+    fn a_session_that_has_billed_nothing_reports_zero_not_unknown() {
+        let tracker = CostTracker::new();
+        assert_eq!(tracker.known_total_cost(), Some(0.0));
+    }
+
+    #[test]
+    fn a_session_that_touched_an_unpriced_model_reports_no_cost() {
+        let mut tracker = CostTracker::new();
+        let usage = UsageSummary {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+
+        tracker.record_usage(&usage, &ModelId::sonnet());
+        let priced = tracker.known_total_cost();
+        assert!(
+            priced.is_some_and(|cost| cost > 0.0),
+            "a priced model still has a total: {priced:?}"
+        );
+
+        // One request through an unpriced model is enough: the total is now a
+        // mix of a real price and a guess, and no arithmetic makes that a cost.
+        tracker.record_usage(&usage, &ModelId("deepseek-v4.1-flash".into()));
+        assert_eq!(
+            tracker.known_total_cost(),
+            None,
+            "the total included guessed pricing and was still reported as money"
+        );
+        // Budgeting still gets a number, which is what the fallback is for.
+        assert!(tracker.get_total_cost() > 0.0);
+    }
+
+    /// Session tokens are accumulated as billed, not summed from the history.
+    ///
+    /// A turn that re-sends its request (an elicitation answer, a compaction
+    /// recovery) bills both requests but records only the last in
+    /// `turn_history`, so the two counts diverge exactly where a long run
+    /// needs them to agree.
+    #[test]
+    fn session_usage_counts_every_billed_request() {
+        let mut tracker = CostTracker::new();
+        let first = UsageSummary {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        let resend = UsageSummary {
+            input_tokens: 200,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+
+        tracker.start_turn();
+        tracker.record_usage(&first, &ModelId::sonnet());
+        tracker.record_usage(&resend, &ModelId::sonnet());
+        tracker.end_turn(1, &resend, &ModelId::sonnet());
+
+        let session = tracker.session_usage();
+        assert_eq!(
+            session.input_tokens, 300,
+            "the re-sent request was not counted"
+        );
+        assert_eq!(session.output_tokens, 30);
+        assert_eq!(
+            tracker.get_turn_history()[0].usage.input_tokens,
+            200,
+            "the turn history records the turn's last request, unchanged"
+        );
+    }
+
+    #[test]
+    fn usage_summaries_add_saturating() {
+        let a = UsageSummary {
+            input_tokens: usize::MAX,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        let b = UsageSummary {
+            input_tokens: 5,
+            output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        let sum = a.saturating_add(&b);
+        assert_eq!(sum.input_tokens, usize::MAX, "addition wrapped or panicked");
+        assert_eq!(sum.output_tokens, 3);
     }
 
     // A `mul_add` rewrite of the tolerance check below would be harder to

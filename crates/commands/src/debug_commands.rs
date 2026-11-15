@@ -29,7 +29,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 lines.push(format!("Output tokens: {}", ctx.output_tokens));
                 lines.push(format!("Cache read: {}", ctx.cache_read_tokens));
                 lines.push(format!("Cache creation: {}", ctx.cache_creation_tokens));
-                lines.push(format!("Cost: ${:.4}", ctx.cost_usd));
+                lines.push(format!("Cost: {}", ctx.cost_label()));
             }
             CommandResult::success(lines.join("\n"))
         }),
@@ -160,7 +160,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 format!("Output tokens: {}", ctx.output_tokens),
                 format!("Cache read: {}", ctx.cache_read_tokens),
                 format!("Cache creation: {}", ctx.cache_creation_tokens),
-                format!("Cost: ${:.4}", ctx.cost_usd),
+                format!("Cost: {}", ctx.cost_label()),
             ];
             if ctx.input_tokens == 0 && ctx.output_tokens == 0 {
                 lines.push(String::new());

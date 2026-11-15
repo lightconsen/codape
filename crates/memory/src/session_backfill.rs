@@ -103,7 +103,7 @@ pub fn backfill(
             pr_url: None,
             created_at: modified,
             last_active_at: modified,
-            total_cost_usd: 0.0,
+            total_cost_usd: None,
             total_tokens: 0,
         };
         index.upsert_with_content(&meta, Some(&content))?;
@@ -172,7 +172,7 @@ pub fn index_transcript(
         pr_url: None,
         created_at: now,
         last_active_at: now,
-        total_cost_usd: 0.0,
+        total_cost_usd: None,
         total_tokens: 0,
     };
     let content = session_content(messages);

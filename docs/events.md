@@ -59,7 +59,7 @@ discriminant is spelled exactly as the reference spells it:
 | `Assistant(AssistantFrame)` | `assistant` | `message` (role + content blocks), `session_id`, optional `parent_tool_use_id` | One model step |
 | `User(UserFrame)` | `user` | same shape | Queued user input, and the `tool_result` blocks fed back to the model |
 | `System(SystemFrame)` | `system` | **`subtype`**, `session_id`, flattened subtype payload | e.g. `init`, `compact_boundary` |
-| `Result(ResultFrame)` | `result` | **`subtype`**, `is_error`, `duration_ms`, `num_turns`, `session_id`, optional `result` | **The turn-complete signal** |
+| `Result(ResultFrame)` | `result` | **`subtype`**, `is_error`, `duration_ms`, `num_turns`, `session_id`, optional `result`, `usage`, optional `total_cost_usd` | **The turn-complete signal**, and the run's accounting record |
 | `StreamEvent(StreamEventFrame)` | `stream_event` | raw API streaming event, `session_id` | Forwarded unmodified |
 | `ControlRequest(ControlRequestFrame)` | `control_request` | `request_id`, `request` (`subtype: can_use_tool`, `tool_name`, `input`, `reason`, `allow_session`) | Headless approval request; not a turn frame |
 | `ControlResponse(ControlResponseFrame)` | `control_response` | `response` (`subtype: success/error`, `request_id`, `behavior: allow/deny`, optional `message`) | **Input** direction: read from the child's stdin |
@@ -104,6 +104,31 @@ The CLI closes the turn explicitly when the engine task disappears without
 handing the engine back: it emits one `error_during_execution` result and keeps
 the sink for the next turn. The only zero-result paths left are a failed write
 and a caller that drops the guard without completing it.
+
+### What the `result` frame says the run cost
+
+Every `result` frame carries a `usage` object with the tokens the session has
+been billed for, accumulated as each request was answered:
+
+```json
+{"input_tokens":10,"output_tokens":20,
+ "cache_read_input_tokens":0,"cache_creation_input_tokens":0,
+ "cache_read_tokens":0,"cache_creation_tokens":0}
+```
+
+The cache keys are emitted in both spellings — the reference protocol's long
+form and the shorter one this repository uses — so a host written against
+either reads the field. The numbers come from `CostTracker::session_usage`,
+which accumulates per request rather than summing the turn history: a turn
+that re-sends its request (an elicitation answer, a compaction recovery) is
+billed twice and recorded once, so a sum over turns undercounts.
+
+`total_cost_usd` appears only when the price is known. `pricing_for_model`
+falls back to Sonnet's rate so budgets always have a number, but reporting
+that fallback as money would print Sonnet's price under a gateway model's
+name. A model with no built-in price (anything outside `claude-*`) therefore
+reports tokens and no dollar figure until `pricing.json` in the config home
+names its price.
 
 ### The sink
 

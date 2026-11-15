@@ -134,8 +134,12 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             CommandResult::success(format!(
-                "Session Summary\n──────────────\nSession: {}\nMessages: {}\nModel: {}\nCost: ${:.4}\nElapsed: {}s\n\n(Use an AI model to generate a detailed summary)",
-                ctx.session_title, ctx.message_count, ctx.model.0, ctx.cost_usd, ctx.elapsed_secs
+                "Session Summary\n──────────────\nSession: {}\nMessages: {}\nModel: {}\nCost: {}\nElapsed: {}s\n\n(Use an AI model to generate a detailed summary)",
+                ctx.session_title,
+                ctx.message_count,
+                ctx.model.0,
+                ctx.cost_label(),
+                ctx.elapsed_secs
             ))
         }),
     ));
@@ -259,7 +263,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 let _ = writeln!(output, "Output Tokens: {}", ctx.output_tokens);
                 let _ = writeln!(output, "Cache Read: {}", ctx.cache_read_tokens);
                 let _ = writeln!(output, "Cache Creation: {}", ctx.cache_creation_tokens);
-                let _ = writeln!(output, "Cost: ${:.4}", ctx.cost_usd);
+                let _ = writeln!(output, "Cost: {}", ctx.cost_label());
                 let _ = writeln!(output, "Permission Mode: {:?}", ctx.permission_mode);
                 let _ = writeln!(output, "Elapsed: {}s", ctx.elapsed_secs);
                 if !ctx.git_branch.is_empty() {

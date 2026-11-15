@@ -25,8 +25,14 @@ pub struct TeleportSnapshot {
     pub messages: Vec<Message>,
     /// Token usage summary.
     pub usage: UsageSummary,
-    /// Cumulative cost in USD.
-    pub cost_usd: f64,
+    /// Cumulative cost in USD, when a price is known for every model used.
+    ///
+    /// `None` means the snapshot has no honest price, not that the session
+    /// was free. `#[serde(default)]` reads a snapshot written before this was
+    /// optional as `None` — the truth about a record that never said which it
+    /// was.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     /// ISO 8601 creation timestamp.
     pub created_at: String,
     /// Working directory at save time.
@@ -77,7 +83,15 @@ impl TeleportSnapshot {
         let mut map = HashMap::new();
         map.insert("session_id".into(), state.session_id.to_string());
         map.insert("title".into(), state.title.clone().unwrap_or_default());
-        map.insert("cost_usd".into(), state.cost_usd.to_string());
+        // An unknown price has to hash differently from a known zero, or a
+        // snapshot that learned it has no honest cost would share a revision
+        // with one that genuinely spent nothing.
+        map.insert(
+            "cost_usd".into(),
+            state
+                .cost_usd
+                .map_or_else(String::new, |cost| cost.to_string()),
+        );
         map.insert("created_at".into(), state.created_at.to_rfc3339());
         map.insert("cwd".into(), state.cwd.to_string_lossy().to_string());
         map.insert("usage_input".into(), state.usage.input_tokens.to_string());
@@ -541,7 +555,7 @@ mod tests {
         state.messages.push(Message::user("hello"));
         state.messages.push(Message::assistant("world"));
         state.title = Some("Test Session".into());
-        state.cost_usd = 0.01;
+        state.cost_usd = Some(0.01);
 
         let snapshot = TeleportSnapshot::from_session(&state);
         let restored = snapshot.to_session_state();

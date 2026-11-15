@@ -32,8 +32,10 @@ pub struct SessionMeta {
     pub created_at: DateTime<Utc>,
     /// When the session was last active.
     pub last_active_at: DateTime<Utc>,
-    /// Total cost in USD.
-    pub total_cost_usd: f64,
+    /// Total cost in USD, when a price is known for every model used.
+    ///
+    /// `None` means the cost was never known, not that the session was free.
+    pub total_cost_usd: Option<f64>,
     /// Total token count.
     pub total_tokens: i64,
 }
@@ -60,7 +62,7 @@ impl SessionIndex {
                 pr_url TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_active_at DATETIME,
-                total_cost_usd REAL DEFAULT 0.0,
+                total_cost_usd REAL,
                 total_tokens INTEGER DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_project_path ON sessions(project_path);
@@ -163,10 +165,14 @@ impl SessionIndex {
     }
 
     /// Update cost and token counts for a session.
+    ///
+    /// `cost` is `None` when no price is known for a model the session used.
+    /// The column is nullable for exactly that: `NULL` reads as "not known",
+    /// while `0.0` would read as "this run was free" forever.
     pub fn update_cost_and_tokens(
         &self,
         session_id: &str,
-        cost: f64,
+        cost: Option<f64>,
         tokens: i64,
     ) -> Result<(), SessionIndexError> {
         self.conn.execute(
@@ -467,7 +473,7 @@ mod tests {
             pr_url: None,
             created_at: Utc::now(),
             last_active_at: Utc::now(),
-            total_cost_usd: 0.0,
+            total_cost_usd: Some(0.0),
             total_tokens: 0,
         }
     }
@@ -744,7 +750,7 @@ mod tests {
                         pr_url: None,
                         created_at: Utc::now(),
                         last_active_at: Utc::now(),
-                        total_cost_usd: 0.0,
+                        total_cost_usd: Some(0.0),
                         total_tokens: 0,
                     };
                     index

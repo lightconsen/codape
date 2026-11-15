@@ -249,6 +249,26 @@ impl UsageSummary {
             .saturating_add(self.cache_read_tokens)
             .saturating_add(self.cache_creation_tokens)
     }
+
+    /// Add two usage reports, saturating at `usize::MAX`.
+    ///
+    /// Accumulating a session used to mean looping over the turn history and
+    /// adding four fields at each step; a `+` there panics on overflow in debug
+    /// and wraps in release, and a session that large is exactly the one where
+    /// a wrong total matters.
+    #[must_use]
+    pub const fn saturating_add(&self, other: &Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_read_tokens: self
+                .cache_read_tokens
+                .saturating_add(other.cache_read_tokens),
+            cache_creation_tokens: self
+                .cache_creation_tokens
+                .saturating_add(other.cache_creation_tokens),
+        }
+    }
 }
 
 /// Identifier for an Anthropic model.

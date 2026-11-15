@@ -17,8 +17,17 @@ pub struct SessionState {
     pub messages: Vec<Message>,
     /// Token usage summary.
     pub usage: UsageSummary,
-    /// Cumulative cost in USD.
-    pub cost_usd: f64,
+    /// Cumulative cost in USD, when a price for every model the session
+    /// touched is known.
+    ///
+    /// `None` rather than `0.0` for a session that talked to a model with no
+    /// known price: this value is persisted into the `/resume` index, and a
+    /// stored zero reads as "this run was free" for the rest of the session's
+    /// life. Deserializing a snapshot written before this field was optional
+    /// leaves it `None`, which is the honest reading of a record that never
+    /// distinguished the two.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     /// When the session was created.
     pub created_at: DateTime<Utc>,
     /// When the session was last active.
@@ -45,7 +54,9 @@ impl SessionState {
                 cache_read_tokens: 0,
                 cache_creation_tokens: 0,
             },
-            cost_usd: 0.0,
+            // Nothing has been billed yet, so nothing is owed: a fresh
+            // session's cost is known to be zero, not unknown.
+            cost_usd: Some(0.0),
             created_at: now,
             last_active_at: now,
             cwd,
@@ -115,7 +126,7 @@ mod tests {
         assert_eq!(state.usage.output_tokens, 0);
         assert_eq!(state.usage.cache_read_tokens, 0);
         assert_eq!(state.usage.cache_creation_tokens, 0);
-        assert_eq!(state.cost_usd, 0.0);
+        assert_eq!(state.cost_usd, Some(0.0));
         assert!(state.active_worktree.is_none());
         // Timestamps should be very recent
         let now = Utc::now();

@@ -229,10 +229,11 @@ order flips again: Claude Code reached 99 to Codape's 92, and neither is
 solved, so ProgramBench has no solved instance under either harness.
 
 The caveats are the sample. Each cell is one run; a single pass or fail moves a
-row. Claude Code reports its own cost, Codape does not emit usage in headless
-stream-json, so the money column exists on one side only. And the two arms
-share a model, not a prompt: the system prompt is part of the scaffold under
-test, which is exactly what this control is meant to vary.
+row. Claude Code reports cost and usage on its own `result` frame; Codape emits
+the same `usage` object and a `total_cost_usd` when it knows a price for the
+model, so a run under a gateway model reports tokens and no money. And the two
+arms share a model, not a prompt: the system prompt is part of the scaffold
+under test, which is exactly what this control is meant to vary.
 
 Run-ids: `xarray-claude-r1`, `xarray-codape-r1`, `seaborn-claude-r1`,
 `seaborn-codape-r1`, `astropy-claude-r1`, `astropy-codape-r1`,

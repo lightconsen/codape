@@ -13,8 +13,12 @@ pub struct Statusline {
     pub model: String,
     /// Total tokens used (input + output).
     pub total_tokens: usize,
-    /// Cost in USD.
-    pub cost_usd: f64,
+    /// Session cost in USD, when a price for the model is known.
+    ///
+    /// `None` renders as `$n/a` rather than `$0.00`. A model routed through a
+    /// gateway has no price this binary knows, and a formatted zero is a claim
+    /// the session was free; the two are not the same information.
+    pub cost_usd: Option<f64>,
     /// Git branch name.
     pub git_branch: String,
     /// Session title.
@@ -53,7 +57,7 @@ impl Statusline {
         Self {
             model: String::new(),
             total_tokens: 0,
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             git_branch: String::new(),
             session_title: String::new(),
             thinking: false,
@@ -80,6 +84,12 @@ impl Statusline {
         } else {
             format!("{secs}s")
         }
+    }
+
+    /// The cost segment, or `$n/a` when no price for the model is known.
+    fn cost_label(&self) -> String {
+        self.cost_usd
+            .map_or_else(|| "$n/a".to_string(), |cost| format!("${cost:.2}"))
     }
 
     /// Render to a single-line string.
@@ -147,7 +157,7 @@ impl Statusline {
             segments.push(format!("tok:{},", self.total_tokens));
         }
         if self.show_cost {
-            segments.push(format!("${:.2}", self.cost_usd));
+            segments.push(self.cost_label());
         }
         if self.show_git_branch {
             segments.push(self.git_branch.clone());
@@ -172,7 +182,7 @@ impl Statusline {
     /// visible rather than silently dropping a segment.
     fn expand(&self, template: &str) -> String {
         let tokens = self.total_tokens.to_string();
-        let cost = format!("${:.2}", self.cost_usd);
+        let cost = self.cost_label();
         let mut out = String::with_capacity(template.len());
         let mut rest = template;
         while let Some(open) = rest.find('[') {
@@ -236,7 +246,7 @@ mod tests {
         let sl = Statusline {
             model: "sonnet".into(),
             total_tokens: 1234,
-            cost_usd: 0.42,
+            cost_usd: Some(0.42),
             git_branch: "main".into(),
             session_title: "Fix bug".into(),
             thinking: false,
@@ -291,7 +301,7 @@ mod tests {
         let sl = Statusline {
             model: "sonnet".into(),
             total_tokens: 1234,
-            cost_usd: 0.42,
+            cost_usd: Some(0.42),
             git_branch: "main".into(),
             session_title: "Fix bug".into(),
             thinking: false,
@@ -317,7 +327,7 @@ mod tests {
         let sl = Statusline {
             model: "a very long model name here".into(),
             total_tokens: 0,
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             git_branch: "main".into(),
             session_title: String::new(),
             thinking: false,
@@ -376,7 +386,7 @@ mod tests {
         let sl = Statusline {
             model: "日本語モデル".into(),
             total_tokens: 0,
-            cost_usd: 0.0,
+            cost_usd: Some(0.0),
             git_branch: "main".into(),
             session_title: String::new(),
             thinking: false,
@@ -393,6 +403,43 @@ mod tests {
         let rendered = sl.render(20);
         // Each CJK char is 2 columns wide, so truncation should handle correctly
         assert!(UnicodeWidthStr::width(rendered.as_str()) <= 20);
+    }
+
+    /// An unknown price is not a free session.
+    ///
+    /// The segment used to be `format!("${:.2}", 0.0)`, which rendered a
+    /// gateway model's unpriced run as `$0.00` — the same thing it renders for
+    /// a run that genuinely cost nothing. `$n/a` says the number is missing
+    /// rather than that the number is zero.
+    #[test]
+    fn an_unknown_price_renders_as_unavailable_not_free() {
+        let sl = Statusline {
+            cost_usd: None,
+            ..Statusline::new()
+        };
+        let rendered = sl.render(200);
+        assert!(rendered.contains("$n/a"), "{rendered}");
+        assert!(!rendered.contains("$0.00"), "{rendered}");
+    }
+
+    #[test]
+    fn a_known_price_renders_as_dollars() {
+        let sl = Statusline {
+            cost_usd: Some(1.25),
+            ..Statusline::new()
+        };
+        assert!(sl.render(200).contains("$1.25"));
+    }
+
+    /// The `[cost]` placeholder uses the same formatter as the default layout.
+    #[test]
+    fn the_cost_placeholder_matches_the_default_segment() {
+        let missing = Statusline {
+            cost_usd: None,
+            format: Some("[cost]".into()),
+            ..Statusline::new()
+        };
+        assert_eq!(missing.render(100), "$n/a");
     }
 
     #[test]

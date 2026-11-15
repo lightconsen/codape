@@ -2210,7 +2210,7 @@ mod tests {
         let sl = Statusline {
             model: "sonnet".into(),
             total_tokens: 100,
-            cost_usd: 0.01,
+            cost_usd: Some(0.01),
             git_branch: "main".into(),
             session_title: "test".into(),
             thinking: false,

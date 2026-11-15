@@ -14,7 +14,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             let output = format!(
-                "Session: {} ({})\nMessages: {}\nElapsed: {}\n\nTokens:\n  Input:  {:>8}\n  Output: {:>8}\n  Cache Read: {:>8}\n  Cache Creation: {:>8}\n\nCost: ${:.4}\nModel: {}\nPermissions: {:?}",
+                "Session: {} ({})\nMessages: {}\nElapsed: {}\n\nTokens:\n  Input:  {:>8}\n  Output: {:>8}\n  Cache Read: {:>8}\n  Cache Creation: {:>8}\n\nCost: {}\nModel: {}\nPermissions: {:?}",
                 ctx.session_id,
                 ctx.session_title,
                 ctx.message_count,
@@ -23,7 +23,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 ctx.output_tokens,
                 ctx.cache_read_tokens,
                 ctx.cache_creation_tokens,
-                ctx.cost_usd,
+                ctx.cost_label(),
                 ctx.model.0,
                 ctx.permission_mode,
             );
@@ -41,8 +41,8 @@ pub fn register(registry: &mut CommandRegistry) {
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             let output = if ctx.cost_summary.is_empty() {
                 format!(
-                    "Session Cost: ${:.6}\nModel: {}\nInput Tokens: {}\nOutput Tokens: {}\nCache Read: {}\nCache Creation: {}",
-                    ctx.cost_usd,
+                    "Session Cost: {}\nModel: {}\nInput Tokens: {}\nOutput Tokens: {}\nCache Read: {}\nCache Creation: {}",
+                    ctx.cost_label(),
                     ctx.model.0,
                     ctx.input_tokens,
                     ctx.output_tokens,
@@ -129,7 +129,7 @@ mod tests {
             output_tokens: 3000,
             cache_read_tokens: 1000,
             cache_creation_tokens: 500,
-            cost_usd: 0.042,
+            cost_usd: Some(0.042),
             message_count: 15,
             elapsed_secs: 3661,
             ..CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())

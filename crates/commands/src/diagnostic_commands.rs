@@ -22,7 +22,7 @@ pub fn register(registry: &mut CommandRegistry) {
             ));
             lines.push(format!("Model: {}", ctx.model.0));
             lines.push(format!("Messages: {}", ctx.message_count));
-            lines.push(format!("Cost: ${:.4}", ctx.cost_usd));
+            lines.push(format!("Cost: {}", ctx.cost_label()));
             lines.push(format!("Git Branch: {}", ctx.git_branch));
             lines.push(format!(
                 "MCP: {}",

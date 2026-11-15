@@ -19,7 +19,7 @@ The foundational engine of Codape. Manages LLM API communication, conversation t
 - **`PermissionRuleSpec`** (`permissions.rs`) — Parsed Claude-style rule (`Tool`, `Tool(glob)`, `Bash(prefix:*)`, `Bash(glob)`); `PermissionChecker::add_spec` compiles it against a `RuleCompileContext { cwd, home }`. `ToolExecutor::rule_subjects` supplies `RuleSubject`s (one per command segment or file, each with raw/absolute/canonical forms); deny/ask match any subject, allow requires every subject to be covered. A subject marked opaque (unmodelled shell construct) can never be auto-approved. `PowerShell`/`pwsh` specifiers use the same command-segment and opaque analysis as `Bash`. Precedence is deny > ask > allow. `ToolExecutor::set_path_verifier` lets file tools re-check the real path of an opened handle, closing the check/open TOCTOU gap.
 - **`ConfirmationBus`** (`confirmation_bus.rs`) — Decoupled confirmation request/response channel for tool call permissions.
 - **`TokenBudget`** (`budget.rs`) — Tracks per-session and per-turn token consumption.
-- **`CostTracker`** (`cost.rs`) — Records USD cost per model/request. Loads `~/.codape/pricing.json` with built-in fallbacks.
+- **`CostTracker`** (`cost.rs`) — Records USD cost per model/request. Loads `pricing.json` from the config home (`CLAUDE_CONFIG_DIR`, else `~/.codape`) with built-in fallbacks.
 - **`CompactConfig` / compact module** — Context window recovery via micro/auto/reactive/snip strategies.
 - **`ModelRouter`** (`model_router.rs`) — Routes requests across multiple LLM providers with fallback.
 - **`ProviderConfig`** (`provider_config.rs`) — Multi-provider configuration with endpoint definitions.
@@ -96,7 +96,7 @@ non-zero read, so a session can be checked.
 - Thinking-block round-tripping: `thinking` + `signature` are parsed from non-streaming responses and accumulated from streaming deltas, stored as `MessageContent::Thinking`, and prepended to the matching assistant turn when the next request is built. Nothing is sent unless the provider returned a block; none are synthesized.
 - Turn state machine with both blocking and streaming paths.
 - Permission engine with Allow/Deny/Ask/AllowForPath/Elevated results, hooks and compiled rule specs. Session-wide approval is recorded with `record_session_approval`.
-- Token budget tracking and cost estimation with `~/.codape/pricing.json` loading.
+- Token budget tracking and cost estimation with config-home `pricing.json` loading.
 - Context compaction with 4 strategies (micro, auto, reactive, snip).
 - Transcript persistence (atomic temp-file + rename).
 - Structured output validation (JSON schema support).
