@@ -57,8 +57,9 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 
 ### Custom Agents (`custom_agents.rs`)
 
-- **`CustomAgentDef`** — User-defined agent loaded from `~/.codape/agents/*.json` with fields: `name`, `system_prompt`, `allowed_tools`, `model`, `max_tokens`, `output_schema`.
-- **`load_custom_agents()`** — Scans `~/.codape/agents/` and returns a name-to-definition map. Files that fail to read, parse, or validate are skipped with a warning naming the path and error; valid files still load.
+- **`CustomAgentDef`** — User-defined agent loaded from `~/.codape/agents/` or `<project>/.codape/agents/` with fields: `name`, `system_prompt`, `allowed_tools`, `model`, `max_tokens`, `output_schema`, `description`. A file is JSON, or Markdown with an optional frontmatter block — the body is the prompt and the file stem is the name.
+- **`load_custom_agents()`** — Scans the user directory and returns a name-to-definition map. Files that fail to read, parse, or validate are skipped with a warning naming the path and error; valid files still load.
+- **`load_custom_agents_for_project(cwd)`** — Merges the user directory then `<cwd>/.codape/agents/`, so a repository's definition shadows a user one of the same name. This is what the session and `--agent` resolve against, because a worktree session's directory is not the process's.
 - **`load_custom_agents_from_dir(dir)`** — The same scan against an explicit directory, used by tests and embedders that keep definitions elsewhere.
 - **`get_custom_agent()`** — Lookup helper for a named custom agent.
 - Definitions are loaded when `AgentManager::standalone()` is created and can be replaced with `set_custom_agents()` / extended with `register_custom_agent()`. `custom_agent_names()` returns the sorted names used in unknown-name errors.
@@ -146,7 +147,7 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
   test-only one; `subscribe_all()` / `"all"` keeps the unfiltered view.
 - **Sandbox override** — Per-agent `SandboxConfig` injected into the tool executor factory.
 - **Token tracking** — `QueryEngine.total_usage()` captured after each attempt, persisted to companion `.meta.json` file alongside the output file.
-- **Custom agent definitions** — Users define agents in `~/.codape/agents/{name}.json`; `spawn_named_agent(name, ...)` resolves the definition and delegates to `AgentType::Custom`, which merges the system prompt, tool whitelist, model, token limit and output schema into the spawn.
+- **Custom agent definitions** — Users define agents in `~/.codape/agents/{name}.json` or `.md` (or a project's `.codape/agents/`); `spawn_named_agent(name, ...)` resolves the definition and delegates to `AgentType::Custom`, which merges the system prompt, tool whitelist, model, token limit and output schema into the spawn.
 - **Named agents from the CLI** — `codape --agent <name>` resolves the same definitions at session start. The definition's system prompt replaces the default session prompt, its `allowed_tools` narrows the session, and its `model` / `max_tokens` are installed on the session `QueryEngine`. An explicit `--system-prompt`, `--allowed-tools` or `--model` wins, and the definition's `max_tokens` wins over `CODAPE_MAX_TOKENS` (the definition was written for this session; the variable is ambient). An unknown name fails before the REPL starts with the list of configured names. The `codape agents` subcommand lists built-in and custom agents.
 - **Parent prefix wiring** — The REPL refreshes a [`ParentContextSnapshot`] immediately before each turn and the Agent tool's parent-context provider reads it when spawning. When the snapshot has messages, the tool sets `SpawnOptions::parent_prefix` and `parent_cache_safe_params` (derived from the same model/system-prompt/tool list) and reports `message_count = prefix.len()`, so `ForkedContext` knows where the parent prefix ends. Without a provider (managers used directly, tests) a spawn still works but starts a fresh prefix.
 - **Lifecycle producers** — `run_agent_task()` emits `AgentLifecycleEvent::Started`, `TextDelta` for each streamed text delta, `ToolCall { name, args }` for each tool invocation (the engine exposes the call summary, so `args` currently carries `{"summary": ...}` rather than the parsed arguments), `Idle { reason: "turn complete" }` after the event stream drains, and finally `Completed` or `Failed`. They travel as `EngineEvent::AgentEvent`, which the TUI already renders.
@@ -173,7 +174,7 @@ custom agent definitions (`agents`), which the REPL registers at startup.
 ### What Works
 
 - **Agent type definitions** — All 7 built-in types plus custom agents.
-- **Custom agent loading** — Scans `~/.codape/agents/*.json` on manager creation; merged options override spawn defaults.
+- **Custom agent loading** — Scans `~/.codape/agents/` and `<project>/.codape/agents/` (JSON or Markdown) on manager creation; merged options override spawn defaults.
 - **AgentManager** — Full lifecycle: spawn (built-in or named custom), send_message, complete, stop, list, running_count.
 - **Real engine execution** — `spawn_agent()` creates a `tokio::spawn` task running `run_agent_task()` with a full `QueryEngine`.
 - **Context forking** — `ForkedContext` with session ID, cwd, message count, tool whitelist, environment snapshot, and — for cache-aware forks — the parent conversation prefix, fork point and cache-safe params.
@@ -382,9 +383,26 @@ through `EngineEvent::AgentEvent`.
   "allowed_tools": ["Read", "Grep", "Glob"],
   "model": "claude-opus",
   "max_tokens": 4096,
-  "output_schema": null
+  "output_schema": null,
+  "description": "Reviews a diff for security problems"
 }
 ```
+
+The Markdown form is shorter when the prompt is prose. The file stem is the
+name and the body is the prompt; frontmatter is optional and holds the same
+fields:
+
+```markdown
+---
+description: Reviews a diff for security problems
+tools: Read, Grep, Glob
+model: claude-opus
+---
+You are a security review agent. Read the diff and report only real issues.
+```
+
+A definition in `<project>/.codape/agents/` shadows `~/.codape/agents/` by
+name, so a repository can pin its own reviewer.
 
 Spawn by name (this is what the Agent tool and `--agent` use):
 

@@ -46,6 +46,13 @@ pub struct ListMcpResourcesTool;
 
 #[async_trait]
 impl Tool for ListMcpResourcesTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Lists the resources the connected MCP servers expose: URIs, names and MIME \
+             types. Read one with ReadMcpResource.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "ListMcpResources".into(),
@@ -93,6 +100,13 @@ pub struct ReadMcpResourceTool;
 
 #[async_trait]
 impl Tool for ReadMcpResourceTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Reads one MCP resource by URI and returns its content. Use ListMcpResources to \
+             discover the URIs the connected servers offer.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "ReadMcpResource".into(),

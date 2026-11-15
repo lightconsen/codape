@@ -30,6 +30,19 @@ pub enum Overlay {
         /// Currently selected index.
         selected: usize,
     },
+    /// `@path` completion list.
+    ///
+    /// Separate from [`Overlay::CommandPalette`] because choosing an entry
+    /// inserts text into the input line rather than running a command, and the
+    /// list is filtered as the mention is typed.
+    FileMention {
+        /// The text typed after the `@`, without the `@`.
+        query: String,
+        /// Matching project-relative paths.
+        files: Vec<String>,
+        /// Currently selected index.
+        selected: usize,
+    },
     /// Generic detail viewer used for plan, activity, failure, and notification inspection.
     Detail {
         /// Overlay title.

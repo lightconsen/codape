@@ -59,6 +59,40 @@ fn list_dir_items(path: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// The skill names a directory holds, in the form `Skill` resolves them.
+///
+/// A skill is `name.md` or `name/SKILL.md`, and both are named `name` — the
+/// raw directory entry would print `pdf.md` and `pdf` for the same skill in
+/// its two forms, and neither is what the model has to type. Directories with
+/// no `SKILL.md` are skipped: not every folder under `skills/` is a skill.
+fn list_skill_names(path: &std::path::Path) -> Vec<String> {
+    if !path.is_dir() {
+        return Vec::new();
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                return path
+                    .join("SKILL.md")
+                    .is_file()
+                    .then(|| entry.file_name().to_string_lossy().to_string());
+            }
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+                .then(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
+        })
+        .collect()
+}
+
 /// Built-in theme names.
 ///
 /// Kept in sync with `codape_ui::themes::ThemeManager::new`. The commands
@@ -556,19 +590,25 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, args: &[String]| {
+        Arc::new(|ctx: &CommandContext, args: &[String]| {
             let home = config_home();
 
-            // Scan multiple skill directories
+            // Scan every directory the loader scans: the config home, the
+            // project, and the bundled tree. Listing only the config home
+            // meant a project skill was loaded into the session and missing
+            // from `/skills`, which reads as "this skill does not exist".
             let skill_dirs = [
-                home.join("skills"), // ~/.codape/skills/
+                home.join("skills"),                                   // ~/.codape/skills/
+                home.join("bundled-skills"),                           // bundled with Codape
+                std::path::Path::new(&ctx.cwd).join(".codape/skills"), // project
             ];
 
             let mut all_skills: Vec<String> = Vec::new();
             for dir in &skill_dirs {
-                let items = list_dir_items(dir);
-                all_skills.extend(items);
+                all_skills.extend(list_skill_names(dir));
             }
+            all_skills.sort();
+            all_skills.dedup();
 
             if args.is_empty() {
                 if all_skills.is_empty() {
@@ -994,5 +1034,26 @@ mod tests {
         };
         let result = reg.execute("plan", &c, &[]);
         assert!(result.output.contains("Plan"));
+    }
+
+    /// Both skill forms are listed by the name the model has to type, and a
+    /// folder that is not a skill is left out.
+    #[test]
+    fn skill_listing_names_both_forms_and_skips_plain_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pdf.md"), "---\nname: pdf\n---\nbody").unwrap();
+        std::fs::create_dir_all(tmp.path().join("slides/assets")).unwrap();
+        std::fs::write(
+            tmp.path().join("slides/SKILL.md"),
+            "---\nname: slides\n---\nbody",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tmp.path().join("assets")).unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "not a skill").unwrap();
+
+        let mut names = list_skill_names(tmp.path());
+        names.sort();
+
+        assert_eq!(names, vec!["pdf".to_string(), "slides".to_string()]);
     }
 }

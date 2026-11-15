@@ -230,8 +230,21 @@ pub struct SessionContext {
     /// Server-initiated elicitation has nobody to ask in those modes, so the
     /// installed handler declines instead of reaching for stdin.
     pub non_interactive: bool,
+    /// Directories that can contribute a Markdown custom command, project
+    /// first and user second.
+    ///
+    /// Resolved during LoadCommands and applied when the REPL is built: the
+    /// registry lives in the REPL, so the phase can find the directories but
+    /// only the loop can register into them.
+    pub command_dirs: Vec<std::path::PathBuf>,
     /// MCP-discovered skills registered during InitMcp.
     pub mcp_skills: Vec<codape_plugins::skills::SkillMetadata>,
+    /// Skills found on disk during LoadSkills, enabled only.
+    ///
+    /// Kept on the context because the loader needs the working directory and
+    /// the config home — both known here — while the session that advertises
+    /// them is built later.
+    pub skills: Vec<codape_plugins::skills::Skill>,
     /// Memory subsystem initialized.
     pub memory_ready: bool,
     /// Remote services initialized.
@@ -698,7 +711,9 @@ impl StartupOrchestrator {
                 mcp_manager: None,
                 mcp_elicitation: None,
                 non_interactive: false,
+                command_dirs: Vec::new(),
                 mcp_skills: Vec::new(),
+                skills: Vec::new(),
                 memory_ready: false,
                 remote_services_ready: false,
                 cwd: String::new(),
@@ -829,7 +844,8 @@ impl StartupOrchestrator {
         // loudly with the configured names, not start a default session that
         // silently ignores the flag.
         if let Some(ref name) = self.ctx.agent
-            && let Err(error) = crate::agent_selection::resolve_agent(name)
+            && let Err(error) =
+                crate::agent_selection::resolve_agent_at(name, std::path::Path::new(&self.ctx.cwd))
         {
             bail!("{error}");
         }
@@ -1067,7 +1083,10 @@ impl StartupOrchestrator {
             }
             StartupPhase::BuildCapabilities => self.phase_build_capabilities().await,
             StartupPhase::LoadCommands => self.phase_load_commands().await,
-            StartupPhase::LoadSkills => self.phase_load_skills().await,
+            StartupPhase::LoadSkills => {
+                self.phase_load_skills();
+                Ok(())
+            }
             StartupPhase::InitPlugins => self.phase_init_plugins().await,
             StartupPhase::ReconcileMarketplaces => self.phase_reconcile_marketplaces().await,
             StartupPhase::InitMcp => self.phase_init_mcp().await,
@@ -1648,47 +1667,56 @@ impl StartupOrchestrator {
         Ok(())
     }
 
-    /// LoadCommands: discover and register custom commands from `.codape/commands/`.
+    /// LoadCommands: resolve the directories that can supply a custom command.
+    ///
+    /// The registry a command lands in is created by `ReplLoop`, one per
+    /// session, so this phase cannot register anything itself. It resolves the
+    /// two places a Markdown command can live and `configure_repl` hands them to
+    /// the loop that owns the registry — a single scan, and the list `/help`
+    /// prints is the same list that was discovered here.
     // Retained `async`: the startup/dispatch pipeline awaits these on the current
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    async fn phase_load_commands(&self) -> Result<()> {
-        let commands_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/commands");
-        if commands_dir.exists() {
-            let mut count = 0;
-            if let Ok(entries) = std::fs::read_dir(&commands_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "json")
-                        && let Ok(content) = std::fs::read_to_string(&path)
-                        && let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&content)
-                        && let Some(name) = cmd.get("name").and_then(|n| n.as_str())
-                    {
-                        tracing::debug!("discovered custom command: {name}");
-                        count += 1;
-                    }
-                }
-            }
-            tracing::info!("commands loaded: {count} custom from {commands_dir:?}");
-        } else {
-            tracing::debug!("no custom commands directory found");
-        }
+    async fn phase_load_commands(&mut self) -> Result<()> {
+        // Project before user, so a project file is the later of the two and
+        // wins the duplicate-name check.
+        let candidates = [
+            std::path::Path::new(&self.ctx.cwd)
+                .join(".codape")
+                .join("commands"),
+            codape_config::config_home().join("commands"),
+        ];
+        self.ctx.command_dirs = candidates.into_iter().filter(|dir| dir.is_dir()).collect();
+        tracing::debug!(dirs = self.ctx.command_dirs.len(), "custom command dirs");
         Ok(())
     }
 
-    /// LoadSkills: discover and register skills from .codape/skills/.
-    // Retained `async`: the startup/dispatch pipeline awaits these on the current
-    // task, and removing it cascades into unnecessary_wraps/unused_self.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    async fn phase_load_skills(&self) -> Result<()> {
-        let skills_dir = std::path::Path::new(&self.ctx.cwd).join(".codape/skills");
-        if skills_dir.exists() {
-            let count = std::fs::read_dir(&skills_dir).map_or(0, std::iter::Iterator::count);
-            tracing::info!("skills loaded: {count} from {skills_dir:?}");
-        } else {
-            tracing::debug!("no skills directory found");
+    /// LoadSkills: discover skills from the config home and `.codape/skills/`.
+    ///
+    /// This used to count directory entries and log the number, which meant a
+    /// skill on disk was never parsed, never handed to the session, and never
+    /// mentioned to the model — the `Skill` tool could only find a file if the
+    /// model guessed its name. The loader resolves bundled, user and repo
+    /// skills by precedence; the result stays on the context for
+    /// `configure_repl` to advertise.
+    fn phase_load_skills(&mut self) {
+        let mut loader = codape_plugins::skills::SkillLoader::new(
+            // Nothing ships a bundled skill tree yet, so this path is a
+            // convention the loader already understands rather than a
+            // resource that exists today. Pointing at it costs one failed
+            // `read_dir` and leaves room for one later.
+            codape_config::config_home().join("bundled-skills"),
+            codape_config::config_home().join("skills"),
+        );
+        loader.load_all(Some(std::path::Path::new(&self.ctx.cwd)));
+
+        for (source, count) in loader.count_by_source() {
+            tracing::info!("skills loaded: {count} from {source}");
         }
-        Ok(())
+        self.ctx.skills = loader.into_enabled();
+        if self.ctx.skills.is_empty() {
+            tracing::debug!("no skills found");
+        }
     }
 
     /// The builtin tool schemas the plugin type declaration is generated from.
@@ -2789,6 +2817,33 @@ impl StartupOrchestrator {
         if let Some(ref elicitation) = self.ctx.mcp_elicitation {
             repl.with_mcp_elicitation_handler(Arc::clone(elicitation));
         }
+        // Custom Markdown commands go in after the plugin commands, so a file
+        // cannot quietly replace a built-in or a `/{plugin}/{command}`.
+        let custom = repl.with_custom_command_dirs(&self.ctx.command_dirs);
+        if !custom.is_empty() {
+            tracing::info!(
+                count = custom.len(),
+                names = %custom.join(", "),
+                "custom commands registered"
+            );
+        }
+        // Skills were resolved during LoadSkills, before plugins and MCP could
+        // add theirs. The session advertises them every turn; a skill the
+        // model is not told about is one it can only reach by guessing.
+        if !self.ctx.skills.is_empty() {
+            tracing::debug!(
+                count = self.ctx.skills.len(),
+                names = %self
+                    .ctx
+                    .skills
+                    .iter()
+                    .map(|skill| skill.metadata.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "skills advertised to the model"
+            );
+            repl.with_skills(self.ctx.skills.clone());
+        }
         repl.with_skip_permissions(self.ctx.skip_permissions);
         // Only the headless path reads `control_response` from stdin; the
         // interactive loop has its own confirmation UI and owns stdin for the
@@ -3706,11 +3761,16 @@ impl StartupOrchestrator {
 
         // Custom agents are user files; listing them is the discoverability
         // half of resolving `--agent <name>` and the Agent tool's `agent`.
-        let custom = codape_agents::custom_agents::load_custom_agents();
+        let custom = codape_agents::custom_agents::load_custom_agents_for_project(
+            std::path::Path::new(&self.ctx.cwd),
+        );
         let mut names: Vec<&str> = custom.keys().map(String::as_str).collect();
         names.sort_unstable();
         println!();
-        println!("Custom agents (~/.codape/agents/*.json):");
+        println!(
+            "Custom agents (~/.codape/agents/, {}/.codape/agents/):",
+            self.ctx.cwd
+        );
         if names.is_empty() {
             println!("  none configured");
         } else if detailed {
@@ -3721,7 +3781,11 @@ impl StartupOrchestrator {
                     } else {
                         def.allowed_tools.join(", ")
                     };
-                    let summary = def.system_prompt.lines().next().unwrap_or("");
+                    let summary = def
+                        .description
+                        .as_deref()
+                        .or_else(|| def.system_prompt.lines().next())
+                        .unwrap_or("");
                     println!("  {name:<17} - {summary} (tools: {tools})");
                 }
             }

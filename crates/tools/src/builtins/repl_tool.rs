@@ -10,6 +10,14 @@ pub struct ReplTool;
 
 #[async_trait]
 impl Tool for ReplTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Evaluates one expression in a persistent language REPL and returns its value. Use \
+             it for a calculation or a short piece of exploratory code that does not deserve a \
+             file; state carries between calls.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "REPL".into(),

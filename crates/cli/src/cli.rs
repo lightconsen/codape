@@ -237,9 +237,11 @@ pub struct Cli {
 
     /// Run the session as a named custom agent.
     ///
-    /// The name refers to a JSON definition in `~/.codape/agents/`; its
-    /// system prompt and tool whitelist are applied to the session. An
-    /// unknown name is an error listing the configured agents.
+    /// The name refers to a definition in `~/.codape/agents/` or the project's
+    /// `.codape/agents/` (a `.json` file, or a `.md` file whose frontmatter
+    /// holds the metadata and whose body is the system prompt); its system
+    /// prompt and tool whitelist are applied to the session. An unknown name
+    /// is an error listing the configured agents.
     #[arg(long, value_name = "AGENT")]
     pub agent: Option<String>,
 

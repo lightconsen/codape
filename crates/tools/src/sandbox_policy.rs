@@ -93,6 +93,41 @@ fn system_exec_paths() -> Vec<std::path::PathBuf> {
     }
 }
 
+/// Add extra roots to a sandbox config.
+///
+/// The roots become readable, writable and executable locations and additional
+/// working directories. Read and write are granted together on purpose: a
+/// directory the session was told to work in is one it may create a file in,
+/// and a read-only grant would make `--add-dir` half a permission that fails at
+/// the edit rather than at the flag.
+///
+/// Roots already covered by an existing entry are still added: the config may
+/// later be narrowed by a caller that filters this list, and a redundant entry
+/// costs a `starts_with` comparison.
+pub fn extend_with_roots(
+    config: &mut codape_core::sandbox::SandboxConfig,
+    roots: &[std::path::PathBuf],
+) {
+    for root in roots {
+        if !config.allowed_read_paths.contains(root) {
+            config.allowed_read_paths.push(root.clone());
+        }
+        if !config.allowed_write_paths.contains(root) {
+            config.allowed_write_paths.push(root.clone());
+        }
+        if !config.allowed_exec_paths.contains(root) {
+            config.allowed_exec_paths.push(root.clone());
+        }
+        // Every backend treats the working-dir list as writable too — bwrap
+        // starts the child in its first entry, and the Windows ACL grants
+        // land on it — so leaving it out would grant the permission on macOS
+        // and not on Linux.
+        if !config.additional_working_dirs.contains(root) {
+            config.additional_working_dirs.push(root.clone());
+        }
+    }
+}
+
 /// Check whether a resolved path is inside any of the allowed paths.
 ///
 /// Used by `EditTool` and `WriteTool` to enforce sandbox boundaries

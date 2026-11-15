@@ -6,7 +6,9 @@ pub mod custom_agents;
 pub mod manager;
 pub mod types;
 
-pub use custom_agents::{CustomAgentDef, load_custom_agents, load_custom_agents_from_dir};
+pub use custom_agents::{
+    CustomAgentDef, load_custom_agents, load_custom_agents_for_project, load_custom_agents_from_dir,
+};
 pub use manager::{
     AgentError, AgentInstance, AgentManager, AgentMessage, AgentObservableEvent, AgentResult,
     AgentStatus, AgentSubscription, CacheSafeParams, FailureAction, ForkedContext,

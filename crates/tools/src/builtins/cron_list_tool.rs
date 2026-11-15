@@ -12,6 +12,13 @@ pub struct CronListTool;
 
 #[async_trait]
 impl Tool for CronListTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Lists the cron jobs scheduled in this session and the ones persisted from earlier \
+             ones, with their ids, schedules and prompts.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "CronList".into(),

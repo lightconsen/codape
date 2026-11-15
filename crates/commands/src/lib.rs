@@ -2,6 +2,7 @@
 
 #![warn(missing_docs)]
 
+pub mod custom_commands;
 pub mod registry;
 
 // Command modules (12.2 through 12.14)

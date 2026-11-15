@@ -11,6 +11,13 @@ pub struct TeamDeleteTool;
 
 #[async_trait]
 impl Tool for TeamDeleteTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Deletes a team by id, releasing its members. This is destructive and asks for \
+             approval; the team's members are not stopped individually.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "TeamDelete".into(),
