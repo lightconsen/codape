@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -115,7 +115,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: clippy
       - uses: ./.github/actions/linux-deps
@@ -148,7 +148,7 @@ jobs:
           # A separate cache: reusing the 1.99 artifacts here would hide
           # exactly the failure this job exists to find.
           key: msrv
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - name: Compile on the declared MSRV
         run: cargo check --workspace --locked
@@ -165,7 +165,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@nextest
       # Two steps instead of one. Running the whole workspace in a single
@@ -241,7 +241,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - run: cargo test --doc --workspace --locked
 
@@ -257,7 +257,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: clippy
       - run: cargo test -p codape-config --locked
@@ -287,7 +287,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           targets: x86_64-unknown-linux-musl
       - uses: ./.github/actions/linux-deps
@@ -311,7 +311,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
 
       - name: Start a throwaway sshd
@@ -374,7 +374,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           targets: x86_64-pc-windows-gnu
       - name: Install mingw-w64
@@ -415,7 +415,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: clippy
       # Production Windows code (the AppContainer paths) is not compiled on
@@ -529,7 +529,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: 'true'
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - uses: taiki-e/install-action@cargo-llvm-cov
       # `scripts/coverage.sh` measures with `cargo llvm-cov nextest` when
@@ -619,7 +619,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-code-agent-benchmark.sh mock
 
@@ -632,7 +632,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - name: Build eval fixtures
         run: cargo build -p codape-cli --bin codape --bin static-anthropic-server --locked
@@ -663,7 +663,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-mock.sh full
       - run: cargo test -p codape-cli --test e2e_stress --locked -- --nocapture
@@ -686,7 +686,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
@@ -741,7 +741,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - run: scripts/test-interactive-live.sh "${{ inputs.live_provider }}" smoke
       - run: scripts/test-code-agent-benchmark.sh live "${{ inputs.live_provider }}"
@@ -787,7 +787,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       - name: Run the live-provider eval flow
         run: scripts/test-live-eval.sh
@@ -810,7 +810,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: ./.github/actions/linux-deps
       # The rustdoc backlog is empty; a warning is a regression.
       - run: cargo doc --workspace --no-deps --locked
@@ -826,7 +826,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: taiki-e/install-action@cargo-audit
       - run: cargo audit
 
@@ -839,7 +839,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check licenses bans sources
 
@@ -865,7 +865,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.120
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
       - run: cargo build --workspace --release --locked
