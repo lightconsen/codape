@@ -112,7 +112,7 @@ impl Tool for AgentTool {
                     "prompt": { "type": "string" },
                     "agent": {
                         "type": "string",
-                        "description": "Name of a custom agent defined in ~/.codape/agents/*.json. Takes precedence over subagent_type. An unknown name is an error that lists the configured names."
+                        "description": "Name of a custom agent defined in ~/.codape/agents/ or .codape/agents/ (a .json file or a .md file whose body is the prompt). Takes precedence over subagent_type. An unknown name is an error that lists the configured names."
                     },
                     "subagent_type": {
                         "type": "string",
@@ -478,6 +478,7 @@ mod tests {
             model: None,
             max_tokens: None,
             output_schema: None,
+            description: None,
         });
         Arc::new(tokio::sync::Mutex::new(manager))
     }

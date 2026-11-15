@@ -10,6 +10,14 @@ pub struct SkillTool;
 
 #[async_trait]
 impl Tool for SkillTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Loads a skill: a markdown file under .codape/skills/ or ~/.codape/skills/ that \
+             carries instructions for a repeatable task. Only call it when the adverts you were \
+             given name the skill.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "Skill".into(),
@@ -46,16 +54,20 @@ impl Tool for SkillTool {
         let skill = extract_string(&input.arguments, "skill")?;
         let args = extract_string_opt(&input.arguments, "args");
 
-        // Search for skill file in multiple locations
-        let skill_file = format!("{skill}.md");
+        // A skill is either a single Markdown file — `pdf.md` — or a directory
+        // that owns its assets and enters through `SKILL.md`. The loader
+        // accepts both; this tool has to accept the same two forms or a skill
+        // that loaded at startup is one the model cannot open.
         let search_dirs = [
             ctx.cwd.join(".codape/skills"),
             codape_config::settings::config_home().join("skills"),
         ];
 
         for dir in &search_dirs {
-            let path = dir.join(&skill_file);
-            if path.exists() {
+            for path in skill_candidates(dir, &skill) {
+                if !path.exists() {
+                    continue;
+                }
                 match std::fs::read_to_string(&path) {
                     Ok(content) => {
                         let mut output =
@@ -84,16 +96,25 @@ impl Tool for SkillTool {
         for dir in &search_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if std::path::Path::new(&name)
+                    let path = entry.path();
+                    if path
                         .extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
                     {
-                        available.push(name.trim_end_matches(".md").to_string());
+                        available.push(
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string(),
+                        );
+                    } else if path.join("SKILL.md").is_file() {
+                        available.push(entry.file_name().to_string_lossy().to_string());
                     }
                 }
             }
         }
+        available.sort();
+        available.dedup();
 
         let mut msg = format!("Skill '{skill}' not found.");
         if available.is_empty() {
@@ -103,6 +124,18 @@ impl Tool for SkillTool {
         }
         Err(ToolError::InvalidInput { message: msg })
     }
+}
+
+/// The paths a skill name could resolve to, in the order to try them.
+///
+/// The single-file form first, so a loose `pdf.md` still wins over a
+/// `pdf/` directory of the same name — the same order the loader's directory
+/// walk produces.
+fn skill_candidates(dir: &std::path::Path, skill: &str) -> [std::path::PathBuf; 2] {
+    [
+        dir.join(format!("{skill}.md")),
+        dir.join(skill).join("SKILL.md"),
+    ]
 }
 
 fn extract_string(args: &serde_json::Value, key: &str) -> Result<String, ToolError> {
@@ -184,5 +217,73 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    /// A directory skill is reached through its `SKILL.md`, like the loader.
+    #[tokio::test]
+    async fn a_directory_skill_loads_from_its_skill_markdown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".codape/skills/pdf");
+        std::fs::create_dir_all(skill_dir.join("templates")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "# PDF Skill\nExtract text from PDF files.",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("templates/invoice.html"), "<html>").unwrap();
+
+        let ctx = ToolContext {
+            elicit_tx: None,
+            path_verifier: None,
+            execution_context: ExecutionContext::Normal,
+            cwd: tmp.path(),
+            extra: Arc::new(HashMap::new()),
+        };
+
+        let output = SkillTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "Skill".into(),
+                    arguments: serde_json::json!({ "skill": "pdf" }),
+                },
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(output.output.contains("pdf/SKILL.md"), "{}", output.output);
+        assert!(output.output.contains("Extract text"), "{}", output.output);
+    }
+
+    /// The miss message lists directory skills too, or a model that guessed
+    /// wrong is told only about the single-file ones.
+    #[tokio::test]
+    async fn a_missed_name_lists_directory_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_dir = tmp.path().join(".codape/skills");
+        std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
+        std::fs::write(skills_dir.join("pdf/SKILL.md"), "---\nname: pdf\n---\nbody").unwrap();
+
+        let ctx = ToolContext {
+            elicit_tx: None,
+            path_verifier: None,
+            execution_context: ExecutionContext::Normal,
+            cwd: tmp.path(),
+            extra: Arc::new(HashMap::new()),
+        };
+
+        let error = SkillTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "Skill".into(),
+                    arguments: serde_json::json!({ "skill": "nope" }),
+                },
+                ctx,
+            )
+            .await
+            .expect_err("a missing skill is an error");
+        let message = format!("{error:?}");
+        assert!(message.contains("pdf"), "{message}");
     }
 }

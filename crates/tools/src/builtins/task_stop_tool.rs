@@ -12,6 +12,13 @@ pub struct TaskStopTool;
 
 #[async_trait]
 impl Tool for TaskStopTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Stops a running background task by id. Use it when the task is no longer needed or \
+             is going the wrong way; TaskOutput reads what it already produced.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "TaskStop".into(),

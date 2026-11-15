@@ -1,5 +1,6 @@
 //! Skill loading — bundled, user dir, repo dir, plugin, and MCP skills.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use yaml_rust2::{Yaml, YamlLoader};
@@ -22,7 +23,7 @@ pub struct SkillMetadata {
 }
 
 /// A loaded skill.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Skill {
     /// The skill's parsed metadata.
     pub metadata: SkillMetadata,
@@ -139,6 +140,15 @@ fn parse_frontmatter(frontmatter: &str) -> Option<SkillFrontmatter> {
             Some(_) => return None,
         },
     })
+}
+
+/// Whether a path is a Markdown file, by extension.
+fn is_markdown_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
 }
 
 /// Parse skill frontmatter from markdown file content.
@@ -284,25 +294,52 @@ impl SkillLoader {
     }
 
     /// Load skills from a directory.
+    ///
+    /// A skill is either a single file — `pdf.md` — or a directory holding its
+    /// own assets, in which case the entry point is `<dir>/SKILL.md`. The second
+    /// form is what lets a skill ship a template, a script or a reference file
+    /// beside its instructions; without it a skill was one Markdown file and
+    /// nothing could sit next to it.
+    ///
+    /// A directory with no `SKILL.md` is skipped silently: not every directory
+    /// under `skills/` is a skill (a shared `assets/` folder is not), and a
+    /// warning per directory would be noise.
     fn load_from_dir(&mut self, dir: &Path, source: SkillSource) {
         if !dir.exists() {
             return;
         }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md")
-                    && let Ok(content) = std::fs::read_to_string(&path)
-                    && let Some(skill_file) = parse_skill_file(&content)
-                {
-                    self.skills.push(Skill {
-                        metadata: skill_file.metadata,
-                        source,
-                        path,
-                        plugin_name: None,
-                    });
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                is_markdown_file(path) || path.is_dir() && path.join("SKILL.md").is_file()
+            })
+            .map(|path| {
+                if path.is_dir() {
+                    path.join("SKILL.md")
+                } else {
+                    path
                 }
-            }
+            })
+            .collect();
+        paths.sort();
+
+        for path in paths {
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(skill_file) = parse_skill_file(&content) else {
+                continue;
+            };
+            self.skills.push(Skill {
+                metadata: skill_file.metadata,
+                source,
+                path,
+                plugin_name: None,
+            });
         }
     }
 
@@ -362,6 +399,19 @@ impl SkillLoader {
         }
     }
 
+    /// Consume the loader, keeping only the skills that are enabled.
+    ///
+    /// The session wants to own the list — it holds it for as long as it runs
+    /// and hands it to the prompt — and a disabled skill is a skill the model
+    /// must not be told about.
+    #[must_use]
+    pub fn into_enabled(self) -> Vec<Skill> {
+        self.skills
+            .into_iter()
+            .filter(|skill| skill.metadata.enabled)
+            .collect()
+    }
+
     /// Get a skill by name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Skill> {
@@ -389,6 +439,51 @@ impl SkillLoader {
         }
         counts.into_iter().collect()
     }
+}
+
+/// Render the block that tells the model which skills exist.
+///
+/// A skill is only useful if the model knows to reach for it. Before this the
+/// loader ran and nothing was ever said about what it found, so `Skill` was a
+/// tool the model would only call by guessing a name. The block names each
+/// skill and its description, which is exactly what the tool's own error
+/// message would have had to supply after a miss.
+///
+/// Descriptions are truncated: a description is a hint, not the skill, and a
+/// directory of verbose skills must not crowd out the conversation.
+#[must_use]
+pub fn render_skill_adverts(skills: &[Skill]) -> String {
+    const MAX_DESCRIPTION: usize = 200;
+
+    let enabled: Vec<&Skill> = skills
+        .iter()
+        .filter(|skill| skill.metadata.enabled)
+        .collect();
+    if enabled.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "Skills available to you. Call the Skill tool with the name when one applies; do not \
+         guess a name that is not listed.\n",
+    );
+    for skill in enabled {
+        let description = skill
+            .metadata
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if description.is_empty() {
+            let _ = write!(out, "\n- {}", skill.metadata.name);
+        } else if description.chars().count() > MAX_DESCRIPTION {
+            let head: String = description.chars().take(MAX_DESCRIPTION).collect();
+            let _ = write!(out, "\n- {}: {head}…", skill.metadata.name);
+        } else {
+            let _ = write!(out, "\n- {}: {description}", skill.metadata.name);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -548,6 +643,72 @@ This is the script content.
         assert_eq!(loader.enabled()[0].source, SkillSource::RepoDir);
     }
 
+    /// A skill directory carries its own assets, so it is `name/SKILL.md`.
+    ///
+    /// The single-file form made shipping a template or a script beside a
+    /// skill impossible: everything had to be inline. A skill that ships
+    /// anything now owns a directory.
+    #[test]
+    fn a_skill_directory_is_loaded_from_its_skill_markdown() {
+        let repo = tempfile::tempdir().unwrap();
+        let skills_dir = repo.path().join(".codape").join("skills");
+        let skill_dir = skills_dir.join("pdf");
+        std::fs::create_dir_all(skill_dir.join("templates")).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), skill_content()).unwrap();
+        std::fs::write(skill_dir.join("templates/invoice.html"), "<html>").unwrap();
+
+        let mut loader =
+            SkillLoader::new(PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent"));
+        loader.load_all(Some(repo.path()));
+
+        let skill = loader.get("test-skill").expect("the directory skill loads");
+        assert!(
+            skill.path.ends_with("pdf/SKILL.md"),
+            "the entry point is SKILL.md: {}",
+            skill.path.display()
+        );
+    }
+
+    /// A directory without `SKILL.md` is not a skill and says nothing.
+    #[test]
+    fn a_plain_directory_is_not_a_skill() {
+        let repo = tempfile::tempdir().unwrap();
+        let skills_dir = repo.path().join(".codape").join("skills");
+        std::fs::create_dir_all(skills_dir.join("shared")).unwrap();
+        std::fs::write(skills_dir.join("shared/notes.md"), "not a skill").unwrap();
+
+        let mut loader =
+            SkillLoader::new(PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent"));
+        loader.load_all(Some(repo.path()));
+        assert!(loader.list().is_empty(), "{:?}", loader.list());
+    }
+
+    /// Both forms in one directory are loaded, in a stable order.
+    #[test]
+    fn single_file_and_directory_skills_coexist() {
+        let repo = tempfile::tempdir().unwrap();
+        let skills_dir = repo.path().join(".codape").join("skills");
+        std::fs::create_dir_all(skills_dir.join("bundled")).unwrap();
+        std::fs::write(skills_dir.join("bundled/SKILL.md"), skill_content()).unwrap();
+        std::fs::write(
+            skills_dir.join("loose.md"),
+            "---\nname: loose\ndescription: A loose skill\n---\nBody",
+        )
+        .unwrap();
+
+        let mut loader =
+            SkillLoader::new(PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent"));
+        loader.load_all(Some(repo.path()));
+
+        let mut names: Vec<&str> = loader
+            .list()
+            .iter()
+            .map(|s| s.metadata.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["loose", "test-skill"]);
+    }
+
     #[test]
     fn conflict_resolution_prefers_user_over_bundled() {
         let dir = tempfile::tempdir().unwrap();
@@ -586,5 +747,68 @@ enabled: true
 script"#;
         let parsed = parse_skill_file(content).unwrap();
         assert_eq!(parsed.metadata.description, "This: has a colon");
+    }
+
+    /// The model has to be told what it can reach for.
+    ///
+    /// A loaded skill that nobody mentions is a tool the model will only call
+    /// by guessing. The advert names it and says what it is for.
+    #[test]
+    fn adverts_name_each_enabled_skill_and_its_description() {
+        let mut loader = SkillLoader::new(PathBuf::new(), PathBuf::new());
+        loader.add_mcp_skill(SkillMetadata {
+            name: "pdf".into(),
+            hooks: Vec::new(),
+            agent: None,
+            allowed_tools: Vec::new(),
+            description: "Extract text from a PDF".into(),
+            enabled: true,
+        });
+        loader.add_mcp_skill(SkillMetadata {
+            name: "off".into(),
+            hooks: Vec::new(),
+            agent: None,
+            allowed_tools: Vec::new(),
+            description: "Should not be mentioned".into(),
+            enabled: false,
+        });
+
+        let adverts = render_skill_adverts(loader.list());
+        assert!(adverts.contains("pdf"), "{adverts}");
+        assert!(adverts.contains("Extract text from a PDF"), "{adverts}");
+        assert!(
+            !adverts.contains("off"),
+            "a disabled skill must not be advertised: {adverts}"
+        );
+    }
+
+    #[test]
+    fn no_skills_produce_no_advert_block() {
+        assert_eq!(render_skill_adverts(&[]), "");
+        let mut loader = SkillLoader::new(PathBuf::new(), PathBuf::new());
+        loader.add_mcp_skill(SkillMetadata {
+            name: "off".into(),
+            hooks: Vec::new(),
+            agent: None,
+            allowed_tools: Vec::new(),
+            description: String::new(),
+            enabled: false,
+        });
+        assert_eq!(render_skill_adverts(loader.list()), "");
+    }
+
+    #[test]
+    fn a_directory_skill_is_handed_to_the_session_as_an_enabled_skill() {
+        let repo = tempfile::tempdir().unwrap();
+        let skills_dir = repo.path().join(".codape").join("skills");
+        std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
+        std::fs::write(skills_dir.join("pdf/SKILL.md"), skill_content()).unwrap();
+
+        let mut loader =
+            SkillLoader::new(PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent"));
+        loader.load_all(Some(repo.path()));
+        let skills = loader.into_enabled();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].metadata.name, "test-skill");
     }
 }

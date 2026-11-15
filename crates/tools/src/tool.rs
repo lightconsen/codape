@@ -70,6 +70,28 @@ pub fn hook_executor_from(ctx: &ToolContext<'_>) -> Option<Arc<dyn HookExecutor>
 /// writes, so `/rewind` can undo the file half of a truncated turn.
 pub const CHECKPOINT_STORE_KEY: &str = "checkpoint_store";
 
+/// The `ToolContext.extra` key under which the session's plan-mode switch
+/// rides.
+///
+/// `EnterPlanMode` and `ExitPlanMode` are tools, and the permission mode lives
+/// on the engine's checker, which no tool can reach. The session installs this
+/// closure into the dispatcher; the tools call it and report what it says.
+pub const PLAN_MODE_SWITCH_KEY: &str = "plan_mode_switch";
+
+/// Borrow the session's plan-mode switch out of a tool context.
+///
+/// Absent in a bare test context: a plan-mode tool then reports that it could
+/// not change the mode rather than claiming it did.
+#[must_use]
+pub fn plan_mode_switch_from(
+    ctx: &ToolContext<'_>,
+) -> Option<codape_core::permissions::PlanModeSwitch> {
+    ctx.extra
+        .get(PLAN_MODE_SWITCH_KEY)
+        .and_then(|state| state.downcast_ref::<codape_core::permissions::PlanModeSwitch>())
+        .cloned()
+}
+
 /// Borrow the session's file checkpoint store out of a tool context, if one
 /// is installed.
 #[must_use]

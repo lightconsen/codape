@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 pub mod export;
+pub mod history_search;
 pub mod input;
 pub mod message_list;
 pub mod mod_elements;

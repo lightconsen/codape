@@ -1,12 +1,13 @@
 //! Resolution of the `--agent <name>` flag against custom agent definitions.
 //!
-//! A named agent is a JSON file under `~/.codape/agents/`. Selecting one for
-//! the session applies its system prompt and, when the definition provides
-//! one, its tool whitelist. Names are resolved before the session starts so a
-//! typo fails with the list of configured names instead of silently running
-//! the default agent.
+//! A named agent is a file under `~/.codape/agents/` or the project's
+//! `.codape/agents/`, in either JSON or Markdown-with-frontmatter form.
+//! Selecting one for the session applies its system prompt and, when the
+//! definition provides one, its tool whitelist. Names are resolved before the
+//! session starts so a typo fails with the list of configured names instead of
+//! silently running the default agent.
 
-use codape_agents::custom_agents::{CustomAgentDef, load_custom_agents};
+use codape_agents::custom_agents::{CustomAgentDef, load_custom_agents_for_project};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -52,8 +53,9 @@ impl fmt::Display for UnknownAgent {
         if self.available.is_empty() {
             write!(
                 f,
-                "unknown agent {:?}: no custom agents are configured; add a JSON definition \
-                 under ~/.codape/agents/ (for example ~/.codape/agents/{}.json)",
+                "unknown agent {:?}: no custom agents are configured; add a definition \
+                 under ~/.codape/agents/ or .codape/agents/ (for example \
+                 ~/.codape/agents/{}.md, whose body is the prompt)",
                 self.name, self.name
             )
         } else {
@@ -69,13 +71,29 @@ impl fmt::Display for UnknownAgent {
 
 impl std::error::Error for UnknownAgent {}
 
-/// Resolve a custom agent name from `~/.codape/agents/`.
+/// Resolve a custom agent name against the process's working directory.
 ///
 /// # Errors
 /// Returns [`UnknownAgent`] when no definition matches. The error lists the
 /// configured names so the user can correct the flag without guessing.
 pub fn resolve_agent(name: &str) -> Result<ResolvedAgent, UnknownAgent> {
-    resolve_agent_in(name, &load_custom_agents())
+    resolve_agent_at(name, std::path::Path::new("."))
+}
+
+/// Resolve a custom agent name against one project root.
+///
+/// The session resolves against its own `cwd` rather than the process's,
+/// because `--worktree` and tests start a session somewhere the process is
+/// not running: a repository's `.codape/agents/reviewer.md` must be found
+/// wherever the session was pointed.
+///
+/// # Errors
+/// Returns [`UnknownAgent`] when no definition matches.
+pub fn resolve_agent_at(
+    name: &str,
+    project_root: &std::path::Path,
+) -> Result<ResolvedAgent, UnknownAgent> {
+    resolve_agent_in(name, &load_custom_agents_for_project(project_root))
 }
 
 /// Resolve a name against an explicit definition map.
@@ -110,6 +128,7 @@ mod tests {
             model: Some("claude-test".into()),
             max_tokens: Some(1000),
             output_schema: None,
+            description: None,
         }
     }
 
@@ -147,5 +166,25 @@ mod tests {
         assert_eq!(error.available, [] as [std::string::String; 0]);
         let message = error.to_string();
         assert!(message.contains("~/.codape/agents/"), "{message}");
+        assert!(message.contains(".codape/agents/"), "{message}");
+    }
+
+    /// A project's own definition is found from the project root, including
+    /// the Markdown form whose body is the prompt. The name is unique so the
+    /// person's real `~/.codape/agents` cannot shadow the result.
+    #[test]
+    fn a_project_markdown_agent_resolves_from_the_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join(".codape/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("project_probe_agent.md"),
+            "---\ntools: Read\n---\nYou probe projects.\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_agent_at("project_probe_agent", tmp.path()).unwrap();
+        assert_eq!(resolved.system_prompt, "You probe projects.");
+        assert_eq!(resolved.allowed_tools, vec!["Read"]);
     }
 }

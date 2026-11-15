@@ -38,6 +38,14 @@ pub struct CommandResult {
     pub suppress_output: bool,
     /// Additional context to inject into the session.
     pub extra_context: Option<String>,
+    /// Text to submit to the model as the person's next message.
+    ///
+    /// A Markdown command is a prompt template: running `/review src/lib.rs`
+    /// has to expand into a turn, not merely print the expansion and wait for
+    /// the person to type it again. `extra_context` cannot express that — it is
+    /// queued context that rides along with whatever turn comes next — so the
+    /// command says here that it *is* the turn.
+    pub submit_prompt: Option<String>,
     /// System prompt to append for mode switching.
     pub append_system_prompt: Option<String>,
     /// System prompt to fully override the default base prompt.
@@ -58,6 +66,7 @@ impl CommandResult {
             state_changed: false,
             suppress_output: false,
             extra_context: None,
+            submit_prompt: None,
             append_system_prompt: None,
             override_system_prompt: None,
             prompt_profile: None,
@@ -73,6 +82,7 @@ impl CommandResult {
             state_changed: false,
             suppress_output: false,
             extra_context: None,
+            submit_prompt: None,
             append_system_prompt: None,
             override_system_prompt: None,
             prompt_profile: None,
@@ -99,6 +109,17 @@ impl CommandResult {
     #[must_use]
     pub fn with_context(mut self, ctx: impl Into<String>) -> Self {
         self.extra_context = Some(ctx.into());
+        self
+    }
+
+    /// Make this command's text the next turn's prompt.
+    ///
+    /// Used by `prompt`-kind commands that carry their whole payload (a
+    /// Markdown command file, a saved prompt): the REPL submits this text as if
+    /// the person had typed it, so the model answers it in the same turn.
+    #[must_use]
+    pub fn with_submit_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.submit_prompt = Some(prompt.into());
         self
     }
 
@@ -296,11 +317,17 @@ impl CommandContext {
 // ─── SlashCommand ───────────────────────────────────────────────────────────
 
 /// A registered slash command.
+///
+/// `name` and `description` are `CompactString` rather than `&'static str`
+/// because a command can come from a file: a `.codape/commands/*.md` entry is
+/// discovered at startup, so its name and description are not known at compile
+/// time. Built-ins still construct inline — `CompactString::const_new` makes
+/// the constructors `const` for them — so nothing about a built-in changed.
 pub struct SlashCommand {
     /// The command name (e.g., "clear" for /clear).
-    pub name: &'static str,
+    pub name: compact_str::CompactString,
     /// Brief description for /help.
-    pub description: &'static str,
+    pub description: compact_str::CompactString,
     /// The command type.
     pub kind: CommandType,
     /// Whether this command works in non-interactive mode.
@@ -340,17 +367,17 @@ impl std::fmt::Debug for SlashCommand {
 
 impl SlashCommand {
     /// Create a new Local command.
-    pub const fn local(
-        name: &'static str,
-        description: &'static str,
+    pub fn local(
+        name: impl Into<compact_str::CompactString>,
+        description: impl Into<compact_str::CompactString>,
         supports_non_interactive: bool,
         remote_safe: bool,
         bridge_safe: bool,
         handler: CommandHandler,
     ) -> Self {
         Self {
-            name,
-            description,
+            name: name.into(),
+            description: description.into(),
             kind: CommandType::Local,
             supports_non_interactive,
             remote_safe,
@@ -364,15 +391,15 @@ impl SlashCommand {
     }
 
     /// Create a new LocalUi command.
-    pub const fn local_ui(
-        name: &'static str,
-        description: &'static str,
+    pub fn local_ui(
+        name: impl Into<compact_str::CompactString>,
+        description: impl Into<compact_str::CompactString>,
         supports_non_interactive: bool,
         handler: CommandHandler,
     ) -> Self {
         Self {
-            name,
-            description,
+            name: name.into(),
+            description: description.into(),
             kind: CommandType::LocalUi,
             supports_non_interactive,
             remote_safe: true,
@@ -386,15 +413,15 @@ impl SlashCommand {
     }
 
     /// Create a new Prompt command.
-    pub const fn prompt(
-        name: &'static str,
-        description: &'static str,
+    pub fn prompt(
+        name: impl Into<compact_str::CompactString>,
+        description: impl Into<compact_str::CompactString>,
         supports_non_interactive: bool,
         handler: CommandHandler,
     ) -> Self {
         Self {
-            name,
-            description,
+            name: name.into(),
+            description: description.into(),
             kind: CommandType::Prompt,
             supports_non_interactive,
             remote_safe: true,
@@ -408,14 +435,14 @@ impl SlashCommand {
     }
 
     /// Create a new Standalone command.
-    pub const fn standalone(
-        name: &'static str,
-        description: &'static str,
+    pub fn standalone(
+        name: impl Into<compact_str::CompactString>,
+        description: impl Into<compact_str::CompactString>,
         handler: CommandHandler,
     ) -> Self {
         Self {
-            name,
-            description,
+            name: name.into(),
+            description: description.into(),
             kind: CommandType::Standalone,
             supports_non_interactive: true,
             remote_safe: false,

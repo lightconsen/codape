@@ -82,6 +82,37 @@ impl std::str::FromStr for PermissionMode {
     }
 }
 
+/// What a session's plan-mode tools ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanModeRequest {
+    /// Switch to [`PermissionMode::Plan`], remembering the current mode.
+    Enter,
+    /// Restore the mode that was active before [`PlanModeRequest::Enter`].
+    Exit,
+}
+
+/// The session's answer to a [`PlanModeRequest`].
+///
+/// `changed` is false when the request was a no-op — entering plan mode from
+/// plan mode, or leaving it when no mode was saved — so a tool can say what
+/// happened instead of reporting a switch that did not occur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanModeChange {
+    /// Whether the mode actually changed.
+    pub changed: bool,
+    /// The mode in force after the request.
+    pub mode: PermissionMode,
+}
+
+/// A session-installed switch the plan-mode tools call.
+///
+/// The tools cannot reach the engine's checker: the checker belongs to the
+/// session, and the tools crate has no handle on it. A closure installed into
+/// the dispatcher closes that gap — it holds the `Arc<Mutex<PermissionChecker>>`
+/// the engine exposes, so it keeps working while the engine is moved into the
+/// turn's task.
+pub type PlanModeSwitch = std::sync::Arc<dyn Fn(PlanModeRequest) -> PlanModeChange + Send + Sync>;
+
 /// The result of a permission check.
 ///
 /// A session-wide approval is not a result of its own: once the user answers
@@ -718,6 +749,10 @@ impl PermissionChecker {
             session_approvals: HashMap::new(),
             dangerous_tools: vec![
                 "bash".into(),
+                // The shell tool is `Bash` on Unix and `PowerShell` on
+                // Windows; listing only the first meant a command that writes
+                // or deletes ran without the approval every Unix command gets.
+                "powershell".into(),
                 "write".into(),
                 "edit".into(),
                 "multi_edit".into(),
@@ -1440,6 +1475,16 @@ mod tests {
             checker.check("write", None),
             PermissionResult::Ask { .. }
         ));
+        // `Bash` is the shell tool on Unix and `PowerShell` on Windows. Asking
+        // for one and not the other made the default mode mean different
+        // things on the two platforms.
+        assert!(
+            matches!(
+                checker.check("powershell", None),
+                PermissionResult::Ask { .. }
+            ),
+            "PowerShell is the Windows shell tool and must be gated like Bash"
+        );
     }
 
     #[test]

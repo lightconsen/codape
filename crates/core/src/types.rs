@@ -806,6 +806,23 @@ impl ContextWindowResolver {
     }
 }
 
+/// The Codape config home: `CLAUDE_CONFIG_DIR` when set, else `$HOME/.codape`.
+///
+/// The same convention [`context_window_client_data_path`] and
+/// [`token_ratio_client_data_path`] follow, and the one `codape_config`
+/// exposes. It lives here as well because `codape-core` does not depend on
+/// that crate and the prompt compiler needs the directory.
+#[must_use]
+pub fn config_home_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        return PathBuf::from(home).join(".codape");
+    }
+    PathBuf::from(".codape")
+}
+
 /// Path to the client-data context-window file.
 ///
 /// Uses `CLAUDE_CONFIG_DIR` when set, otherwise `$HOME/.codape`, matching

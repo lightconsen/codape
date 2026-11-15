@@ -560,12 +560,18 @@ fn extract_number(args: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// A job id that is safe as a file stem (no separators) and unique enough:
-/// the start time plus a process-local sequence distinguishes two commands.
+/// the start time, the process id and a process-local sequence distinguish
+/// two commands.
+///
+/// The process id is what keeps two Codape processes in one directory apart.
+/// Without it they both start at sequence 0, so two sessions (or two tests,
+/// which nextest runs as separate processes) starting in the same millisecond
+/// derived the same output file and read each other's output.
 fn next_job_id(started_at_ms: i64) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let started_at_ms = started_at_ms.max(0);
     let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("shell-{started_at_ms}-{n}")
+    format!("shell-{started_at_ms}-{}-{n}", std::process::id())
 }
 
 /// A bounded, human-readable description for a job record.
@@ -926,6 +932,34 @@ mod tests {
             output.output.contains("HAS_HOMEHAS_PATH"),
             "ordinary variables were stripped too: {}",
             output.output
+        );
+    }
+
+    /// Two processes starting in the same millisecond need different ids.
+    ///
+    /// The id names an output file under the shared `.codape/jobs`, so an id
+    /// collision is not cosmetic: the second command writes over the first's
+    /// file and both readers see whichever command finished last. The
+    /// sequence counter alone only separates calls within one process, which
+    /// is why this test pinned the failure to two processes rather than two
+    /// threads.
+    #[test]
+    fn job_ids_differ_within_a_millisecond_and_carry_the_process() {
+        let first = next_job_id(1_700_000_000_000);
+        let second = next_job_id(1_700_000_000_000);
+        assert_ne!(first, second, "two calls produced one id");
+        assert!(
+            first.contains(&std::process::id().to_string()),
+            "{first} does not name the process, so another process starting in \
+             the same millisecond can produce the same id"
+        );
+        // The id is a file stem and a store key; a separator would silently
+        // move the record into a subdirectory.
+        assert!(
+            first
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{first} is not safe as a file stem"
         );
     }
 

@@ -63,7 +63,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/status` and `/doctor` show comprehensive system health (API key, MCP, git, model, feature flags).
 - `/memory` reads and searches long-term memory entries.
 - `/hooks`, `/mcp`, `/plugin`, `/skills`, `/tasks` list and manage subsystem state. `/plugin components` lists the themes, output styles, workflows, monitors, LSP servers, channels, binaries, types and experimental data contributed by active plugins.
-- `/style [name]` lists or applies a plugin output style as additional system instructions.
+- `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins.
 - `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing.
 - Feature-gated commands (`/ultraplan`, `/thinkback`, `/thinkback-play`, `/voice`, `/ctx_viz`, `/heapdump`, `/mock-limits`, `/stickers`) check `CommandContext.feature_flags`, which the REPL now fills from the resolved `FeatureFlags` (env + `--betas`).
 - `/bridge` and `/bridge-kick` check `CODAPE_BRIDGE_URL` env var.
@@ -88,6 +88,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
   descriptors) to `/tmp/codape-heap.prof` and reports the byte count. It is a process
   snapshot, not a heap profile, and the command says so in its output.
 - Command chaining via `|` operator (e.g., `/diff | /commit`) passes output between commands.
+- Custom Markdown commands (`custom_commands.rs`): a `.md` file under `<cwd>/.codape/commands/` or `<config home>/commands/` defines a command. The file stem is the name, optional frontmatter carries `description` (shown by `/help` and the palette) and `argument-hint`, and the body is the prompt. `$ARGUMENTS` expands to everything after the command, `$1`…`$9` to individual words. They are loaded at startup as ordinary `SlashCommand`s, so `/help`, the palette, chaining and macros treat them like built-ins; an unreadable or malformed file is skipped with a warning naming it rather than failing startup.
 - Command history is recorded for built-ins and registry commands alike (both REPL paths record before dispatch) and persisted; `/history` reads it, with `[n]` and `search <query>`.
 - `/macro define|list|run|delete` is a REPL built-in backed by `~/.codape/macros.json`; macro names also expand directly.
 - `/trust` is a REPL built-in that reports or changes this workspace's trust decision — the one that lets a repository's `.codape/settings.json` bring `hooks`, `permissions.allow` and `mcp_servers`. `/trust` alone reports the standing decision and what the workspace asks for; `/trust yes` and `/trust no` record a new one. Neither reloads the session, because the hooks were installed at startup, and the output says a restart is needed rather than claiming the change took effect. See [config.md](config.md) → *Workspace Trust*.

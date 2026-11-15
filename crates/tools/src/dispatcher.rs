@@ -93,8 +93,62 @@ pub struct RegistryToolDispatcher {
         Arc<parking_lot::RwLock<Option<Arc<codape_core::checkpoints::CheckpointStore>>>>,
     /// Re-check a path after a tool has opened it.
     path_verifier: Arc<parking_lot::RwLock<Option<PathVerifier>>>,
+    /// Additional directories this session was told to work in.
+    ///
+    /// `--add-dir` used to only push a listing into the conversation, which
+    /// told the model a directory existed and then denied it the moment it
+    /// tried to edit a file there. These roots are folded into every sandbox
+    /// policy the dispatcher builds, so the permission the flag grants is the
+    /// one the tools enforce.
+    ///
+    /// Shared across clones for the same reason the feature flags are: the
+    /// agent manager holds a clone, and a sub-agent editing a file inside an
+    /// added directory should be allowed exactly as the parent is.
+    extra_sandbox_roots: SharedSandboxRoots,
+    /// The session's plan-mode switch, if one was installed.
+    ///
+    /// `EnterPlanMode` and `ExitPlanMode` are tools; the permission mode lives
+    /// on the engine's checker, which no tool can reach. The session puts a
+    /// closure here that holds the checker, so a plan-mode tool changes the
+    /// real mode instead of answering "true" and letting the session keep
+    /// editing.
+    ///
+    /// Shared across clones for the same reason the feature flags are: the
+    /// agent manager holds a clone, and a sub-agent entering plan mode should
+    /// move the session it belongs to.
+    plan_mode_switch: Arc<parking_lot::RwLock<Option<codape_core::permissions::PlanModeSwitch>>>,
     /// Subject forms the pre-dispatch permission check saw, by call id.
     expected_subjects: Arc<parking_lot::Mutex<HashMap<String, Vec<String>>>>,
+}
+
+/// The root list shared between a session's dispatcher and its sub-agents'.
+pub type SharedSandboxRoots = Arc<parking_lot::RwLock<Vec<std::path::PathBuf>>>;
+
+/// Canonicalize, sort and deduplicate a root list.
+///
+/// The comparison `is_path_allowed` makes is against canonicalized paths, so a
+/// root recorded as `./vendor` or through a symlink would never match a tool's
+/// resolved target. A root that cannot be canonicalized (it does not exist
+/// yet) is kept as given rather than dropped: dropping it would turn "not
+/// there yet" into a permission that silently never applies.
+#[must_use]
+pub fn canonical_sandbox_roots(roots: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    let mut resolved: Vec<std::path::PathBuf> = roots
+        .into_iter()
+        .map(|root| std::fs::canonicalize(&root).unwrap_or(root))
+        .collect();
+    resolved.sort();
+    resolved.dedup();
+    resolved
+}
+
+/// Replace the contents of a shared root list with resolved roots.
+///
+/// Writing through the pointer rather than replacing it is what makes a grant
+/// visible everywhere: the dispatcher's clones, and every sub-agent dispatcher
+/// built on the same list, keep working.
+pub fn set_shared_sandbox_roots(shared: &SharedSandboxRoots, roots: Vec<std::path::PathBuf>) {
+    *shared.write() = canonical_sandbox_roots(roots);
 }
 
 impl RegistryToolDispatcher {
@@ -254,8 +308,58 @@ impl RegistryToolDispatcher {
             hooks: Arc::new(parking_lot::RwLock::new(None)),
             checkpoint_store: Arc::new(parking_lot::RwLock::new(None)),
             path_verifier: Arc::new(parking_lot::RwLock::new(None)),
+            extra_sandbox_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            plan_mode_switch: Arc::new(parking_lot::RwLock::new(None)),
             expected_subjects: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Grant tools access to directories outside the working directory.
+    ///
+    /// This is what makes `--add-dir <path>` mean "work here" rather than
+    /// "here is a listing". The roots are canonicalized once, because the
+    /// comparison [`crate::sandbox_policy::is_path_allowed`] makes is against a
+    /// canonicalized path and a symlinked or `..`-relative root would never
+    /// match. A root that cannot be canonicalized is kept as given: it may
+    /// exist by the time a tool runs, and dropping it would turn a transient
+    /// problem into a silent denial.
+    pub fn set_extra_sandbox_roots(&self, roots: Vec<std::path::PathBuf>) {
+        set_shared_sandbox_roots(&self.extra_sandbox_roots, roots);
+    }
+
+    /// The additional roots this session may work in.
+    #[must_use]
+    pub fn extra_sandbox_roots(&self) -> Vec<std::path::PathBuf> {
+        self.extra_sandbox_roots.read().clone()
+    }
+
+    /// Share a root list with another dispatcher.
+    ///
+    /// A sub-agent gets its own dispatcher built at spawn time. Handing it the
+    /// same list is what keeps `--add-dir` in force inside a delegation
+    /// instead of only in the parent's turn.
+    pub fn attach_extra_sandbox_roots(&mut self, roots: SharedSandboxRoots) {
+        self.extra_sandbox_roots = roots;
+    }
+
+    /// The shared root list, for constructing a child dispatcher on it.
+    #[must_use]
+    pub fn shared_extra_sandbox_roots(&self) -> SharedSandboxRoots {
+        Arc::clone(&self.extra_sandbox_roots)
+    }
+
+    /// The session's plan-mode switch, when one is installed.
+    #[must_use]
+    pub fn plan_mode_switch(&self) -> Option<codape_core::permissions::PlanModeSwitch> {
+        self.plan_mode_switch.read().clone()
+    }
+
+    /// Install the session's plan-mode switch.
+    ///
+    /// Pass `None` to make the plan-mode tools report that they could not act
+    /// rather than pretending they did.
+    pub fn set_plan_mode_switch(&self, switch: Option<codape_core::permissions::PlanModeSwitch>) {
+        *self.plan_mode_switch.write() = switch;
     }
 
     /// Enable or disable sandbox injection for dispatched tools.
@@ -622,7 +726,11 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                 .sandbox_override
                 .clone()
                 .or_else(|| sandbox_policy::default_sandbox_config(tool_name, &cwd));
-            if let Some(config) = config {
+            if let Some(mut config) = config {
+                // `--add-dir` has to reach the policy, or the flag grants a
+                // listing the tools then refuse to act on.
+                let extra_roots = self.extra_sandbox_roots.read().clone();
+                sandbox_policy::extend_with_roots(&mut config, &extra_roots);
                 extra.insert(
                     "sandbox_config".to_string(),
                     Box::new(config) as SharedState,
@@ -636,6 +744,17 @@ impl CoreToolExecutor for RegistryToolDispatcher {
             SESSION_CWD_KEY.to_string(),
             Box::new(Arc::clone(&self.session_cwd)) as SharedState,
         );
+
+        // Plan mode is enforced by the engine's checker, which only the
+        // session holds. Without this the two plan-mode tools could not move
+        // it and quietly reported a success that changed nothing.
+        let plan_mode_switch = self.plan_mode_switch.read().clone();
+        if let Some(switch) = plan_mode_switch {
+            extra.insert(
+                crate::tool::PLAN_MODE_SWITCH_KEY.to_string(),
+                Box::new(switch) as SharedState,
+            );
+        }
 
         // Inject the owning session id for durable job records.
         if let Some(ref session_id) = self.session_id {
@@ -816,7 +935,7 @@ pub fn rule_content_arguments(
 
 /// The subject strings a permission rule matches for this call.
 ///
-/// Unlike [`rule_content_arguments`], this returns the forms a *user-written
+/// Unlike `rule_content_arguments`, this returns the forms a *user-written
 /// rule* is expected to match: the command for a shell tool (never path-shaped),
 /// and for file tools both the argument as written and a cwd/home-resolved
 /// absolute form. The rule compiler normalizes patterns the same way.
@@ -1040,6 +1159,7 @@ mod tests {
     use crate::executor::ExecutionConfig;
     use crate::registry::ToolDenyRule;
     use crate::tool::{InterruptBehavior, Tool, ToolDescriptor, ToolTier};
+    use std::fmt::Write as _;
 
     /// A tool whose schema advertises `run_in_background` without declaring
     /// any backgrounding behaviour, as a copied schema would.
@@ -1153,6 +1273,108 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(EchoTool));
         Arc::new(registry)
+    }
+
+    /// Reports the sandbox policy it was handed, so a test can see what a tool
+    /// is actually allowed to touch.
+    struct SandboxProbe;
+
+    #[async_trait::async_trait]
+    impl Tool for SandboxProbe {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: "sandbox_probe".into(),
+                tier: ToolTier::Baseline,
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                output_schema: serde_json::json!({}),
+                requires_approval: false,
+                is_enabled: true,
+                is_read_only: true,
+                is_concurrency_safe: true,
+                interrupt_behavior: InterruptBehavior::RunToCompletion,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            ctx: ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            let config = ctx
+                .extra
+                .get("sandbox_config")
+                .and_then(|value| value.downcast_ref::<codape_core::sandbox::SandboxConfig>());
+            let mut output = String::from("no sandbox\n");
+            if let Some(config) = config {
+                for path in &config.allowed_write_paths {
+                    let _ = writeln!(output, "write {}", path.display());
+                }
+            }
+            Ok(ToolOutput {
+                output,
+                is_display: false,
+                images: Vec::new(),
+            })
+        }
+    }
+
+    /// `--add-dir` reaches the tool: the directory is part of the policy the
+    /// tool is handed, so a write there is allowed rather than denied.
+    #[tokio::test]
+    async fn an_added_root_reaches_the_tool_s_sandbox_policy() {
+        let project = tempfile::tempdir().unwrap();
+        let added = tempfile::tempdir().unwrap();
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SandboxProbe));
+        let dispatcher = RegistryToolDispatcher::new(
+            Arc::new(registry),
+            Arc::new(InnerExecutor::new(ExecutionConfig::default())),
+            ExecutionContext::Normal,
+            project.path().to_path_buf(),
+        );
+        dispatcher.set_extra_sandbox_roots(vec![added.path().to_path_buf()]);
+
+        let outcome = dispatcher
+            .execute("call-1", "sandbox_probe", &serde_json::json!({}))
+            .await;
+        let canonical = std::fs::canonicalize(added.path()).unwrap();
+        assert!(
+            outcome
+                .result
+                .output
+                .contains(&canonical.display().to_string()),
+            "the added directory is not writable: {}",
+            outcome.result.output
+        );
+        let project_root = std::fs::canonicalize(project.path()).unwrap();
+        assert!(
+            outcome
+                .result
+                .output
+                .contains(&project_root.display().to_string()),
+            "the working directory was dropped: {}",
+            outcome.result.output
+        );
+    }
+
+    /// A sub-agent's dispatcher shares the parent's list, so a grant made
+    /// after the child factory was built still applies.
+    #[test]
+    fn a_shared_root_list_is_seen_by_a_later_dispatcher() {
+        let shared: SharedSandboxRoots = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = RegistryToolDispatcher::new(
+            registry_with_echo(),
+            Arc::new(InnerExecutor::new(ExecutionConfig::default())),
+            ExecutionContext::Normal,
+            PathBuf::from("/tmp"),
+        );
+        child.attach_extra_sandbox_roots(Arc::clone(&shared));
+
+        set_shared_sandbox_roots(&shared, vec![dir.path().to_path_buf()]);
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(child.extra_sandbox_roots(), vec![canonical]);
     }
 
     /// Images returned by a tool survive the dispatcher: this is the path an

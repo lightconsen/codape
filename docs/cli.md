@@ -54,7 +54,7 @@ main() → parse_args() → StartupOrchestrator::run()
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--directory DIR` | | Working directory (defaults to current directory) |
-| `--add-dir DIR` | `-a` | Additional directories to include in context (contents listed and injected) |
+| `--add-dir DIR` | `-a` | Additional directories to include in context (contents listed and injected) and to grant the sandbox |
 | `--permissions MODE` | | Permission mode: `default`, `accept-edits`, `plan`, `dont-ask` |
 | `--dangerously-skip-permissions` | | Skip all permission prompts (sets `BypassPermissions` mode) |
 | `--allowed-tools TOOLS` | | Comma-separated list of allowed tools (restricts tool executor) |
@@ -281,7 +281,7 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 5. **Worktree** — `--worktree` detects the current git branch and sets `WorktreeState`.
 6. **Fork session** — `--fork-session` loads transcript messages into the engine session.
 7. **Replay messages** — `--replay-user-messages` loads user messages from the most recent transcript.
-8. **Add directories** — `--add-dir` reads directory listings into `session_effects.extra_context`.
+8. **Add directories** — `--add-dir` reads directory listings into `session_effects.extra_context` and extends the sandbox policy with each root (read, write, exec and working directory), so a tool can act in the directory the flag named instead of being refused by the sandbox after the listing succeeded.
 9. **Beta flags** — `--betas` parses `+name`/`-name`/`name` over `CODAPE_FEATURE_FLAGS`, stores the result as the session `FeatureFlags`, and derives the session `CapabilitySet`. Unknown names fail startup.
 10. **PR context** — `--from-pr` is fetched during orchestrator startup and prepended to the initial prompt (headless) or added to `session_effects.extra_context` (interactive).
 12. **tmux** — `--tmux` is applied before any startup phase; outside tmux it re-launches the binary in a new session.

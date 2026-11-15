@@ -486,6 +486,23 @@ Validate:
 - selection state works
 - dismissal works
 
+### Input-Line Keys
+
+- `Ctrl+R` opens reverse history search. Typing filters (case-insensitive
+  substring), `Up`/`Down` move the highlight, `Enter` puts the entry on the
+  input line without submitting it, and `Esc` restores the draft that was
+  there before.
+- A line starting with `!` runs as a shell command through the platform shell
+  tool and never reaches the model. The command is gated by the same
+  permission decision a `Bash` call gets: a denial is reported, an ask raises
+  the confirmation dialog, and the output is appended as a tool result when it
+  finishes.
+- `@path` attaches a file the way `--file` does. Typing `@` opens a completion
+  list over the project's gitignore-filtered files; `Up`/`Down` walk it, `Tab`
+  or `Enter` insert the highlighted path, and `Esc` dismisses it. At submit,
+  each resolved mention becomes a `--- path ---` block; a path that cannot be
+  read is left in the text and reported as not attached.
+
 ### Notification Bar
 
 Validate:

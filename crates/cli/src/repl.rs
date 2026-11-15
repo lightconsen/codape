@@ -55,6 +55,14 @@ struct SessionEffects {
     allowed_tools_override: Option<Vec<String>>,
     /// Additional user-context fragments accumulated from commands.
     extra_context: Vec<String>,
+    /// A prompt a command expanded into, waiting to become the next turn.
+    ///
+    /// A Markdown command is a prompt template: `/review src/lib.rs` should
+    /// produce an answer, not print the expansion and leave the person to
+    /// type it. The registry cannot start a turn (its handlers are
+    /// synchronous), so it hands the text over and the entry point that runs
+    /// commands starts the turn.
+    pending_submit_prompt: Option<String>,
     /// Whether a title has been generated for this session.
     title_generated: bool,
 }
@@ -956,6 +964,23 @@ struct InteractiveLive {
     /// When the transcript was last written during streaming. The 1 s gate
     /// keeps a long turn from rewriting the file on every delta.
     last_stream_snapshot: std::time::Instant,
+    /// Project-relative paths for `@` completion, read once.
+    ///
+    /// Walking the tree on every keystroke would make typing an `@` mention
+    /// cost a full traversal; a file created after the session starts is
+    /// still reachable by typing its full path, and a restart picks it up.
+    file_list: Option<Arc<Vec<String>>>,
+}
+
+/// What a `!` command produced, for the row it appends.
+#[derive(Debug)]
+struct ShellCommandResult {
+    /// The command as typed, without the `!`.
+    command: String,
+    /// Combined output, as the shell tool reports it.
+    output: String,
+    /// Whether the shell tool reports a failure.
+    is_error: bool,
 }
 
 impl InteractiveLive {
@@ -965,7 +990,17 @@ impl InteractiveLive {
             pending_confirmation: None,
             mod_ui_focus: ModUiFocus::default(),
             last_stream_snapshot: std::time::Instant::now(),
+            file_list: None,
         }
+    }
+
+    /// The project's file list, computed on first use.
+    fn project_files(&mut self, cwd: &str) -> Arc<Vec<String>> {
+        Arc::clone(self.file_list.get_or_insert_with(|| {
+            Arc::new(crate::file_mentions::project_files(std::path::Path::new(
+                cwd,
+            )))
+        }))
     }
 }
 
@@ -1107,6 +1142,35 @@ fn complete_plan(ui_state: &mut codape_ui::state::UiState) {
     }
 }
 
+/// Copy the tool's todo list into the panel the renderer paints.
+///
+/// The `TodoWrite` tool owns the list, and it talks to a store inside the
+/// dispatcher rather than to the UI. Reading it back after the call is what
+/// turns "Wrote 3 todo(s)" into something on screen.
+fn sync_todo_panel(
+    ui_state: &mut codape_ui::state::UiState,
+    dispatcher: Option<&codape_tools::RegistryToolDispatcher>,
+) {
+    let Some(dispatcher) = dispatcher else {
+        return;
+    };
+    let items = dispatcher
+        .todo_store()
+        .get_all()
+        .into_iter()
+        .map(|item| codape_ui::state::TodoEntry {
+            subject: item.subject,
+            description: item.description,
+            status: match item.status {
+                codape_tools::TodoStatus::Pending => codape_ui::state::TodoStatus::Pending,
+                codape_tools::TodoStatus::InProgress => codape_ui::state::TodoStatus::InProgress,
+                codape_tools::TodoStatus::Completed => codape_ui::state::TodoStatus::Completed,
+            },
+        })
+        .collect();
+    ui_state.todos.set_items(items);
+}
+
 fn selected_palette_command(ui_state: &codape_ui::state::UiState) -> Option<String> {
     let codape_ui::overlay::Overlay::CommandPalette {
         commands, selected, ..
@@ -1119,6 +1183,55 @@ fn selected_palette_command(ui_state: &codape_ui::state::UiState) -> Option<Stri
         .get(*selected)
         .and_then(|entry| entry.split_whitespace().next())
         .map(ToString::to_string)
+}
+
+/// Decide whether a `!` command may run, and whether a prompt is needed first.
+///
+/// A `!` line runs a shell command the person typed, so it is gated exactly as
+/// a `Bash` tool call would be: the session's permission mode, deny rules, ask
+/// rules, and the dangerous-tool default all apply. Doing the check here rather
+/// than trusting the dispatcher is deliberate — the dispatcher does not consult
+/// the permission checker at all, because the model's calls are already gated
+/// by the engine before they reach it.
+fn shell_command_needs_approval(
+    checker: &PermissionChecker,
+    command: &str,
+    tool_name: &str,
+) -> Option<String> {
+    let subjects = codape_tools::rule_content_subjects(
+        Some(codape_tools::RuleContentField::Scalar("command")),
+        &serde_json::json!({ "command": command }),
+        &std::path::PathBuf::from("."),
+    );
+    match checker.check_with_subjects(tool_name, &subjects, None) {
+        codape_core::permissions::PermissionResult::Allow
+        | codape_core::permissions::PermissionResult::AllowForPath { .. } => None,
+        codape_core::permissions::PermissionResult::Ask { reason }
+        | codape_core::permissions::PermissionResult::Deny { reason }
+        | codape_core::permissions::PermissionResult::Elevated { reason } => Some(reason),
+    }
+}
+
+/// Replace the `@token` the cursor is inside with `@path`, plus a space.
+///
+/// The token is replaced whole rather than only up to the cursor: the person
+/// may have put the cursor back inside a path they already typed, and leaving
+/// the tail of the old token behind would produce `@src/main.rsain.rs`.
+fn replace_mention(text: &str, cursor: usize, path: &str) -> String {
+    let Some((start, _)) = crate::file_mentions::mention_at(text, cursor) else {
+        return text.to_string();
+    };
+    // The token ends at the next whitespace after the cursor.
+    let rest = &text[cursor.min(text.len())..];
+    let tail = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let end = cursor.min(text.len()) + tail;
+    let mut out = String::with_capacity(text.len() + path.len() + 2);
+    out.push_str(&text[..start]);
+    out.push('@');
+    out.push_str(path);
+    out.push(' ');
+    out.push_str(text[end..].trim_start());
+    out
 }
 
 fn show_detail_overlay(
@@ -2275,6 +2388,17 @@ pub struct ReplLoop {
     telemetry: Option<codape_telemetry::TelemetryHandle>,
     /// What the active plugins contributed: agents, themes, LSP servers and so on.
     plugins: PluginState,
+    /// Skills discovered at startup, advertised to the model on every turn.
+    ///
+    /// Enabled skills only, resolved by source precedence. Empty when nothing
+    /// was found, in which case no block is added.
+    skills: Vec<codape_plugins::skills::Skill>,
+    /// Directories `--add-dir` granted.
+    ///
+    /// Shared with every sub-agent dispatcher built for this session, so a
+    /// delegation can work in an added directory exactly as the parent can.
+    /// Empty until `apply_cli_config` fills it.
+    extra_sandbox_roots: codape_tools::SharedSandboxRoots,
     /// In-flight tool calls, so the activity rows can report duration and labels.
     tools: ToolActivity,
     /// Current working directory.
@@ -2373,6 +2497,21 @@ pub struct ReplLoop {
     workflow_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Terminal preferences: keybindings, theme and the elapsed-time clock.
     ui: UiPreferences,
+    /// Output of `!` commands running off the turn's critical path.
+    ///
+    /// A `cargo build` typed at the prompt must not freeze the frame that is
+    /// drawing the spinner, so the command runs in a task and its row is
+    /// appended when the result reaches the loop.
+    shell_results: ShellResults,
+}
+
+/// The channel a `!` command's task reports on.
+struct ShellResults {
+    /// Cloned into each spawned command.
+    tx: mpsc::UnboundedSender<ShellCommandResult>,
+    /// Taken out once before the TUI loop's `select!`, because poll it through
+    /// `self` would fight the other branches for a borrow.
+    rx: Option<mpsc::UnboundedReceiver<ShellCommandResult>>,
 }
 
 /// In-flight tool calls, so the activity rows can report duration and labels.
@@ -2584,6 +2723,13 @@ struct SessionPermissions {
     headless_control: bool,
     /// Pending destructive command awaiting confirmation.
     pending_destructive_cmd: Option<(String, Vec<String>)>,
+    /// A `!` command waiting for the person to approve running it.
+    ///
+    /// A `!` line is a shell command, not a prompt, so it goes through the
+    /// same permission decision a `Bash` tool call would — an ask rule, plan
+    /// mode, or a dangerous-command default must not be bypassed just because
+    /// the command was typed at the prompt.
+    pending_shell_command: Option<String>,
     /// Confirmation bus for interactive permission requests.
     confirmation_bus: Option<ConfirmationBus>,
     /// Skip permission prompts (--dangerously-skip-permissions).
@@ -2876,6 +3022,7 @@ impl ReplLoop {
     pub fn new(cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
         codape_commands::registry::register_all_commands(&mut commands);
+        let (shell_results_tx, shell_results_rx) = mpsc::unbounded_channel();
         let mut this = Self {
             commands,
             model: ModelSettings {
@@ -2886,6 +3033,8 @@ impl ReplLoop {
                 explicit_model_override: false,
             },
             telemetry: None,
+            skills: Vec::new(),
+            extra_sandbox_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             plugins: PluginState {
                 agents: Vec::new(),
                 workflows: None,
@@ -2951,6 +3100,7 @@ impl ReplLoop {
             permissions: SessionPermissions {
                 headless_control: false,
                 pending_destructive_cmd: None,
+                pending_shell_command: None,
                 confirmation_bus: None,
                 skip: false,
                 mode: None,
@@ -3023,6 +3173,10 @@ impl ReplLoop {
                 settings_statusline_format: None,
                 worktree_previous_cwd: None,
             },
+            shell_results: ShellResults {
+                tx: shell_results_tx,
+                rx: Some(shell_results_rx),
+            },
         };
         this.init_command_persistence();
         this
@@ -3046,6 +3200,12 @@ impl ReplLoop {
     pub fn with_engine(api_client: Box<dyn ApiClient>, cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
         codape_commands::registry::register_all_commands(&mut commands);
+
+        // Shared from here on by the session's dispatcher and every
+        // sub-agent's. `--add-dir` is resolved later, so both have to see the
+        // same list rather than a snapshot of it.
+        let extra_sandbox_roots: codape_tools::SharedSandboxRoots =
+            Arc::new(parking_lot::RwLock::new(Vec::new()));
 
         let session = SessionState::new(std::path::PathBuf::from(&cwd));
         let session_id = session.session_id;
@@ -3122,6 +3282,13 @@ impl ReplLoop {
         ));
 
         let mut agent_manager = AgentManager::standalone();
+        // The manager's own constructor reads `.codape/agents` relative to the
+        // process, which is wrong for a worktree session: refresh from the
+        // session's cwd so a project definition applies to the checkout the
+        // session actually runs in.
+        agent_manager.set_custom_agents(codape_agents::load_custom_agents_for_project(
+            std::path::Path::new(&cwd),
+        ));
         agent_manager.set_api_client(api_client.clone_box());
         agent_manager.set_model(model.clone());
         // Teammate events are a callback surface on the manager; forward them
@@ -3152,6 +3319,10 @@ impl ReplLoop {
         // Background tools run inside a sub-agent's turn too, and a job record
         // written there must still name the session that owns it.
         let subagent_session_id = session_id.to_string();
+        // `--add-dir` grants are session-wide, so a sub-agent gets the same
+        // roots. Shared rather than copied: the roots are resolved after this
+        // factory is built.
+        let subagent_roots = Arc::clone(&extra_sandbox_roots);
         agent_manager.set_tool_executor_factory(move |cwd, sandbox| {
             let mut registry = ToolRegistry::new();
             register_builtin_tools(&mut registry);
@@ -3173,6 +3344,7 @@ impl ReplLoop {
                 cwd,
             );
             dispatcher.set_sandbox_override(sandbox);
+            dispatcher.attach_extra_sandbox_roots(Arc::clone(&subagent_roots));
             dispatcher.set_rate_limiter(Arc::new(RateLimiter::new()));
             dispatcher.set_chrome_client(ChromeClient::new());
             dispatcher.set_session_id(subagent_session_id.clone());
@@ -3256,6 +3428,9 @@ impl ReplLoop {
             ExecutionContext::Normal,
             std::path::PathBuf::from(&cwd),
         );
+        // The same shared list the sub-agent factory holds, so a grant made
+        // later reaches both.
+        dispatcher.attach_extra_sandbox_roots(Arc::clone(&extra_sandbox_roots));
         // Whether this session turned feature flags on decides whether a
         // gated tool is offered at all — the tool listing the model sees is
         // filtered by it.
@@ -3300,6 +3475,43 @@ impl ReplLoop {
         }
 
         let dispatcher = Arc::new(dispatcher);
+        // The plan-mode tools have to move the engine's checker, and the
+        // checker is reachable only through the engine. The closure holds the
+        // `Arc<Mutex<..>>` rather than a reference, so it keeps working after
+        // the engine is moved into the turn's task.
+        {
+            let checker = engine.permission_checker();
+            let switch: codape_core::permissions::PlanModeSwitch = Arc::new(move |request| {
+                use codape_core::permissions::{PermissionMode, PlanModeChange, PlanModeRequest};
+                // A poisoned lock means some other thread panicked while
+                // holding it. Report no change rather than a mode that is not
+                // the one in force.
+                let Ok(mut checker) = checker.lock() else {
+                    return PlanModeChange {
+                        changed: false,
+                        mode: PermissionMode::Plan,
+                    };
+                };
+                match request {
+                    PlanModeRequest::Enter => {
+                        let was_plan = checker.mode() == PermissionMode::Plan;
+                        checker.enter_plan_mode();
+                        PlanModeChange {
+                            changed: !was_plan,
+                            mode: checker.mode(),
+                        }
+                    }
+                    PlanModeRequest::Exit => {
+                        let restored = checker.exit_plan_mode();
+                        PlanModeChange {
+                            changed: restored.is_some(),
+                            mode: checker.mode(),
+                        }
+                    }
+                }
+            });
+            dispatcher.set_plan_mode_switch(Some(switch));
+        }
         let primary_executor: Arc<dyn codape_core::tool_executor::ToolExecutor + Send + Sync> =
             dispatcher.clone();
         let arc_exec = ArcToolExecutor(Arc::clone(&primary_executor));
@@ -3316,6 +3528,7 @@ impl ReplLoop {
 
         #[cfg(feature = "hot-reload")]
         let (config_watcher, config_changed_rx) = Self::init_config_watcher(&cwd);
+        let (shell_results_tx, shell_results_rx) = mpsc::unbounded_channel();
 
         let mut this = Self {
             commands,
@@ -3327,6 +3540,8 @@ impl ReplLoop {
                 explicit_model_override: false,
             },
             telemetry: None,
+            skills: Vec::new(),
+            extra_sandbox_roots,
             plugins: PluginState {
                 agents: Vec::new(),
                 workflows: Some(workflow_scripts),
@@ -3390,6 +3605,7 @@ impl ReplLoop {
             permissions: SessionPermissions {
                 headless_control: false,
                 pending_destructive_cmd: None,
+                pending_shell_command: None,
                 confirmation_bus: Some(confirmation_bus),
                 skip: false,
                 mode: None,
@@ -3461,6 +3677,10 @@ impl ReplLoop {
                 settings_statusline_theme: None,
                 settings_statusline_format: None,
                 worktree_previous_cwd: None,
+            },
+            shell_results: ShellResults {
+                tx: shell_results_tx,
+                rx: Some(shell_results_rx),
             },
         };
         this.init_command_persistence();
@@ -3810,6 +4030,39 @@ impl ReplLoop {
 
     pub const fn with_no_slash_commands(&mut self, no_slash: bool) {
         self.options.no_slash_commands = no_slash;
+    }
+
+    /// Register Markdown commands discovered in `dirs`.
+    ///
+    /// Called once, after the built-ins and any plugin commands are in, so a
+    /// file cannot shadow either. Later directories in `dirs` lose to earlier
+    /// ones on a duplicate name, which is what makes project scope beat user
+    /// scope when the orchestrator passes project first.
+    ///
+    /// Returns the names registered, for logging and tests.
+    pub fn with_custom_command_dirs(&mut self, dirs: &[std::path::PathBuf]) -> Vec<String> {
+        let mut registered = Vec::new();
+        for dir in dirs {
+            for name in codape_commands::custom_commands::register_markdown_commands(
+                dir,
+                &mut self.commands,
+            ) {
+                tracing::debug!(%name, dir = %dir.display(), "registered custom command");
+                registered.push(name);
+            }
+        }
+        registered
+    }
+
+    /// Adopt the skills found at startup.
+    ///
+    /// The list is what the model is told about: a skill nobody names is a
+    /// tool the model only calls by guessing, and a guess that misses costs a
+    /// round trip to learn what was available all along. Kept here rather than
+    /// folded into `append_system_prompt` so `/style` and a mode command
+    /// cannot overwrite it by assignment.
+    pub fn with_skills(&mut self, skills: Vec<codape_plugins::skills::Skill>) {
+        self.skills = skills;
     }
 
     pub fn with_json_schema(&mut self, schema: Option<String>) {
@@ -4265,7 +4518,26 @@ impl ReplLoop {
             engine.set_session(session);
         }
 
-        // 8. Add directory contents to extra context
+        // 8. `--add-dir`: grant access, and show the model what is there.
+        //
+        // The listing alone used to be the whole effect, which told the model
+        // a directory existed and then refused the first edit inside it. The
+        // dispatcher now folds these roots into every sandbox policy it
+        // builds, so the grant and the listing agree.
+        if !self.options.add_dir.is_empty() {
+            let roots: Vec<std::path::PathBuf> = self
+                .options
+                .add_dir
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            // The list is shared rather than copied so a dispatcher built
+            // later — this session's own, or a sub-agent's — is granted the
+            // same roots without having to be told again. Resolving through
+            // the same helper keeps the recorded list and the dispatcher's
+            // identical.
+            codape_tools::set_shared_sandbox_roots(&self.extra_sandbox_roots, roots);
+        }
         for dir in &self.options.add_dir {
             let path = std::path::Path::new(dir);
             if path.exists() && path.is_dir() {
@@ -4647,7 +4919,7 @@ impl ReplLoop {
         let Some(name) = self.options.agent.clone() else {
             return;
         };
-        match crate::agent_selection::resolve_agent(&name) {
+        match crate::agent_selection::resolve_agent_at(&name, std::path::Path::new(&self.cwd)) {
             Ok(agent) => self.apply_resolved_agent(agent),
             Err(error) => tracing::warn!("--agent was not applied: {error}"),
         }
@@ -5028,6 +5300,7 @@ impl ReplLoop {
         ui_state.notifications.dismiss_all();
         ui_state.input = codape_ui::input::InputBuffer::new();
         ui_state.plan.reset();
+        ui_state.todos.clear();
         ui_state.activity_log.clear();
         ui_state.permission_bar.clear_status();
         clear_permission_overlay(ui_state);
@@ -5338,6 +5611,13 @@ impl ReplLoop {
                         .success(format!("{tool_name} completed"));
                     result.output
                 };
+                // `TodoWrite` writes the list into the dispatcher's store, and
+                // the result row alone ("Wrote 3 todo(s)") never shows it. The
+                // panel mirrors the store on every result rather than keying
+                // off the tool name: the name arrives on a separate
+                // `ToolCallStart`, and a lost start would leave the panel
+                // empty for the rest of the session. Reading it is a mutex
+                // and a clone of a list that is usually a handful of rows.
                 ui_state.messages.push(Message {
                     role: MessageRole::ToolResult,
                     content: content.into(),
@@ -5348,6 +5628,7 @@ impl ReplLoop {
                     streaming: false,
                     folded: false,
                 });
+                sync_todo_panel(ui_state, self.agents.dispatcher.as_deref());
                 self.persist_interactive_snapshot(ui_state);
             }
             EngineEvent::PermissionRequest { tool, args, .. } => {
@@ -5542,6 +5823,64 @@ impl ReplLoop {
             return TuiKeyFlow::Quit;
         }
 
+        // Ctrl+R: reverse search over the input history. While it is open it
+        // owns the keyboard, the way the MCP form does, so a query character
+        // cannot land on the line behind it.
+        if ui_state.history_search.is_none()
+            && key.code == KeyCode::Char('r')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            ui_state.history_search = Some(codape_ui::history_search::HistorySearch::new(
+                &ui_state.input.history,
+                ui_state.input.text.clone(),
+            ));
+            return TuiKeyFlow::Handled;
+        }
+        if ui_state.history_search.is_some() {
+            let history = ui_state.input.history.clone();
+            let mut accept: Option<String> = None;
+            let mut cancel = false;
+            if let Some(search) = ui_state.history_search.as_mut() {
+                match key.code {
+                    KeyCode::Esc => cancel = true,
+                    // Enter puts the highlighted entry on the line rather
+                    // than submitting it: Ctrl+R followed by Enter in a shell
+                    // *runs* the command, but here Enter submits a prompt to
+                    // the model, and picking from the list is not the same
+                    // decision as sending it.
+                    KeyCode::Enter | KeyCode::Tab => {
+                        accept = Some(
+                            search
+                                .current()
+                                .unwrap_or_else(|| search.original())
+                                .to_string(),
+                        );
+                    }
+                    KeyCode::Up => search.move_selection(-1),
+                    KeyCode::Down => search.move_selection(1),
+                    KeyCode::Backspace => search.pop_char(&history),
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() =>
+                    {
+                        search.push_char(c, &history);
+                    }
+                    _ => {}
+                }
+            }
+            if cancel {
+                let original = ui_state
+                    .history_search
+                    .take()
+                    .map_or_else(String::new, |search| search.original().to_string());
+                ui_state.input.text = original;
+            } else if let Some(text) = accept {
+                ui_state.history_search = None;
+                ui_state.input.text = text;
+            }
+            ui_state.input.cursor = ui_state.input.text.len();
+            return TuiKeyFlow::Handled;
+        }
+
         // Informational overlays do not own the keyboard.
         // Dismiss one on the next key and handle that key
         // normally, so typing `/status` after a failure
@@ -5645,18 +5984,30 @@ impl ReplLoop {
                     ui_state.overlays.pop();
                     if let Some((cmd, args)) = self.permissions.pending_destructive_cmd.take() {
                         self.execute_and_display_command(&cmd, &args, ui_state);
+                    } else if let Some(command) = self.permissions.pending_shell_command.take() {
+                        self.spawn_shell_command(command, ui_state);
                     }
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                     ui_state.overlays.pop();
                     self.permissions.pending_destructive_cmd = None;
-                    ui_state.messages.push(codape_ui::message_list::Message {
-                        role: codape_ui::message_list::MessageRole::System,
-                        content: "Command cancelled.".into(),
-                        tool_name: None,
-                        streaming: false,
-                        folded: false,
-                    });
+                    if let Some(command) = self.permissions.pending_shell_command.take() {
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
+                            content: format!("Not run: {command}").into(),
+                            tool_name: None,
+                            streaming: false,
+                            folded: false,
+                        });
+                    } else {
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
+                            content: "Command cancelled.".into(),
+                            tool_name: None,
+                            streaming: false,
+                            folded: false,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -5741,6 +6092,49 @@ impl ReplLoop {
                     return TuiKeyFlow::Handled;
                 }
                 _ => {}
+            }
+        }
+
+        // The `@` palette: Up/Down walk the matches, Tab or Enter inserts the
+        // highlighted path, Esc drops the list and keeps the text as typed.
+        //
+        // These four are consumed here rather than falling through, because
+        // the end of the handler re-syncs the palette from the input line and
+        // a fresh sync would reset the highlight Up/Down just moved.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::FileMention { .. })
+        ) {
+            let mut insert: Option<String> = None;
+            let mut dismiss = false;
+            let mut consume = true;
+            if let Some(codape_ui::overlay::Overlay::FileMention {
+                files, selected, ..
+            }) = ui_state.overlays.top_mut()
+            {
+                match key.code {
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down if !files.is_empty() => {
+                        *selected = (*selected + 1).min(files.len() - 1);
+                    }
+                    KeyCode::Tab | KeyCode::Enter => insert = files.get(*selected).cloned(),
+                    KeyCode::Esc => dismiss = true,
+                    // Everything else edits the line, which the sync at the
+                    // end of the handler then folds into the list.
+                    _ => consume = false,
+                }
+            }
+            if let Some(path) = insert {
+                ui_state.overlays.pop();
+                ui_state.input.text =
+                    replace_mention(&ui_state.input.text, ui_state.input.cursor, &path);
+                ui_state.input.cursor = ui_state.input.text.len();
+                ui_state.input.suggestion = None;
+            } else if dismiss {
+                ui_state.overlays.pop();
+            }
+            if consume {
+                return TuiKeyFlow::Handled;
             }
         }
 
@@ -6220,6 +6614,7 @@ impl ReplLoop {
         // Sync slash-command suggestion overlay when typing in insert mode.
         if vim.is_insert() {
             self.update_slash_suggestions(ui_state);
+            self.update_mention_suggestions(ui_state, live);
         }
         TuiKeyFlow::Handled
     }
@@ -6425,6 +6820,10 @@ impl ReplLoop {
         // The loop's own mutable state, grouped so the per-event handlers can
         // take one borrow of it instead of six separate `&mut` arguments.
         let mut live = InteractiveLive::new();
+        // `!` command output arrives here from the task that ran it. Taken out
+        // of `self` for the loop: polling it through `self` would fight the
+        // other `select!` branches for the borrow.
+        let mut shell_results_rx = self.shell_results.rx.take();
 
         // A signalled TUI must not leave the terminal in the alternate screen
         // with raw mode on. Exit through the same cleanup path as Ctrl+D and
@@ -6839,6 +7238,12 @@ impl ReplLoop {
 
                 () = tokio::time::sleep(Duration::from_millis(100)), if thinking => {
                     self.drain_agent_observable_events();
+                }
+
+                Some(shell_result) = async {
+                    shell_results_rx.as_mut().unwrap().recv().await
+                }, if shell_results_rx.is_some() => {
+                    self.apply_shell_result(shell_result, &mut ui_state);
                 }
 
 
@@ -7507,6 +7912,24 @@ impl ReplLoop {
             // is how headless came to report commands it never actually ran.
             let mut buffer: Vec<u8> = Vec::new();
             self.execute_command(prompt, &mut buffer).await?;
+            // A prompt command (a Markdown file in `.codape/commands/`) is a
+            // template for a turn. Running it and stopping would print the
+            // expansion and never ask the model, which is the one thing the
+            // file exists to do.
+            if let Some(expanded) = self.session.effects.pending_submit_prompt.take() {
+                if self.session.engine.is_none() {
+                    return Err(anyhow::anyhow!(
+                        "No QueryEngine configured. Set ANTHROPIC_API_KEY or run `codape --api-key <key>`"
+                    ));
+                }
+                let answer = self.submit_prompt(&expanded, true).await;
+                let head = String::from_utf8_lossy(&buffer);
+                return Ok(if head.trim().is_empty() {
+                    answer
+                } else {
+                    format!("{head}{answer}")
+                });
+            }
             return Ok(String::from_utf8_lossy(&buffer).into_owned());
         }
 
@@ -8377,6 +8800,20 @@ impl ReplLoop {
             opts
         };
 
+        // Name the skills this session found. The advert rides on the
+        // per-turn append rather than on `SessionEffects` so that `/style`,
+        // which assigns to `append_system_prompt`, cannot drop it, and so a
+        // skill found at startup still reaches a turn submitted through the
+        // orchestrator path. `render_skill_adverts` returns an empty string
+        // when there is nothing to say, which leaves the prompt untouched.
+        let adverts = codape_plugins::skills::render_skill_adverts(&self.skills);
+        if !adverts.is_empty() {
+            options.append_system_prompt = Some(match options.append_system_prompt.take() {
+                Some(existing) => format!("{existing}\n\n{adverts}"),
+                None => adverts,
+            });
+        }
+
         // REPL-specific: extra context from commands is not part of QueryRequest
         if !self.session.effects.extra_context.is_empty() {
             options.replay_user_messages = Some(
@@ -8894,6 +9331,10 @@ impl ReplLoop {
 
         if let Some(ref ctx) = result.extra_context {
             self.session.effects.extra_context.push(ctx.clone());
+        }
+
+        if let Some(ref prompt) = result.submit_prompt {
+            self.session.effects.pending_submit_prompt = Some(prompt.clone());
         }
 
         if let Some(ref tools) = result.allowed_tools_override {
@@ -9610,6 +10051,47 @@ impl ReplLoop {
         }
     }
 
+    /// Sync the `@path` completion overlay with the token under the cursor.
+    ///
+    /// The list is filtered on every edit rather than only on `@`, because the
+    /// query keeps changing while the path is typed. An `@` inside a word is
+    /// an email address, not a mention, and [`file_mentions::mention_at`] is
+    /// what draws that line — both here and at submit, so the list can never
+    /// offer a completion for a token the expansion will not touch.
+    fn update_mention_suggestions(
+        &self,
+        ui_state: &mut codape_ui::state::UiState,
+        live: &mut InteractiveLive,
+    ) {
+        use codape_ui::overlay::Overlay;
+
+        let is_mention_palette =
+            matches!(ui_state.overlays.top(), Some(Overlay::FileMention { .. }));
+        let Some((_, query)) =
+            crate::file_mentions::mention_at(&ui_state.input.text, ui_state.input.cursor)
+        else {
+            if is_mention_palette {
+                ui_state.overlays.pop();
+            }
+            return;
+        };
+        let files = live.project_files(&self.cwd);
+        let matches = crate::file_mentions::complete(query, &files);
+        if is_mention_palette {
+            ui_state.overlays.pop();
+        }
+        // An empty list would paint a two-row palette that says nothing; the
+        // input line is still the place to keep typing.
+        if matches.is_empty() {
+            return;
+        }
+        ui_state.overlays.push(Overlay::FileMention {
+            query: query.to_string(),
+            files: matches,
+            selected: 0,
+        });
+    }
+
     /// Edit, submit, or cancel the open multi-field MCP form.
     ///
     /// Returns whether the key was consumed. Every key is consumed while a
@@ -9708,6 +10190,140 @@ impl ReplLoop {
     }
 
     /// Process a line of input in the TUI context.
+    /// Run a `!` line as a shell command instead of a prompt.
+    ///
+    /// The gate comes first: a denial is reported and nothing runs, an ask
+    /// raises the same Confirmation dialog `/`-destructive commands use, and
+    /// only an allow reaches the dispatcher. The command then runs in its own
+    /// task so a long build does not freeze the frame — its row is appended by
+    /// the loop when the result arrives.
+    fn run_bang_command(&mut self, text: &str, ui_state: &mut codape_ui::state::UiState) {
+        let command = text.trim_start_matches('!').trim().to_string();
+        if command.is_empty() {
+            // A toast alone scrolls away; a usage error belongs in the
+            // transcript, where the person who typed it will look.
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
+                content: "Usage: !<command>".into(),
+                tool_name: None,
+                streaming: false,
+                folded: false,
+            });
+            ui_state.notifications.warn("Usage: !<command>");
+            return;
+        }
+        self.history.push(text.to_string());
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::ToolCall,
+            content: format!("$ {command}").into(),
+            tool_name: Some(codape_tools::platform_shell_tool().into()),
+            streaming: false,
+            folded: false,
+        });
+
+        let checker = self
+            .session
+            .engine
+            .as_ref()
+            .map(codape_core::QueryEngine::permission_checker);
+        let ask = checker.as_ref().and_then(|checker| {
+            let checker = checker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shell_command_needs_approval(&checker, &command, codape_tools::platform_shell_tool())
+        });
+        if let Some(reason) = ask {
+            // A mode-level refusal (plan mode) says why the command cannot
+            // run at all; the same text is the confirmation prompt for an
+            // ordinary "this needs approval", where the answer can unblock it.
+            let allowed_by_answer = checker.as_ref().is_some_and(|checker| {
+                !checker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .mode()
+                    .is_read_only()
+            });
+            if !allowed_by_answer {
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
+                    content: format!("Not run: {command}\n({reason})").into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                });
+                return;
+            }
+            self.permissions.pending_shell_command = Some(command.clone());
+            ui_state
+                .overlays
+                .push(codape_ui::overlay::Overlay::Confirm {
+                    message: format!("Run this command?\n{command}\n\n({reason})"),
+                });
+            return;
+        }
+        self.spawn_shell_command(command, ui_state);
+    }
+
+    /// Run one shell command in a task and hand its output back to the loop.
+    fn spawn_shell_command(&self, command: String, ui_state: &mut codape_ui::state::UiState) {
+        let Some(dispatcher) = self.agents.dispatcher.clone() else {
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
+                content: "No tool dispatcher is configured for this session.".into(),
+                tool_name: None,
+                streaming: false,
+                folded: false,
+            });
+            return;
+        };
+        let tool = codape_tools::platform_shell_tool();
+        let tx = self.shell_results.tx.clone();
+        ui_state.notifications.info(format!(
+            "Running {}",
+            command.lines().next().unwrap_or_default()
+        ));
+        tokio::spawn(async move {
+            let outcome = dispatcher
+                .execute(
+                    &format!("bang-{}", std::process::id()),
+                    tool,
+                    &serde_json::json!({ "command": command }),
+                )
+                .await;
+            // A closed receiver means the TUI is gone; nothing left to tell.
+            let _ = tx.send(ShellCommandResult {
+                command,
+                output: outcome.result.output,
+                is_error: outcome.result.is_error,
+            });
+        });
+    }
+
+    /// Append a finished `!` command's output to the transcript.
+    fn apply_shell_result(
+        &self,
+        result: ShellCommandResult,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        if result.is_error {
+            ui_state
+                .notifications
+                .err(format!("Command failed: {}", result.command));
+        } else {
+            ui_state
+                .notifications
+                .success(format!("Command finished: {}", result.command));
+        }
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::ToolResult,
+            content: result.output.into(),
+            tool_name: Some(codape_tools::platform_shell_tool().into()),
+            streaming: false,
+            folded: false,
+        });
+        self.persist_interactive_snapshot(ui_state);
+    }
+
     fn process_tui_input(
         &mut self,
         text: &str,
@@ -9751,6 +10367,15 @@ impl ReplLoop {
             return;
         }
 
+        // A `!` line is a shell command, not a prompt: it runs through the
+        // shell tool and never reaches the model. Checked before the slash
+        // path so `!` cannot be captured by a slash command, and after the
+        // elicitation answer above, where any text is an answer.
+        if text.starts_with('!') {
+            self.run_bang_command(text, ui_state);
+            return;
+        }
+
         self.history.push(text.to_string());
 
         // Add user message
@@ -9761,6 +10386,29 @@ impl ReplLoop {
             streaming: false,
             folded: false,
         });
+
+        // Attach `@path` mentions the way `--file` does: the token becomes a
+        // `--- path ---` block before the turn is built, so the model reads
+        // the file instead of spending a call finding it. The transcript keeps
+        // the line as typed; a path that could not be attached stays in the
+        // turn text and the person is told why.
+        let mut expanded = text.to_string();
+        if !text.starts_with('/') {
+            let (expanded_text, attached, skipped) =
+                crate::file_mentions::expand(text, std::path::Path::new(&self.cwd));
+            if !attached.is_empty() || !skipped.is_empty() {
+                expanded = expanded_text;
+            }
+            if !skipped.is_empty() {
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
+                    content: format!("Not attached: {}", skipped.join("; ")).into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                });
+            }
+        }
 
         if text.starts_with('/') {
             let parts: Vec<&str> = text.split_whitespace().collect();
@@ -10020,12 +10668,47 @@ impl ReplLoop {
 
             // Execute the command directly
             self.execute_and_display_command(cmd_name, &args, ui_state);
+
+            // A prompt command (a Markdown file in `.codape/commands/`)
+            // expanded into text meant to become a turn. The registry cannot
+            // start one — its handlers are synchronous — so it hands the text
+            // over here, where the engine is reachable. A turn already running
+            // takes precedence: the expansion is queued like a typed prompt,
+            // and the idle boundary picks it up when the current turn ends.
+            if let Some(prompt) = self.session.effects.pending_submit_prompt.take() {
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::User,
+                    content: prompt.clone().into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                });
+                if self.session.engine.is_some()
+                    && !*thinking
+                    && query_done_rx.is_none()
+                    && !ui_state.overlays.is_active()
+                {
+                    self.mods.auto_turns = 0;
+                    self.mods.prompts_this_turn = 0;
+                    self.start_tui_query(
+                        prompt,
+                        ui_state,
+                        thinking,
+                        phase,
+                        query_done_rx,
+                        elicit_rx,
+                        tui_elicit_rx,
+                    );
+                } else {
+                    queued_prompts.push_back(prompt);
+                }
+            }
         } else if self.session.engine.is_some() {
             // A person submitted a prompt: the auto-turn chain starts over.
             self.mods.auto_turns = 0;
             self.mods.prompts_this_turn = 0;
             self.start_tui_query(
-                text.to_string(),
+                expanded,
                 ui_state,
                 thinking,
                 phase,
@@ -10038,7 +10721,7 @@ impl ReplLoop {
             // running turn; it resets the loop guard when it is started.
             self.mods.auto_turns = 0;
             self.mods.prompts_this_turn = 0;
-            queued_prompts.push_back(text.to_string());
+            queued_prompts.push_back(expanded);
             ui_state.messages.push(codape_ui::message_list::Message {
                 role: codape_ui::message_list::MessageRole::System,
                 content: "[Queued until current turn finishes]".into(),
@@ -10301,6 +10984,12 @@ impl ReplLoop {
         }
         self.history.clear();
         self.session.effects = SessionEffects::default();
+        // The todo list belongs to the conversation it was written for. A
+        // cleared session that kept the old rows would show a plan nothing in
+        // the transcript refers to.
+        if let Some(dispatcher) = self.agents.dispatcher.as_deref() {
+            dispatcher.todo_store().clear();
+        }
 
         if removed == 0 {
             "Session cleared. (There was nothing in it.)".to_string()
@@ -10317,6 +11006,7 @@ impl ReplLoop {
         ui_state.notifications.dismiss_all();
         ui_state.input = codape_ui::input::InputBuffer::new();
         ui_state.plan.reset();
+        ui_state.todos.clear();
         ui_state.activity_log.clear();
         ui_state.permission_bar.clear_status();
         clear_permission_overlay(ui_state);
@@ -10873,58 +11563,64 @@ impl ReplLoop {
         Ok(())
     }
 
-    /// `/style [name]` — list or apply a plugin output style.
+    /// `/style [name]` — list or apply an output style.
     ///
     /// An output style is assigned to `append_system_prompt`, so the style's
     /// instructions are added to the base prompt rather than replacing it.
     /// Values may be a string or an object with `prompt`/`content`/`text`.
+    /// A plugin style is consulted first; the built-ins in
+    /// [`crate::output_styles`] are the fallback, which is what makes `/style`
+    /// useful on an install with no plugins at all.
     fn handle_output_style_command(&mut self, args: &[String]) -> String {
+        let plugin_names: Vec<String> = self
+            .plugins
+            .output_styles
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
         if args.is_empty() {
-            if self.plugins.output_styles.is_empty() {
-                return "No output styles available.".to_string();
-            }
-            let names: Vec<&str> = self
-                .plugins
-                .output_styles
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect();
+            let names = crate::output_styles::available_names(&plugin_names);
             return format!(
-                "Output styles: {}\nUse /style <name> to apply one.",
+                "Output styles: {}\nUse /style <name> to apply one. \
+                 (Built-in: default, explanatory, learning.)",
                 names.join(", ")
             );
         }
         let name = args[0].as_str();
-        let Some((_, value)) = self
+        if let Some((style, value)) = self
             .plugins
             .output_styles
             .iter()
             .find(|(style, _)| style == name)
-        else {
-            let names: Vec<&str> = self
-                .plugins
-                .output_styles
-                .iter()
-                .map(|(style, _)| style.as_str())
-                .collect();
-            return format!(
-                "No output style named '{name}'. Available: {}",
-                names.join(", ")
-            );
-        };
-        let prompt = value.as_str().map(str::to_string).or_else(|| {
-            for key in ["prompt", "content", "text"] {
-                if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                    return Some(text.to_string());
+        {
+            let prompt = value.as_str().map(str::to_string).or_else(|| {
+                for key in ["prompt", "content", "text"] {
+                    if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                        return Some(text.to_string());
+                    }
                 }
-            }
-            None
-        });
-        let Some(prompt) = prompt else {
-            return format!("Output style '{name}' has no prompt text.");
-        };
-        self.session.effects.append_system_prompt = Some(prompt);
-        format!("Output style '{name}' applied to the system prompt.")
+                None
+            });
+            let Some(prompt) = prompt else {
+                return format!("Output style '{name}' has no prompt text.");
+            };
+            self.session.effects.append_system_prompt = Some(prompt);
+            return format!("Output style '{style}' applied to the system prompt.");
+        }
+        // A built-in is the fallback, not the override: a plugin of the same
+        // name was found above and is what a local install asked for.
+        if let Some(style) = crate::output_styles::built_in(name) {
+            self.session.effects.append_system_prompt = Some(style.prompt.to_string());
+            return format!(
+                "Output style '{}' applied to the system prompt. (built-in)",
+                style.name
+            );
+        }
+        let names = crate::output_styles::available_names(&plugin_names);
+        format!(
+            "No output style named '{name}'. Available: {}",
+            names.join(", ")
+        )
     }
 
     /// What `/macro` asks the REPL to do.
@@ -12208,6 +12904,107 @@ mod tests {
         let mut out = Vec::new();
         repl.execute_command("/agents wat", &mut out).await.unwrap();
         assert!(String::from_utf8_lossy(&out).contains("Unknown /agents subcommand"));
+    }
+
+    /// `EnterPlanMode` is a tool, and the mode it changes lives on the
+    /// engine's checker. Without the switch installed into the dispatcher the
+    /// call answered "true" and the session kept editing.
+    #[tokio::test]
+    async fn enter_plan_mode_tool_moves_the_session_s_own_mode() {
+        let api = ReadThenAnswerApi {
+            call: Arc::new(std::sync::Mutex::new(0)),
+            expected_contents: "unused",
+        };
+        let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
+        repl.with_no_persistence(true);
+        repl.apply_cli_config();
+
+        let checker = repl
+            .session
+            .engine
+            .as_ref()
+            .expect("engine")
+            .permission_checker();
+        assert_eq!(checker.lock().unwrap().mode(), PermissionMode::Default);
+
+        let dispatcher = repl.agents.dispatcher.clone().expect("dispatcher");
+        let entered = dispatcher
+            .execute("call-1", "EnterPlanMode", &serde_json::json!({}))
+            .await;
+        assert!(!entered.result.is_error, "{:?}", entered.result);
+        assert_eq!(
+            checker.lock().unwrap().mode(),
+            PermissionMode::Plan,
+            "the tool did not enter plan mode on the session's checker"
+        );
+        // Plan mode is only real if the checker now refuses a mutation.
+        assert!(matches!(
+            checker.lock().unwrap().check("Write", None),
+            codape_core::permissions::PermissionResult::Deny { .. }
+        ));
+
+        let exited = dispatcher
+            .execute("call-2", "ExitPlanMode", &serde_json::json!({}))
+            .await;
+        assert!(!exited.result.is_error, "{:?}", exited.result);
+        assert_eq!(
+            checker.lock().unwrap().mode(),
+            PermissionMode::Default,
+            "leaving plan mode did not restore the mode it replaced"
+        );
+    }
+
+    /// The tool result row is not the plan: a `TodoWrite` call puts the list
+    /// in the dispatcher's store, and the panel is painted from there.
+    #[tokio::test]
+    async fn a_todo_write_result_fills_the_todo_panel() {
+        let api = ReadThenAnswerApi {
+            call: Arc::new(std::sync::Mutex::new(0)),
+            expected_contents: "unused",
+        };
+        let mut repl = ReplLoop::with_engine(Box::new(api), "/tmp".into(), ModelId::sonnet());
+        repl.with_no_persistence(true);
+        let dispatcher = repl.agents.dispatcher.clone().expect("dispatcher");
+        let outcome = dispatcher
+            .execute(
+                "call-1",
+                "TodoWrite",
+                &serde_json::json!({"todos": [
+                    {"subject": "read the parser", "status": "completed"},
+                    {"subject": "port the tokenizer", "status": "in_progress"},
+                    {"subject": "run the tests", "status": "pending"}
+                ]}),
+            )
+            .await;
+        assert!(!outcome.result.is_error, "{:?}", outcome.result);
+
+        let mut ui_state = codape_ui::state::UiState::default();
+        let mut live = InteractiveLive::new();
+        repl.apply_engine_event(
+            EngineEvent::ToolCallEnd {
+                id: "call-1".into(),
+                result: ToolResult {
+                    tool_call_id: "call-1".into(),
+                    output: outcome.result.output,
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            },
+            &mut live,
+            &mut ui_state,
+            NotificationSupport {
+                osc9: false,
+                progress: false,
+                inside_tmux: false,
+            },
+        );
+
+        let rows = ui_state.todos.render_rows();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0], ('✓', "read the parser".to_string()));
+        assert_eq!(rows[1], ('■', "port the tokenizer".to_string()));
+        assert_eq!(rows[2], ('□', "run the tests".to_string()));
+        assert_eq!(ui_state.todos.display_height(), 3);
     }
 
     #[test]
@@ -14165,6 +14962,39 @@ mod tests {
         );
     }
 
+    /// `--add-dir` has to reach the sandbox, or the flag grants a listing the
+    /// tools then refuse to act on.
+    #[tokio::test]
+    async fn apply_cli_config_turns_add_dir_into_a_sandbox_grant() {
+        let project = tempfile::tempdir().unwrap();
+        let added = tempfile::tempdir().unwrap();
+        let api = ReadThenAnswerApi {
+            call: Arc::new(std::sync::Mutex::new(0)),
+            expected_contents: "unused",
+        };
+        let mut repl = ReplLoop::with_engine(
+            Box::new(api),
+            project.path().to_string_lossy().into_owned(),
+            ModelId::sonnet(),
+        );
+        repl.with_add_dir(vec![added.path().to_string_lossy().into_owned()]);
+
+        repl.apply_cli_config();
+
+        let canonical = std::fs::canonicalize(added.path()).unwrap();
+        assert_eq!(
+            repl.extra_sandbox_roots.read().as_slice(),
+            std::slice::from_ref(&canonical),
+            "the added directory is not in the shared root list"
+        );
+        let dispatcher = repl.agents.dispatcher.as_ref().expect("dispatcher");
+        assert_eq!(
+            dispatcher.extra_sandbox_roots(),
+            vec![canonical],
+            "the dispatcher did not receive the grant"
+        );
+    }
+
     #[test]
     fn resolved_agent_sets_prompt_and_tools_unless_flags_win() {
         use crate::agent_selection::ResolvedAgent;
@@ -15388,5 +16218,543 @@ mod tests {
                 .all(|action| matches!(action, ModDrainAction::Submit(_)))
         );
         assert_eq!(queue.len(), 7, "the rest waits for a later idle boundary");
+    }
+
+    // ── Gap 9: Ctrl+R, `!` shell mode, `@` mentions ──────────────────────────
+
+    fn press(code: KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[allow(unused_imports)]
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    /// Driving `handle_key_event` needs a dispatcher, which only
+    /// `with_engine` builds; the double never answers a turn here.
+    fn repl_with_keys(cwd: &std::path::Path) -> ReplLoop {
+        let api = ReadThenAnswerApi {
+            call: Arc::new(std::sync::Mutex::new(0)),
+            expected_contents: "unused",
+        };
+        let mut repl = ReplLoop::with_engine(
+            Box::new(api),
+            cwd.to_string_lossy().into_owned(),
+            ModelId::sonnet(),
+        );
+        repl.with_no_persistence(true);
+        repl
+    }
+
+    #[tokio::test]
+    async fn ctrl_r_opens_the_history_search_and_enter_puts_it_on_the_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state.input.history = vec!["cargo test".into(), "git status".into()];
+        ui_state.input.text = "draft".into();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let mut thinking = false;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        let flow = repl
+            .handle_key_event(
+                ctrl('r'),
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                &mut thinking,
+                &mut query_done_rx,
+                &mut elicit_rx,
+                &mut tui_elicit_rx,
+                &mut queued,
+            )
+            .await;
+        assert_eq!(flow, TuiKeyFlow::Handled);
+        assert!(ui_state.history_search.is_some(), "Ctrl+R did not open");
+        assert_eq!(
+            ui_state.history_search.as_ref().unwrap().original(),
+            "draft"
+        );
+
+        // Typing narrows, and the query must not land on the input line.
+        for c in "git".chars() {
+            repl.handle_key_event(
+                press(KeyCode::Char(c)),
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                &mut thinking,
+                &mut query_done_rx,
+                &mut elicit_rx,
+                &mut tui_elicit_rx,
+                &mut queued,
+            )
+            .await;
+        }
+        assert_eq!(ui_state.input.text, "draft", "the query edited the line");
+        assert_eq!(ui_state.history_search.as_ref().unwrap().query(), "git");
+
+        // Enter accepts rather than submitting: no turn starts.
+        repl.handle_key_event(
+            press(KeyCode::Enter),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(ui_state.history_search.is_none(), "the search stayed open");
+        assert_eq!(ui_state.input.text, "git status");
+        assert!(!thinking, "Enter started a turn instead of accepting");
+        assert!(query_done_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn escaping_the_history_search_restores_the_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state.input.history = vec!["cargo test".into()];
+        ui_state.input.text = "kept".into();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let mut thinking = false;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        for key in [ctrl('r'), press(KeyCode::Char('x')), press(KeyCode::Esc)] {
+            repl.handle_key_event(
+                key,
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                &mut thinking,
+                &mut query_done_rx,
+                &mut elicit_rx,
+                &mut tui_elicit_rx,
+                &mut queued,
+            )
+            .await;
+        }
+        assert!(ui_state.history_search.is_none());
+        assert_eq!(ui_state.input.text, "kept", "Esc lost the draft");
+    }
+
+    #[tokio::test]
+    async fn a_bang_line_never_becomes_a_turn_and_a_bare_bang_is_a_usage_error() {
+        // The routing decision: `!` never reaches a slash command or the
+        // model, and a bare `!` is a usage error rather than a turn. Both
+        // assertions drive the real submit path; asserting on
+        // `trim_start_matches` alone would only test the standard library.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        allow_the_shell_tool(&repl);
+
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut thinking = false;
+        let mut phase = InteractivePhase::Idle;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.process_tui_input(
+            "!",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+        assert!(
+            ui_state
+                .messages
+                .messages
+                .iter()
+                .any(|message| message.content.contains("Usage: !")),
+            "a bare `!` should say how to use it: {:?}",
+            ui_state.messages.messages
+        );
+        assert!(queued.is_empty(), "a bare `!` queued a turn");
+        assert!(!thinking, "a bare `!` started a query");
+
+        repl.process_tui_input(
+            "!echo hello",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+        assert!(queued.is_empty(), "`!` text reached the model as a prompt");
+        assert!(
+            ui_state
+                .messages
+                .messages
+                .iter()
+                .any(|message| message.content.contains("$ echo hello")),
+            "the command was not echoed as a tool call: {:?}",
+            ui_state.messages.messages
+        );
+    }
+
+    /// Allow the shell tool outright, so a `!` command runs instead of
+    /// asking. `Bash` is a dangerous tool with no rules, which by default
+    /// means "ask" on every call.
+    fn allow_the_shell_tool(repl: &ReplLoop) {
+        let checker = repl
+            .session
+            .engine
+            .as_ref()
+            .expect("engine")
+            .permission_checker();
+        checker
+            .lock()
+            .unwrap()
+            .add_rule(codape_core::permissions::PermissionRule {
+                tool_name: codape_tools::platform_shell_tool().into(),
+                action: codape_core::permissions::PermissionAction::Allow,
+                paths: Vec::new(),
+                description: "shell allowed for the test".into(),
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bang_command_runs_through_the_shell_tool_and_reports_its_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        allow_the_shell_tool(&repl);
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut thinking = false;
+        let mut phase = InteractivePhase::Idle;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.process_tui_input(
+            "!echo bang-output",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+
+        // The command row is added immediately; the output arrives from the
+        // task the dispatcher ran it in.
+        assert!(
+            ui_state.messages.messages.iter().any(|message| {
+                message.role == codape_ui::message_list::MessageRole::ToolCall
+                    && message.content.contains("$ echo bang-output")
+            }),
+            "no command row: {:?}",
+            ui_state.messages.messages
+        );
+        assert!(!thinking, "a `!` command must not start a turn");
+
+        // Drain the result the way the event loop would.
+        let mut rx = repl.shell_results.rx.take().expect("shell receiver");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the command did not finish")
+            .expect("the result channel closed");
+        assert!(!result.is_error, "{:?}", result.output);
+        repl.apply_shell_result(result, &mut ui_state);
+        assert!(
+            ui_state.messages.messages.iter().any(|message| {
+                message.role == codape_ui::message_list::MessageRole::ToolResult
+                    && message.content.contains("bang-output")
+            }),
+            "output missing: {:?}",
+            ui_state.messages.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bang_command_in_plan_mode_is_refused_not_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let checker = repl
+            .session
+            .engine
+            .as_ref()
+            .expect("engine")
+            .permission_checker();
+        checker
+            .lock()
+            .unwrap()
+            .set_mode(codape_core::permissions::PermissionMode::Plan);
+
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut thinking = false;
+        let mut phase = InteractivePhase::Idle;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.process_tui_input(
+            "!rm -rf /tmp/should-not-run",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+
+        assert!(
+            ui_state
+                .messages
+                .messages
+                .iter()
+                .any(|message| message.content.contains("Not run:")),
+            "a plan-mode refusal was not reported: {:?}",
+            ui_state.messages.messages
+        );
+        assert!(repl.permissions.pending_shell_command.is_none());
+    }
+
+    #[tokio::test]
+    async fn typing_an_at_mention_opens_the_completion_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "fn main() {}").unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let mut thinking = false;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        for c in "@src/li".chars() {
+            repl.handle_key_event(
+                press(KeyCode::Char(c)),
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                &mut thinking,
+                &mut query_done_rx,
+                &mut elicit_rx,
+                &mut tui_elicit_rx,
+                &mut queued,
+            )
+            .await;
+        }
+        let Some(codape_ui::overlay::Overlay::FileMention { query, files, .. }) =
+            ui_state.overlays.top()
+        else {
+            panic!("no mention palette: {:?}", ui_state.overlays.top());
+        };
+        assert_eq!(query, "src/li");
+        assert_eq!(files, &vec!["src/lib.rs".to_string()]);
+
+        // Tab inserts the highlighted path and closes the list.
+        repl.handle_key_event(
+            press(KeyCode::Tab),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(ui_state.overlays.top().is_none(), "the list stayed open");
+        assert_eq!(ui_state.input.text, "@src/lib.rs ");
+    }
+
+    #[test]
+    fn replace_mention_swaps_the_whole_token() {
+        assert_eq!(
+            replace_mention("read @src/li now", 12, "src/lib.rs"),
+            "read @src/lib.rs now"
+        );
+        // The cursor inside a long token does not leave a tail behind.
+        assert_eq!(
+            replace_mention("@src/main.rs", 5, "src/main.rs"),
+            "@src/main.rs "
+        );
+        // Text after the token is trimmed of the space it started with.
+        assert_eq!(
+            replace_mention("@a.txt and more", 6, "b.txt"),
+            "@b.txt and more"
+        );
+    }
+
+    #[test]
+    fn a_built_in_output_style_applies_even_with_no_plugins() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        assert!(repl.plugins.output_styles.is_empty());
+
+        let listing = repl.handle_output_style_command(&[]);
+        for name in ["default", "explanatory", "learning"] {
+            assert!(listing.contains(name), "{name} missing from: {listing}");
+        }
+
+        let applied = repl.handle_output_style_command(&["explanatory".to_string()]);
+        assert!(applied.contains("applied"), "{applied}");
+        let prompt = repl
+            .session
+            .effects
+            .append_system_prompt
+            .clone()
+            .expect("no prompt was appended");
+        assert_eq!(
+            prompt,
+            crate::output_styles::built_in("explanatory")
+                .unwrap()
+                .prompt
+        );
+
+        // An unknown name lists what is available rather than appending.
+        repl.session.effects.append_system_prompt = None;
+        let unknown = repl.handle_output_style_command(&["nope".to_string()]);
+        assert!(unknown.contains("No output style named"), "{unknown}");
+        assert!(repl.session.effects.append_system_prompt.is_none());
+    }
+
+    #[test]
+    fn a_plugin_style_shadows_the_built_in_of_the_same_name() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.plugins.output_styles = vec![(
+            "default".to_string(),
+            serde_json::json!({ "prompt": "plugin prompt" }),
+        )];
+
+        let applied = repl.handle_output_style_command(&["default".to_string()]);
+        assert!(applied.contains("applied"), "{applied}");
+        assert_eq!(
+            repl.session.effects.append_system_prompt.as_deref(),
+            Some("plugin prompt"),
+            "the built-in replaced the plugin's copy"
+        );
+    }
+
+    #[test]
+    fn shell_approval_matches_the_bash_tool_decision() {
+        use codape_core::permissions::{PermissionChecker, PermissionMode, PermissionRule};
+
+        // Default: the shell is a dangerous tool with no rules, so even a
+        // benign command asks. A `!` command must inherit that, not bypass it.
+        let checker = PermissionChecker::new(PermissionMode::Default);
+        assert!(shell_command_needs_approval(&checker, "echo hi", "Bash").is_some());
+
+        // An allow rule is what makes it run without asking.
+        let mut allowed = PermissionChecker::new(PermissionMode::Default);
+        allowed
+            .add_rule(PermissionRule {
+                tool_name: "Bash".into(),
+                action: codape_core::permissions::PermissionAction::Allow,
+                paths: Vec::new(),
+                description: String::new(),
+            })
+            .unwrap();
+        assert!(shell_command_needs_approval(&allowed, "echo hi", "Bash").is_none());
+
+        // Plan mode refuses a mutating command outright.
+        let plan = PermissionChecker::new(PermissionMode::Plan);
+        assert!(
+            shell_command_needs_approval(&plan, "rm -rf build", "Bash").is_some(),
+            "plan mode allowed a mutating shell command"
+        );
+
+        // A configured deny rule wins even over a whole-tool allow.
+        let mut deny = PermissionChecker::new(PermissionMode::Default);
+        deny.add_rule(PermissionRule {
+            tool_name: "Bash".into(),
+            action: codape_core::permissions::PermissionAction::Deny,
+            paths: vec!["rm*".into()],
+            description: "rm is denied".into(),
+        })
+        .unwrap();
+        assert!(shell_command_needs_approval(&deny, "rm -rf build", "Bash").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_bang_command_that_needs_approval_waits_for_a_yes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut thinking = false;
+        let mut phase = InteractivePhase::Idle;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.process_tui_input(
+            "!echo needs-approval",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+        assert!(
+            matches!(
+                ui_state.overlays.top(),
+                Some(codape_ui::overlay::Overlay::Confirm { .. })
+            ),
+            "no confirmation: {:?}",
+            ui_state.overlays.top()
+        );
+        assert_eq!(
+            repl.permissions.pending_shell_command.as_deref(),
+            Some("echo needs-approval")
+        );
+
+        // Answering yes runs it; answering no drops it without running.
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        repl.handle_key_event(
+            press(KeyCode::Char('y')),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(repl.permissions.pending_shell_command.is_none());
+        let mut rx = repl.shell_results.rx.take().expect("shell receiver");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+            .await
+            .expect("the approved command did not finish")
+            .expect("the result channel closed");
+        assert!(result.output.contains("needs-approval"), "{result:?}");
     }
 }

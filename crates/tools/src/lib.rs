@@ -32,11 +32,14 @@ pub use builtins::{
 pub use codape_core::permissions::ToolRuleExemptions;
 pub use context::{ExecutionContext, ToolError, ToolOutput};
 pub use cron_scheduler::{CRON_SCHEDULER_KEY, CronJob, CronScheduler};
-pub use dispatcher::RegistryToolDispatcher;
+pub use dispatcher::{
+    RegistryToolDispatcher, SharedSandboxRoots, canonical_sandbox_roots, rule_content_subjects,
+    set_shared_sandbox_roots,
+};
 pub use executor::{ExecutionConfig, ToolExecutor};
 pub use rate_limiter::{RATE_LIMITER_KEY, RateLimitConfig, RateLimiter};
 pub use registry::{ToolDenyRule, ToolNotFoundError, ToolRegistry, install_rule_exemptions};
-pub use sandbox_policy::{default_sandbox_config, is_path_allowed};
+pub use sandbox_policy::{default_sandbox_config, extend_with_roots, is_path_allowed};
 pub use task_store::{TASK_STORE_KEY, TaskRecord, TaskStatus, TaskStore};
 pub use todo_store::{TODO_STORE_KEY, TodoItem, TodoStatus, TodoStore};
 pub use tool::{

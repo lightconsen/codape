@@ -24,6 +24,13 @@ pub struct TeamCreateTool;
 
 #[async_trait]
 impl Tool for TeamCreateTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Creates a named team that sub-agents can join and share work through. Returns the \
+             new team id; TeamDelete removes it.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "TeamCreate".into(),

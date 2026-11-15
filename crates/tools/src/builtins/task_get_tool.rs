@@ -12,6 +12,13 @@ pub struct TaskGetTool;
 
 #[async_trait]
 impl Tool for TaskGetTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Reads one background task's record by id: status, owner, and what it has \
+             produced so far. Use TaskList to find the id.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "TaskGet".into(),

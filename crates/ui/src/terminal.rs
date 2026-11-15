@@ -369,20 +369,24 @@ fn panic_exit_commands(
 /// constraint position instead.
 const PALETTE_IDX: usize = 1;
 const NOTIFICATION_IDX: usize = 2;
-const STATUSLINE_IDX: usize = 3;
-const RULE_IDX: usize = 4;
-const INPUT_IDX: usize = 5;
-const RULE_BELOW_IDX: usize = 6;
-const PERMISSION_IDX: usize = 7;
+const TODOS_IDX: usize = 3;
+const STATUSLINE_IDX: usize = 4;
+const RULE_IDX: usize = 5;
+const INPUT_IDX: usize = 6;
+const RULE_BELOW_IDX: usize = 7;
+const PERMISSION_IDX: usize = 8;
 
 /// The vertical pane stack, top to bottom.
 ///
 /// Shared with the layout tests so both sides agree on what each index means.
 /// `input_height` is the number of terminal rows the input buffer needs: one
 /// for an empty or single-line buffer, more once the buffer has lines or wraps.
+/// `todo_height` is the row count the `TodoWrite` panel asked for, zero when
+/// the model has not written a list.
 fn frame_constraints(
     inline_palette_height: u16,
     show_notif: bool,
+    todo_height: u16,
     show_statusline: bool,
     input_height: u16,
     show_perm_bar: bool,
@@ -391,6 +395,7 @@ fn frame_constraints(
         Constraint::Min(1),                        // message area
         Constraint::Length(inline_palette_height), // inline command hint
         Constraint::Length(u16::from(show_notif)), // notification bar
+        Constraint::Length(todo_height),           // todo panel
         // One row of text with one blank row above and below it.
         Constraint::Length(if show_statusline { 3 } else { 0 }), // statusline
         Constraint::Length(1),                                   // rule above the input
@@ -452,15 +457,26 @@ fn render_frame(
     let show_notif = state.notifications.active_count() > 0 && !is_compact;
 
     let show_perm_bar = !is_compact;
+    // The todo panel sits above the statusline. It is the model's own plan, so
+    // it stays visible in compact mode too, but capped so the transcript keeps
+    // most of the screen.
+    let max_todo_height = area.height.saturating_sub(6).max(1);
+    let todo_height = state.todos.display_height().min(max_todo_height);
     // A long or multi-line input grows its own pane rather than being clipped
     // to one row. It is capped so the transcript keeps most of the screen.
     let max_input_height = area.height.saturating_sub(3).max(1);
-    let input_height = input_display_height(&state.input, area.width).min(max_input_height);
+    let input_height = if state.history_search.is_some() {
+        // The query line plus at least one match row.
+        2.min(max_input_height)
+    } else {
+        input_display_height(&state.input, area.width).min(max_input_height)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(frame_constraints(
             inline_palette_height,
             show_notif,
+            todo_height,
             show_statusline,
             input_height,
             show_perm_bar,
@@ -527,11 +543,22 @@ fn render_frame(
         );
     }
 
+    // Todo panel (above the statusline)
+    if todo_height > 0 {
+        render_todo_panel(frame, chunks[TODOS_IDX], &state.todos, &state.theme);
+    }
+
     // Rules that frame the input box
     render_input_rule(frame, chunks[RULE_IDX], &state.theme);
 
     // Input line
-    render_input(frame, chunks[INPUT_IDX], &state.input, &state.theme);
+    render_input(
+        frame,
+        chunks[INPUT_IDX],
+        &state.input,
+        state.history_search.as_ref(),
+        &state.theme,
+    );
 
     render_input_rule(frame, chunks[RULE_BELOW_IDX], &state.theme);
 
@@ -570,6 +597,10 @@ fn inline_palette_height(state: &UiState) -> u16 {
             let count = commands.len().min(5);
             u16::try_from(count + 1).map_or(6, |height| height.min(6))
         }
+        Overlay::FileMention { files, .. } => {
+            let count = files.len().min(5);
+            u16::try_from(count + 1).map_or(6, |height| height.min(6))
+        }
         _ => 0,
     }
 }
@@ -577,9 +608,12 @@ fn inline_palette_height(state: &UiState) -> u16 {
 /// Check whether the active overlay is an inline `/` palette.
 fn is_inline_palette(state: &UiState) -> bool {
     use crate::overlay::Overlay;
-    state.overlays.top().is_some_and(
-        |o| matches!(o, Overlay::CommandPalette { query, .. } if query.starts_with('/')),
-    )
+    state.overlays.top().is_some_and(|overlay| {
+        matches!(
+            overlay,
+            Overlay::CommandPalette { query, .. } if query.starts_with('/')
+        ) || matches!(overlay, Overlay::FileMention { .. })
+    })
 }
 
 /// Word-wrap text to the given display width.
@@ -1850,6 +1884,38 @@ fn render_statusline(
     frame.render_widget(paragraph, text_area);
 }
 
+fn render_todo_panel(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    panel: &crate::state::TodoPanel,
+    theme: &Theme,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let padding = 2usize.min(area.width as usize);
+    let lines: Vec<Line> = panel
+        .render_rows()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (marker, text))| {
+            // The row the model is on is the one being worked on, which is
+            // more useful than its ordinal; the rest recede so the active row
+            // reads first.
+            let active = panel
+                .items()
+                .get(index)
+                .is_some_and(|item| item.status == crate::state::TodoStatus::InProgress);
+            let color = if active { theme.accent } else { theme.dim };
+            Line::from(Span::styled(
+                format!("{}{marker} {text}", " ".repeat(padding)),
+                Style::default().fg(color),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn render_permission_bar(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -1884,8 +1950,16 @@ fn render_input(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
     input: &crate::input::InputBuffer,
+    history_search: Option<&crate::history_search::HistorySearch>,
     theme: &Theme,
 ) {
+    // While a reverse search is open the pane shows the search, not the
+    // buffer: the buffer is what Esc restores, so painting it would suggest
+    // the query is being typed into it.
+    if let Some(search) = history_search {
+        render_history_search(frame, area, search, theme);
+        return;
+    }
     // Byte offsets are not columns: a CJK character occupies two cells. The
     // buffer reports its rows and the cursor's row/column in display units, so
     // a wrapped or multi-line buffer places the cursor on the right cell.
@@ -1966,16 +2040,83 @@ fn render_input(
     ));
 }
 
+/// Paint an open Ctrl+R search into the input pane.
+///
+/// The matched entries are listed newest first with the highlighted one
+/// inverted, and the last row is the one the cursor sits on, so the search
+/// reads top-down like the palette above it.
+fn render_history_search(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    search: &crate::history_search::HistorySearch,
+    theme: &Theme,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            "reverse-search: ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            search.query().to_string(),
+            Style::default().fg(theme.input_fg),
+        ),
+    ]));
+
+    if search.matches().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no matching history)",
+            Style::default().fg(theme.dim),
+        )));
+    } else {
+        // Show the highlighted entry and the ones after it, the way Ctrl+R
+        // reports the newest match and its neighbours as the query narrows.
+        let visible = area.height.saturating_sub(1) as usize;
+        for (index, entry) in search
+            .matches()
+            .iter()
+            .enumerate()
+            .skip(search.selected())
+            .take(visible.max(1))
+        {
+            let style = if index == search.selected() {
+                Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg)
+            } else {
+                Style::default().fg(theme.dim)
+            };
+            // A multi-line history entry has to stay on one row here.
+            let single_line: String = entry.replace('\n', " ");
+            lines.push(Line::from(Span::styled(format!("  {single_line}"), style)));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 /// Render the inline command palette just above the statusline / input line.
 fn render_inline_palette(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
     use crate::overlay::Overlay;
-    let Some(Overlay::CommandPalette {
-        query,
-        commands,
-        selected,
-    }) = state.overlays.top()
-    else {
-        return;
+    // Both palettes are the same list with a different heading; a mention
+    // inserts text and a command runs it, which is the caller's business.
+    let (heading, query, entries, selected) = match state.overlays.top() {
+        Some(Overlay::CommandPalette {
+            query,
+            commands,
+            selected,
+        }) => ("Commands ", query, commands, *selected),
+        Some(Overlay::FileMention {
+            query,
+            files,
+            selected,
+        }) => ("Files ", query, files, *selected),
+        _ => return,
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -1983,7 +2124,7 @@ fn render_inline_palette(frame: &mut Frame, area: ratatui::layout::Rect, state: 
     // Header
     lines.push(Line::from(vec![
         Span::styled(
-            "Commands ",
+            heading,
             Style::default()
                 .fg(state.theme.foreground)
                 .add_modifier(Modifier::BOLD),
@@ -1992,22 +2133,21 @@ fn render_inline_palette(frame: &mut Frame, area: ratatui::layout::Rect, state: 
     ]));
 
     let available_rows = area.height.saturating_sub(1) as usize;
-    let visible_count = commands.len().min(available_rows);
+    let visible_count = entries.len().min(available_rows);
     if visible_count == 0 {
-        let paragraph = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::NONE)
-                .style(Style::default().fg(state.theme.foreground)),
-        );
-        frame.render_widget(paragraph, area);
+        lines.push(Line::from(Span::styled(
+            "  no matches",
+            Style::default().fg(state.theme.dim),
+        )));
+        frame.render_widget(Paragraph::new(lines), area);
         return;
     }
     let start = selected
         .saturating_sub(visible_count - 1)
-        .min(commands.len().saturating_sub(visible_count));
+        .min(entries.len().saturating_sub(visible_count));
 
-    for (i, command) in commands.iter().enumerate().skip(start).take(visible_count) {
-        let style = if i == *selected {
+    for (i, command) in entries.iter().enumerate().skip(start).take(visible_count) {
+        let style = if i == selected {
             Style::default()
                 .fg(state.theme.selection_fg)
                 .bg(state.theme.selection_bg)
@@ -2055,8 +2195,8 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::Notification { message, level } => {
             format!("Notification: {message} ({level:?})")
         }
-        Overlay::CommandPalette { .. } => {
-            // Inline palette is handled separately; skip here.
+        Overlay::CommandPalette { .. } | Overlay::FileMention { .. } => {
+            // Both inline lists are handled separately; skip here.
             return;
         }
         Overlay::Detail { title, body } => {
@@ -2073,6 +2213,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::Notification { .. } => "Notification",
         Overlay::Detail { title, .. } => title.as_str(),
         Overlay::CommandPalette { .. } => "Commands",
+        Overlay::FileMention { .. } => "Files",
         Overlay::Confirm { .. } => "Confirm",
     };
     let block = Block::default()
@@ -2397,9 +2538,24 @@ mod layout_tests {
         input: u16,
         perm: bool,
     ) -> Vec<ratatui::layout::Rect> {
+        chunks_with_todos(height, palette, notif, 0, statusline, input, perm)
+    }
+
+    /// The same stack with a todo panel of `todos` rows above the statusline.
+    fn chunks_with_todos(
+        height: u16,
+        palette: u16,
+        notif: bool,
+        todos: u16,
+        statusline: bool,
+        input: u16,
+        perm: bool,
+    ) -> Vec<ratatui::layout::Rect> {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints(frame_constraints(palette, notif, statusline, input, perm))
+            .constraints(frame_constraints(
+                palette, notif, todos, statusline, input, perm,
+            ))
             .split(ratatui::layout::Rect::new(0, 0, 80, height))
             .to_vec()
     }
@@ -2507,10 +2663,11 @@ mod layout_tests {
     /// Every index the renderer uses must name the constraint it claims to.
     #[test]
     fn pane_indices_follow_the_constraint_order() {
-        let chunks = chunks_for(30, 4, true, true, 1, true);
+        let chunks = chunks_with_todos(30, 4, true, 2, true, 1, true);
         assert_eq!(chunks.len(), PERMISSION_IDX + 1, "one rect per constraint");
         assert_eq!(chunks[PALETTE_IDX].height, 4, "palette");
         assert_eq!(chunks[NOTIFICATION_IDX].height, 1, "notification");
+        assert_eq!(chunks[TODOS_IDX].height, 2, "todo panel");
         assert_eq!(chunks[STATUSLINE_IDX].height, 3, "statusline");
         assert_eq!(chunks[RULE_IDX].height, 1, "input rule");
         assert_eq!(chunks[INPUT_IDX].height, 1, "input");
@@ -2521,6 +2678,85 @@ mod layout_tests {
         for pair in chunks.windows(2) {
             assert_eq!(pair[0].y + pair[0].height, pair[1].y);
         }
+    }
+
+    /// A list the model wrote through `TodoWrite` is painted above the
+    /// statusline, with a glyph per status.
+    #[test]
+    fn the_todo_panel_draws_every_row_above_the_statusline() {
+        let mut state = UiState::default();
+        state.todos.set_items(vec![
+            crate::state::TodoEntry {
+                subject: "read the parser".into(),
+                description: String::new(),
+                status: crate::state::TodoStatus::Completed,
+            },
+            crate::state::TodoEntry {
+                subject: "port the tokenizer".into(),
+                description: String::new(),
+                status: crate::state::TodoStatus::InProgress,
+            },
+            crate::state::TodoEntry {
+                subject: "run the tests".into(),
+                description: String::new(),
+                status: crate::state::TodoStatus::Pending,
+            },
+        ]);
+        let buffer = render_to_buffer(80, 40, &mut state);
+
+        let chunks = chunks_with_todos(40, 0, false, 3, true, 1, true);
+        assert_eq!(chunks[TODOS_IDX].height, 3, "three rows");
+        assert!(
+            chunks[TODOS_IDX].y < chunks[STATUSLINE_IDX].y,
+            "the panel must sit above the statusline"
+        );
+
+        let panel_rows: Vec<String> = (chunks[TODOS_IDX].y
+            ..chunks[TODOS_IDX].y + chunks[TODOS_IDX].height)
+            .map(|y| row_text(&buffer, y))
+            .collect();
+        assert!(
+            panel_rows[0].contains("✓ read the parser"),
+            "{panel_rows:?}"
+        );
+        assert!(
+            panel_rows[1].contains("■ port the tokenizer"),
+            "{panel_rows:?}"
+        );
+        assert!(panel_rows[2].contains("□ run the tests"), "{panel_rows:?}");
+    }
+
+    /// An empty list takes no space, so a session that never calls the tool
+    /// sees the same layout as before.
+    #[test]
+    fn no_todo_list_claims_no_rows() {
+        let mut state = UiState::default();
+        assert_eq!(state.todos.display_height(), 0);
+        let buffer = render_to_buffer(80, 30, &mut state);
+        let chunks = chunks_for(30, 0, false, true, 1, true);
+        assert_eq!(chunks[TODOS_IDX].height, 0);
+        // The rows below are still where they were: the empty pane is the
+        // only one at index 3 and it collapses to nothing.
+        assert!(row_text(&buffer, chunks[INPUT_IDX].y).contains('❯'));
+    }
+
+    /// A list longer than the panel fits is capped and ends with a count.
+    #[test]
+    fn a_long_todo_list_is_capped_and_counted() {
+        let mut state = UiState::default();
+        state.todos.set_items(
+            (0..12)
+                .map(|n| crate::state::TodoEntry {
+                    subject: format!("step {n}"),
+                    description: String::new(),
+                    status: crate::state::TodoStatus::Pending,
+                })
+                .collect(),
+        );
+        let rows = state.todos.render_rows();
+        assert_eq!(rows.len(), 9, "eight rows plus the summary");
+        assert_eq!(rows[8], ('…', "4 more".to_string()));
+        assert_eq!(state.todos.display_height(), 9);
     }
 
     /// The input box is separated from the transcript by a full-width rule.

@@ -5,7 +5,7 @@
 //! for prompt cache optimization.
 
 use std::fmt::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::budget::TokenBudget;
 use crate::engine::DeniedToolCall;
@@ -336,6 +336,12 @@ pub struct PromptCompiler {
     static_blocks: Vec<PromptBlock>,
     dynamic_blocks: Vec<DynamicBlock>,
     config: CompactConfig,
+    /// The user-level instruction file, or `None` to skip it.
+    ///
+    /// Resolved once at construction rather than on every turn: the path comes
+    /// from the environment, and a turn that re-read it would change behaviour
+    /// mid-session if something mutated the variable.
+    user_instructions: Option<PathBuf>,
 }
 
 impl PromptCompiler {
@@ -350,7 +356,17 @@ impl PromptCompiler {
             static_blocks: Vec::new(),
             dynamic_blocks: Vec::new(),
             config,
+            user_instructions: Some(crate::types::config_home_dir().join("CLAUDE.md")),
         }
+    }
+
+    /// Point the user-level instruction file somewhere else, or turn it off.
+    ///
+    /// `None` means "do not load one". A test that asserts what a prompt
+    /// contains has to say this, or its result depends on whether the machine
+    /// running it happens to have a `~/.codape/CLAUDE.md`.
+    pub fn set_user_instructions_path(&mut self, path: Option<PathBuf>) {
+        self.user_instructions = path;
     }
 
     /// Register a static block (base settings, outputStyle, tool guidelines).
@@ -429,7 +445,15 @@ impl PromptCompiler {
         out
     }
 
-    /// Load CLAUDE.md from cwd and parent directories.
+    /// Load the project and user instruction files.
+    ///
+    /// The walk starts at `cwd` and climbs to the filesystem root, so a
+    /// monorepo's root `CLAUDE.md` and the package's own both apply. The user
+    /// file at `~/.codape/CLAUDE.md` is loaded last so it is the final word —
+    /// it is the one the person wrote about how they want to be worked with,
+    /// and a repository should not be able to override it by checking in a file
+    /// of the same name. (`CLAUDE_CONFIG_DIR` redirects the config home, which
+    /// is how a test isolates this.)
     #[allow(clippy::unused_self)]
     fn load_claude_markdown(&self, cwd: &Path) -> String {
         let mut content = String::new();
@@ -446,6 +470,22 @@ impl PromptCompiler {
                 content.push_str(&text);
             }
             current = dir.parent();
+        }
+
+        // The user-level file. Skipped when the walk already read it, which
+        // happens when `cwd` is inside the config home.
+        let Some(user_file) = self.user_instructions.as_deref() else {
+            return content;
+        };
+        let already_read = user_file.parent().is_some_and(|home| cwd.starts_with(home));
+        if !already_read
+            && let Ok(text) = std::fs::read_to_string(user_file)
+            && !text.trim().is_empty()
+        {
+            if !content.is_empty() {
+                content.push_str("\n\n---\n\n");
+            }
+            content.push_str(&text);
         }
 
         content
@@ -647,7 +687,10 @@ mod tests {
         let content = "# Project Rules\n\nAlways use Rust.";
         std::fs::write(tmp.path().join("CLAUDE.md"), content).unwrap();
 
-        let compiler = PromptCompiler::new(CompactConfig::default());
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        // The real config home may hold a user CLAUDE.md; this test is about
+        // the project file.
+        compiler.set_user_instructions_path(None);
         let user_ctx = compiler.get_user_context(tmp.path());
 
         assert!(user_ctx.is_some());
@@ -664,9 +707,54 @@ mod tests {
 
     #[test]
     fn missing_claude_md_returns_none() {
-        let compiler = PromptCompiler::new(CompactConfig::default());
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(None);
         let ctx = compiler.get_user_context(Path::new("/nonexistent/path"));
         assert!(ctx.is_none());
+    }
+
+    /// A user-level instruction file applies in every repository.
+    ///
+    /// The walk from `cwd` only ever finds files that are checked in somewhere
+    /// above the project; the preferences a person writes once have to come
+    /// from the config home or they never reach the model at all.
+    #[test]
+    fn the_user_instruction_file_applies_outside_any_project() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), "Answer in British English.").unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(Some(home.path().join("CLAUDE.md")));
+        let message = compiler
+            .get_user_context(project.path())
+            .expect("the user file should supply context");
+        let crate::types::MessageContent::Text(text) = &message.content else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("British English"), "{text}");
+    }
+
+    /// The user file comes after the project's, so it is the final word.
+    #[test]
+    fn the_user_instruction_file_follows_the_project_one() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), "USER-PREFERENCE").unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("CLAUDE.md"), "PROJECT-RULE").unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(Some(home.path().join("CLAUDE.md")));
+        let message = compiler.get_user_context(project.path()).unwrap();
+        let crate::types::MessageContent::Text(text) = &message.content else {
+            panic!("expected text content");
+        };
+        let project_pos = text.find("PROJECT-RULE").expect("project rule");
+        let user_pos = text.find("USER-PREFERENCE").expect("user preference");
+        assert!(
+            project_pos < user_pos,
+            "the user's file must come last: {text}"
+        );
     }
 
     #[test]

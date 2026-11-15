@@ -77,7 +77,7 @@ pub enum AgentError {
 /// Describe the available custom agent names for an error message.
 fn available_agents_description(names: &[String]) -> String {
     if names.is_empty() {
-        "none configured (add JSON definitions under ~/.codape/agents/)".to_string()
+        "none configured (add a definition under ~/.codape/agents/ or .codape/agents/)".to_string()
     } else {
         names.join(", ")
     }
@@ -1401,7 +1401,7 @@ impl AgentManager {
 
     /// Replace the loaded custom agent definitions.
     ///
-    /// Production managers load `~/.codape/agents/*.json` in
+    /// Production managers load `~/.codape/agents/` and `.codape/agents/` in
     /// [`AgentManager::new`]. Tests and embedders use this to install a
     /// known set without touching the user's home directory.
     pub fn set_custom_agents(&mut self, agents: HashMap<String, CustomAgentDef>) {
@@ -3286,6 +3286,7 @@ mod tests {
             model: Some("claude-test".into()),
             max_tokens: Some(1234),
             output_schema: None,
+            description: None,
         }
     }
 

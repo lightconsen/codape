@@ -12,6 +12,13 @@ pub struct CronDeleteTool;
 
 #[async_trait]
 impl Tool for CronDeleteTool {
+    fn description(&self) -> Option<&'static str> {
+        Some(
+            "Cancels a cron job that CronCreate registered. Takes the job id CronCreate \
+             returned; use CronList first if you no longer have it.",
+        )
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "CronDelete".into(),

@@ -150,7 +150,7 @@ fn e2e_all_commands_registered() {
     let mut reg = CommandRegistry::new();
     codape_commands::registry::register_all_commands(&mut reg);
 
-    let names: Vec<&str> = reg.list().iter().map(|c| c.name).collect();
+    let names: Vec<&str> = reg.list().iter().map(|c| c.name.as_str()).collect();
 
     assert!(names.contains(&"clear"));
     assert!(names.contains(&"model"));

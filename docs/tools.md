@@ -41,7 +41,7 @@ Implements the tool trait system, registers built-in tools, and provides executi
 | CronCreate, CronDelete, CronList | Cron scheduling | Functional (background runner via `CronScheduler::spawn_runner`) |
 | TodoWrite | Todo tracking | Functional |
 | AskUserQuestion | Interactive | Functional |
-| SendMessage, EnterPlanMode, ExitPlanMode | Agent flow | Functional |
+| SendMessage, EnterPlanMode, ExitPlanMode | Agent flow | Functional (Enter/Exit switch the session's permission mode through the dispatcher's shared plan-mode switch; Enter refuses while a plan is not underway, Exit hands the plan back for approval) |
 | LspTool | LSP integration | Functional (spawns language server, JSON-RPC stdio) |
 | McpAuthTool | MCP auth | Functional (OAuth flow: browser open, localhost callback, token exchange, persistence to `~/.codape/mcp_tokens.json`) |
 | ListMcpResourcesTool, ReadMcpResourceTool | MCP resources | Functional |
