@@ -18,9 +18,9 @@
 //!
 //! Everything written to stdout is protocol. Nothing else in this module
 //! prints there; diagnostics go through `tracing`, which goes to stderr. That
-//! is also why [`maybe_run_ide_bridge`] is called before the startup
-//! orchestrator runs — the startup phases narrate themselves on stdout, and a
-//! sentence in the middle of a JSON-RPC stream breaks the editor's parser.
+//! is also why [`is_ide_bridge`] is checked before the startup orchestrator
+//! runs — the startup phases narrate themselves on stdout, and a sentence in
+//! the middle of a JSON-RPC stream breaks the editor's parser.
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};

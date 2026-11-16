@@ -425,7 +425,7 @@ impl From<reqwest::Error> for ApiError {
 /// The five levels are the ones the Messages API documents for
 /// `output_config.effort`. A model does not necessarily accept all of them:
 /// `xhigh` and `max` are newer than the rest, and which models take which is
-/// recorded in [`model_supports_effort`].
+/// recorded in the effort table this crate resolves against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {

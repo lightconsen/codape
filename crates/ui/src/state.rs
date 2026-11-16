@@ -333,9 +333,10 @@ pub struct UiState {
     pub left_pane_title: String,
     /// How the transcript draws an attached picture.
     ///
-    /// Defaults to [`ImageProtocol::None`] so a state built in a test or a
-    /// headless path keeps the `[image: …]` caption. The interactive terminal
-    /// sets it from the detected terminal before the first draw.
+    /// Defaults to [`crate::transcript_image::ImageProtocol::None`] so a state
+    /// built in a test or a headless path keeps the `[image: …]` caption. The
+    /// interactive terminal sets it from the detected terminal before the
+    /// first draw.
     pub image_protocol: crate::transcript_image::ImageProtocol,
 }
 
