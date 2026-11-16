@@ -283,6 +283,42 @@ fn read_memory_entries() -> Vec<String> {
 
 /// The servers a project's `.mcp.json` configures, one line each.
 ///
+/// What `/mcp` with no subcommand prints: the session's connection state,
+/// then whatever `.mcp.json` names. A session that is not connected still has
+/// a config worth showing — that file is where `codape mcp add` writes and
+/// where startup reads, so a listing that only spoke about live connections
+/// pointed at a file and named no servers.
+fn mcp_listing(ctx: &CommandContext) -> String {
+    if ctx.mcp_connected {
+        let mut output = String::from("MCP: Connected");
+        if !ctx.mcp_servers.is_empty() {
+            output.push_str("\nServers:");
+            for server in &ctx.mcp_servers {
+                output.push_str("\n  ");
+                output.push_str(server);
+            }
+        }
+        if !ctx.mcp_conflicts.is_empty() {
+            output.push_str("\nRefused tool names (duplicate across servers):");
+            for conflict in &ctx.mcp_conflicts {
+                output.push_str("\n  ");
+                output.push_str(conflict);
+            }
+        }
+        output
+    } else {
+        let mut output = String::from("MCP: Not connected");
+        output.push_str(&configured_mcp_servers(std::path::Path::new(&ctx.cwd)));
+        if ctx.mcp_servers.is_empty() && ctx.mcp_conflicts.is_empty() {
+            output.push_str(
+                "\nAdd a server with /mcp add <name> <command>, or write .mcp.json in the \
+                 project root.",
+            );
+        }
+        output
+    }
+}
+
 /// The config crate this module can reach has no MCP parser (that lives in
 /// `codape-mcp`, which the command layer does not depend on), so this reads the
 /// two shapes the file accepts — `{"mcpServers": {...}}` and the older
@@ -480,7 +516,26 @@ pub fn register(registry: &mut CommandRegistry) {
             } else {
                 match args[0].as_str() {
                     "list" => CommandResult::success(describe(details)),
-                    _ => CommandResult::error("Usage: /hooks [list]"),
+                    // Editing the hook configuration from here would write a
+                    // file the running executor never re-reads, so `/hooks`
+                    // does not pretend to. Firing an event is something it can
+                    // answer honestly: it runs the installed hooks and says
+                    // what happened.
+                    "test" => {
+                        let Some(event) = args.get(1) else {
+                            return CommandResult::error(
+                                "Usage: /hooks test <event> (for example: PreToolUse)",
+                            );
+                        };
+                        CommandResult::success(format!("Firing '{event}'...")).with_deferred(
+                            crate::registry::CommandDeferred::HookFire {
+                                event: event.clone(),
+                            },
+                        )
+                    }
+                    other => CommandResult::error(format!(
+                        "Unknown /hooks subcommand '{other}'. Use list or test."
+                    )),
                 }
             }
         }),
@@ -494,43 +549,80 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|ctx: &CommandContext, args: &[String]| {
-            if ctx.mcp_connected {
-                let mut output = String::from("MCP: Connected");
-                if !ctx.mcp_servers.is_empty() {
-                    output.push_str("\nServers:");
-                    for server in &ctx.mcp_servers {
-                        output.push_str("\n  ");
-                        output.push_str(server);
+            // Subcommands come first: `add`/`remove`/`test` are about the
+            // config file and the manager, not about what this session has
+            // connected, so answering them with a listing would be a
+            // non-answer even when the session is connected.
+            if let Some(subcommand) = args.first().map(String::as_str) {
+                let rest = &args[1..];
+                return match subcommand {
+                    "list" => CommandResult::success(mcp_listing(ctx)),
+                    "add" => {
+                        let Some(name) = rest.first() else {
+                            return CommandResult::error(
+                                "Usage: /mcp add <name> (<command> | --url <url>)",
+                            );
+                        };
+                        // `--url` marks the target as an endpoint. Everything
+                        // else is a stdio command line, which the session
+                        // splits into program and args.
+                        //
+                        // The arguments arrive already split on whitespace, so
+                        // the command is *all* of the remaining words rejoined
+                        // — taking only `rest[1]` dropped the rest of
+                        // `/mcp add pg npx -y @mcp/postgres` and registered a
+                        // server called `npx` with no args.
+                        let (remote, target) = if rest.get(1).is_some_and(|arg| arg == "--url") {
+                            match rest.get(2) {
+                                Some(url) => (true, url.clone()),
+                                None => {
+                                    return CommandResult::error(
+                                        "Usage: /mcp add <name> --url <url>",
+                                    );
+                                }
+                            }
+                        } else {
+                            let command =
+                                rest.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+                            if command.is_empty() {
+                                return CommandResult::error(
+                                    "Usage: /mcp add <name> (<command> | --url <url>)",
+                                );
+                            }
+                            (false, command)
+                        };
+                        CommandResult::success(format!("Adding MCP server '{name}'..."))
+                            .with_deferred(crate::registry::CommandDeferred::McpAdd {
+                                name: name.clone(),
+                                target,
+                                remote,
+                            })
                     }
-                }
-                if !ctx.mcp_conflicts.is_empty() {
-                    output.push_str("\nRefused tool names (duplicate across servers):");
-                    for conflict in &ctx.mcp_conflicts {
-                        output.push_str("\n  ");
-                        output.push_str(conflict);
+                    "remove" => {
+                        let Some(name) = rest.first() else {
+                            return CommandResult::error("Usage: /mcp remove <name>");
+                        };
+                        CommandResult::success(format!("Removing MCP server '{name}'..."))
+                            .with_deferred(crate::registry::CommandDeferred::McpRemove {
+                                name: name.clone(),
+                            })
                     }
-                }
-                CommandResult::success(output)
-            } else if args.is_empty() {
-                // Read MCP config if available. `.mcp.json` is where
-                // `codape mcp add` writes and where startup reads, so a
-                // session that is not connected should still be able to see
-                // what is configured there — the old text pointed at a file
-                // and named no servers.
-                let mut output = String::from("MCP: Not connected");
-                output.push_str(&configured_mcp_servers(std::path::Path::new(&ctx.cwd)));
-                if ctx.mcp_servers.is_empty() && ctx.mcp_conflicts.is_empty() {
-                    output.push_str(
-                        "\nAdd a server with `codape mcp add`, or write .mcp.json in the \
-                         project root.",
-                    );
-                }
-                CommandResult::success(output)
-            } else {
-                CommandResult::error(
-                    "MCP servers are added with `codape mcp add <name> -- <command>`.",
-                )
+                    "test" => {
+                        let Some(name) = rest.first() else {
+                            return CommandResult::error("Usage: /mcp test <name>");
+                        };
+                        CommandResult::success(format!("Testing MCP server '{name}'..."))
+                            .with_deferred(crate::registry::CommandDeferred::McpTest {
+                                name: name.clone(),
+                            })
+                    }
+                    other => CommandResult::error(format!(
+                        "Unknown /mcp subcommand '{other}'. Use list, add, remove or test."
+                    )),
+                };
             }
+
+            CommandResult::success(mcp_listing(ctx))
         }),
     ));
 
@@ -942,6 +1034,40 @@ mod tests {
         assert!(result.output.contains("hooks") || result.output.contains("Installed"));
     }
 
+    /// `/hooks test` fires the installed executor, which the registry cannot
+    /// reach, so it hands the event on; editing the configuration is refused
+    /// because a rewrite would not reach a running session.
+    #[test]
+    fn hooks_test_defers_and_editing_is_refused() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let test = reg.execute("hooks", &ctx(), &["test".into(), "PreToolUse".into()]);
+        assert_eq!(
+            test.deferred,
+            Some(crate::registry::CommandDeferred::HookFire {
+                event: "PreToolUse".into()
+            })
+        );
+
+        // No event is a usage error, not a deferred no-op.
+        let bare = reg.execute("hooks", &ctx(), &["test".into()]);
+        assert!(bare.output.starts_with("Error: "), "{}", bare.output);
+        assert!(bare.deferred.is_none());
+
+        // An unknown subcommand names the ones that exist rather than
+        // pretending `add`/`edit` are supported.
+        let unknown = reg.execute("hooks", &ctx(), &["add".into()]);
+        assert!(
+            unknown.output.contains("list or test"),
+            "{}",
+            unknown.output
+        );
+    }
+
     #[test]
     fn mcp_status_not_connected() {
         let reg = {
@@ -1085,6 +1211,92 @@ mod tests {
             result.output.contains("not valid JSON"),
             "{}",
             result.output
+        );
+    }
+
+    /// `/mcp` with a subcommand has to hand the work to the session rather
+    /// than answering with a listing: the config parser and the client live
+    /// in `codape-mcp`, which this crate cannot reach.
+    #[test]
+    fn mcp_subcommands_defer_to_the_session() {
+        let home = tempfile::tempdir().unwrap();
+        set_test_config_home(home.path().to_path_buf());
+        let c = CommandContext {
+            cwd: tempfile::tempdir()
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .to_string(),
+            ..ctx()
+        };
+        let mut reg = CommandRegistry::new();
+        register(&mut reg);
+
+        let add = reg.execute(
+            "mcp",
+            &c,
+            &[
+                "add".to_string(),
+                "fs".to_string(),
+                "npx".to_string(),
+                "-y".to_string(),
+                "@mcp/fs".to_string(),
+            ],
+        );
+        assert_eq!(
+            add.deferred,
+            Some(crate::registry::CommandDeferred::McpAdd {
+                name: "fs".into(),
+                // The words arrive already split; the whole tail is the
+                // command, not just the program.
+                target: "npx -y @mcp/fs".into(),
+                remote: false,
+            })
+        );
+
+        // `--url` marks the target as a remote endpoint rather than a command.
+        let add_url = reg.execute(
+            "mcp",
+            &c,
+            &[
+                "add".to_string(),
+                "api".to_string(),
+                "--url".to_string(),
+                "https://example.test/mcp".to_string(),
+            ],
+        );
+        assert_eq!(
+            add_url.deferred,
+            Some(crate::registry::CommandDeferred::McpAdd {
+                name: "api".into(),
+                target: "https://example.test/mcp".into(),
+                remote: true,
+            })
+        );
+
+        let remove = reg.execute("mcp", &c, &["remove".to_string(), "fs".to_string()]);
+        assert_eq!(
+            remove.deferred,
+            Some(crate::registry::CommandDeferred::McpRemove { name: "fs".into() })
+        );
+
+        let test = reg.execute("mcp", &c, &["test".to_string(), "fs".to_string()]);
+        assert_eq!(
+            test.deferred,
+            Some(crate::registry::CommandDeferred::McpTest { name: "fs".into() })
+        );
+
+        // A missing argument is a usage error, not a deferred no-op.
+        let bare = reg.execute("mcp", &c, &["add".to_string()]);
+        assert!(bare.output.starts_with("Error: "), "{}", bare.output);
+        assert!(bare.deferred.is_none());
+
+        // An unknown subcommand names the ones that exist.
+        let unknown = reg.execute("mcp", &c, &["frobnicate".to_string()]);
+        assert!(
+            unknown.output.contains("list, add, remove or test"),
+            "{}",
+            unknown.output
         );
     }
 

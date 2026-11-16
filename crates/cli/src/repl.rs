@@ -3898,6 +3898,13 @@ impl ReplLoop {
 
     /// The `/mcp` registry output with the discovered prompts appended under
     /// the server that offers them.
+    /// Run `/mcp`'s registry dispatch.
+    ///
+    /// `add`, `remove` and `test` come back as deferred work, because the
+    /// registry is synchronous and cannot reach `codape-mcp`. The caller
+    /// stores it on `pending_deferred` and the async entry point drains it —
+    /// `/mcp` is intercepted before the generic command path, so it has to
+    /// hand its own work on rather than swallow it.
     fn run_mcp_command(&self, args: &[String]) -> CommandResult {
         let ctx = self.build_context();
         let mut result = self.commands.execute("mcp", &ctx, args);
@@ -9651,6 +9658,182 @@ impl ReplLoop {
             codape_commands::CommandDeferred::PluginInstall { source } => {
                 Some(Self::install_plugin_from(&self.cwd, &source).await)
             }
+            codape_commands::CommandDeferred::McpAdd {
+                name,
+                target,
+                remote,
+            } => Some(Self::mcp_add(&self.cwd, &name, &target, remote)),
+            codape_commands::CommandDeferred::McpRemove { name } => {
+                Some(Self::mcp_remove(&self.cwd, &name))
+            }
+            codape_commands::CommandDeferred::McpTest { name } => {
+                Some(Self::mcp_test(&self.cwd, &name).await)
+            }
+            codape_commands::CommandDeferred::HookFire { event } => {
+                Some(self.fire_test_hook(&event).await)
+            }
+        }
+    }
+
+    /// Fire one lifecycle event at the hooks this session installed.
+    ///
+    /// This is what `/hooks test <event>` asks for. It uses the executor the
+    /// session built at startup, so the answer is about the hooks that are
+    /// actually installed — the only version of the question that means
+    /// anything, since rewriting the file would not reach them.
+    ///
+    /// It cannot say how many hooks matched: [`HookFireResult`] reports
+    /// outcomes, not counts, and an event with no hook and an event whose hook
+    /// said nothing both come back empty.
+    async fn fire_test_hook(&self, event: &str) -> String {
+        let Some(ref engine) = self.session.engine else {
+            return format!("No session engine, so the '{event}' hook cannot be fired.");
+        };
+        Self::fire_hook_for_test(
+            engine.hook_executor(),
+            event,
+            &engine.session().session_id.to_string(),
+        )
+        .await
+    }
+
+    /// The body of `/hooks test`, taking the executor rather than the engine.
+    ///
+    /// Split out so the TUI path can move the `Arc` into a spawned task — the
+    /// engine itself cannot be moved, but the executor it exposes can.
+    async fn fire_hook_for_test(
+        executor: Arc<dyn codape_core::hook_executor::HookExecutor + Send + Sync>,
+        event: &str,
+        session_id: &str,
+    ) -> String {
+        let mut context = std::collections::HashMap::new();
+        context.insert("hook_event_name".to_string(), event.to_string());
+        context.insert("session_id".to_string(), session_id.to_string());
+        let result = executor.fire_hook(event, "/hooks test", &context).await;
+
+        if result.failed {
+            let detail = if result.errors.is_empty() {
+                "it could not be run or its output could not be parsed".to_string()
+            } else {
+                result.errors.join("; ")
+            };
+            format!("'{event}' failed: {detail}")
+        } else if result.errors.is_empty() {
+            format!(
+                "'{event}' fired cleanly. No hook answered it, or the ones that ran had \
+                 nothing to say."
+            )
+        } else {
+            format!("'{event}' fired with errors: {}", result.errors.join("; "))
+        }
+    }
+
+    /// Register an MCP server in the project's `.mcp.json`.
+    ///
+    /// The same file `codape mcp add` writes, so a server added from inside a
+    /// session is the one the next startup reads. It does not join *this*
+    /// session's tool registry: those were built at startup, and pretending
+    /// otherwise would leave `/mcp` listing a server the model cannot call.
+    fn mcp_add(cwd: &str, name: &str, target: &str, remote: bool) -> String {
+        let path = std::path::Path::new(cwd).join(".mcp.json");
+        let mut config = if path.exists() {
+            match codape_mcp::config::McpConfig::load(&path) {
+                Ok(config) => config,
+                Err(error) => return format!("Could not read {}: {error}", path.display()),
+            }
+        } else {
+            codape_mcp::config::McpConfig::new()
+        };
+
+        let added = if remote {
+            config.add_remote_server(
+                name.to_string(),
+                target.to_string(),
+                codape_mcp::config::McpTransport::Http,
+                std::collections::HashMap::new(),
+            )
+        } else {
+            config.add_stdio_server(name.to_string(), target)
+        };
+
+        match added.and_then(|()| config.save(&path).map_err(|error| error.to_string())) {
+            Ok(()) => format!(
+                "Added MCP server '{name}' to {}. It joins the session's tools on the next \
+                 start.",
+                path.display()
+            ),
+            Err(error) => format!("Could not add '{name}': {error}"),
+        }
+    }
+
+    /// Drop a server from `.mcp.json`.
+    fn mcp_remove(cwd: &str, name: &str) -> String {
+        let path = std::path::Path::new(cwd).join(".mcp.json");
+        if !path.exists() {
+            return format!("No MCP config found at {}", path.display());
+        }
+        let mut config = match codape_mcp::config::McpConfig::load(&path) {
+            Ok(config) => config,
+            Err(error) => return format!("Could not read {}: {error}", path.display()),
+        };
+        if config.remove_server(name).is_none() {
+            return format!("MCP server '{name}' not found in {}", path.display());
+        }
+        match config.save(&path) {
+            Ok(()) => format!(
+                "Removed MCP server '{name}' from {}. This session's tools are unchanged until \
+                 the next start.",
+                path.display()
+            ),
+            Err(error) => format!("Could not save {}: {error}", path.display()),
+        }
+    }
+
+    /// Connect to one configured server and report what it offers.
+    ///
+    /// Starts exactly the named server, so a broken sibling in the same file
+    /// cannot make this one look down. The manager is dropped at the end,
+    /// which stops the child.
+    async fn mcp_test(cwd: &str, name: &str) -> String {
+        let path = std::path::Path::new(cwd).join(".mcp.json");
+        if !path.exists() {
+            return format!("No MCP config found at {}", path.display());
+        }
+        let config = match codape_mcp::config::McpConfig::load(&path) {
+            Ok(config) => config,
+            Err(error) => return format!("Could not read {}: {error}", path.display()),
+        };
+        let Some(server) = config.mcp_servers.get(name).cloned() else {
+            return format!("MCP server '{name}' not found in {}", path.display());
+        };
+
+        let mut selected = codape_mcp::config::McpConfig::new();
+        selected.mcp_servers.insert(name.to_string(), server);
+        let manager = codape_mcp::manager::McpManager::new();
+        manager.load_config(&selected);
+        manager.start_all().await;
+
+        if !manager.is_running(name) {
+            manager.stop_all().await;
+            return format!("MCP server '{name}' did not start.");
+        }
+
+        let tools: Vec<String> = manager
+            .list_tool_info()
+            .into_iter()
+            .filter(|tool| tool.server == name)
+            .map(|tool| tool.name)
+            .collect();
+        manager.stop_all().await;
+
+        if tools.is_empty() {
+            format!("MCP server '{name}' started but offers no tools.")
+        } else {
+            format!(
+                "MCP server '{name}' is running with {} tool(s):\n  {}",
+                tools.len(),
+                tools.join("\n  ")
+            )
         }
     }
 
@@ -10739,6 +10922,14 @@ impl ReplLoop {
                     }
                     "mcp" => {
                         let result = self.run_mcp_command(&args);
+                        // `add`, `remove` and `test` need the MCP client,
+                        // which the synchronous registry cannot reach. This
+                        // path is not async, so it hands the work to the same
+                        // off-thread channel `/plugin install` uses.
+                        if let Some(deferred) = result.deferred.clone() {
+                            self.pending_deferred = Some(deferred);
+                            self.spawn_deferred_work();
+                        }
                         ui_state.messages.push(codape_ui::message_list::Message {
                             role: codape_ui::message_list::MessageRole::System,
                             content: result.output.into(),
@@ -11279,18 +11470,66 @@ impl ReplLoop {
     /// archive must not freeze the frame that is drawing the spinner. The
     /// result arrives through the same channel a `!` command uses.
     fn spawn_deferred_work(&mut self) {
-        let Some(codape_commands::CommandDeferred::PluginInstall { source }) =
-            self.pending_deferred.take()
-        else {
+        let Some(deferred) = self.pending_deferred.take() else {
             return;
         };
         let cwd = self.cwd.clone();
         let tx = self.shell_results.tx.clone();
+        // `/hooks test` needs the installed executor, which the task cannot
+        // borrow from the loop. Both are captured now, before the spawn.
+        let hook_executor = self
+            .session
+            .engine
+            .as_ref()
+            .map(codape_core::QueryEngine::hook_executor);
+        let session_id = self
+            .session
+            .engine
+            .as_ref()
+            .map_or_else(String::new, |engine| {
+                engine.session().session_id.to_string()
+            });
         tokio::spawn(async move {
-            let output = Self::install_plugin_from(&cwd, &source).await;
-            // A closed receiver means the TUI is gone; nothing left to tell.
+            // The report goes back through the shell-result channel, which
+            // every off-thread command already uses; a closed receiver means
+            // the TUI is gone and there is nobody left to tell.
+            let (command, output) = match deferred {
+                codape_commands::CommandDeferred::PluginInstall { source } => (
+                    format!("/plugin install {source}"),
+                    Self::install_plugin_from(&cwd, &source).await,
+                ),
+                codape_commands::CommandDeferred::McpAdd {
+                    name,
+                    target,
+                    remote,
+                } => (
+                    format!("/mcp add {name}"),
+                    Self::mcp_add(&cwd, &name, &target, remote),
+                ),
+                codape_commands::CommandDeferred::McpRemove { name } => {
+                    (format!("/mcp remove {name}"), Self::mcp_remove(&cwd, &name))
+                }
+                codape_commands::CommandDeferred::McpTest { name } => (
+                    format!("/mcp test {name}"),
+                    Self::mcp_test(&cwd, &name).await,
+                ),
+                codape_commands::CommandDeferred::HookFire { event } => {
+                    // The engine cannot move into this task, but the executor
+                    // it holds is an `Arc`.
+                    match hook_executor {
+                        Some(executor) => (
+                            format!("/hooks test {event}"),
+                            Self::fire_hook_for_test(executor, &event, &session_id).await,
+                        ),
+                        None => (
+                            format!("/hooks test {event}"),
+                            format!("No session engine, so the '{event}' hook cannot be fired."),
+                        ),
+                    }
+                }
+            };
             let _ = tx.send(ShellCommandResult {
-                command: format!("/plugin install {source}"),
+                command,
                 output,
                 is_error: false,
             });
@@ -11552,7 +11791,18 @@ impl ReplLoop {
                     return Ok(());
                 }
                 "mcp" => {
-                    let result = self.run_mcp_command(&args);
+                    let mut result = self.run_mcp_command(&args);
+                    // The registry cannot reach `codape-mcp`, so `add`,
+                    // `remove` and `test` arrive as deferred work. This arm
+                    // intercepts `/mcp` before the generic drain, so the work
+                    // has to be carried out here or its report is lost.
+                    if let Some(deferred) = result.deferred.clone() {
+                        self.pending_deferred = Some(deferred);
+                    }
+                    if let Some(report) = self.drain_pending_deferred().await {
+                        result.output.push('\n');
+                        result.output.push_str(&report);
+                    }
                     writeln!(stdout, "{}", result.output)?;
                     return Ok(());
                 }

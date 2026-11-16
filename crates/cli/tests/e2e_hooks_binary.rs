@@ -1258,3 +1258,57 @@ fn failure_and_compaction_events_reach_their_hooks() {
         );
     }
 }
+
+/// `/hooks test <event>` fires the executor the session installed.
+///
+/// The command cannot edit the configuration — a rewrite would never reach a
+/// running session — so the honest thing it can answer is "does this hook
+/// run?". This proves it runs the real hook, by observing the marker the hook
+/// writes.
+#[test]
+fn the_hooks_test_subcommand_fires_the_installed_hook() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let marker = dir.path().join("hook-test-fired");
+    let script_path = script(
+        dir.path(),
+        "mark.sh",
+        // A gating hook has to answer on stdout; writing the marker is how
+        // this test sees that the script itself ran, and the JSON is what
+        // makes the result a clean one rather than "produced no output".
+        &format!(
+            "printf hit >> {}\nprintf '%s\\n' '{{\"decision\":\"allow\"}}'",
+            marker.display()
+        ),
+    );
+    let home = seed_config(&hook_settings(
+        "PreToolUse",
+        None,
+        script_path.to_str().unwrap(),
+    ));
+    let (mut provider, base_url) = start_static_provider();
+
+    let output = run(
+        dir.path(),
+        home.path(),
+        &base_url,
+        "/hooks test PreToolUse",
+        &["--dangerously-skip-permissions"],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("fired"),
+        "the command did not report firing: {stdout}"
+    );
+    assert!(
+        !stdout.contains("failed"),
+        "an allowing hook must not be reported as failed: {stdout}"
+    );
+    assert!(
+        marker.exists(),
+        "the hook itself never ran; stdout was {stdout}"
+    );
+}

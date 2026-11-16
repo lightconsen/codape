@@ -46,7 +46,7 @@ Without the prefix a shared raw name cannot address both servers, so the second 
 ### Hooked Into CLI
 
 - **`StartupOrchestrator.phase_init_mcp()`** (`crates/cli/src/orchestrator.rs:1353`) — Loads `.mcp.json`, starts servers, discovers tools/resources, sets `mcp_ready`.
-- **`/mcp` commands** — Server listing and status via config extension commands, with discovered prompts appended under each server (see *Prompts*).
+- **`/mcp` commands** — Server listing and status via config extension commands, with discovered prompts appended under each server (see *Prompts*). `add`, `remove` and `test` reach `codape-mcp`, which the command registry cannot: the handler returns a `CommandDeferred` naming the work and the REPL carries it out (headless drains it in place; the TUI hands it to the off-thread shell-result channel), which is the same mechanism `/plugin install` uses.
 - **`/mcp__<server>__<prompt>`** — one slash command per discovered prompt; arguments are positional or `key=value`, and the resolved messages are printed as text (see *Prompts*).
 
 ### Architecture Patterns

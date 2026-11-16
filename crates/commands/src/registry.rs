@@ -83,6 +83,41 @@ pub enum CommandDeferred {
         /// Where to install from, exactly as typed.
         source: String,
     },
+    /// Register an MCP server and save the config that names it.
+    ///
+    /// The config file lives in `.mcp.json`, which this crate does not parse;
+    /// `codape_mcp` owns the format. `/mcp add` used to answer with "use the
+    /// codape mcp add subcommand" — advice that leaves the session to do what
+    /// `/mcp` should have done.
+    McpAdd {
+        /// Name to register the server under.
+        name: String,
+        /// Target, exactly as typed: a stdio command, or a URL when `remote`.
+        target: String,
+        /// Whether `target` is a URL rather than a command.
+        remote: bool,
+    },
+    /// Drop an MCP server from `.mcp.json`.
+    McpRemove {
+        /// The server name to remove.
+        name: String,
+    },
+    /// Connect to one configured server and report what it offers.
+    McpTest {
+        /// The server name to connect to.
+        name: String,
+    },
+    /// Fire one lifecycle event at the hooks this session installed.
+    ///
+    /// Hooks are compiled into the session at startup, so `/hooks` cannot edit
+    /// the configuration and have it mean anything — the executor it holds is
+    /// the one built from the old file. What it *can* do is answer "would this
+    /// hook run?" by firing the event and reporting what came back. The
+    /// executor lives on the engine, which this crate cannot reach.
+    HookFire {
+        /// The event to fire, as `/hooks test <event>` spells it.
+        event: String,
+    },
 }
 
 impl CommandResult {
