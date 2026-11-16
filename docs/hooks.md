@@ -68,6 +68,11 @@ HookTier::Managed)` so they can run ahead of repository-controlled hooks.
 `from_settings_sources` loads several `(tier, document)` pairs into one
 registry, which is what the CLI uses.
 
+`HookRegistry::configured()` returns every hook the registry holds in chain
+order, with `len()` and `is_empty()`. `/hooks` reads that list — the executor is
+a trait object by the time the session holds it and cannot report its own
+contents, so `repl.rs` captures the names once, when it installs the registry.
+
 **Status:** wired. `Settings` carries the hook layers separately (`HookLayers`
 in `codape-config`: core, managed, and plugin), so `crates/cli/src/repl.rs`
 loads managed hooks as `HookTier::Managed` and user/project hooks as

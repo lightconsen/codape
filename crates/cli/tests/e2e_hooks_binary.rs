@@ -199,6 +199,39 @@ fn a_stop_hook_runs_after_a_completed_turn() {
     );
 }
 
+/// `/hooks` names the hook the session installed.
+///
+/// It used to list a directory nothing writes and report "no hooks" while the
+/// configured hook ran on every turn, so this checks the command against a
+/// hook that is demonstrably installed.
+#[test]
+fn the_hooks_command_names_a_configured_hook() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let stop = script(dir.path(), "stop.sh", "exit 0");
+    let home = seed_config(&hook_settings("Stop", None, stop.to_str().unwrap()));
+    let (mut provider, base_url) = start_static_provider();
+
+    let output = run(
+        dir.path(),
+        home.path(),
+        &base_url,
+        "/hooks",
+        &["--dangerously-skip-permissions"],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("Active hooks: 1"), "{stdout}");
+    assert!(stdout.contains("Stop"), "{stdout}");
+    assert!(stdout.contains("stop.sh"), "{stdout}");
+    assert!(
+        !stdout.contains("No lifecycle hooks are configured"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn a_posttooluse_rewrite_reaches_the_tool_result() {
     let dir = tempfile::tempdir().expect("workspace");

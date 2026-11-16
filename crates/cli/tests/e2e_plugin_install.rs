@@ -247,6 +247,75 @@ fn run_with_key(
         .expect("run codape")
 }
 
+/// `/plugin install <source>` in a session installs, rather than refusing.
+///
+/// The command registry cannot reach the installer, so the handler returns a
+/// deferred request and the REPL carries it out. This is the end-to-end check
+/// that the hand-off actually lands: the command names the source, the
+/// directory appears, and a later `/plugin` listing sees it.
+#[test]
+fn the_session_plugin_install_command_installs_a_directory() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+    let source = write_plugin_source(workspace.path());
+    let (mut provider, base_url) = start_static_provider();
+
+    let install = run(
+        workspace.path(),
+        home.path(),
+        &[
+            "-p",
+            &format!("/plugin install {}", source.to_str().unwrap()),
+        ],
+        None,
+        &base_url,
+    );
+    let stdout = String::from_utf8_lossy(&install.stdout);
+    assert!(
+        install.status.success(),
+        "the command failed: {stdout}\n{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert!(
+        stdout.contains("Installing plugin from"),
+        "the command did not start an install: {stdout}"
+    );
+    assert!(
+        stdout.contains("Installed to"),
+        "no install report: {stdout}"
+    );
+    assert!(
+        !stdout.contains("requires marketplace access"),
+        "the command still refuses: {stdout}"
+    );
+    let installed = workspace
+        .path()
+        .join(".codape")
+        .join("plugins")
+        .join("mock-plugin");
+    assert!(installed.join("bin/plugin").exists(), "{installed:?}");
+
+    // The listing reads the project's install directory, so the plugin that
+    // just landed is named by the next command.
+    let list = run(
+        workspace.path(),
+        home.path(),
+        &["-p", "/plugin"],
+        None,
+        &base_url,
+    );
+    let listed = String::from_utf8_lossy(&list.stdout);
+    assert!(listed.contains("mock-plugin"), "not listed: {listed}");
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+}
+
 /// A directory has no archive signature, so a configured signing key accepts
 /// it only when trust-on-first-use already pinned those exact contents.
 #[test]

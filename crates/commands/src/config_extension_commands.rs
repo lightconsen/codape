@@ -248,6 +248,20 @@ fn find_declaration(
         .map(|declaration| declaration.path.clone())
 }
 
+/// Plugin names an install directory holds.
+///
+/// A plugin is a directory with a `plugin.json`. An install directory also
+/// holds staging (`.install-<name>`), the pin store (`.codape-pins.json`) and
+/// a lock file while an install is running; none of those is a plugin, and
+/// listing them made a half-finished install look like an installed one.
+fn installed_plugin_names(path: &std::path::Path) -> Vec<String> {
+    list_dir_items(path)
+        .into_iter()
+        .filter(|name| !name.starts_with('.'))
+        .filter(|name| path.join(name).join("plugin.json").is_file())
+        .collect()
+}
+
 /// Read memory entries from the memory file.
 fn read_memory_entries() -> Vec<String> {
     let memory_path = config_home().join("memory").join("MEMORY.md");
@@ -265,6 +279,69 @@ fn read_memory_entries() -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+/// The servers a project's `.mcp.json` configures, one line each.
+///
+/// The config crate this module can reach has no MCP parser (that lives in
+/// `codape-mcp`, which the command layer does not depend on), so this reads the
+/// two shapes the file accepts — `{"mcpServers": {...}}` and the older
+/// `{"mcp_servers": {...}}` — and prints a name plus how it is reached. A file
+/// that cannot be read or parsed says so instead of reading as "none".
+fn configured_mcp_servers(cwd: &std::path::Path) -> String {
+    let path = cwd.join(".mcp.json");
+    if !path.exists() {
+        return format!("\nNo .mcp.json in {}", cwd.display());
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => return format!("\nCould not read {}: {error}", path.display()),
+    };
+    let document: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(document) => document,
+        Err(error) => return format!("\n{} is not valid JSON: {error}", path.display()),
+    };
+    let servers = document
+        .get("mcpServers")
+        .or_else(|| document.get("mcp_servers"))
+        .and_then(serde_json::Value::as_object);
+    let Some(servers) = servers else {
+        return format!("\n{} configures no servers.", path.display());
+    };
+    if servers.is_empty() {
+        return format!("\n{} configures no servers.", path.display());
+    }
+
+    let mut names: Vec<&String> = servers.keys().collect();
+    names.sort();
+    let mut output = format!("\nConfigured in {}:", path.display());
+    for name in names {
+        let entry = &servers[name];
+        let target = entry
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(std::string::ToString::to_string)
+            .or_else(|| {
+                let command = entry.get("command")?.as_str()?;
+                let args: Vec<&str> = entry
+                    .get("args")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Some(
+                    format!("{command} {}", args.join(" "))
+                        .trim_end()
+                        .to_string(),
+                )
+            })
+            .unwrap_or_else(|| "(no command or url)".to_string());
+        let _ = write!(output, "\n  {name}: {target}");
+    }
+    output
 }
 
 /// Register config extension commands.
@@ -359,17 +436,40 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|ctx: &CommandContext, args: &[String]| {
+            // The hooks that were installed, not the contents of a directory.
+            // `~/.codape/hooks/` was never written by anything, so the old
+            // listing reported "no hooks" while a configured hook was running
+            // on every tool call. What the session actually installed comes
+            // from the registry it built.
+            let details = &ctx.active_hook_details;
             let home = config_home();
             let hooks_path = home.join("hooks");
-            let available = list_dir_items(&hooks_path);
+            let files = list_dir_items(&hooks_path);
+
+            let describe = |hooks: &[String]| {
+                let mut output = format!("Active hooks: {}", hooks.len());
+                if hooks.is_empty() {
+                    output.push_str(
+                        "\nNo lifecycle hooks are configured. Add a `hooks` block to \
+                         settings.json; see docs/hooks.md.",
+                    );
+                } else {
+                    output.push_str("\nInstalled hooks:");
+                    for hook in hooks {
+                        let _ = write!(output, "\n  {hook}");
+                    }
+                }
+                output
+            };
 
             if args.is_empty() {
-                let mut output = format!("Active hooks: {}", ctx.active_hooks);
-                if !available.is_empty() {
+                let mut output = describe(details);
+                if !files.is_empty() {
                     let _ = write!(
                         output,
-                        "\nInstalled hooks:\n{}",
-                        available
+                        "\nHook files in {}:\n{}",
+                        hooks_path.display(),
+                        files
                             .iter()
                             .map(|h| format!("  {h}"))
                             .collect::<Vec<_>>()
@@ -379,16 +479,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 CommandResult::success(output)
             } else {
                 match args[0].as_str() {
-                    "list" => {
-                        if available.is_empty() {
-                            CommandResult::success("No hooks installed in ~/.codape/hooks/")
-                        } else {
-                            CommandResult::success(format!(
-                                "Installed hooks:\n{}",
-                                available.join("\n")
-                            ))
-                        }
-                    }
+                    "list" => CommandResult::success(describe(details)),
                     _ => CommandResult::error("Usage: /hooks [list]"),
                 }
             }
@@ -421,25 +512,24 @@ pub fn register(registry: &mut CommandRegistry) {
                 }
                 CommandResult::success(output)
             } else if args.is_empty() {
-                // Read MCP config if available
-                let settings_path = config_home().join("settings.json");
-                let mcp_info = if settings_path.exists() {
-                    std::fs::read_to_string(&settings_path).map_or_else(
-                        |_| "Unable to read settings.json.".to_string(),
-                        |content| {
-                            if content.contains("mcpServers") {
-                                "MCP servers configured in settings.json but not connected.\nCheck server URLs and authentication.".to_string()
-                            } else {
-                                "No MCP servers configured.\nAdd mcpServers to settings.json.".to_string()
-                            }
-                        },
-                    )
-                } else {
-                    "No settings.json found.\nAdd mcpServers to configure MCP.".to_string()
-                };
-                CommandResult::success(format!("MCP: Not connected\n{mcp_info}\nUse settings.json to configure MCP servers."))
+                // Read MCP config if available. `.mcp.json` is where
+                // `codape mcp add` writes and where startup reads, so a
+                // session that is not connected should still be able to see
+                // what is configured there — the old text pointed at a file
+                // and named no servers.
+                let mut output = String::from("MCP: Not connected");
+                output.push_str(&configured_mcp_servers(std::path::Path::new(&ctx.cwd)));
+                if ctx.mcp_servers.is_empty() && ctx.mcp_conflicts.is_empty() {
+                    output.push_str(
+                        "\nAdd a server with `codape mcp add`, or write .mcp.json in the \
+                         project root.",
+                    );
+                }
+                CommandResult::success(output)
             } else {
-                CommandResult::error("MCP management requires runtime connection.")
+                CommandResult::error(
+                    "MCP servers are added with `codape mcp add <name> -- <command>`.",
+                )
             }
         }),
     ));
@@ -452,13 +542,19 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|ctx: &CommandContext, args: &[String]| {
-            let home = config_home();
-            let plugins_path = home.join("plugins");
-            let installed = list_dir_items(&plugins_path);
+            // Installs go to the project's `.codape/plugins` and startup loads
+            // both that and the config home, so a listing that read only the
+            // home showed "no plugins" straight after a successful install.
+            let project_path = std::path::Path::new(&ctx.cwd).join(".codape/plugins");
+            let home_path = config_home().join("plugins");
+            let mut installed = installed_plugin_names(&project_path);
+            installed.extend(installed_plugin_names(&home_path));
+            installed.sort();
+            installed.dedup();
 
             if args.is_empty() {
                 if installed.is_empty() {
-                    CommandResult::success("No plugins installed.\nInstall plugins in ~/.codape/plugins/\nUse /plugin install <name> to install from marketplace.")
+                    CommandResult::success("No plugins installed.\nInstall one with /plugin install <source>: a directory, a git URL, a `github:owner/repo` shorthand, or a marketplace name.")
                 } else {
                     CommandResult::success(format!("Installed plugins:\n{}", installed.iter().map(|p| format!("  {p}")).collect::<Vec<_>>().join("\n")))
                 }
@@ -472,8 +568,23 @@ pub fn register(registry: &mut CommandRegistry) {
                         }
                     }
                     "install" => {
-                        let name = args.get(1).map_or("<name>", std::string::String::as_str);
-                        CommandResult::error(format!("Plugin installation requires marketplace access. Use: /plugin install {name}"))
+                        let Some(source) = args.get(1) else {
+                            return CommandResult::error(
+                                "Usage: /plugin install <source>\n\
+                                 A source is a directory (./my-plugin), a git remote \
+                                 (https://github.com/acme/plugin.git), a `github:owner/repo` \
+                                 shorthand, an archive URL (.tar.gz/.tgz), or the name of a \
+                                 plugin in a configured marketplace.",
+                            );
+                        };
+                        // Installing is async and needs the plugin manager, both
+                        // of which live in the CLI. The handler says what to
+                        // install; `ReplLoop` carries it out and reports back.
+                        CommandResult::success(format!("Installing plugin from '{source}'..."))
+                            .with_state_change(true)
+                            .with_deferred(crate::registry::CommandDeferred::PluginInstall {
+                                source: source.clone(),
+                            })
                     }
                     "components" => {
                         if ctx.plugin_components.is_empty() {
@@ -531,7 +642,7 @@ pub fn register(registry: &mut CommandRegistry) {
                         CommandResult::success(output)
                     }
                     _ => CommandResult::error(
-                        "Usage: /plugin [list|components|types [name]|install <name>]",
+                        "Usage: /plugin [list|components|types [name]|install <source>]",
                     ),
                 }
             }
@@ -877,6 +988,165 @@ mod tests {
         };
         let result = reg.execute("plugin", &ctx(), &["list".into()]);
         assert!(result.output.contains("plugin") || result.output.contains("No plugins"));
+    }
+
+    /// `/hooks` names the hooks the session installed.
+    ///
+    /// It used to list `~/.codape/hooks/`, a directory nothing writes, and so
+    /// reported "no hooks" while a configured hook ran on every tool call.
+    #[test]
+    fn hooks_names_the_configured_hooks() {
+        let home = tempfile::tempdir().unwrap();
+        set_test_config_home(home.path().to_path_buf());
+        let c = CommandContext {
+            active_hooks: 1,
+            active_hook_details: vec!["Core PreToolUse command: cargo fmt".into()],
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let listed = reg.execute("hooks", &c, &[]);
+        assert!(
+            listed.output.contains("Active hooks: 1"),
+            "{}",
+            listed.output
+        );
+        assert!(listed.output.contains("PreToolUse"), "{}", listed.output);
+        assert!(listed.output.contains("cargo fmt"), "{}", listed.output);
+        assert!(
+            !listed.output.contains("No lifecycle hooks"),
+            "{}",
+            listed.output
+        );
+    }
+
+    /// `/mcp` reports what `.mcp.json` configures, not just that it is not
+    /// connected.
+    #[test]
+    fn mcp_names_servers_configured_in_the_project() {
+        let home = tempfile::tempdir().unwrap();
+        set_test_config_home(home.path().to_path_buf());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".mcp.json"),
+            r#"{"mcpServers":{"fs":{"command":"npx","args":["-y","@mcp/fs"]},"api":{"url":"https://example.test/mcp"}}}"#,
+        )
+        .unwrap();
+
+        let c = CommandContext {
+            cwd: workspace.path().to_string_lossy().to_string(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let result = reg.execute("mcp", &c, &[]);
+        assert!(result.output.contains("Not connected"), "{}", result.output);
+        assert!(
+            result.output.contains("fs: npx -y @mcp/fs"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("api: https://example.test/mcp"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// A `.mcp.json` that cannot be parsed says so; it must not read as "no
+    /// servers".
+    #[test]
+    fn mcp_reports_an_unparseable_config() {
+        let home = tempfile::tempdir().unwrap();
+        set_test_config_home(home.path().to_path_buf());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join(".mcp.json"), "{not json").unwrap();
+
+        let c = CommandContext {
+            cwd: workspace.path().to_string_lossy().to_string(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let result = reg.execute("mcp", &c, &[]);
+        assert!(
+            result.output.contains("not valid JSON"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// `/plugin` lists the project's install directory, where installs land.
+    #[test]
+    fn plugin_lists_a_project_install() {
+        let home = tempfile::tempdir().unwrap();
+        set_test_config_home(home.path().to_path_buf());
+        let workspace = tempfile::tempdir().unwrap();
+        let plugins = workspace.path().join(".codape/plugins");
+        std::fs::create_dir_all(plugins.join("acme-tools")).unwrap();
+        std::fs::write(plugins.join("acme-tools/plugin.json"), "{}").unwrap();
+        // Staging and the pin store are not plugins.
+        std::fs::create_dir_all(plugins.join(".install-broken")).unwrap();
+        std::fs::write(plugins.join(".codape-pins.json"), "{}").unwrap();
+
+        let c = CommandContext {
+            cwd: workspace.path().to_string_lossy().to_string(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let result = reg.execute("plugin", &c, &[]);
+        assert!(result.output.contains("acme-tools"), "{}", result.output);
+        for not_a_plugin in [".install-broken", ".codape-pins.json"] {
+            assert!(
+                !result.output.contains(not_a_plugin),
+                "{not_a_plugin} was listed: {}",
+                result.output
+            );
+        }
+    }
+
+    /// `/plugin install <source>` hands the install to the session.
+    ///
+    /// The command layer cannot reach the installer, so the handler queues a
+    /// `CommandDeferred` instead of refusing the way it used to.
+    #[test]
+    fn plugin_install_queues_the_install() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let result = reg.execute("plugin", &ctx(), &["install".into(), "./my-plugin".into()]);
+        assert!(!result.output.starts_with("Error:"), "{:?}", result.output);
+        assert!(result.output.contains("./my-plugin"), "{}", result.output);
+        assert_eq!(
+            result.deferred,
+            Some(crate::registry::CommandDeferred::PluginInstall {
+                source: "./my-plugin".into()
+            })
+        );
+
+        let missing = reg.execute("plugin", &ctx(), &["install".into()]);
+        assert!(missing.output.starts_with("Error:"), "{:?}", missing.output);
+        assert!(missing.deferred.is_none());
     }
 
     #[test]

@@ -27,6 +27,6 @@ pub use history::CommandHistory;
 pub use integration_commands::load_remote_env;
 pub use macro_commands::MacroRegistry;
 pub use registry::{
-    CommandArgs, CommandContext, CommandHandler, CommandRegistry, CommandResult, CommandType,
-    SlashCommand, register_all_commands,
+    CommandArgs, CommandContext, CommandDeferred, CommandHandler, CommandRegistry, CommandResult,
+    CommandType, SlashCommand, register_all_commands,
 };

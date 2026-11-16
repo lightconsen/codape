@@ -59,6 +59,24 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
+    // /agents — handled directly by the REPL (built-in command).
+    //
+    // The listing reads the live agent manager, which only the session holds.
+    // Without this stub `/agents` worked but was invisible in `/help`, so the
+    // one place a person looks for a command did not mention it.
+    registry.register(SlashCommand::local(
+        "agents",
+        "List running sub-agents and their definitions (REPL built-in)",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "Agents are handled by the REPL. Use /agents [list|logs <id> [count]|follow <id|all>].",
+            )
+        }),
+    ));
+
     // /ultraplan — super plan mode (feature-gated)
     registry.register(SlashCommand::local(
         "ultraplan",
@@ -302,6 +320,28 @@ mod tests {
         };
         let result = reg.execute("teleport", &ctx(), &[]);
         assert!(result.output.contains("handled by the REPL"));
+    }
+
+    #[test]
+    fn agents_stub_is_listed_and_names_the_repl_syntax() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        // The REPL runs `/agents`, so the registry entry exists to make the
+        // command discoverable — it has to be in the listing `/help` reads.
+        assert!(
+            reg.list().iter().any(|cmd| cmd.name == "agents"),
+            "/agents is missing from the registry"
+        );
+        let result = reg.execute("agents", &ctx(), &[]);
+        assert!(
+            result.output.contains("handled by the REPL"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("/agents"), "{}", result.output);
     }
 
     #[test]

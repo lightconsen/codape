@@ -1290,6 +1290,32 @@ impl HookRegistry {
         self.matches_for_event_name(event.as_str())
     }
 
+    /// Every hook this registry holds, in chain order.
+    ///
+    /// `/hooks` used to read a directory nothing installs into and then report
+    /// "no hooks" while a configured hook ran on every tool call. This is the
+    /// list that answers "what is installed" instead.
+    #[must_use]
+    pub fn configured(&self) -> Vec<&HookConfig> {
+        let mut configs: Vec<&HookConfig> = self.hooks.iter().map(|entry| &entry.config).collect();
+        // Stable sort, same key as matching: tier order is what decides who
+        // runs first, so the listing shows the same order.
+        configs.sort_by_key(|config| (config.tier, std::cmp::Reverse(config.priority)));
+        configs
+    }
+
+    /// How many hooks this registry holds.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.hooks.len()
+    }
+
+    /// Whether this registry holds no hooks.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
     /// Find hooks matching the given event name string, in chain order.
     ///
     /// Both sides are parsed as a [`HookEvent`] before comparing, so a
@@ -3452,6 +3478,53 @@ mod tests {
         // Exactly two hooks: the managed document was installed once, at its
         // own tier, not folded into core.
         assert_eq!(matches.len(), 2);
+    }
+
+    /// `configured()` lists every installed hook in the order the chain runs.
+    ///
+    /// `/hooks` reads this instead of a directory: it is the only way for the
+    /// command to know that a hook is installed while none is firing.
+    #[test]
+    fn configured_lists_every_hook_in_chain_order() {
+        let managed = serde_json::json!({
+            "hooks": [{ "event": "PreToolUse", "command": "managed", "priority": 0 }]
+        });
+        let core = serde_json::json!({
+            "hooks": [
+                { "event": "PreToolUse", "command": "core", "priority": 100 },
+                { "event": "SessionEnd", "command": "bye", "priority": 0 }
+            ]
+        });
+        let registry = HookRegistry::from_settings_sources([
+            (HookTier::Core, &core),
+            (HookTier::Managed, &managed),
+        ])
+        .unwrap();
+
+        assert_eq!(registry.len(), 3);
+        assert!(!registry.is_empty());
+
+        let commands: Vec<&str> = registry
+            .configured()
+            .into_iter()
+            .map(|hook| hook.command.as_str())
+            .collect();
+        assert_eq!(commands, vec!["managed", "core", "bye"]);
+        // Same tier ordering the executor uses, so the listing is not a second
+        // opinion about who runs first.
+        let tiers: Vec<HookTier> = registry.configured().iter().map(|h| h.tier).collect();
+        assert_eq!(
+            tiers,
+            vec![HookTier::Managed, HookTier::Core, HookTier::Core]
+        );
+    }
+
+    #[test]
+    fn an_empty_registry_reports_empty() {
+        let registry = HookRegistry::default();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+        assert!(registry.configured().is_empty());
     }
 
     /// A bad entry in the repository-controlled core document must not remove

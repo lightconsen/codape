@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 76 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
+Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 77 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
 
 ## Design
 
@@ -12,12 +12,13 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandContext`** (`registry.rs`) — Per-invocation context: cwd, model, session state, token usage, cost, feature flags, git branch, theme, vim mode, env vars, and `pipe_input: Option<String>` for command chaining.
 - **`CommandHandler`** (`registry.rs`) — `Arc<dyn Fn(&CommandContext, &[String]) -> CommandResult + Send + Sync>`.
 - **`SlashCommand`** (`registry.rs`) — Metadata: name, description, kind (`Local`/`LocalUi`/`Prompt`/`Standalone`), `supports_non_interactive`, `remote_safe`, `bridge_safe`, `uses_agent_backend`, `destructive: bool`, `args: CommandArgs`, handler.
-- **`CommandResult`** (`registry.rs`) — Output, `state_changed`, `suppress_output`, `extra_context`, `append_system_prompt`, `override_system_prompt`, `prompt_profile`, `allowed_tools_override`, `scrollable: bool`.
+- **`CommandResult`** (`registry.rs`) — Output, `state_changed`, `suppress_output`, `extra_context`, `submit_prompt`, `append_system_prompt`, `override_system_prompt`, `prompt_profile`, `allowed_tools_override`, `scrollable: bool`, `deferred: Option<CommandDeferred>`.
+- **`CommandDeferred`** (`registry.rs`) — Work a synchronous handler hands to the session because the crate cannot do it itself: `PluginInstall { source }` is carried out by the REPL (headless: appended to the command's output; TUI: a `tokio::spawn` reporting through the shell-result channel). Same hand-off shape as `pending_setup`.
 - **`CommandArgs`** (`registry.rs`) — Argument validation enum: `None` (no validation), `AtLeast(n)`, `AtMost(n)`, `Exactly(n)`. Validated pre-dispatch in `execute()`.
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (76 commands across 13 registered modules)
+### Command Inventory (77 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
@@ -32,7 +33,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |
-| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated |
+| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/agents`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/agents` is a REPL built-in the registry also lists so `/help` shows it |
 | `misc_commands` | `/advisor`, `/btw`, `/good-claude`, `/stickers`, `/bughunter`, `/issue`, `/env`, `/diff`, `/oauth-refresh`, `/backfill-sessions`, `/history` | Miscellaneous. `/history [n]` and `/history search <q>` read the session's recorded command lines. |
 | `macro_commands` | `/macro` (REPL built-in) | `MacroRegistry` loads, persists and expands macros. `/macro define <name> <command[; command…]>`, `list`, `run <name>`, `delete <name>` are handled by the REPL; a defined macro also runs by typing `/<name>`. |
 
@@ -62,7 +63,8 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/theme` lists and changes themes with available theme detection.
 - `/status` and `/doctor` show comprehensive system health (API key, MCP, git, model, feature flags).
 - `/memory` reads and searches long-term memory entries.
-- `/hooks`, `/mcp`, `/plugin`, `/skills`, `/tasks` list and manage subsystem state. `/plugin components` lists the themes, output styles, workflows, monitors, LSP servers, channels, binaries, types and experimental data contributed by active plugins.
+- `/hooks`, `/mcp`, `/plugin`, `/skills`, `/tasks` list and manage subsystem state. `/hooks` names each installed hook with its event, kind, tier and target — taken from the registry the session built, not from a directory. `/mcp` reports the servers `.mcp.json` configures even when the session is not connected. `/plugin` reads both the project's `.codape/plugins` and the config home, and `/plugin install <source>` installs from a directory, git URL, `github:owner/repo` shorthand or archive. `/plugin components` lists the themes, output styles, workflows, monitors, LSP servers, channels, binaries, types and experimental data contributed by active plugins.
+- `/agents [list|logs <id> [count]|follow <id|all>]` is a REPL built-in: `list` names the agent definitions the session can spawn and the agents it has spawned, `logs` replays one agent's log, and `follow` subscribes to its events. A registry entry mirrors it so `/help` lists it.
 - `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins.
 - `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing.
 - Feature-gated commands (`/ultraplan`, `/thinkback`, `/thinkback-play`, `/voice`, `/ctx_viz`, `/heapdump`, `/mock-limits`, `/stickers`) check `CommandContext.feature_flags`, which the REPL now fills from the resolved `FeatureFlags` (env + `--betas`).

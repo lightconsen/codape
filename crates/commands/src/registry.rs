@@ -56,6 +56,33 @@ pub struct CommandResult {
     pub allowed_tools_override: Option<Vec<String>>,
     /// Whether the output should be rendered as a scrollable message.
     pub scrollable: bool,
+    /// Work the handler could not do itself, for the session to carry out.
+    ///
+    /// Handlers are synchronous and this crate depends on neither the plugin
+    /// installer nor the MCP client, so a command that needs one says what it
+    /// wants here and the CLI runs it. `/plugin install` is the first user: it
+    /// used to refuse outright because the installer lived where the registry
+    /// could not reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<CommandDeferred>,
+}
+
+/// Work a synchronous command handler hands to the session.
+///
+/// The variant names the intent, not the mechanism, so the CLI can decide how
+/// to carry it out — and report the outcome back in the command's own output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum CommandDeferred {
+    /// Install a plugin from a source spec.
+    ///
+    /// The spec is the person's argument verbatim: a directory, a git remote,
+    /// a `github:owner/repo` shorthand, an archive URL, or a bare marketplace
+    /// listing name. Classifying it needs the plugins crate, so the CLI does
+    /// that and reports what it did.
+    PluginInstall {
+        /// Where to install from, exactly as typed.
+        source: String,
+    },
 }
 
 impl CommandResult {
@@ -72,6 +99,7 @@ impl CommandResult {
             prompt_profile: None,
             allowed_tools_override: None,
             scrollable: false,
+            deferred: None,
         }
     }
 
@@ -88,6 +116,7 @@ impl CommandResult {
             prompt_profile: None,
             allowed_tools_override: None,
             scrollable: false,
+            deferred: None,
         }
     }
 
@@ -161,6 +190,16 @@ impl CommandResult {
         self.scrollable = true;
         self
     }
+
+    /// Hand work the handler cannot do itself to the session.
+    ///
+    /// The output stays what the handler already said; the session appends
+    /// what it did with the request. See [`CommandDeferred`].
+    #[must_use]
+    pub fn with_deferred(mut self, deferred: CommandDeferred) -> Self {
+        self.deferred = Some(deferred);
+        self
+    }
 }
 
 /// Command argument specification for validation.
@@ -229,6 +268,12 @@ pub struct CommandContext {
     pub mcp_conflicts: Vec<String>,
     /// Active hooks.
     pub active_hooks: usize,
+    /// One line per hook the session installed, in the order they run.
+    ///
+    /// `active_hooks` is a count and cannot say *which* hooks; `/hooks` was
+    /// left listing a directory nothing writes to because the names were not
+    /// in the context. Each line names the event, the kind and the target.
+    pub active_hook_details: Vec<String>,
     /// API key configured.
     pub api_key_set: bool,
     /// Feature flags (key -> enabled).
@@ -293,6 +338,7 @@ impl CommandContext {
             plugin_themes: Vec::new(),
             mcp_conflicts: Vec::new(),
             active_hooks: 0,
+            active_hook_details: Vec::new(),
             api_key_set: false,
             feature_flags: HashMap::new(),
             git_branch: String::new(),
@@ -686,6 +732,37 @@ mod tests {
 
         let enough = registry.execute("needs-two", &make_ctx(), &["one".into(), "two".into()]);
         assert!(enough.output.contains("ran with 2"), "{}", enough.output);
+    }
+
+    /// A handler's deferred request survives dispatch.
+    ///
+    /// The session reads `result.deferred` to decide what to carry out; a
+    /// `CommandResult` that dropped it would silently turn `/plugin install`
+    /// back into a no-op.
+    #[test]
+    fn a_deferred_request_survives_dispatch() {
+        let mut registry = CommandRegistry::new();
+        registry.register(SlashCommand::local(
+            "queues-work",
+            "hands work to the session",
+            false,
+            false,
+            false,
+            Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+                CommandResult::success("queued").with_deferred(CommandDeferred::PluginInstall {
+                    source: "./acme".into(),
+                })
+            }),
+        ));
+
+        let result = registry.execute("queues-work", &make_ctx(), &[]);
+        assert_eq!(result.output, "queued");
+        assert_eq!(
+            result.deferred,
+            Some(CommandDeferred::PluginInstall {
+                source: "./acme".into()
+            })
+        );
     }
 
     #[test]

@@ -447,7 +447,7 @@ fn schema_is_present(schema: &serde_json::Value) -> bool {
 /// The key is the trust anchor for plugin signatures, so it comes from the
 /// process environment — a source a repository cannot write — rather than from
 /// anything a plugin package carries.
-fn plugin_manager_with_signing_key() -> codape_plugins::plugins::PluginManager {
+pub(crate) fn plugin_manager_with_signing_key() -> codape_plugins::plugins::PluginManager {
     let mut manager = codape_plugins::plugins::PluginManager::new();
     if manager.set_public_key_from_env() {
         tracing::info!(
@@ -2286,7 +2286,7 @@ impl StartupOrchestrator {
     ///
     /// Later duplicates (by name or URL) are dropped so a settings entry wins
     /// over the environment fallback rather than being registered twice.
-    fn configured_marketplaces(
+    pub(crate) fn configured_marketplaces(
         configured: &[codape_config::MarketplaceSetting],
     ) -> Vec<(String, String)> {
         let mut entries: Vec<(String, String)> = configured
@@ -2321,7 +2321,7 @@ impl StartupOrchestrator {
     ///
     /// A registration failure (for example an HTTP URL) is reported and
     /// skipped; it must not stop an install that may still be a direct URL.
-    fn register_marketplaces(
+    pub(crate) fn register_marketplaces(
         manager: &codape_plugins::plugins::PluginManager,
         marketplaces: &[(String, String)],
     ) {
@@ -2616,7 +2616,7 @@ impl StartupOrchestrator {
     }
 
     /// Find project config in CWD or nearest ancestor.
-    fn find_project_config(cwd: &str) -> Option<std::path::PathBuf> {
+    pub(crate) fn find_project_config(cwd: &str) -> Option<std::path::PathBuf> {
         let mut current = std::path::Path::new(cwd);
         loop {
             let candidate = current.join(".codape/settings.json");

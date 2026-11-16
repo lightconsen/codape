@@ -2460,6 +2460,13 @@ pub struct ReplLoop {
     /// async entry points (`execute_command`, and `run_tui` after
     /// `process_tui_input`) take and fire it exactly once.
     pending_setup: Option<String>,
+    /// Work a synchronous command handed to this loop.
+    ///
+    /// `/plugin install` needs the plugin manager and an async installer, and
+    /// the command crate depends on neither. `sync_command_state` records the
+    /// request; the async entry points carry it out and append the outcome to
+    /// the command's own output.
+    pending_deferred: Option<codape_commands::CommandDeferred>,
     /// What the last `/backfill-sessions` run did.
     ///
     /// The registry's dispatch is synchronous and does not know where the
@@ -2477,6 +2484,11 @@ pub struct ReplLoop {
     macro_registry: MacroRegistry,
     /// Lifecycle hooks: what was configured, and how many the executor runs.
     hooks: HookState,
+    /// One line per installed hook, in the order they run.
+    ///
+    /// Built when the registry is installed: the executor is behind a trait
+    /// object by then and cannot list itself, and `/hooks` has to name them.
+    hook_details: Vec<String>,
     /// Mod runtime state: the UI handle, the submit queue and the loop guard.
     mods: ModState,
     /// Where the line-delimited protocol goes, when `--output-format
@@ -3105,6 +3117,7 @@ impl ReplLoop {
                 layers: None,
                 active: 0,
             },
+            hook_details: Vec::new(),
             mods: ModState {
                 ui_handle: None,
                 submit_queue: codape_mods::ModSubmitQueue::default(),
@@ -3150,6 +3163,7 @@ impl ReplLoop {
             #[cfg(feature = "hot-reload")]
             config_changed_rx: None,
             pending_setup: None,
+            pending_deferred: None,
             last_backfill: None,
             options: SessionOptions {
                 no_persistence: false,
@@ -3610,6 +3624,7 @@ impl ReplLoop {
                 layers: None,
                 active: 0,
             },
+            hook_details: Vec::new(),
             mods: ModState {
                 ui_handle: None,
                 submit_queue: codape_mods::ModSubmitQueue::default(),
@@ -3655,6 +3670,7 @@ impl ReplLoop {
             #[cfg(feature = "hot-reload")]
             config_changed_rx,
             pending_setup: None,
+            pending_deferred: None,
             last_backfill: None,
             options: SessionOptions {
                 no_persistence: false,
@@ -4763,6 +4779,22 @@ impl ReplLoop {
                     hook_sources.iter().map(|(tier, value)| (*tier, value)),
                 ) {
                     Ok(registry) => {
+                        // What `/hooks` lists. Captured here because the
+                        // executor is a trait object from the next line on and
+                        // cannot be asked for its contents.
+                        self.hook_details = registry
+                            .configured()
+                            .into_iter()
+                            .map(|hook| {
+                                format!(
+                                    "{:?} {} ({}): {}",
+                                    hook.tier,
+                                    hook.event,
+                                    format!("{:?}", hook.kind).to_lowercase(),
+                                    hook.label()
+                                )
+                            })
+                            .collect();
                         // Three kinds — `prompt`, `agent`, `mcp_tool` — need a
                         // model client and the tool registry, which the hooks
                         // crate cannot reach. Without this they load and then
@@ -6235,6 +6267,9 @@ impl ReplLoop {
                     // this is the async drain point for
                     // the TUI.
                     self.drain_pending_setup_hook().await;
+                    // `/plugin install` queues its install the same
+                    // way; it runs off the draw thread.
+                    self.spawn_deferred_work();
                 }
             }
             VimAction::Escape => {
@@ -9441,6 +9476,12 @@ impl ReplLoop {
             self.run_session_backfill();
         }
 
+        // A command that needs the plugin manager or an async installer says
+        // so in its result; the entry points carry it out.
+        if let Some(deferred) = result.deferred.clone() {
+            self.pending_deferred = Some(deferred);
+        }
+
         if cmd_name == "vim" && result.state_changed {
             self.ui.vim_mode_enabled = !self.ui.vim_mode_enabled;
             return true;
@@ -9525,6 +9566,91 @@ impl ReplLoop {
             .await;
         if !result.errors.is_empty() {
             tracing::warn!(errors = ?result.errors, "Setup hook errors");
+        }
+    }
+
+    /// Carry out work a synchronous command queued.
+    ///
+    /// The pending value is taken before the await, so a failed install is not
+    /// retried on the next turn, and the report is returned rather than
+    /// printed: every display path already has the command's output in hand
+    /// and appends this.
+    async fn drain_pending_deferred(&mut self) -> Option<String> {
+        match self.pending_deferred.take()? {
+            codape_commands::CommandDeferred::PluginInstall { source } => {
+                Some(Self::install_plugin_from(&self.cwd, &source).await)
+            }
+        }
+    }
+
+    /// Install a plugin from the same sources `codape plugin install` accepts.
+    ///
+    /// A bare name is a marketplace listing and is resolved against the
+    /// configured marketplaces; anything else — a directory, a git remote, a
+    /// `github:` shorthand, an archive URL — is a source, which
+    /// `PluginManager::install_from_source` handles. This is the classification
+    /// the CLI subcommand performs in `run_plugin`; doing it here is what lets
+    /// `/plugin install` work at all instead of refusing.
+    async fn install_plugin_from(cwd: &str, source: &str) -> String {
+        use codape_plugins::plugins::{MarketplacePlugin, PluginSource};
+
+        let install_dir = std::path::Path::new(cwd).join(".codape/plugins");
+        let manager = Arc::new(crate::orchestrator::plugin_manager_with_signing_key());
+
+        // Marketplaces are registered on this manager so a bare name resolves.
+        // The settings files are read rather than the startup context: this
+        // path must work in a session started before any marketplace phase.
+        let service = codape_config::settings::ConfigService::new(
+            codape_config::config_home().join("settings.json"),
+            crate::orchestrator::StartupOrchestrator::find_project_config(cwd),
+        )
+        .with_local_config_path(std::path::Path::new(cwd).join(".codape/settings.local.json"));
+        let host = service.load_plugin_host_config();
+        if let Some(plugins) = host.plugins.as_ref()
+            && let Err(error) = manager.apply_options_from_settings(plugins)
+        {
+            tracing::warn!(%error, "plugin userConfig was not applied before install");
+        }
+        let marketplaces =
+            crate::orchestrator::StartupOrchestrator::configured_marketplaces(&host.marketplaces);
+        crate::orchestrator::StartupOrchestrator::register_marketplaces(&manager, &marketplaces);
+
+        let detected = PluginSource::detect(source);
+        let result = if detected.is_marketplace() {
+            if marketplaces.is_empty() {
+                return format!(
+                    "Could not install '{source}': that is a marketplace plugin name, but no \
+                     marketplace is configured. Pass a source instead — a directory, a git URL, \
+                     a `github:owner/repo` shorthand, or an archive URL."
+                );
+            }
+            manager.install_plugin_by_name(source, &install_dir).await
+        } else {
+            // `install_plugin` routes a non-marketplace listing to the same
+            // path; going through it keeps the one entry point that records
+            // the listing's name and version.
+            let listing = MarketplacePlugin {
+                name: source.to_string(),
+                version: "latest".into(),
+                url: source.to_string(),
+                description: String::new(),
+            };
+            manager.install_plugin(&listing, &install_dir).await
+        };
+
+        match result {
+            Ok(path) => {
+                // Commands, skills and hooks from a newly installed plugin
+                // reach a live session only after a restart; say so rather
+                // than let the person wonder why `/plugin components` is
+                // unchanged.
+                format!(
+                    "Installed to {}. Its commands, skills and hooks load on the next \
+                     session.",
+                    path.display()
+                )
+            }
+            Err(error) => format!("Installation failed: {error}"),
         }
     }
 
@@ -11060,6 +11186,30 @@ impl ReplLoop {
         });
     }
 
+    /// Carry out queued work in the TUI and put its report on screen.
+    ///
+    /// The install runs in a task: cloning a repository or downloading an
+    /// archive must not freeze the frame that is drawing the spinner. The
+    /// result arrives through the same channel a `!` command uses.
+    fn spawn_deferred_work(&mut self) {
+        let Some(codape_commands::CommandDeferred::PluginInstall { source }) =
+            self.pending_deferred.take()
+        else {
+            return;
+        };
+        let cwd = self.cwd.clone();
+        let tx = self.shell_results.tx.clone();
+        tokio::spawn(async move {
+            let output = Self::install_plugin_from(&cwd, &source).await;
+            // A closed receiver means the TUI is gone; nothing left to tell.
+            let _ = tx.send(ShellCommandResult {
+                command: format!("/plugin install {source}"),
+                output,
+                is_error: false,
+            });
+        });
+    }
+
     /// Clear the session and say what happened.
     ///
     /// One implementation for every entry point, because `/clear` that reports
@@ -11257,8 +11407,11 @@ impl ReplLoop {
         // Check for pipe operator
         if line.contains('|') {
             let result = self.execute_piped_commands_non_tui(line, stdout);
-            // A pipe may end in `/init`; the drain is async and the piped
-            // helper is not, so it happens here.
+            // A pipe may end in `/init` or `/plugin install`; the drain is
+            // async and the piped helper is not, so it happens here.
+            if let Some(report) = self.drain_pending_deferred().await {
+                writeln!(stdout, "\n{report}")?;
+            }
             self.drain_pending_setup_hook().await;
             return result;
         }
@@ -11594,10 +11747,15 @@ impl ReplLoop {
         let ctx = self.build_context();
         let result = self.commands.execute(cmd_name, &ctx, &args);
         self.sync_command_state(cmd_name, &result);
-        let output = self.with_backfill_report(cmd_name, &result.output);
+        let mut output = self.with_backfill_report(cmd_name, &result.output);
+        // The registry dispatch is synchronous; carry out anything it queued
+        // now, while this async entry point owns the manager and the runtime.
+        if let Some(report) = self.drain_pending_deferred().await {
+            output.push('\n');
+            output.push_str(&report);
+        }
         writeln!(stdout, "{output}")?;
-        // The registry dispatch is synchronous; fire anything it queued now,
-        // while this async entry point owns the engine.
+        // The same drain point for the hook `/init` queued.
         self.drain_pending_setup_hook().await;
         Ok(())
     }
@@ -12273,19 +12431,44 @@ impl ReplLoop {
 
         match args.first().map(String::as_str) {
             None | Some("list") => {
+                // Definitions first: a session with nothing spawned still has
+                // agents it can spawn, and "none spawned" alone reads as
+                // "there are no agents". They come from the manager, so the
+                // list matches what the Agent tool will resolve.
+                let (running, defined) = {
+                    let manager = manager.lock().await;
+                    (manager.list_agents().len(), manager.custom_agent_names())
+                };
+                let mut lines = Vec::new();
+                if !defined.is_empty() {
+                    lines.push(format!("{} agent definition(s):", defined.len()));
+                    for name in &defined {
+                        lines.push(format!("  {name}"));
+                    }
+                }
                 let manager = manager.lock().await;
                 let agents = manager.list_agents();
                 if agents.is_empty() {
-                    return "No agents have been spawned in this session.".into();
-                }
-                let mut lines = vec![format!("{} agent(s):", agents.len())];
-                for agent in agents {
-                    lines.push(format!(
-                        "  {} [{}] {}",
-                        agent.task_handle.id,
-                        format!("{:?}", agent.status()).to_lowercase(),
-                        agent.prompt.lines().next().unwrap_or("").trim()
-                    ));
+                    if lines.is_empty() {
+                        return "No agents have been spawned in this session, and no agent \
+                                definitions were found in .codape/agents/."
+                            .into();
+                    }
+                    lines.push(
+                        "\nNo agents have been spawned in this session. Spawn one with the \
+                         Agent tool, naming a definition above."
+                            .into(),
+                    );
+                } else {
+                    lines.push(format!("\n{running} agent(s) spawned:"));
+                    for agent in agents {
+                        lines.push(format!(
+                            "  {} [{}] {}",
+                            agent.task_handle.id,
+                            format!("{:?}", agent.status()).to_lowercase(),
+                            agent.prompt.lines().next().unwrap_or("").trim()
+                        ));
+                    }
                 }
                 // `lines` owns its strings; the borrow of the agent list ends
                 // with the loop, so release the manager lock before returning.
@@ -12415,6 +12598,7 @@ impl ReplLoop {
         // `/doctor`, `/config` always said "disconnected" and `/hooks`
         // always said zero.
         ctx.active_hooks = self.hooks.active;
+        ctx.active_hook_details.clone_from(&self.hook_details);
         let (mcp_connected, mcp_servers, mcp_conflicts) = self.mcp_state();
         ctx.mcp_connected = mcp_connected;
         ctx.mcp_servers = mcp_servers;
@@ -13000,6 +13184,42 @@ mod tests {
         let mut out = Vec::new();
         repl.execute_command("/agents wat", &mut out).await.unwrap();
         assert!(String::from_utf8_lossy(&out).contains("Unknown /agents subcommand"));
+    }
+
+    /// A definition with nothing spawned is still listed.
+    ///
+    /// "No agents have been spawned" alone read as "there are no agents" while
+    /// `.codape/agents/` defined several, which is the state a fresh project is
+    /// in right after someone writes their first agent file.
+    #[tokio::test]
+    async fn agents_command_lists_definitions_with_nothing_spawned() {
+        let mut repl = ReplLoop::with_engine(
+            Box::new(CountingApi::new()),
+            "/tmp".into(),
+            ModelId::sonnet(),
+        );
+        let manager = repl.agents.manager.as_ref().expect("manager").clone();
+        manager
+            .lock()
+            .await
+            .register_custom_agent(codape_agents::CustomAgentDef {
+                name: "reviewer".into(),
+                system_prompt: "Review the diff.".into(),
+                allowed_tools: Vec::new(),
+                model: None,
+                max_tokens: None,
+                output_schema: None,
+                description: Some("Reviews diffs".into()),
+            });
+
+        let mut out = Vec::new();
+        repl.execute_command("/agents list", &mut out)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("1 agent definition(s):"), "{text}");
+        assert!(text.contains("reviewer"), "{text}");
+        assert!(text.contains("No agents have been spawned"), "{text}");
     }
 
     /// `EnterPlanMode` is a tool, and the mode it changes lives on the
