@@ -63,8 +63,12 @@ terminal.
 - `core::wire_protocol` and the stream-json protocol both carry mod UI, so a
   surface outside this process receives the same tree.
 
-Only the terminal is registered. There is no IDE, desktop, web or chat host in
-this repository; that is a product gap, not an abstraction gap.
+Only the terminal is registered as a `UiSurface`. An editor reaches a running
+session through a different path — `codape ide bridge`, a stdio MCP server that
+talks to the daemon over WebSocket (see [mcp.md](mcp.md#reaching-a-running-session-from-an-editor)).
+That path carries text tool calls, not the mod element tree, so an IDE host for
+`UiSurface` is still unbuilt: a surface that renders `UiElement`s inside an
+editor needs an implementation this repository does not have.
 
 ## Adding a surface
 

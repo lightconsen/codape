@@ -83,6 +83,9 @@ uuid.workspace = true
 base64.workspace = true
 portable-pty = "0.9"
 vt100 = "0.15"
+# The editor bridge is a WebSocket client against `codape serve`.
+tokio-tungstenite.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

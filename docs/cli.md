@@ -21,9 +21,10 @@ main() → parse_args() → StartupOrchestrator::run()
   → run() routes based on args:
     --print / PROMPT  → run_headless() → single turn → print → exit
     Command::Repl     → run_repl() → TUI
-    Command::Serve    → run_server() → WebSocket daemon (writes PID file)
+    Command::Serve    → run_server() → WebSocket daemon (records pid/address/token)
     Command::ServeStop    → run_serve_stop() → sends SIGTERM to daemon
     Command::ServeStatus  → run_serve_status() → reports daemon state
+    Command::Ide          → print the MCP snippet that registers `codape ide bridge`
     Command::Agents       → list available agents
     Command::Auth         → show API provider status
     Command::Doctor       → run diagnostics
@@ -112,6 +113,7 @@ main() → parse_args() → StartupOrchestrator::run()
 | `serve [--port PORT]` | Start WebSocket daemon server |
 | `serve-stop` | Stop the running daemon |
 | `serve-status` | Show daemon status |
+| `ide [config]` | Print the MCP configuration an editor uses to reach a running daemon. `codape ide bridge` (hidden) is the stdio MCP server itself. See `docs/mcp.md`. |
 | `gateway [--port PORT]` | Run the bridge gateway: control plane, work submission and the permission-frame relay a remote operator answers through. See `docs/bridge.md`. |
 | `teleport-service [--port PORT] [--ttl-secs N]` | Run the teleport rendezvous service that `/teleport --share` uploads to and other machines join from. See `docs/teleport.md`. |
 | `plugin-typecheck [--dir DIR]` | Type-check the exported plugin declarations with a TypeScript compiler; exits 1 on errors, 2 on a timeout, 0 when there is nothing to check with. See `docs/plugins.md`. |
@@ -308,7 +310,7 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - **Graceful shutdown** — Ctrl+C via `crossterm` raw mode guard, SIGTERM/SIGHUP via `tokio::signal::unix`, TUI cleanup on exit.
 - **Telemetry** — SQLite-backed crash telemetry store with pending crash report ingestion at startup.
 - **Crash recovery** — Session state snapshot (`.codape/recovery.json`) written periodically, restored via `/recover`.
-- **Daemon management** — PID file (`~/.codape/daemon.pid`) with `serve-stop`/`serve-status` subcommands.
+- **Daemon management** — `~/.codape/daemon.pid` records `{pid, address, token}` (mode 0600, since it can hold a credential), with `serve-stop`/`serve-status` subcommands. A loopback daemon started with no `CODAPE_API_KEYS` mints a token so a local client can authenticate; one given an explicit key list records no token.
 - **Config hot-reload** — the REPL's `HookFileWatcher` (default `hot-reload` feature) reports the changed settings-file paths and the event kind; the TUI loop and the headless watcher fire the `FileChanged` hook.
 - **Update check** — GitHub Releases API comparison with `CARGO_PKG_VERSION`, 24h cadence, `/update-check` command. `codape update` downloads the archive for this platform, verifies it against the release's `SHA256SUMS`, and replaces the binary atomically; `--check` only reports. See `docs/self-update.md`.
 
@@ -326,8 +328,8 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - Non-interactive headless mode (`--print` or positional prompt): reads input, runs a single turn, prints response, exits.
 - Crash telemetry: SQLite store ingests pending panic hooks at startup.
 - Session resume (`--resume ID` or `--continue`): loads transcript, continues conversation.
-- WebSocket server daemon (`codape serve`): writes PID file on start, removes on exit.
-- Daemon management: `codape serve-stop` sends SIGTERM, `codape serve-status` reports liveness.
+- WebSocket server daemon (`codape serve`): records pid, bound address and token on listen, removes the file on exit.
+- Daemon management: `codape serve-stop` sends SIGTERM, `codape serve-status` reports liveness and the URL a client connects to.
 - Crash recovery: `.codape/recovery.json` snapshot, `/recover` command.
 - Config hot-reload: `HookFileWatcher` is behind the default `hot-reload` feature (`default = ["core", "hot-reload"]`). The TUI loop fires `FileChanged` from it; a headless run installs its own watcher task and joins it on exit. `codape-config` no longer ships a watcher of its own — the REPL one is the only consumer.
 - Multi-workspace: `/workspace [path]` switches CWD, validates directory.

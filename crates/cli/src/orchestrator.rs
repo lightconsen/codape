@@ -1068,6 +1068,14 @@ impl StartupOrchestrator {
                 crate::cli::Command::Serve { port } => self.run_server(&self.ctx.cwd, port).await,
                 crate::cli::Command::ServeStop => self.run_serve_stop().await,
                 crate::cli::Command::ServeStatus => self.run_serve_status().await,
+                crate::cli::Command::Ide { action } => {
+                    // Both spellings print the same thing: the connection
+                    // snippet, plus where the daemon the bridge will reach is.
+                    // A separate action would only be a second name for it.
+                    let _ = action;
+                    println!("{}", crate::ide_bridge::describe());
+                    Ok(())
+                }
                 crate::cli::Command::Agents { detailed } => self.run_agents(detailed).await,
                 crate::cli::Command::Auth => self.run_auth().await,
                 crate::cli::Command::Doctor => self.run_doctor().await,
@@ -3482,10 +3490,31 @@ impl StartupOrchestrator {
         daemon::write_pid_file().map_err(|e| anyhow::anyhow!("Failed to write PID file: {e}"))?;
 
         // Build server config from environment
-        let valid_keys: Vec<String> = std::env::var("CODAPE_API_KEYS")
+        let mut valid_keys: Vec<String> = std::env::var("CODAPE_API_KEYS")
             .ok()
             .map(|s| s.split(',').map(String::from).collect())
             .unwrap_or_default();
+
+        // The listener address and the exposure check come from one place, so
+        // `serve` cannot drift from the other services: loopback by default,
+        // and a non-loopback bind without keys is refused before anything is
+        // printed as running.
+        let addr = codape_server::resolve_bind_addr(None, port).map_err(|e| anyhow::anyhow!(e))?;
+
+        // A loopback daemon with no key list of its own authenticates nobody.
+        // It used to be unusable without the user inventing a key, which is
+        // why an editor had no way in. Mint one and record it beside the
+        // address: the file is 0600 in the user's config home, and a local
+        // client that can read it is one that could already read the session's
+        // files. An explicitly configured list is left alone — the daemon has
+        // nothing to add to it, and nothing of it to copy onto disk.
+        let local_token = if valid_keys.is_empty() && codape_server::is_loopback(&addr) {
+            let token = format!("local_{}", uuid::Uuid::new_v4().simple());
+            valid_keys.push(token.clone());
+            Some(token)
+        } else {
+            None
+        };
 
         let idle_timeout = std::env::var("CODAPE_IDLE_TIMEOUT")
             .ok()
@@ -3582,7 +3611,6 @@ impl StartupOrchestrator {
         // `serve` cannot drift from the other services: loopback by default,
         // and a non-loopback bind without keys is refused before anything is
         // printed as running.
-        let addr = codape_server::resolve_bind_addr(None, port).map_err(|e| anyhow::anyhow!(e))?;
         let service_auth = if valid_keys.is_empty() {
             codape_server::ServiceAuth::default()
         } else {
@@ -3590,6 +3618,17 @@ impl StartupOrchestrator {
         };
         codape_server::ensure_exposure_is_authenticated(&addr, &service_auth, "server")
             .map_err(|e| anyhow::anyhow!(e))?;
+
+        // The listener picks the real port when `port` is 0, and it is the
+        // only component that knows it. Recording it here is what lets an
+        // editor find the daemon instead of being told a port by hand.
+        let recorded_token = local_token.clone();
+        server.on_listening(move |bound| {
+            if let Err(error) = daemon::write_daemon_state(&bound, recorded_token.as_deref()) {
+                tracing::warn!(%error, "could not record the server address");
+            }
+            eprintln!("Codape server listening on ws://{bound}");
+        });
 
         println!("Codape server running on ws://{addr}");
         println!("Sessions: 0 active");
@@ -3678,6 +3717,7 @@ impl StartupOrchestrator {
         api_key: Option<&str>,
         provider: Option<&codape_config::ProviderSettings>,
     ) -> Option<codape_server::session::EngineFactory> {
+        use codape_server::session::SessionEngineParts;
         use codape_tools::{
             ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
             TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
@@ -3776,7 +3816,23 @@ impl StartupOrchestrator {
                 .join(".codape")
                 .join("memory");
             crate::repl::apply_engine_flag_behaviours(&mut engine, &flags, Some(&memory_base));
-            (engine, rx)
+
+            // Where the session's permission prompts wait for the client's
+            // answer. Without one every `Ask` is reported to the model as an
+            // unapproved call — a served session could read files and then
+            // write nothing, and the IDE had no way to say yes.
+            //
+            // Capacity is small on purpose: one turn asks about one tool at
+            // a time (the scheduler checks sequentially), so a queue deeper
+            // than that is only ever the client failing to answer.
+            let confirmations = codape_core::confirmation_bus::ConfirmationBus::new(16);
+            engine.set_confirmation_bus(confirmations.clone());
+
+            SessionEngineParts {
+                engine,
+                events: rx,
+                confirmations: Some(confirmations),
+            }
         }))
     }
 

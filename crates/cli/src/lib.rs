@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod file_mentions;
 pub mod from_pr;
 pub mod hook_actions;
+pub mod ide_bridge;
 pub mod image_input;
 pub mod interactive_e2e;
 pub mod mcp_elicitation;

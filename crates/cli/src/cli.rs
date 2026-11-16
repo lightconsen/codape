@@ -291,6 +291,15 @@ pub enum Command {
     },
     /// Show status of a running daemon server.
     ServeStatus,
+    /// Connect an editor to this machine's Codape daemon.
+    ///
+    /// With no action it prints the MCP configuration an editor needs. The
+    /// editor launches `codape ide bridge` itself; that spelling is handled
+    /// before argument parsing and is not listed here.
+    Ide {
+        #[command(subcommand)]
+        action: Option<IdeAction>,
+    },
     /// List available agents (built-in and custom).
     Agents {
         /// Show detailed agent information.
@@ -488,6 +497,13 @@ pub struct BridgeArgs {
         default_value = "/api/environments/{env_id}/assignments/{assignment_id}/claim"
     )]
     pub claim_path: Option<String>,
+}
+
+/// Editor-integration actions.
+#[derive(Subcommand, Debug)]
+pub enum IdeAction {
+    /// Print the MCP configuration that connects an editor to this daemon.
+    Config,
 }
 
 /// MCP management subcommands.

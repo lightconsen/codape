@@ -21,6 +21,13 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // An editor launches `codape ide bridge` as a stdio MCP server. Like the
+    // two above it runs before startup: everything the orchestrator prints
+    // would otherwise land in the middle of a JSON-RPC stream.
+    if codape_cli::ide_bridge::is_ide_bridge() {
+        std::process::exit(codape_cli::ide_bridge::run_ide_bridge().await);
+    }
+
     codape_cli::tracing_setup::init_tracing();
     codape_cli::tracing_setup::install_panic_hook();
 

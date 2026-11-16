@@ -317,7 +317,65 @@ therefore keep refusing.
 
 ### IDE tools
 
-Codape has no IDE integration and no bundled IDE. An IDE's own MCP server can still be configured like any other server (`mcp_servers` / `.mcp.json`); its tools are named `mcp__<server>__<tool>` and follow the ordinary permission rules. There is no fixed `ide` server, no `--ide` flag and no product-specific allowlist: a user who wants `mcp__ide__executeCode` prompt-free adds an explicit `mcp__ide__*` rule like any other.
+An IDE's own MCP server can be configured like any other server (`mcp_servers` /
+`.mcp.json`); its tools are named `mcp__<server>__<tool>` and follow the
+ordinary permission rules. There is no product-specific allowlist: a user who
+wants `mcp__ide__executeCode` prompt-free adds an explicit `mcp__ide__*` rule
+like any other.
+
+Codape does not ship an editor extension. What it ships is the reverse
+direction — Codape *as* the server an editor talks to — and that needs no
+per-editor code, because editors already speak MCP over stdio.
+
+## Reaching a running session from an editor
+
+Two halves:
+
+- `codape serve` is the daemon. On loopback with no key list of its own it mints
+  a token and records `{pid, address, token}` in `<config_home>/daemon.pid`
+  (mode 0600). A daemon given an explicit key list records no token: that list
+  is the user's secret.
+- `codape ide bridge` is a stdio MCP server that connects to that daemon over
+  WebSocket. An editor launches it like any other MCP server:
+
+  ```json
+  {"mcpServers": {"codape": {"command": "/abs/path/to/codape", "args": ["ide", "bridge"]}}}
+  ```
+
+  `codape ide` prints exactly that snippet — with this binary's absolute path —
+  followed by the daemon's status (running, stale, no address recorded, or none).
+  It never prints the token.
+
+The bridge is detected by parsing argv in `main()` before tracing and clap,
+because startup narrates itself on stdout and one stray line breaks the
+editor's JSON-RPC parser. Everything diagnostic goes to stderr.
+
+### The tools the bridge exposes
+
+| Tool | Purpose |
+|---|---|
+| `ask` | Send a prompt to the session and wait for the turn |
+| `answer_permission` | Answer a paused turn's permission prompt |
+| `cancel` | Interrupt the open turn |
+| `status` | Report whether a daemon is running, where it listens, and the snippet that registers this bridge |
+
+`ask` returns the turn's text. If the turn wants to run a tool that needs
+approval, it **pauses**: `ask` returns, as the tool call's result, a prompt
+naming the tool, the reason, the arguments, and a `request_id:` line. The turn
+stays open — a second `ask` is refused with the blocking request id
+named. The next call is `answer_permission` with that id and one of
+`approved` / `approve_session` / `denied`; the decision resumes the turn, and
+its result comes back from that same call.
+
+The paused turn and its request id live in the **bridge process**, so it is that
+process that has to answer: an editor that restarts the bridge gets a fresh
+session and cannot answer a prompt the old one received. Moving the pending
+request into the daemon is what would change that.
+
+The bridge does not connect at startup; it connects when the first prompt
+arrives, so an editor may launch it before `codape serve` is running. A prompt
+sent with no daemon, or against a recorded PID that is no longer alive, is
+refused with that reason rather than hanging.
 
 ## Remaining Considerations
 
