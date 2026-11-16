@@ -64,7 +64,7 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--system-prompt PROMPT` | | Custom system prompt (replaces default), in headless and interactive mode |
 | `--append-system-prompt TEXT` | | Append TEXT to the default system prompt instead of replacing it. Independent of `--system-prompt`; when both are given, the replacement is authoritative and TEXT is added as extra instructions |
 | `--file FILE` | `-f` | Include a file in context (can be repeated). A path naming an image is attached as an image instead of read as text |
-| `--image IMAGE` | | Attach an image to the prompt: png, jpeg, gif or webp, up to 5 MiB each, can be repeated. An image that cannot be read, is too large, or is a format the provider does not take is a startup error rather than a silent text-only turn |
+| `--image IMAGE` | | Attach an image to the prompt: png, jpeg, gif or webp, up to 5 MiB each, can be repeated. An image that cannot be read, is too large, or is a format the provider does not take is a startup error rather than a silent text-only turn. The interactive transcript draws the picture where the terminal can show one; see [ui.md](ui.md#pictures-in-the-transcript) |
 | `--print` | `-p` | Non-interactive mode: read from stdin, print response, exit |
 | `--brief` | | Concise output (minimal formatting) |
 | `--bare` | | Minimal output (no decorations) |

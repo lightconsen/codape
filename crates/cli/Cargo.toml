@@ -98,6 +98,7 @@ serde_json.workspace = true
 codape-test-utils = { path = "../test-utils" }
 futures.workspace = true
 tokio-tungstenite.workspace = true
+image.workspace = true
 
 # ─── Release Tier Features ──────────────────────────────────────────────────
 # Each tier enables everything below it.

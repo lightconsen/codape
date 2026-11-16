@@ -114,6 +114,15 @@ compact_str = "0.9"
 smallvec = "1"
 regex = "1"
 base64 = "0.22"
+# Image decoding for the terminal transcript. Only the four formats a turn can
+# attach are enabled: the default set pulls in AVIF/EXR/TIFF decoders that no
+# attachment path can produce.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 
 # Cryptography & hashing
 sha2 = "0.10"

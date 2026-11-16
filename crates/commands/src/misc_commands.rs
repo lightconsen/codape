@@ -48,22 +48,22 @@ pub fn register(registry: &mut CommandRegistry) {
 
     // /stickers — stickers/emoji (feature-gated)
     //
-    // A sticker is an image message, and no Codape surface renders one: the
-    // terminal surface reports `images: false` and the only image-carrying
-    // message is a `ToolResult` (a screenshot the model asked for), not a
-    // user-posted sticker. There is nothing to send, so the command says that
-    // instead of printing a placeholder that reads like content.
+    // A sticker is an image posted by the person for its own sake. The
+    // transcript can now draw an attached picture (see
+    // `codape_ui::transcript_image`), but there is still no sticker store and
+    // no way to pick one, so the command says that instead of printing a
+    // placeholder that reads like content.
     registry.register(SlashCommand::local(
         "stickers",
-        "Sticker messages (feature-gated, no surface renders them)",
+        "Sticker messages (feature-gated, no sticker store)",
         false,
         false,
         false,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             if ctx.is_feature_enabled("stickers") {
                 CommandResult::success(
-                    "Stickers: not implemented. No Codape surface renders image messages, so \
-                     there is nothing to send one to.",
+                    "Stickers: not implemented. There is no sticker store to choose one \
+                     from; attach a picture with --image, @path or Ctrl+V instead.",
                 )
             } else {
                 CommandResult::error("stickers feature is not enabled.")

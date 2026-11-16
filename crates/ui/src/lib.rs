@@ -21,6 +21,7 @@ pub mod terminal;
 pub mod terminal_notification;
 pub mod terminal_profile;
 pub mod themes;
+pub mod transcript_image;
 pub mod vim;
 
 #[cfg(feature = "voice")]

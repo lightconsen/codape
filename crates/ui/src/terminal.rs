@@ -650,10 +650,18 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Compute how many terminal rows a message occupies at the given width.
-fn message_display_height(msg: &crate::message_list::Message, width: usize) -> usize {
+fn message_display_height(
+    msg: &crate::message_list::Message,
+    width: usize,
+    is_compact: bool,
+    image_protocol: crate::transcript_image::ImageProtocol,
+) -> usize {
     let prefix = message_prefix(msg.role);
     let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
     let wrap_width = width.saturating_sub(prefix_width);
+    if let Some(rows) = image_rows(msg, wrap_width, is_compact, image_protocol) {
+        return rows;
+    }
     let mut height = wrapped_line_count(&msg.content, wrap_width);
     if matches!(
         msg.role,
@@ -671,6 +679,28 @@ fn message_display_height(msg: &crate::message_list::Message, width: usize) -> u
         height += 1;
     }
     height
+}
+
+/// The cell rows a message's picture occupies, when one will be drawn.
+///
+/// `None` means the row renders as text — there is no picture, the terminal
+/// cannot draw one, or the image could not be read. Keeping this and the draw
+/// path on the same predicate is what stops the reserved height and the painted
+/// rows from disagreeing.
+fn image_rows(
+    msg: &crate::message_list::Message,
+    wrap_width: usize,
+    is_compact: bool,
+    image_protocol: crate::transcript_image::ImageProtocol,
+) -> Option<usize> {
+    // Compact mode draws one line per message, so the picture is not drawn
+    // there either; the caption is what the row shows.
+    if is_compact || !image_protocol.can_draw() {
+        return None;
+    }
+    let (_, rows) = msg.image.as_ref()?.cell_size(wrap_width);
+    // The role prefix gets its own row above the picture.
+    (rows > 0).then_some(rows + 1)
 }
 
 fn wrapped_line_count(text: &str, width: usize) -> usize {
@@ -900,8 +930,12 @@ fn render_messages(
     state.notifications.cleanup();
 
     if state.messages.scroll_offset > 0 {
-        let signature =
-            message_render_signature(&state.messages.messages, &state.theme, mod_ui_blocks);
+        let signature = message_render_signature(
+            &state.messages.messages,
+            &state.theme,
+            mod_ui_blocks,
+            state.image_protocol,
+        );
         // A tracked block needs the render spans that the cache does not keep,
         // so only reuse the cache when there is no block to hit-test.
         let cache_valid = mod_ui_blocks.is_empty()
@@ -917,6 +951,7 @@ fn render_messages(
                 is_compact,
                 &state.theme,
                 mod_ui_blocks,
+                state.image_protocol,
             );
             if lines.is_empty() {
                 lines.extend(render_welcome_art(
@@ -967,6 +1002,7 @@ fn render_messages(
                 width,
                 is_compact,
                 mod_ui_blocks,
+                state.image_protocol,
             ));
         }
     }
@@ -1009,6 +1045,7 @@ fn render_messages(
             is_compact,
             &state.theme,
             mod_ui_blocks,
+            state.image_protocol,
         ) {
             block_spans.push(span);
         }
@@ -1045,6 +1082,7 @@ fn message_render_height(
     width: usize,
     is_compact: bool,
     mod_ui_blocks: &[ModUiBlockSpec],
+    image_protocol: crate::transcript_image::ImageProtocol,
 ) -> usize {
     if !is_compact && let Some(spec) = matching_mod_ui_block(msg, index, mod_ui_blocks) {
         let prefix_width = unicode_width::UnicodeWidthStr::width(message_prefix(msg.role));
@@ -1053,7 +1091,7 @@ fn message_render_height(
             return lines.len();
         }
     }
-    message_display_height(msg, width)
+    message_display_height(msg, width, is_compact, image_protocol)
 }
 
 fn matching_mod_ui_block<'a>(
@@ -1185,6 +1223,7 @@ fn render_all_message_lines(
     is_compact: bool,
     theme: &Theme,
     mod_ui_blocks: &[ModUiBlockSpec],
+    image_protocol: crate::transcript_image::ImageProtocol,
 ) -> (Vec<Line<'static>>, Vec<ModUiBlockSpan>) {
     let mut lines = Vec::new();
     let mut block_spans = Vec::new();
@@ -1197,6 +1236,7 @@ fn render_all_message_lines(
             is_compact,
             theme,
             mod_ui_blocks,
+            image_protocol,
         ) {
             block_spans.push(span);
         }
@@ -1208,8 +1248,11 @@ fn message_render_signature(
     messages: &[Message],
     theme: &Theme,
     mod_ui_blocks: &[ModUiBlockSpec],
+    image_protocol: crate::transcript_image::ImageProtocol,
 ) -> u64 {
-    let mut signature = (messages.len() as u64) ^ theme.render_signature();
+    let mut signature = (messages.len() as u64)
+        ^ theme.render_signature()
+        ^ (u64::from(image_protocol.can_draw()) << 63);
     for (idx, msg) in messages.iter().enumerate() {
         signature = signature
             .wrapping_mul(16_777_619)
@@ -1275,6 +1318,7 @@ fn append_message_lines(
     is_compact: bool,
     theme: &Theme,
     mod_ui_blocks: &[ModUiBlockSpec],
+    image_protocol: crate::transcript_image::ImageProtocol,
 ) -> Option<ModUiBlockSpan> {
     if !is_compact
         && !lines.is_empty()
@@ -1295,7 +1339,7 @@ fn append_message_lines(
                 MessageRole::ToolCall => "Tool Call",
                 MessageRole::System => "System",
             },
-            message_display_height(msg, width).saturating_sub(1)
+            message_display_height(msg, width, is_compact, image_protocol).saturating_sub(1)
         );
         lines.push(Line::from(Span::styled(fold_indicator, style)));
         return None;
@@ -1315,8 +1359,43 @@ fn append_message_lines(
     let prefix_width = unicode_width::UnicodeWidthStr::width(prefix);
     let wrap_width = width.saturating_sub(prefix_width);
 
+    // A picture is drawn in place of its caption when the terminal can show
+    // one. It goes through `msg.image`, whose half-block spans are ordinary
+    // cells, so the line cache, the viewport slice and the selection snapshot
+    // all treat it as text. A terminal that cannot draw it, or an image that
+    // failed to decode, falls through to the caption in `content`.
+    if !is_compact
+        && image_protocol.can_draw()
+        && let Some(image) = msg.image.as_ref()
+    {
+        if let Some(image_lines) = image.lines(wrap_width, theme) {
+            // The picture starts on its own row under the role prefix, so a
+            // screenshot is not indented by three columns it does not need.
+            lines.push(Line::from(Span::styled(prefix, style)));
+            for line in image_lines {
+                lines.push(line);
+            }
+            return None;
+        }
+        // The header reserved rows, but the pixels would not decode — a
+        // truncated body reads its size fine. The layout has already committed
+        // to that height, so the caption sits on the first of those rows and
+        // the rest stay blank; falling through to the one-line text path would
+        // pull everything below the picture up by the difference.
+        if let Some(reserved) = image_rows(msg, wrap_width, is_compact, image_protocol) {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(msg.content.to_string(), style),
+            ]));
+            for _ in 1..reserved {
+                lines.push(Line::default());
+            }
+            return None;
+        }
+    }
+
     // In compact mode, truncate long messages to single line
-    if is_compact && message_display_height(msg, width) > 3 {
+    if is_compact && message_display_height(msg, width, is_compact, image_protocol) > 3 {
         let truncated = msg
             .content
             .chars()
@@ -2450,6 +2529,7 @@ mod tests {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             },
             Message {
                 role: MessageRole::Assistant,
@@ -2457,15 +2537,236 @@ mod tests {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             },
         ];
 
         let theme = Theme::dark();
-        let (lines, _) = render_all_message_lines(&messages, 80, false, &theme, &[]);
+        let (lines, _) = render_all_message_lines(
+            &messages,
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::default(),
+        );
 
         assert_eq!(lines[0].to_string(), "● hello");
         assert_eq!(lines[1].to_string(), "");
         assert_eq!(lines[2].to_string(), "◆ hi there");
+    }
+
+    /// A 2x2 PNG: red/green on top, blue/white below.
+    pub(super) fn two_by_two_png() -> String {
+        use base64::Engine as _;
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let encoder = image::codecs::png::PngEncoder::new(&mut buffer);
+            let pixels: [u8; 16] = [
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ];
+            image::ImageEncoder::write_image(
+                encoder,
+                &pixels,
+                2,
+                2,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode png");
+        }
+        base64::engine::general_purpose::STANDARD.encode(buffer.into_inner())
+    }
+
+    pub(super) fn image_message() -> Message {
+        let state = crate::transcript_image::ImageState::new(codape_core::types::ImageBlock {
+            media_type: "image/png".into(),
+            data: two_by_two_png(),
+        });
+        let caption = state.caption();
+        Message {
+            role: MessageRole::User,
+            content: caption.into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: Some(state),
+        }
+    }
+
+    #[test]
+    fn a_picture_is_drawn_as_half_blocks_instead_of_its_caption() {
+        let theme = Theme::dark();
+        let messages = vec![image_message()];
+        let (lines, _) = render_all_message_lines(
+            &messages,
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+
+        // The role prefix gets its own row, then one row of two half blocks.
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].to_string(), "● ");
+        let spans = &lines[1].spans;
+        assert_eq!(spans.len(), 2);
+        assert!(spans.iter().all(|span| span.content.as_ref() == "\u{2580}"));
+        assert_eq!(spans[0].style.fg, Some(Color::Rgb(255, 0, 0)));
+        assert_eq!(spans[0].style.bg, Some(Color::Rgb(0, 0, 255)));
+        // The caption is not printed alongside the picture.
+        let rendered: String = lines.iter().map(ToString::to_string).collect();
+        assert!(!rendered.contains("[image:"), "{rendered}");
+    }
+
+    #[test]
+    fn compact_mode_draws_the_caption_not_the_picture() {
+        // Compact reserves one row per message. Drawing a picture there would
+        // paint rows the layout never reserved, pushing the input box down.
+        let theme = Theme::dark();
+        let messages = vec![image_message()];
+        let rows = message_display_height(
+            &messages[0],
+            80,
+            true,
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        // Compact reserves exactly what it would for the caption alone.
+        assert_eq!(
+            rows,
+            message_display_height(
+                &messages[0],
+                80,
+                true,
+                crate::transcript_image::ImageProtocol::None,
+            )
+        );
+        let (lines, _) = render_all_message_lines(
+            &messages,
+            80,
+            true,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        let rendered: String = lines.iter().map(ToString::to_string).collect();
+        assert!(!rendered.contains("\u{2580}"), "{rendered}");
+    }
+
+    #[test]
+    fn a_terminal_without_truecolor_keeps_the_caption() {
+        let theme = Theme::dark();
+        let messages = vec![image_message()];
+        let (lines, _) = render_all_message_lines(
+            &messages,
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::None,
+        );
+
+        let rendered: String = lines.iter().map(ToString::to_string).collect();
+        assert!(rendered.contains("[image: image/png]"), "{rendered}");
+    }
+
+    #[test]
+    fn the_reserved_height_matches_the_drawn_rows() {
+        let theme = Theme::dark();
+        let messages = vec![image_message()];
+        let rows = message_display_height(
+            &messages[0],
+            80,
+            false,
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        let (lines, _) = render_all_message_lines(
+            &messages,
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        // A viewport window that reserved a different height would either clip
+        // the picture or leave a blank gap under it.
+        assert_eq!(rows, lines.len());
+    }
+
+    #[test]
+    fn an_image_with_no_readable_header_still_occupies_its_caption_row() {
+        let state = crate::transcript_image::ImageState::new(codape_core::types::ImageBlock {
+            media_type: "image/png".into(),
+            data: "not base64".into(),
+        });
+        let caption = state.caption();
+        let msg = Message {
+            role: MessageRole::User,
+            content: caption.into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: Some(state),
+        };
+        let theme = Theme::dark();
+        let (lines, _) = render_all_message_lines(
+            &[msg],
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        let rendered: String = lines.iter().map(ToString::to_string).collect();
+        assert!(rendered.contains("[image: image/png]"), "{rendered}");
+    }
+
+    #[test]
+    fn a_picture_whose_pixels_fail_to_decode_keeps_its_reserved_rows() {
+        // A base64 payload with a readable header is not the same as a payload
+        // that decodes: a truncated body still names its size. The layout has
+        // already reserved those rows from the header, so the caption has to
+        // stay inside them rather than collapse to one line and lift
+        // everything below it.
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(super::tests::two_by_two_png().as_bytes())
+            .expect("decode");
+        // Cut the file in half: the signature and IHDR survive, the IDAT does
+        // not. The header names 2x2, the pixels are gone.
+        let truncated = &decoded[..decoded.len() / 2];
+        let state = crate::transcript_image::ImageState::new(codape_core::types::ImageBlock {
+            media_type: "image/png".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(truncated),
+        });
+        assert_eq!(state.cell_size(80), (2, 1), "the header still reads");
+        assert!(
+            state.lines(80, &Theme::dark()).is_none(),
+            "the body is gone"
+        );
+
+        let caption = state.caption();
+        let msg = Message {
+            role: MessageRole::User,
+            content: caption.into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: Some(state),
+        };
+        let theme = Theme::dark();
+        let (lines, _) = render_all_message_lines(
+            &[msg],
+            80,
+            false,
+            &theme,
+            &[],
+            crate::transcript_image::ImageProtocol::HalfBlocks,
+        );
+        let rendered: String = lines.iter().map(ToString::to_string).collect();
+        assert!(rendered.contains("[image: image/png]"), "{rendered}");
+        assert!(!rendered.contains('\u{2580}'), "{rendered}");
+        assert_eq!(lines.len(), 2, "one prefix row plus one reserved row");
     }
 
     #[test]
@@ -2885,6 +3186,62 @@ mod layout_tests {
         }
     }
 
+    /// The picture reaches the painted buffer, with the pixel colours the
+    /// terminal will show.
+    ///
+    /// The unit tests above assert on the lines the renderer produces; this
+    /// one draws a frame, so a bug in height reservation or in the paragraph
+    /// widget would show up here instead of only on a real terminal.
+    #[test]
+    fn an_attached_picture_paints_its_pixels_into_the_frame() {
+        let image = crate::transcript_image::ImageState::new(codape_core::types::ImageBlock {
+            media_type: "image/png".into(),
+            data: super::tests::two_by_two_png(),
+        });
+        let caption = image.caption();
+        let mut state = UiState {
+            image_protocol: crate::transcript_image::ImageProtocol::HalfBlocks,
+            ..Default::default()
+        };
+        state.messages.push(Message {
+            role: MessageRole::User,
+            content: caption.into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: Some(image),
+        });
+
+        let buffer = render_to_buffer(60, 24, &mut state);
+
+        // Find the row that carries the half blocks: the picture is the last
+        // thing in an otherwise empty transcript.
+        let mut found = None;
+        for y in 0..buffer.area.height {
+            let symbols: String = (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect();
+            if symbols.contains('\u{2580}') {
+                found = Some(y);
+                break;
+            }
+        }
+        let row = found.expect("no half blocks were painted");
+        let first = buffer.cell((0, row)).expect("cell");
+        assert_eq!(first.symbol(), "\u{2580}");
+        // Red on top, blue below, straight from the encoded picture.
+        assert_eq!(first.fg, ratatui::style::Color::Rgb(255, 0, 0));
+        assert_eq!(first.bg, ratatui::style::Color::Rgb(0, 0, 255));
+
+        // The caption is not drawn anywhere: the picture replaced it.
+        for y in 0..buffer.area.height {
+            assert!(
+                !row_text(&buffer, y).contains("[image:"),
+                "row {y} still shows the caption"
+            );
+        }
+    }
+
     /// The wordmark carries a colour per letter, so the page is not a block of
     /// dim text.
     #[test]
@@ -2920,6 +3277,7 @@ mod layout_tests {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
             let buffer = render_to_buffer(width, height, &mut state);
@@ -2999,6 +3357,7 @@ mod layout_tests {
             tool_name: Some("Read".into()),
             streaming: false,
             folded: false,
+            image: None,
         });
         let buffer = render_to_buffer(100, 20, &mut state);
         let screen: String = (0..20)
@@ -3021,6 +3380,7 @@ mod layout_tests {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
         let buffer = render_to_buffer(80, 20, &mut state);
         let rows = capture_rows(&buffer);
@@ -3127,6 +3487,7 @@ mod layout_tests {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
         let buffer = render_to_buffer(80, 30, &mut state);
         let screen: String = (0..30)
@@ -3240,6 +3601,7 @@ mod layout_tests {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
 
         let backend = TestBackend::new(40, 20);

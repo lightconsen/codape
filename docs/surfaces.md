@@ -87,10 +87,12 @@ element tree is the shared contract; the surface decides how it looks.
 
 ## Boundaries
 
-- The terminal does not render images (`images: false`); the element tree has no
-  image element. That is about display only: a person can still *send* an image
-  (`--image`, `@shot.png`, or Ctrl+V) and the model receives it as an image
-  block. The transcript shows an `[image: image/png]` placeholder.
+- The terminal surface still reports `images: false`, and that stays true in the
+  sense the field means: the element tree has no image element, so a mod cannot
+  put a picture into a `UiElement`. The transcript *does* now draw an attached
+  picture — a person can send one (`--image`, `@shot.png`, Ctrl+V) and see it in
+  the conversation — but that is the message list's own renderer, not the
+  surface contract. See [ui.md](ui.md#pictures-in-the-transcript).
 - A surface that reports `interactive: false` still receives hooks and UI; it is
   the host's job to hide affordances it cannot honour.
 - The registry is in-memory and per session. Persisting a preference for a

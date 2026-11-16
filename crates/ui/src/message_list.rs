@@ -2,6 +2,9 @@
 
 use compact_str::CompactString;
 use ratatui::text::Line;
+use std::sync::Arc;
+
+use crate::transcript_image::ImageState;
 
 /// Type of message role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +34,27 @@ pub struct Message {
     pub streaming: bool,
     /// Whether the message is folded (collapsed).
     pub folded: bool,
+    /// A picture this message carries, drawn instead of `content`.
+    ///
+    /// `content` keeps the `[image: …]` caption either way: it is what the row
+    /// falls back to on a terminal that cannot show the picture, and what a
+    /// copy of the transcript produces.
+    pub image: Option<Arc<ImageState>>,
+}
+
+impl Message {
+    /// A text message with no picture attached.
+    #[must_use]
+    pub fn text(role: MessageRole, content: impl Into<CompactString>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        }
+    }
 }
 
 /// Cached fully-rendered transcript lines used for fast scrollback.
@@ -177,13 +201,7 @@ mod tests {
     use super::*;
 
     fn msg(role: MessageRole, text: &str) -> Message {
-        Message {
-            role,
-            content: CompactString::from(text),
-            tool_name: None,
-            streaming: false,
-            folded: false,
-        }
+        Message::text(role, text)
     }
 
     #[test]

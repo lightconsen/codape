@@ -31,6 +31,8 @@ unicode-width.workspace = true
 compact_str.workspace = true
 strum.workspace = true
 regex.workspace = true
+image.workspace = true
+base64.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 

@@ -1075,6 +1075,7 @@ fn push_activity_row(ui_state: &mut codape_ui::state::UiState, label: &str) {
         tool_name: None,
         streaming: false,
         folded: false,
+        image: None,
     });
 }
 
@@ -1505,24 +1506,27 @@ fn core_message_to_ui_message(
     message: &codape_core::types::Message,
     tool_names: &std::collections::HashMap<String, String>,
 ) -> codape_ui::message_list::Message {
-    let (role, content, tool_name, folded) = match (&message.role, &message.content) {
+    let (role, content, tool_name, folded, image_state) = match (&message.role, &message.content) {
         (codape_core::types::Role::User, codape_core::types::MessageContent::Text(text)) => (
             codape_ui::message_list::MessageRole::User,
             text.clone(),
             None,
             false,
+            None,
         ),
         (codape_core::types::Role::Assistant, codape_core::types::MessageContent::Text(text)) => (
             codape_ui::message_list::MessageRole::Assistant,
             text.clone(),
             None,
             false,
+            None,
         ),
         (codape_core::types::Role::System, codape_core::types::MessageContent::Text(text)) => (
             codape_ui::message_list::MessageRole::System,
             text.clone(),
             None,
             false,
+            None,
         ),
         // The engine stores tool calls on the assistant turn, not on a Tool
         // role. Matching only `Role::Tool` here made a resumed transcript show
@@ -1535,6 +1539,7 @@ fn core_message_to_ui_message(
             call.activity_summary(),
             Some(call.name.clone()),
             false,
+            None,
         ),
         (
             codape_core::types::Role::Tool,
@@ -1548,22 +1553,29 @@ fn core_message_to_ui_message(
                 // was built from the calls in the same transcript.
                 tool_names.get(&result.tool_call_id).cloned(),
                 folded,
+                None,
             )
         }
         // An image the person attached. The base64 payload must never reach
         // the debug fallback below — it is megabytes of noise and it would
         // bury the conversation.
-        (_, codape_core::types::MessageContent::Image(image)) => (
-            codape_ui::message_list::MessageRole::User,
-            format!("[image: {}]", image.media_type),
-            None,
-            false,
-        ),
+        (_, codape_core::types::MessageContent::Image(image)) => {
+            let state = codape_ui::transcript_image::ImageState::new(image.clone());
+            let caption = state.caption();
+            (
+                codape_ui::message_list::MessageRole::User,
+                caption,
+                None,
+                false,
+                Some(state),
+            )
+        }
         (_, content) => (
             codape_ui::message_list::MessageRole::System,
             format!("{content:?}"),
             None,
             false,
+            None,
         ),
     };
 
@@ -1573,6 +1585,7 @@ fn core_message_to_ui_message(
         tool_name: tool_name.map(Into::into),
         streaming: false,
         folded,
+        image: image_state,
     }
 }
 
@@ -5258,6 +5271,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
         }
     }
@@ -5497,6 +5511,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
         ui_state.notifications.info(format!("Resumed {session_id}"));
         self.persist_interactive_snapshot(ui_state);
@@ -5667,6 +5682,7 @@ impl ReplLoop {
                     tool_name: Some(name.into()),
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
                 self.persist_interactive_snapshot(ui_state);
             }
@@ -5728,6 +5744,7 @@ impl ReplLoop {
                     tool_name: Some(tool_name.into()),
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
                 sync_todo_panel(ui_state, self.agents.dispatcher.as_deref());
                 self.persist_interactive_snapshot(ui_state);
@@ -5778,6 +5795,7 @@ impl ReplLoop {
                         tool_name: None,
                         streaming: false,
                         folded: false,
+                        image: None,
                     });
                     let index = ui_state.messages.messages.len().saturating_sub(1);
                     live.mod_ui_focus.reset(&elements, index);
@@ -6149,6 +6167,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     } else {
                         ui_state.messages.push(codape_ui::message_list::Message {
@@ -6157,6 +6176,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     }
                 }
@@ -6835,6 +6855,10 @@ impl ReplLoop {
         terminal_ui.enter()?;
 
         let mut ui_state = UiState::new();
+        // Whether an attached picture can be drawn is a property of the
+        // terminal, decided once here: a pipe, a file, or Terminal.app keeps
+        // the `[image: …]` caption.
+        ui_state.image_protocol = codape_ui::transcript_image::ImageProtocol::from_env();
         // Up/Down recall from the input buffer's own history; seed it with the
         // prompts this session already knows about (resume, queued prompts),
         // so recall works before the first new prompt is submitted.
@@ -6903,6 +6927,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
         }
@@ -7056,6 +7081,7 @@ impl ReplLoop {
                         tool_name: None,
                         streaming: false,
                         folded: false,
+                        image: None,
                     });
                     self.persist_interactive_snapshot(&ui_state);
                 }
@@ -7132,6 +7158,7 @@ impl ReplLoop {
                                     tool_name: None,
                                     streaming: false,
                                     folded: false,
+                                    image: None,
                                 });
                             }
                         }
@@ -7155,6 +7182,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         // Mark the message itself too: on resume the prefix is
                         // the only thing distinguishing it from typed input.
@@ -7164,6 +7192,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         self.start_tui_query(
                             next,
@@ -7239,6 +7268,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     }
                     BackgroundFeatureKind::MemoryExtraction => {
@@ -7253,6 +7283,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     }
                     _ => {
@@ -7267,6 +7298,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     }
                 }
@@ -7482,6 +7514,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                             folded: false,
+            image: None,
                             });
                         }
                         // The answer is on screen but the stream died
@@ -7500,6 +7533,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                                 folded: false,
+            image: None,
                             });
                             codape_ui::terminal_notification::emit(
                                 "Codape",
@@ -7537,6 +7571,7 @@ impl ReplLoop {
                                     tool_name: None,
                                     streaming: false,
                                     folded: false,
+            image: None,
                                 });
                             }
                             ui_state.notifications.success("Turn completed");
@@ -7564,6 +7599,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                             folded: false,
+            image: None,
                             });
                             show_detail_overlay(
                                 &mut ui_state,
@@ -7587,6 +7623,7 @@ impl ReplLoop {
                         tool_name: None,
                         streaming: false,
                         folded: false,
+            image: None,
                     });
                     if let Some(scheduler) =
                         self.agents.dispatcher.as_ref().and_then(|d| d.cron_scheduler())
@@ -7606,6 +7643,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+            image: None,
                         });
                         if let Some(options) = q.get("options").and_then(|v| v.as_array()) {
                             for opt in options {
@@ -7619,6 +7657,7 @@ impl ReplLoop {
                                         tool_name: None,
                                         streaming: false,
                                         folded: false,
+            image: None,
                                     });
                                 }
                             }
@@ -7630,6 +7669,7 @@ impl ReplLoop {
                         tool_name: None,
                         streaming: false,
                         folded: false,
+            image: None,
                     });
                     self.mcp.pending_elicitation = Some(request.response_tx);
                 }
@@ -7662,6 +7702,7 @@ impl ReplLoop {
                         tool_name: None,
                         streaming: false,
                         folded: false,
+            image: None,
                     });
 
                     if let Some(form) = request.form {
@@ -7687,6 +7728,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                                 folded: false,
+            image: None,
                             });
                         }
                         ui_state.messages.push(Message {
@@ -7697,6 +7739,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+            image: None,
                         });
                         let state = crate::mcp_elicitation::McpFormState::new(form);
                         ui_state.notifications.info(state.focus_hint());
@@ -8746,6 +8789,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
                 let index = ui_state.messages.messages.len().saturating_sub(1);
                 focus.reset(&elements, index);
@@ -8757,6 +8801,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
         }
@@ -10584,6 +10629,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
             KeyCode::Tab | KeyCode::Down => {
@@ -10611,6 +10657,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                     }
                     Err(message) => {
@@ -10622,6 +10669,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         self.mcp.pending_form = Some(form);
                     }
@@ -10670,6 +10718,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
             ui_state.notifications.warn("Usage: !<command>");
             return;
@@ -10681,6 +10730,7 @@ impl ReplLoop {
             tool_name: Some(codape_tools::platform_shell_tool().into()),
             streaming: false,
             folded: false,
+            image: None,
         });
 
         let checker = self
@@ -10712,6 +10762,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
                 return;
             }
@@ -10735,6 +10786,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
             return;
         };
@@ -10782,8 +10834,33 @@ impl ReplLoop {
             tool_name: Some(codape_tools::platform_shell_tool().into()),
             streaming: false,
             folded: false,
+            image: None,
         });
         self.persist_interactive_snapshot(ui_state);
+    }
+
+    /// Add a transcript row for each picture attached to the prompt.
+    ///
+    /// The content stays the `[image: …]` caption: that is what the row shows
+    /// when the terminal cannot draw the picture, and what a copy of the
+    /// transcript produces. The decoded bytes live behind `image`, which the
+    /// renderer prefers when it can.
+    fn push_attached_images(
+        ui_state: &mut codape_ui::state::UiState,
+        images: &[codape_core::types::ImageBlock],
+    ) {
+        for image in images {
+            let state = codape_ui::transcript_image::ImageState::new(image.clone());
+            let caption = state.caption();
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::User,
+                content: caption.into(),
+                tool_name: None,
+                streaming: false,
+                folded: false,
+                image: Some(state),
+            });
+        }
     }
 
     fn process_tui_input(
@@ -10820,6 +10897,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
             let answer = serde_json::json!({ "answer": text });
             let _ = tx.send(answer);
@@ -10847,6 +10925,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
 
         // Attach `@path` mentions the way `--file` does: the token becomes a
@@ -10873,6 +10952,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
             if !expansion.skipped.is_empty() {
@@ -10882,8 +10962,13 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
             }
+            // The pictures this prompt carries belong to it, so they are drawn
+            // under the line that attached them. Read, not drained: the turn
+            // still has to send the bytes.
+            Self::push_attached_images(ui_state, &self.session.effects.pending_images);
         }
 
         if text.starts_with('/') {
@@ -10936,6 +11021,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         return;
                     }
@@ -10948,6 +11034,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         return;
                     }
@@ -10977,6 +11064,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         return;
                     }
@@ -10992,6 +11080,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                                 folded: false,
+                                image: None,
                             });
                         }
                         return;
@@ -11007,6 +11096,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                                 folded: false,
+                                image: None,
                             });
                             return;
                         }
@@ -11020,6 +11110,7 @@ impl ReplLoop {
                                     tool_name: None,
                                     streaming: false,
                                     folded: false,
+                                    image: None,
                                 });
                             }
                         }
@@ -11042,6 +11133,7 @@ impl ReplLoop {
                                 tool_name: None,
                                 streaming: false,
                                 folded: false,
+                                image: None,
                             });
                             ui_state.notifications.warn("Usage: /open <path>");
                             return;
@@ -11076,6 +11168,7 @@ impl ReplLoop {
                                     tool_name: None,
                                     streaming: false,
                                     folded: false,
+                                    image: None,
                                 });
                             }
                         }
@@ -11094,6 +11187,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         return;
                     }
@@ -11105,6 +11199,7 @@ impl ReplLoop {
                             tool_name: None,
                             streaming: false,
                             folded: false,
+                            image: None,
                         });
                         return;
                     }
@@ -11117,6 +11212,7 @@ impl ReplLoop {
                                     tool_name: None,
                                     streaming: false,
                                     folded: false,
+                                    image: None,
                                 });
                             }
                             MacroCommandOutcome::Run(commands) => {
@@ -11182,6 +11278,7 @@ impl ReplLoop {
                     tool_name: None,
                     streaming: false,
                     folded: false,
+                    image: None,
                 });
                 if self.session.engine.is_some()
                     && !*thinking
@@ -11228,6 +11325,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
         } else {
             ui_state.messages.push(codape_ui::message_list::Message {
@@ -11236,6 +11334,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
         }
     }
@@ -11262,6 +11361,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: true,
             folded: false,
+            image: None,
         });
 
         let options = self.build_submit_options();
@@ -11417,6 +11517,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
             return;
         }
@@ -11461,6 +11562,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
     }
 
@@ -11591,6 +11693,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
         self.clear_interactive_snapshot(prior_session_id.as_deref());
     }
@@ -11634,6 +11737,7 @@ impl ReplLoop {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
     }
 
@@ -11664,6 +11768,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
         } else {
             // Non-command string: treat as a user message
@@ -11673,6 +11778,7 @@ impl ReplLoop {
                 tool_name: None,
                 streaming: false,
                 folded: false,
+                image: None,
             });
         }
     }
@@ -15399,6 +15505,7 @@ mod tests {
             tool_name: None,
             streaming: true,
             folded: false,
+            image: None,
         });
         let mut thinking = true;
         let mut phase = InteractivePhase::Thinking;
@@ -17103,6 +17210,7 @@ mod tests {
             tool_name: Some("Read".into()),
             streaming: false,
             folded: false,
+            image: None,
         });
         let mut live = InteractiveLive::new();
         let mut vim = codape_ui::vim::VimState::new_insert();
@@ -17167,6 +17275,57 @@ mod tests {
         assert!(reported.contains("/tmp/keybindings.json"), "{reported}");
         assert!(reported.contains("1 problem(s)"), "{reported}");
         assert!(reported.contains("not a modifier"), "{reported}");
+    }
+
+    #[tokio::test]
+    async fn an_attached_picture_reaches_the_transcript_and_the_turn() {
+        // The picture path has two halves that can silently disagree: the
+        // transcript row is what the person sees, and `pending_images` is what
+        // the engine sends. Draining one without the other leaves either a
+        // blank row or a turn that sends bytes nobody was shown.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+
+        let block = codape_core::types::ImageBlock {
+            media_type: "image/png".into(),
+            data: "iVBORw0KGgo=".into(),
+        };
+        repl.session.effects.pending_images.push(block);
+
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut thinking = false;
+        let mut phase = InteractivePhase::Idle;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.process_tui_input(
+            "what is wrong with this",
+            &mut ui_state,
+            &mut thinking,
+            &mut phase,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        );
+
+        let picture = ui_state
+            .messages
+            .messages
+            .iter()
+            .find(|message| message.image.is_some())
+            .expect("the attached picture has no transcript row");
+        assert_eq!(picture.content, "[image: image/png]");
+        assert_eq!(picture.role, codape_ui::message_list::MessageRole::User);
+        // The turn took the bytes and cleared the slot, so a retry does not
+        // send the same screenshot twice. Drawing the row must not be what
+        // emptied it: the transcript push happens before the turn is built.
+        assert!(
+            repl.session.effects.pending_images.is_empty(),
+            "the turn did not take the attached picture"
+        );
     }
 
     #[tokio::test]

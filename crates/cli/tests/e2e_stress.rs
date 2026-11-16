@@ -26,6 +26,7 @@ fn stress_large_message_list() {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
     }
 
@@ -56,6 +57,7 @@ fn stress_virtualization_scroll() {
             tool_name: None,
             streaming: false,
             folded: false,
+            image: None,
         });
     }
 

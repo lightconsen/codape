@@ -478,6 +478,12 @@ impl Theme {
     #[must_use]
     pub fn render_signature(&self) -> u64 {
         let colors = [
+            // The background is an input too: a theme change that only moved it
+            // would keep cached lines unless it is mixed in. A half-block
+            // picture's transparent pixels are composited over it, so two
+            // themes differing only in background render the same image
+            // differently.
+            &self.background,
             &self.foreground,
             &self.dim,
             &self.accent,

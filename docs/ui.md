@@ -69,6 +69,9 @@ CODAPE_KEYBOARD_PROTOCOL=disambiguate   # force the kitty keyboard protocol
 CODAPE_KEYBOARD_PROTOCOL=legacy         # force the terminal default
 ```
 
+The picture renderer has its own switch, `CODAPE_IMAGE_PROTOCOL=blocks|off`; see
+*Pictures in the transcript* below.
+
 ### Decoding is robust either way
 
 `input::key_event_to_action` does not assume which encoding is in play:
@@ -109,13 +112,39 @@ events.
 - **`modifyOtherKeys`.** crossterm 0.28 does not decode xterm's `CSI 27 ; modifier ; code ~` form. We avoid the situation rather than mis-decode it: nothing here asks a terminal to enable modifyOtherKeys.
 - **Terminals not in the table above** are `Unknown` and get the legacy encoding.
 
-### Graphics protocol
+### Pictures in the transcript
 
-**Not implemented — ⚪, deliberately.** The Kitty graphics protocol (with its image ids) is the one item in the UI checklist Codape does not take.
+An attached picture — `--image shot.png`, `@shot.png`, a Ctrl+V paste — is drawn
+in the transcript, not just sent. `crates/ui/src/transcript_image.rs` decodes it
+and turns it into half-block cells: `▀` with the top pixel as the foreground and
+the bottom one as the background, so a cell carries two rows of pixels.
 
-Reasoning: tool results can now carry `ImageBlock`s (MCP images, image reads), but the message list and its renderer are still text-only, so there is no place to draw them. Rendering inline images would mean a new dependency (`ratatui-image` plus an image decoder), a message/render variant, a capability handshake, and a fallback for every terminal that does not speak the protocol. The image data exists; the UI consumer does not. If images are ever needed, the honest path is `ratatui-image` gated on `TerminalProfile::kind` (kitty / WezTerm / Ghostty for Kitty graphics, iTerm2 for its own inline-image protocol, sixel elsewhere), degrading to the existing ASCII art.
+**Why not the kitty graphics protocol.** kitty, WezTerm, Ghostty and iTerm2 can
+place real pixels, and that is what `ratatui-image` drives. But those protocols
+write *outside* ratatui's cell buffer: the terminal anchors the image to a screen
+position and keeps it there while the text moves. Codape's transcript
+virtualises, scrolls by rendered line, caches line spans, and hit-tests mod UI
+blocks by row, so an image living outside the buffer would drift, duplicate, and
+survive redraws that moved its text. Half blocks make the picture ordinary
+`Span`s, which means scrolling, the line cache, the virtualised viewport and the
+selection snapshot all work on it with no special cases. The cost is resolution,
+not correctness.
 
-No image capability detection was added either: a detection method with nothing to consume it would be exactly the kind of flag that does nothing.
+Detection is `ImageProtocol::detect` in the same module, from `COLORTERM` and
+`TerminalProfile::kind`. Terminal.app is deliberately excluded: it never gained
+24-bit SGR, so a half block there lands in the default colour and reads as a
+broken picture. `CODAPE_IMAGE_PROTOCOL=blocks|off` overrides the choice. Where
+nothing can be drawn — no truecolor, an unreadable header, more than 40 million
+decoded pixels — the row keeps its `[image: image/png]` caption, which is also
+what a copy of the transcript produces.
+
+The picture is capped at 20 rows and scaled to the pane width, never cropped.
+The pixel size comes from the header, so the layout reserves the right number of
+rows before anything is decoded; the decode happens on the first draw and is
+cached per width and theme background. A payload whose header reads but whose
+pixels do not — a truncated file — keeps the caption on the rows already
+reserved for it, so the rest of the transcript does not jump up when a picture
+turns out to be unreadable.
 
 ## Architecture Patterns
 
