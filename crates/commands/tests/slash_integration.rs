@@ -44,10 +44,10 @@ fn full_registry() -> CommandRegistry {
 #[test]
 fn register_all_commands_populates_registry() {
     let reg = full_registry();
-    // The alignment doc claims 78 commands; pin the number so removing one is
-    // a failing test rather than a quiet drift. Adding one is a deliberate
-    // change and updates this number with it.
-    assert_eq!(reg.len(), 78, "expected 78 commands, got {}", reg.len());
+    // Pin the number so removing a command is a failing test rather than a
+    // quiet drift. Adding one is a deliberate change and updates this number
+    // with it. The count is the registry's real size, not a target.
+    assert_eq!(reg.len(), 79, "expected 79 commands, got {}", reg.len());
 }
 
 #[test]
@@ -534,6 +534,16 @@ fn history_empty() {
     let reg = full_registry();
     let result = reg.execute("history", &test_ctx(), &[]);
     assert!(result.output.contains("No command history"));
+}
+
+/// `/ide` reaches the REPL, which prints the editor snippet. A remote consumer
+/// that only has the registry gets told where the snippet comes from instead
+/// of "Unknown command".
+#[test]
+fn ide_points_at_the_cli_snippet() {
+    let reg = full_registry();
+    let result = reg.execute("ide", &test_ctx(), &[]);
+    assert!(result.output.contains("codape ide"), "{}", result.output);
 }
 
 #[test]

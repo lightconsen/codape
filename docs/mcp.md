@@ -344,7 +344,7 @@ Two halves:
 
   `codape ide` prints exactly that snippet — with this binary's absolute path —
   followed by the daemon's status (running, stale, no address recorded, or none).
-  It never prints the token.
+  It never prints the token. Inside a session, `/ide` prints the same text.
 
 The bridge is detected by parsing argv in `main()` before tracing and clap,
 because startup narrates itself on stdout and one stray line breaks the

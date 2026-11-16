@@ -10839,6 +10839,19 @@ impl ReplLoop {
         self.persist_interactive_snapshot(ui_state);
     }
 
+    /// Append one system row to the transcript.
+    fn push_system_row(
+        ui_state: &mut codape_ui::state::UiState,
+        content: impl Into<compact_str::CompactString>,
+    ) {
+        ui_state
+            .messages
+            .push(codape_ui::message_list::Message::text(
+                codape_ui::message_list::MessageRole::System,
+                content,
+            ));
+    }
+
     /// Add a transcript row for each picture attached to the prompt.
     ///
     /// The content stays the `[image: …]` caption: that is what the row shows
@@ -11180,27 +11193,17 @@ impl ReplLoop {
                         // startup saw, and a person who just edited the file
                         // would be told their edit did nothing.
                         self.reload_keybindings();
-                        let message = self.handle_keybindings_command();
-                        ui_state.messages.push(codape_ui::message_list::Message {
-                            role: codape_ui::message_list::MessageRole::System,
-                            content: message.into(),
-                            tool_name: None,
-                            streaming: false,
-                            folded: false,
-                            image: None,
-                        });
+                        Self::push_system_row(ui_state, self.handle_keybindings_command());
+                        return;
+                    }
+                    "ide" => {
+                        // The same text `codape ide` prints: the editor's MCP
+                        // snippet and the daemon a bridge would reach from here.
+                        Self::push_system_row(ui_state, crate::ide_bridge::describe());
                         return;
                     }
                     "style" => {
-                        let message = self.handle_output_style_command(&args);
-                        ui_state.messages.push(codape_ui::message_list::Message {
-                            role: codape_ui::message_list::MessageRole::System,
-                            content: message.into(),
-                            tool_name: None,
-                            streaming: false,
-                            folded: false,
-                            image: None,
-                        });
+                        Self::push_system_row(ui_state, self.handle_output_style_command(&args));
                         return;
                     }
                     "macro" => {
@@ -12161,6 +12164,12 @@ impl ReplLoop {
                     } else {
                         writeln!(stdout, "No engine configured.")?;
                     }
+                    return Ok(());
+                }
+                "ide" => {
+                    // Same text as the TUI arm: the snippet plus the daemon a
+                    // bridge would reach from here.
+                    writeln!(stdout, "{}", crate::ide_bridge::describe())?;
                     return Ok(());
                 }
                 "style" => {

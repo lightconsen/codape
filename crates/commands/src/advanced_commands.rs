@@ -96,6 +96,26 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
+    // /ide — handled directly by the REPL (built-in command).
+    //
+    // The snippet names this process's own executable and the daemon state
+    // file, both of which the REPL reaches and this crate does not. The
+    // registry entry exists so `/help` lists the command; a remote consumer
+    // gets an answer that points at the CLI rather than "Unknown command".
+    registry.register(SlashCommand::local(
+        "ide",
+        "Show how to connect an editor to this Codape daemon",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "The editor connection snippet is printed by `codape ide`. The setup it names \
+                 applies to any session started from the same daemon.",
+            )
+        }),
+    ));
+
     // /ultraplan — super plan mode (feature-gated)
     registry.register(SlashCommand::local(
         "ultraplan",
