@@ -105,7 +105,11 @@ async fn start_server_recording_handles(
             if let Ok(mut recorded) = recorder.lock() {
                 recorded.push(engine.interrupt_handle());
             }
-            (engine, rx)
+            codape_server::session::SessionEngineParts {
+                engine,
+                events: rx,
+                confirmations: None,
+            }
         }),
     )
     .await;
@@ -216,7 +220,11 @@ async fn start_server_with(config: ServerConfig, answer: Option<&'static str>) -
                 tx,
             );
             engine.set_tool_executor(Box::new(codape_core::tool_executor::NoOpToolExecutor));
-            (engine, rx)
+            codape_server::session::SessionEngineParts {
+                engine,
+                events: rx,
+                confirmations: None,
+            }
         }) as codape_server::session::EngineFactory
     });
 
@@ -549,7 +557,11 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
             tx,
         );
         engine.set_tool_executor(Box::new(codape_core::tool_executor::NoOpToolExecutor));
-        (engine, rx)
+        codape_server::session::SessionEngineParts {
+            engine,
+            events: rx,
+            confirmations: None,
+        }
     });
     let addr = start_server_with_factory(config, factory).await;
 
@@ -1169,4 +1181,319 @@ async fn full_websocket_lifecycle_auth_query_disconnect() {
 
     // Graceful close
     ws.close(None).await.unwrap();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  13.5 A session can see its own work, and answer its own prompts
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A model that calls one dangerous tool on its first turn and answers on the
+/// second, so the server has to carry a tool call and a permission prompt.
+struct ToolThenAnswerModel {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl codape_core::api_client::ApiClient for ToolThenAnswerModel {
+    fn clone_box(&self) -> Box<dyn codape_core::api_client::ApiClient> {
+        Box::new(Self {
+            calls: std::sync::Arc::clone(&self.calls),
+        })
+    }
+
+    async fn create_message(
+        &self,
+        _system: &str,
+        _messages: &[serde_json::Value],
+        _model: &codape_core::types::ModelId,
+        _max_tokens: u32,
+        _tools: &[codape_core::tool_executor::ToolInfo],
+    ) -> Result<codape_core::api_client::ApiResponse, codape_core::api_client::ApiError> {
+        let turn = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if turn == 0 {
+            Ok(codape_core::api_client::ApiResponse {
+                content: String::new(),
+                tool_calls: vec![codape_core::types::ToolCall {
+                    id: "call_1".into(),
+                    name: "Bash".into(),
+                    input: serde_json::json!({"command": "echo hello"}),
+                }],
+                usage: codape_core::types::UsageSummary::default(),
+                stop_reason: "tool_use".into(),
+                thinking: None,
+            })
+        } else {
+            Ok(codape_core::api_client::ApiResponse {
+                content: "the tool ran".into(),
+                tool_calls: Vec::new(),
+                usage: codape_core::types::UsageSummary::default(),
+                stop_reason: "end_turn".into(),
+                thinking: None,
+            })
+        }
+    }
+
+    async fn create_message_streaming(
+        &self,
+        system: &str,
+        messages: &[serde_json::Value],
+        model: &codape_core::types::ModelId,
+        max_tokens: u32,
+        tools: &[codape_core::tool_executor::ToolInfo],
+    ) -> std::pin::Pin<
+        Box<dyn futures::Stream<Item = codape_core::api_client::StreamEvent> + Send + 'static>,
+    > {
+        let response = self
+            .create_message(system, messages, model, max_tokens, tools)
+            .await
+            .expect("the tool model answers");
+        let mut events = Vec::new();
+        if !response.content.is_empty() {
+            events.push(codape_core::api_client::StreamEvent::TextDelta(
+                response.content.clone(),
+            ));
+        }
+        for call in &response.tool_calls {
+            events.push(codape_core::api_client::StreamEvent::ToolCallBlockStart {
+                id: call.id.clone(),
+                name: call.name.clone(),
+            });
+            events.push(codape_core::api_client::StreamEvent::ToolCallBlockEnd {
+                id: call.id.clone(),
+                input: call.input.clone(),
+            });
+        }
+        events.push(codape_core::api_client::StreamEvent::StopReason(
+            response.stop_reason,
+        ));
+        events.push(codape_core::api_client::StreamEvent::StreamEnd);
+        Box::pin(futures::stream::iter(events))
+    }
+}
+
+/// An executor that records the calls it was asked to make.
+#[derive(Clone, Default)]
+struct RecordingExecutor {
+    executed: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl codape_core::tool_executor::ToolExecutor for RecordingExecutor {
+    async fn execute(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        _input: &serde_json::Value,
+    ) -> codape_core::tool_executor::ToolDispatchOutcome {
+        if let Ok(mut executed) = self.executed.lock() {
+            executed.push(tool_name.to_string());
+        }
+        codape_core::tool_executor::ToolDispatchOutcome {
+            result: codape_core::types::ToolResult::text(tool_call_id, "hello\n"),
+        }
+    }
+}
+
+/// Start a server whose session has a confirmation bus, and return where to
+/// reach it plus the executor's record of what actually ran.
+async fn start_server_with_prompts() -> (SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>)
+{
+    let executor = RecordingExecutor::default();
+    let executed = std::sync::Arc::clone(&executor.executed);
+    let factory: codape_server::session::EngineFactory = std::sync::Arc::new(move || {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let bus = codape_core::confirmation_bus::ConfirmationBus::new(4);
+        let mut engine = codape_core::engine::QueryEngine::new(
+            Box::new(ToolThenAnswerModel {
+                calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            codape_core::types::ModelId::sonnet(),
+            codape_core::state::SessionState::new(std::path::PathBuf::from("/tmp")),
+            // Default, not bypass: the prompt is the thing under test.
+            codape_core::permission_engine::PermissionEngine::new(
+                codape_core::permissions::PermissionChecker::new(
+                    codape_core::permissions::PermissionMode::Default,
+                ),
+            ),
+            tx,
+        );
+        engine.set_tool_executor(Box::new(executor.clone()));
+        engine.set_confirmation_bus(bus.clone());
+        codape_server::session::SessionEngineParts {
+            engine,
+            events: rx,
+            confirmations: Some(bus),
+        }
+    });
+    let config = ServerConfig {
+        valid_keys: vec!["key".into()],
+        idle_timeout: Duration::from_secs(3600),
+        max_sessions: 10,
+        rate_limit_per_minute: 100,
+        health_port: None,
+        persist_path: None,
+        allow_anonymous: false,
+    };
+    let addr = start_server_with_factory(config, factory).await;
+    (addr, executed)
+}
+
+/// A client that only ever saw text could not tell a tool ran. The call
+/// frames are what make the stream a transcript.
+#[tokio::test]
+async fn a_query_carries_its_tool_calls_not_only_its_text() {
+    let (addr, executed) = start_server_with_prompts().await;
+    let mut ws = ws_connect(addr).await;
+    ws_auth(&mut ws, "key").await;
+
+    ws_send_json(
+        &mut ws,
+        &serde_json::json!({"id": "q1", "type": "query", "content": "run it"}),
+    )
+    .await;
+
+    let mut saw_start = false;
+    let mut saw_end = false;
+    // The loop breaks on the prompt, so this is assigned exactly once; the
+    // initialiser only exists because it is declared outside the loop.
+    let prompt_id;
+    loop {
+        let text = ws_recv_text(&mut ws).await;
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        match frame["type"].as_str().unwrap() {
+            "tool_call_start" => {
+                assert_eq!(frame["name"], "Bash");
+                assert_eq!(frame["call_id"], "call_1");
+                saw_start = true;
+            }
+            "tool_call_end" => {
+                assert_eq!(frame["call_id"], "call_1");
+                assert_eq!(frame["result"]["output"], "hello\n");
+                saw_end = true;
+            }
+            "permission_request" => {
+                assert_eq!(frame["tool"], "Bash");
+                assert_eq!(frame["args"]["command"], "echo hello");
+                assert!(
+                    frame["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                    "the prompt says why it is asking: {frame}"
+                );
+                prompt_id = frame["request_id"].as_str().map(str::to_string);
+                break;
+            }
+            "stream_chunk" | "query_done" => {}
+            other => panic!("unexpected frame: {other} ({frame})"),
+        }
+    }
+
+    assert!(saw_start, "the tool call start reached the client");
+    assert!(
+        !saw_end,
+        "the call has not finished: it is waiting on the prompt"
+    );
+
+    let prompt_id = prompt_id.expect("a permission prompt");
+    ws_send_json(
+        &mut ws,
+        &serde_json::json!({
+            "id": prompt_id,
+            "type": "permission_response",
+            "decision": "approved",
+        }),
+    )
+    .await;
+
+    // The turn resumes: the tool runs, its result is framed, and the turn
+    // ends. Approval is what makes the executor run at all.
+    let mut saw_end = false;
+    loop {
+        let text = ws_recv_text(&mut ws).await;
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        match frame["type"].as_str().unwrap() {
+            "tool_call_end" => saw_end = true,
+            "query_done" => break,
+            "permission_recorded" => assert_eq!(frame["decision"], "approved"),
+            _ => {}
+        }
+    }
+    assert!(saw_end, "the approved tool ran and reported");
+    assert_eq!(
+        executed.lock().map(|e| e.clone()).unwrap_or_default(),
+        vec!["Bash".to_string()]
+    );
+}
+
+/// Refusing is a different answer from silence: the tool must not run, and the
+/// turn must still finish rather than hanging on the prompt.
+#[tokio::test]
+async fn a_denied_prompt_stops_the_tool_and_ends_the_turn() {
+    let (addr, executed) = start_server_with_prompts().await;
+    let mut ws = ws_connect(addr).await;
+    ws_auth(&mut ws, "key").await;
+
+    ws_send_json(
+        &mut ws,
+        &serde_json::json!({"id": "q1", "type": "query", "content": "run it"}),
+    )
+    .await;
+
+    let prompt_id = loop {
+        let text = ws_recv_text(&mut ws).await;
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if frame["type"] == "permission_request" {
+            break frame["request_id"].as_str().unwrap().to_string();
+        }
+    };
+
+    ws_send_json(
+        &mut ws,
+        &serde_json::json!({
+            "id": prompt_id,
+            "type": "permission_response",
+            "decision": "denied",
+        }),
+    )
+    .await;
+
+    loop {
+        let text = ws_recv_text(&mut ws).await;
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if frame["type"] == "query_done" {
+            break;
+        }
+    }
+
+    assert!(
+        executed.lock().is_ok_and(|e| e.is_empty()),
+        "a denied tool never reaches the executor"
+    );
+}
+
+/// A client that disconnects with the prompt showing leaves nobody to ask.
+/// The bus is abandoned so the turn ends; without that the engine waits on a
+/// channel no one will ever answer.
+#[tokio::test]
+async fn disconnecting_with_a_prompt_open_does_not_strand_the_bus() {
+    let (addr, _executed) = start_server_with_prompts().await;
+    let mut ws = ws_connect(addr).await;
+    ws_auth(&mut ws, "key").await;
+
+    ws_send_json(
+        &mut ws,
+        &serde_json::json!({"id": "q1", "type": "query", "content": "run it"}),
+    )
+    .await;
+
+    // Stop reading once the prompt arrives, then close the connection.
+    loop {
+        let text = ws_recv_text(&mut ws).await;
+        let frame: serde_json::Value = serde_json::from_str(&text).unwrap();
+        if frame["type"] == "permission_request" {
+            break;
+        }
+    }
+    ws.close(None).await.unwrap();
+    // The server's connection task has to observe the close and run its
+    // cleanup before the assertion below is meaningful.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }

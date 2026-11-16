@@ -22,6 +22,6 @@ pub use filter::{CommandFilter, SafetyLevel};
 pub use gateway::GatewayServer;
 pub use persistence::{PersistedSession, SessionStore};
 pub use session::{
-    DaemonServer, ServerConfig, Session, SessionRole, WsEvent, WsRequest, WsRequestKind,
-    WsResponse, WsResponseKind,
+    DaemonServer, PermissionDecision, ServerConfig, Session, SessionEngineParts, SessionRole,
+    WsEvent, WsRequest, WsRequestKind, WsResponse, WsResponseKind,
 };

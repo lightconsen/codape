@@ -62,6 +62,33 @@ to run.
 The server enforces the whitelist; it does not run the command. Execution
 belongs to the session's own tool executor, which the daemon does not own.
 
+### Permission Response
+
+```json
+{"id": "perm_7", "type": "permission_response", "decision": "approved"}
+```
+
+Answers the `permission_request` whose `request_id` is `perm_7` — **the
+request's own `id` is the request id it answers.** `decision` is one of
+`approved`, `approve_session`, `denied`. The turn stays paused until this
+arrives: a client that cannot prompt should answer `denied` rather than staying
+silent, and a client that disconnects has its pending prompts denied.
+
+The answer is delivered, not obeyed — the engine still decides what the call
+becomes. The server answers with `permission_recorded` when it reached the
+prompt it named, and with a `no_pending_request` error when no prompt is waiting
+under that id.
+
+### Elicitation Response
+
+```json
+{"id": "elic_3", "type": "elicitation_response", "response": "staging"}
+```
+
+Answers an `elicitation_request` the same way. A served session installs no
+elicitation handler — the engine cancels the question rather than reading the
+daemon's stdin — so this request currently always answers `unsupported`.
+
 ## Server → Client Responses
 
 Every response echoes the request `id` and includes a `type` field:
@@ -73,8 +100,57 @@ Every response echoes the request `id` and includes a `type` field:
 
 ### Query Done (after interrupt)
 ```json
-{"id": "req_2", "type": "query_done"}
+{"id": "req_2", "type": "query_done", "reason": "interrupted"}
 ```
+
+`reason` says how the turn finished — `completed`, `interrupted`,
+`token_limit_stop`, `nothing running`. A truncated or interrupted answer is not
+the same as a finished one, so a client should not treat `query_done` alone as
+success.
+
+### Stream Chunk
+```json
+{"id": "req_1", "type": "stream_chunk", "chunk": "I'm doing "}
+```
+
+### Tool Call Start / End
+```json
+{"id": "req_1", "type": "tool_call_start", "call_id": "tc_1", "name": "Read", "summary": "Reading src/lib.rs..."}
+{"id": "req_1", "type": "tool_call_end", "call_id": "tc_1", "result": {"tool_call_id": "tc_1", "output": "...", "is_error": false}}
+```
+
+These arrive during the query that requested the tool, correlated by `call_id`.
+Without them a client can only show that the model said something, not that it
+ran a command.
+
+### Permission Request
+```json
+{"id": "req_1", "type": "permission_request", "request_id": "perm_7",
+ "tool": "Bash", "args": {"command": "rm -rf build"}, "reason": "...",
+ "allow_session": true}
+```
+
+The `id` is the query the prompt belongs to; `request_id` is what a
+`permission_response` has to name. What shapes hold the call is the tool's own
+decision: a session with a confirmation channel never reaches the
+scheduler's `Ask` branch, so this frame is the only source of prompts.
+
+### Elicitation Request / Notification
+```json
+{"id": "req_1", "type": "elicitation_request", "request_id": "elic_3", "message": "Which environment?"}
+{"type": "notification", "message": "Context compaction moved 12 messages out of the window"}
+```
+
+`elicitation_request` is not produced yet (see *Elicitation Response*).
+`notification` is advisory and carries no `id`.
+
+### Permission Recorded
+```json
+{"id": "perm_7", "type": "permission_recorded", "decision": "approved"}
+```
+
+The answer reached the prompt it named. It does not mean the call was allowed —
+only that the engine heard the decision.
 
 ### Pong
 ```json
@@ -129,6 +205,8 @@ Events are unsolicited messages (not correlated to a request):
 | `query_failed` | The engine could not finish the query |
 | `empty_command` | A `command` request with nothing in `line` |
 | `command_not_allowed` | The command is not on the session role's whitelist |
+| `no_pending_request` | A `permission_response` that names no prompt waiting — no confirmation channel, or the wrong id |
+| `unsupported` | The request kind is understood but this session cannot serve it (`elicitation_response`) |
 
 ## Health Endpoint
 
@@ -148,9 +226,17 @@ Response:
 ```typescript
 interface WsRequest {
   id: string;
-  type: "query" | "interrupt" | "ping" | "command";
+  type:
+    | "query"
+    | "interrupt"
+    | "ping"
+    | "command"
+    | "permission_response"
+    | "elicitation_response";
   content?: string;
   line?: string;
+  decision?: "approved" | "approve_session" | "denied";
+  response?: string;
 }
 
 interface WsAuth {
@@ -162,17 +248,33 @@ interface WsResponse {
   id: string;
   type:
     | "query_ok"
+    | "stream_chunk"
     | "query_done"
+    | "tool_call_start"
+    | "tool_call_end"
+    | "permission_request"
+    | "permission_recorded"
+    | "elicitation_request"
+    | "notification"
     | "pong"
     | "command_resolved"
-    | "error"
-    | "stream_chunk";
+    | "error";
   content?: string;
   chunk?: string;
+  reason?: string;
+  call_id?: string;
+  name?: string;
+  summary?: string;
+  result?: { tool_call_id: string; output: string; is_error: boolean };
+  request_id?: string;
+  tool?: string;
+  args?: unknown;
+  allow_session?: boolean;
+  decision?: "approved" | "approve_session" | "denied";
+  message?: string;
   command?: string;
   description?: string;
   code?: string;
-  message?: string;
 }
 
 interface WsEvent {

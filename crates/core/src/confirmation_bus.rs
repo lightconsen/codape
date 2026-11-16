@@ -156,6 +156,39 @@ impl ConfirmationBus {
             .is_some_and(|responder| responder.send(response).is_ok())
     }
 
+    /// Abandon every request still waiting, for a responder that is going away.
+    ///
+    /// A turn is paused on [`request`](Self::request) until it is answered;
+    /// dropping one clone of the bus does not resolve it, because the engine
+    /// holds another. A UI that disappears — a closed IDE panel, a dropped
+    /// connection — would otherwise leave the engine waiting forever.
+    ///
+    /// Each pending request is *abandoned*, not denied: the responder channel
+    /// is dropped, so [`request`](Self::request) returns `None` and the engine
+    /// reports the call as unapproved rather than recording a refusal nobody
+    /// made. That is the distinction the elevation path already draws
+    /// (`abandon_pending_elevation`). Returns how many requests were
+    /// abandoned.
+    ///
+    /// Both halves are drained: a request that was sent but not yet received
+    /// is still holding its responder inside the channel.
+    pub async fn abandon_all(&self) -> usize {
+        let mut count = 0;
+        {
+            let mut rx = self.rx.lock().await;
+            while rx.try_recv().is_ok() {
+                count += 1;
+            }
+        }
+        let pending = {
+            let mut pending = self.pending.lock().await;
+            std::mem::take(&mut *pending)
+        };
+        count += pending.len();
+        drop(pending);
+        count
+    }
+
     /// Check if there are pending requests waiting for a response.
     #[must_use]
     pub async fn has_pending(&self) -> bool {

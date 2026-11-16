@@ -51,6 +51,39 @@ pub enum WsRequestKind {
         /// The command line, as typed.
         line: String,
     },
+    /// Answer a `permission_request` the server sent.
+    ///
+    /// `id` is the request id the prompt carried. Until it arrives the
+    /// engine is waiting: a client that never answers leaves the turn
+    /// paused, and one that disconnects has its pending prompts denied.
+    PermissionResponse {
+        /// What the person decided.
+        decision: PermissionDecision,
+    },
+    /// Answer an `elicitation_request` the server sent.
+    ///
+    /// Answers in the engine's own terms: a label chosen from the offered
+    /// options, or free text.
+    ElicitationResponse {
+        /// The chosen label, or the text the person typed.
+        response: String,
+    },
+}
+
+/// A client's answer to a permission prompt.
+///
+/// Serialized as the three decisions a person can make, not as a boolean:
+/// "yes, and stop asking for this tool" is a different answer from "yes,
+/// once", and flattening them loses the one the person chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionDecision {
+    /// Allow this one call.
+    Approved,
+    /// Allow this tool for the rest of the session.
+    ApproveSession,
+    /// Refuse the call.
+    Denied,
 }
 
 /// Server → Client response message.
@@ -88,6 +121,69 @@ pub enum WsResponseKind {
         /// What the command does.
         description: String,
     },
+    /// A tool call started, during the query that requested it.
+    ///
+    /// Client-side this is what turns a stream of text into a transcript: a
+    /// client that only sees `stream_chunk` cannot show that the model ran a
+    /// command, only that it said something.
+    ToolCallStart {
+        /// The tool call identifier, for correlating with the end frame.
+        call_id: String,
+        /// Tool name.
+        name: String,
+        /// One-line, safe description of the activity.
+        summary: String,
+    },
+    /// A tool call finished, during the query that requested it.
+    ToolCallEnd {
+        /// The tool call identifier.
+        call_id: String,
+        /// The tool's output, and whether it failed.
+        result: codape_core::wire_protocol::WireToolResult,
+    },
+    /// The engine needs a person to allow or refuse a tool call.
+    ///
+    /// The turn is paused until `permission_response` arrives with this
+    /// `request_id`. A client that cannot prompt should answer `denied`
+    /// rather than staying silent: silence holds the turn open.
+    PermissionRequest {
+        /// The id to answer with.
+        request_id: String,
+        /// Tool name.
+        tool: String,
+        /// The tool's arguments, so the client can show what is being asked.
+        args: serde_json::Value,
+        /// Why the permission engine asked instead of deciding.
+        reason: String,
+        /// Whether "allow for the session" is an option.
+        allow_session: bool,
+    },
+    /// The engine is asking the person to choose or type an answer.
+    ///
+    /// This frame is not produced yet: a served session installs no
+    /// elicitation handler, so the engine cancels the question instead of
+    /// reading the daemon's stdin. It is listed here so the protocol does
+    /// not grow a new shape when a client actually gets to answer one.
+    ElicitationRequest {
+        /// The id to answer with.
+        request_id: String,
+        /// The question.
+        message: String,
+    },
+    /// An advisory message from the engine (degradation warnings, and the like).
+    Notification {
+        /// The message.
+        message: String,
+    },
+    /// A `permission_response` was delivered to the engine.
+    ///
+    /// Delivered, not obeyed: the engine is still deciding what the call
+    /// becomes. This frame says the answer reached the prompt it named, so a
+    /// client can tell a mis-addressed answer from an accepted one.
+    PermissionRecorded {
+        /// What was recorded.
+        decision: PermissionDecision,
+    },
     /// Error response.
     Error { code: String, message: String },
 }
@@ -123,6 +219,118 @@ impl WsResponse {
             id: id.to_string(),
             kind: WsResponseKind::Pong,
         }
+    }
+}
+
+/// The frame an engine event becomes, when it becomes one.
+///
+/// A `None` is an event with no client-facing shape: the tool-use summary is
+/// a renderer hint that rides in front of a `ToolCallStart` carrying the same
+/// text, and the remaining engine events are internal bookkeeping. Dropping
+/// them here rather than downstream keeps the pump's `select!` loop from
+/// growing a match arm per event it never sends.
+///
+/// `PermissionRequest` is deliberately not here. A session with a
+/// confirmation channel never reaches the scheduler's `Ask` branch — the
+/// permission engine consumes the decision through the bus before the
+/// scheduler sees it — so the event is only ever emitted by a session that
+/// *cannot* answer prompts, and forwarding it would offer a client a prompt
+/// whose answer nothing is listening for. The bus is where prompts come
+/// from; see [`permission_frame`].
+fn query_frame(id: &str, event: EngineEvent) -> Option<String> {
+    let kind = match event {
+        EngineEvent::TextDelta(chunk) => WsResponseKind::StreamChunk { chunk },
+        EngineEvent::ToolCallStart {
+            id: call_id,
+            name,
+            summary,
+            ..
+        } => WsResponseKind::ToolCallStart {
+            call_id,
+            name,
+            summary,
+        },
+        EngineEvent::ToolCallEnd {
+            id: call_id,
+            result,
+        } => WsResponseKind::ToolCallEnd {
+            call_id,
+            result: codape_core::wire_protocol::WireToolResult::from(result),
+        },
+        EngineEvent::ElicitationRequest {
+            id: request_id,
+            message,
+        } => WsResponseKind::ElicitationRequest {
+            request_id,
+            message,
+        },
+        EngineEvent::Notification { message } => WsResponseKind::Notification { message },
+        // Everything else — compaction bookkeeping, sub-agent events the
+        // parent renders, mod UI the terminal owns — has no frame yet.
+        _ => return None,
+    };
+    serde_json::to_string(&WsResponse {
+        id: id.to_string(),
+        kind,
+    })
+    .ok()
+}
+
+/// The next permission prompt, for a select loop that must also end when the
+/// turn does.
+///
+/// Resolves to `None` when the session has no channel — or when the channel
+/// closes, which is what happens when the engine that owns the sending half
+/// goes away. Both cases leave the branch able to resolve, so the loop can
+/// re-arm it without spinning on a again.
+async fn next_prompt(
+    confirmations: Option<codape_core::confirmation_bus::ConfirmationBus>,
+) -> Option<codape_core::confirmation_bus::ConfirmationRequest> {
+    match confirmations {
+        Some(bus) => bus.next_request().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// The prompt frame for a request waiting on the confirmation bus.
+///
+/// The `id` is the query the prompt belongs to, so a client can tie the
+/// question to the turn that raised it; `request_id` is what the answer has
+/// to name.
+fn permission_frame(
+    query_id: &str,
+    request: &codape_core::confirmation_bus::ConfirmationRequest,
+) -> Option<String> {
+    let args = serde_json::from_str(&request.arguments).unwrap_or(serde_json::Value::Null);
+    serde_json::to_string(&WsResponse {
+        id: query_id.to_string(),
+        kind: WsResponseKind::PermissionRequest {
+            request_id: request.id.clone(),
+            tool: request.tool_name.clone(),
+            args,
+            reason: request.reason.clone(),
+            allow_session: request.allow_session,
+        },
+    })
+    .ok()
+}
+
+/// The bus decision a client's answer means.
+///
+/// `PermissionDecision` and `ConfirmationResponse` are the same three
+/// choices; the conversion is spelled out so a new choice on either side
+/// fails to compile here rather than silently becoming "denied".
+const fn confirmation_response(
+    decision: PermissionDecision,
+) -> codape_core::confirmation_bus::ConfirmationResponse {
+    match decision {
+        PermissionDecision::Approved => {
+            codape_core::confirmation_bus::ConfirmationResponse::Approved
+        }
+        PermissionDecision::ApproveSession => {
+            codape_core::confirmation_bus::ConfirmationResponse::ApproveSession
+        }
+        PermissionDecision::Denied => codape_core::confirmation_bus::ConfirmationResponse::Denied,
     }
 }
 
@@ -267,13 +475,32 @@ impl Default for ServerConfig {
 /// started the server. The factory is how they are handed over, and it also
 /// returns the event stream, because whoever builds the engine is who can read
 /// what it emits.
-pub type EngineFactory = Arc<
-    dyn Fn() -> (
-            QueryEngine,
-            tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
-        ) + Send
-        + Sync,
->;
+///
+/// The confirmation bus travels with them for the same reason: the engine
+/// asks *through* it when a call needs a person's decision, and only the
+/// owner of the engine can install one. A factory that supplies no bus leaves
+/// every `Ask` decision unanswered, and the engine reports those calls as
+/// unapproved rather than running them.
+pub type EngineFactory = Arc<dyn Fn() -> SessionEngineParts + Send + Sync>;
+
+/// What a factory hands over for one session.
+pub struct SessionEngineParts {
+    /// The engine, with its tool executor and permission rules installed.
+    pub engine: QueryEngine,
+    /// The event stream the engine writes to.
+    pub events: tokio::sync::mpsc::UnboundedReceiver<EngineEvent>,
+    /// Where the engine's permission prompts wait for an answer.
+    pub confirmations: Option<codape_core::confirmation_bus::ConfirmationBus>,
+}
+
+impl std::fmt::Debug for SessionEngineParts {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionEngineParts")
+            .field("has_confirmations", &self.confirmations.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 /// One session's engine and its event receiver.
 ///
@@ -289,6 +516,13 @@ struct SessionEngine {
 struct SessionEngineSlot {
     engine: Arc<tokio::sync::Mutex<SessionEngine>>,
     interrupt: codape_core::engine::InterruptHandle,
+    /// The bus the engine's permission prompts arrive on, cloned out so a
+    /// `permission_response` can be delivered without taking the engine lock.
+    ///
+    /// Taking that lock from the connection loop would deadlock every
+    /// answer: the query task holds it for the whole turn, and the turn is
+    /// exactly what is waiting for the answer.
+    confirmations: Option<codape_core::confirmation_bus::ConfirmationBus>,
 }
 
 impl std::fmt::Debug for SessionEngineSlot {
@@ -718,6 +952,26 @@ impl Connection {
         if let Some(handle) = running_queries.remove(&session_id) {
             handle.interrupt();
         }
+        // A prompt still waiting for an answer is abandoned, not denied: the
+        // person did not say no, nobody is left to ask. Without this the
+        // engine waits on the bus forever and the turn never ends.
+        //
+        // The bus is cloned out before the await: the guard is not `Send`, and
+        // holding it across `abandon_all` would make the whole connection
+        // future unspawnable.
+        let waiting_bus = {
+            let shared = self.shared.lock();
+            shared
+                .engines
+                .get(&session_id)
+                .and_then(|slot| slot.confirmations.clone())
+        };
+        if let Some(bus) = waiting_bus {
+            let abandoned = bus.abandon_all().await;
+            if abandoned > 0 {
+                debug!("session {session_id} disconnected with {abandoned} unanswered prompt(s)");
+            }
+        }
 
         self.disconnect(&session_id);
         info!(
@@ -773,13 +1027,18 @@ impl Connection {
                     if let Some(slot) = shared.engines.get(session_id) {
                         slot.clone()
                     } else {
-                        let (engine, events) = factory();
+                        let SessionEngineParts {
+                            engine,
+                            events,
+                            confirmations,
+                        } = factory();
                         let slot = SessionEngineSlot {
                             interrupt: engine.interrupt_handle(),
                             engine: Arc::new(tokio::sync::Mutex::new(SessionEngine {
                                 engine,
                                 events,
                             })),
+                            confirmations,
                         };
                         shared.engines.insert(session_id.to_string(), slot.clone());
                         slot
@@ -789,48 +1048,59 @@ impl Connection {
 
                 let id = req.id.clone();
                 let out = out.clone();
+                // Prompts arrive on the bus, not on the event stream: the
+                // engine asks through it and waits. They are pumped by the
+                // same task that pumps the event stream — one writer, so a
+                // prompt cannot overtake the `tool_call_start` it belongs to.
+                let confirmations = slot.confirmations.clone();
                 tokio::spawn(async move {
                     let mut guard = slot.engine.lock().await;
                     let SessionEngine { engine, events } = &mut *guard;
 
                     // Pump the answer while the turn runs, in this task, so
                     // the receiver stays with the engine for the next query.
+                    //
+                    // Every event the engine emits goes out, not just text:
+                    // a client that only sees `stream_chunk` can show an
+                    // answer, but not the command that produced it.
                     let result = {
                         let submit = engine.submit_streaming(content, SubmitOptions::default());
                         tokio::pin!(submit);
+                        // Re-armed after each prompt: a pinned future that has
+                        // already resolved must not be polled again.
+                        let mut prompts = Box::pin(next_prompt(confirmations.clone()));
                         loop {
                             tokio::select! {
+                                // Events first: a prompt that is emitted
+                                // after a tool call must not overtake it.
+                                biased;
                                 Some(event) = events.recv() => {
-                                    if let EngineEvent::TextDelta(chunk) = event {
-                                        let frame = WsResponse {
-                                            id: id.clone(),
-                                            kind: WsResponseKind::StreamChunk { chunk },
-                                        };
-                                        if let Ok(json) = serde_json::to_string(&frame)
-                                            && out.send(json).is_err() {
-                                                // The client is gone; the
-                                                // connection loop will interrupt
-                                                // the turn on disconnect.
-                                                break Err("client disconnected".to_string());
-                                            }
+                                    if let Some(frame) = query_frame(&id, event)
+                                        && out.send(frame).is_err() {
+                                        // The client is gone; the connection
+                                        // loop will interrupt the turn on
+                                        // disconnect.
+                                        break Err("client disconnected".to_string());
                                     }
+                                }
+                                request = &mut prompts => {
+                                    if let Some(request) = request
+                                        && let Some(frame) = permission_frame(&id, &request)
+                                        && out.send(frame).is_err() {
+                                        break Err("client disconnected".to_string());
+                                    }
+                                    prompts = Box::pin(next_prompt(confirmations.clone()));
                                 }
                                 result = &mut submit => break result,
                             }
                         }
                     };
 
-                    // Forward chunks that were queued after the turn future
+                    // Forward frames that were queued after the turn future
                     // completed, then release the engine for the next query.
                     while let Ok(event) = events.try_recv() {
-                        if let EngineEvent::TextDelta(chunk) = event {
-                            let frame = WsResponse {
-                                id: id.clone(),
-                                kind: WsResponseKind::StreamChunk { chunk },
-                            };
-                            if let Ok(json) = serde_json::to_string(&frame) {
-                                let _ = out.send(json);
-                            }
+                        if let Some(frame) = query_frame(&id, event) {
+                            let _ = out.send(frame);
                         }
                     }
                     drop(guard);
@@ -883,6 +1153,54 @@ impl Connection {
                     Err((code, message)) => Some(WsResponse::error(&req.id, &code, &message)),
                 }
             }
+            WsRequestKind::PermissionResponse { decision } => {
+                let bus = self
+                    .shared
+                    .lock()
+                    .engines
+                    .get(session_id)
+                    .and_then(|slot| slot.confirmations.clone());
+                let Some(bus) = bus else {
+                    return Some(WsResponse::error(
+                        &req.id,
+                        "no_pending_request",
+                        "this session has no confirmation channel, so nothing is waiting for an \
+                         answer",
+                    ));
+                };
+                // Delivered without taking the engine lock: the query task
+                // holds it for the whole turn, and that turn is what is
+                // waiting for this answer. The send happens on its own task
+                // for the same reason at the next level up — the bus is
+                // async, and this handler is not.
+                let id = req.id.clone();
+                let out = out.clone();
+                tokio::spawn(async move {
+                    let delivered = bus.respond(&id, confirmation_response(decision)).await;
+                    let frame = if delivered {
+                        WsResponse {
+                            id,
+                            kind: WsResponseKind::PermissionRecorded { decision },
+                        }
+                    } else {
+                        WsResponse::error(
+                            &id,
+                            "no_pending_request",
+                            "no permission prompt is waiting under that id",
+                        )
+                    };
+                    if let Ok(json) = serde_json::to_string(&frame) {
+                        let _ = out.send(json);
+                    }
+                });
+                None
+            }
+            WsRequestKind::ElicitationResponse { response: _ } => Some(WsResponse::error(
+                &req.id,
+                "unsupported",
+                "a served session installs no elicitation handler, so no elicitation is waiting \
+                 for an answer",
+            )),
         }
     }
 }
@@ -896,6 +1214,12 @@ pub struct DaemonServer {
     session_count_atomic: Arc<AtomicUsize>,
     /// How a session's queries reach a model, when one was supplied.
     engine_factory: Option<EngineFactory>,
+    /// Called with the address the listener actually bound.
+    ///
+    /// The port a caller passes can be `0`, and a daemon that answers on a
+    /// port nobody wrote down is unreachable. This is how the caller learns
+    /// the one that was chosen, before the accept loop starts.
+    listening_hook: Option<Arc<dyn Fn(SocketAddr) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for DaemonServer {
@@ -922,6 +1246,16 @@ impl DaemonServer {
         self.engine_factory = Some(factory);
     }
 
+    /// Be told the address the listener bound, once it has.
+    ///
+    /// Called from inside [`run`](Self::run), after the bind and before the
+    /// first connection is accepted, so a caller can record the port a client
+    /// has to connect to. Nothing else can know it: the configured port may
+    /// be `0`.
+    pub fn on_listening(&mut self, hook: impl Fn(SocketAddr) + Send + Sync + 'static) {
+        self.listening_hook = Some(Arc::new(hook));
+    }
+
     /// Create a new daemon server with default config.
     #[must_use]
     pub fn new() -> Self {
@@ -930,6 +1264,7 @@ impl DaemonServer {
             shared: Arc::new(parking_lot::Mutex::new(Shared::default())),
             session_count_atomic: Arc::new(AtomicUsize::new(0)),
             engine_factory: None,
+            listening_hook: None,
         }
     }
 
@@ -944,6 +1279,7 @@ impl DaemonServer {
             shared: Arc::new(parking_lot::Mutex::new(Shared::default())),
             session_count_atomic: Arc::new(AtomicUsize::new(0)),
             engine_factory: None,
+            listening_hook: None,
         };
 
         // Initialize persistence if configured
@@ -1055,7 +1391,15 @@ impl DaemonServer {
             .await
             .map_err(|e| format!("failed to bind TCP listener: {e}"))?;
 
-        info!("WebSocket server listening on ws://{addr}");
+        // The configured address may name port `0`; the listener knows the
+        // one it actually took, and that is what a client has to be told.
+        let bound = listener
+            .local_addr()
+            .map_err(|e| format!("bound listener has no address: {e}"))?;
+        info!("WebSocket server listening on ws://{bound}");
+        if let Some(hook) = self.listening_hook.clone() {
+            hook(bound);
+        }
 
         // Spawn health endpoint if configured
         if let Some(health_port) = self.config.health_port {
