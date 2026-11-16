@@ -245,6 +245,33 @@ impl SkillLoader {
         self.resolve_conflicts();
     }
 
+    /// Add the skills compiled into the binary.
+    ///
+    /// These are the product's own skills, and they are added in memory
+    /// rather than installed to the config home: a fresh install has them
+    /// without a session ever writing to `~/.codape`, and a test run cannot
+    /// leave files behind. The bundled directory is still read first, so a
+    /// user who unpacks a skill of the same name there overrides this one.
+    /// Call after [`load_all`](Self::load_all) so precedence can be settled
+    /// with everything else.
+    pub fn add_bundled_skills(&mut self) {
+        for bundled in codape_core::bundled_skills::BUNDLED_SKILLS {
+            let Some(parsed) = parse_skill_file(bundled.content) else {
+                // A bundled file that does not parse is a build defect; the
+                // core crate's own test catches it before this can run.
+                tracing::warn!(skill = bundled.name, "bundled skill did not parse");
+                continue;
+            };
+            self.skills.push(Skill {
+                path: PathBuf::from(format!("<bundled>/{}", bundled.name)),
+                metadata: parsed.metadata,
+                source: SkillSource::Bundled,
+                plugin_name: None,
+            });
+        }
+        self.resolve_conflicts();
+    }
+
     /// Resolve duplicate skill names by source precedence.
     ///
     /// Logs a warning for each overridden skill.
@@ -810,5 +837,60 @@ script"#;
         let skills = loader.into_enabled();
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].metadata.name, "test-skill");
+    }
+
+    /// The skills compiled into the binary reach the session without anything
+    /// being written to the config home.
+    #[test]
+    fn bundled_skills_load_without_touching_the_disk() {
+        let mut loader =
+            SkillLoader::new(PathBuf::from("/nonexistent"), PathBuf::from("/nonexistent"));
+        loader.load_all(None);
+        loader.add_bundled_skills();
+
+        assert_eq!(
+            loader.list().len(),
+            codape_core::bundled_skills::BUNDLED_SKILLS.len()
+        );
+        let skill = loader.get("code-review").expect("the bundled skill loads");
+        assert_eq!(skill.source, SkillSource::Bundled);
+        assert!(!skill.metadata.description.is_empty());
+        assert!(skill.metadata.enabled, "a bundled skill is on by default");
+    }
+
+    /// A bundled skill is announced to the model, which is the whole point:
+    /// a skill nobody names is a tool call the model has to guess.
+    #[test]
+    fn bundled_skills_appear_in_the_adverts() {
+        let mut loader = SkillLoader::new(PathBuf::new(), PathBuf::new());
+        loader.add_bundled_skills();
+        let adverts = render_skill_adverts(loader.list());
+        for name in codape_core::bundled_skills::names() {
+            assert!(adverts.contains(name), "{name} missing from:\n{adverts}");
+        }
+    }
+
+    /// A user skill of the same name overrides the bundled one, and the
+    /// bundled copy does not appear twice.
+    #[test]
+    fn a_user_skill_overrides_a_bundled_one_of_the_same_name() {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("code-review.md"),
+            "---\nname: code-review\ndescription: Mine\n---\nmy version\n",
+        )
+        .unwrap();
+
+        let mut loader = SkillLoader::new(PathBuf::from("/nonexistent"), user.path().to_path_buf());
+        loader.load_all(None);
+        loader.add_bundled_skills();
+
+        let matches: Vec<&Skill> = loader
+            .list()
+            .iter()
+            .filter(|skill| skill.metadata.name == "code-review")
+            .collect();
+        assert_eq!(matches.len(), 1, "the name must resolve once");
+        assert_eq!(matches[0].source, SkillSource::UserDir);
     }
 }

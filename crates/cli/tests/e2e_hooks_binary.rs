@@ -465,6 +465,58 @@ fn watch_paths_from_session_start_arm_file_changed() {
     );
 }
 
+/// `SessionEnd` is the only hook that runs after the last turn, and a headless
+/// run must fire it exactly once, with the reason the run closed.
+///
+/// The engine latches so a close path cannot fire it twice; this proves the
+/// latch from the outside, where the process's own exit is the second path.
+#[test]
+fn a_headless_run_fires_sessionend_once_with_its_reason() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let marker = dir.path().join("session-end.jsonl");
+    let end = script(
+        dir.path(),
+        "session-end.sh",
+        &format!(
+            "cat >> {}\nprintf '\\n' >> {}\nprintf '%s\\n' '{{}}'",
+            marker.display(),
+            marker.display()
+        ),
+    );
+    let home = seed_config(&hook_settings("SessionEnd", None, end.to_str().unwrap()));
+    let (mut provider, base_url) = start_static_provider();
+
+    let output = run(
+        dir.path(),
+        home.path(),
+        &base_url,
+        "hello",
+        &["--dangerously-skip-permissions"],
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    assert!(
+        output.status.success(),
+        "codape failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = std::fs::read_to_string(&marker).unwrap_or_default();
+    let inputs: Vec<&str> = recorded.lines().collect();
+    assert_eq!(inputs.len(), 1, "SessionEnd must fire once: {recorded}");
+    let input: serde_json::Value =
+        serde_json::from_str(inputs[0]).expect("SessionEnd input is JSON");
+    assert_eq!(input["event"], "SessionEnd");
+    assert_eq!(
+        input["input"], "completed",
+        "a clean headless run reports completed: {input}"
+    );
+    assert!(
+        input["session_id"].is_string(),
+        "the hook needs the session id: {input}"
+    );
+}
+
 fn run_spawned(
     cwd: &Path,
     home: &Path,
@@ -859,6 +911,7 @@ fn the_session_lifecycle_events_reach_their_hooks() {
         "PostToolUseFailure",
         "TurnEnd",
         "Stop",
+        "SessionEnd",
     ] {
         assert!(
             events.iter().any(|event| event == expected),
@@ -912,6 +965,7 @@ fn the_session_lifecycle_events_reach_their_hooks() {
         "PostToolUse",
         "TurnEnd",
         "Stop",
+        "SessionEnd",
     ] {
         assert!(
             events.iter().any(|event| event == expected),

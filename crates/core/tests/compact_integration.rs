@@ -534,14 +534,30 @@ fn select_strategy_max_tokens_triggers_reactive() {
 
 #[test]
 fn select_strategy_over_the_compaction_line() {
-    // Sonnet window 200K; the line is 200K − 20K response reserve − 13K buffer.
-    let strategy = select_compact_strategy("end_turn", 170_000, &ModelId::sonnet(), &cfg());
+    // Sonnet 5.5 window 1M; the line is 1M − 20K response reserve − 13K buffer.
+    let strategy = select_compact_strategy("end_turn", 970_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Auto);
+}
+
+/// The older 200K families keep the arithmetic they had; only the 1M models
+/// moved. Pinned separately so a future table edit cannot silently change it.
+#[test]
+fn a_200k_model_keeps_the_200k_lines() {
+    let model = ModelId("claude-sonnet-4-5".into());
+    assert_eq!(model.context_window(), 200_000);
+    assert_eq!(
+        select_compact_strategy("end_turn", 170_000, &model, &cfg()),
+        CompactStrategy::Auto
+    );
+    assert_eq!(
+        select_compact_strategy("end_turn", 166_999, &model, &cfg()),
+        CompactStrategy::Micro
+    );
 }
 
 #[test]
 fn select_strategy_below_the_lines_is_the_lightest_pass() {
-    // 110K on a 200K window still has room: this used to compact (50% rule)
+    // 110K is far under the compaction line: this used to compact (50% rule)
     // and no longer does.
     let strategy = select_compact_strategy("end_turn", 110_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Micro);
@@ -553,7 +569,7 @@ fn select_strategy_below_the_lines_is_the_lightest_pass() {
 #[test]
 fn select_strategy_past_the_blocked_line_keeps_only_what_fits() {
     // Blocked line = window − 3K.
-    let strategy = select_compact_strategy("end_turn", 198_000, &ModelId::sonnet(), &cfg());
+    let strategy = select_compact_strategy("end_turn", 998_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Snip);
 }
 
@@ -576,25 +592,25 @@ fn select_strategy_small_model_window() {
     // kept.
     let strategy = select_compact_strategy("end_turn", 110_000, &ModelId("ended".into()), &cfg());
     assert_eq!(strategy, CompactStrategy::Auto);
-    let strategy = select_compact_strategy("end_turn", 198_000, &ModelId::sonnet(), &cfg());
+    let strategy = select_compact_strategy("end_turn", 998_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Snip);
 }
 
 #[test]
 fn select_strategy_exactly_at_the_auto_line_compacts() {
-    let strategy = select_compact_strategy("end_turn", 167_000, &ModelId::sonnet(), &cfg());
+    let strategy = select_compact_strategy("end_turn", 967_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Auto);
 }
 
 #[test]
 fn select_strategy_exactly_at_the_blocked_line_keeps_only_what_fits() {
-    let strategy = select_compact_strategy("end_turn", 197_000, &ModelId::sonnet(), &cfg());
+    let strategy = select_compact_strategy("end_turn", 997_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Snip);
 }
 
 #[test]
 fn select_strategy_exactly_at_the_warning_line_is_the_lightest_pass() {
-    let strategy = select_compact_strategy("end_turn", 147_000, &ModelId::sonnet(), &cfg());
+    let strategy = select_compact_strategy("end_turn", 947_000, &ModelId::sonnet(), &cfg());
     assert_eq!(strategy, CompactStrategy::Micro);
 }
 

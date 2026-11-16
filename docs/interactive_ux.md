@@ -501,7 +501,15 @@ Validate:
   list over the project's gitignore-filtered files; `Up`/`Down` walk it, `Tab`
   or `Enter` insert the highlighted path, and `Esc` dismisses it. At submit,
   each resolved mention becomes a `--- path ---` block; a path that cannot be
-  read is left in the text and reported as not attached.
+  read is left in the text and reported as not attached. A mention that names
+  an image (`@shot.png`) is attached as an image block instead — the prompt
+  keeps an `[image: path]` marker, and the notice says how many images went
+  with the turn.
+- `Ctrl+V` attaches the clipboard image to the next prompt. A screenshot is
+  usually taken because there is no file to name, so this is the path that
+  does not require saving it first. Text on the clipboard is not pasted
+  through this binding (the terminal's own paste already does that), and a
+  clipboard holding no image reports that instead of doing nothing.
 
 ### Notification Bar
 

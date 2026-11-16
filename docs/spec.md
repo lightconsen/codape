@@ -500,6 +500,7 @@ pub enum HookEvent {
     PostToolUseFailure,
     UserPromptSubmit,
     SessionStart,
+    SessionEnd,
     Setup,
     SubagentStart,
     Notification,

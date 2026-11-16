@@ -17,8 +17,8 @@
 
 use crate::prompt::{CompactConfig, PromptCompiler};
 use crate::types::{
-    ContextWindowResolver, ContextWindowSource, Message, MessageContent, ModelId,
-    ResolvedContextWindow, Role, ToolResult,
+    ContextWindowResolver, ContextWindowSource, IMAGE_TOKEN_ESTIMATE, Message, MessageContent,
+    ModelId, ResolvedContextWindow, Role, ToolResult,
 };
 
 // ─── Compact Strategy ───────────────────────────────────────────────────────
@@ -86,6 +86,15 @@ fn message_token_estimate(msg: &Message) -> usize {
             // even though it is never shown as assistant output.
             PromptCompiler::estimate_tokens(&block.thinking)
                 + PromptCompiler::estimate_tokens(&block.signature)
+        }
+        MessageContent::Image(image) => {
+            // The base64 payload does not go on the wire as text, so counting
+            // it character for character would over-report by roughly a third.
+            // Anthropic bills an image by its tile count, and a screen-sized
+            // capture lands near 1.5k tokens; the estimate is the placeholder
+            // text plus that floor, which keeps a pasted screenshot from
+            // looking free to the compactor.
+            PromptCompiler::estimate_tokens(&image.media_type) + IMAGE_TOKEN_ESTIMATE
         }
     }
 }
@@ -1181,6 +1190,11 @@ fn render_message_for_summary(msg: &Message) -> String {
         ),
         // Thinking is provider state, not conversation the summarizer needs.
         MessageContent::Thinking(_) => String::new(),
+        // The summarizer cannot see the pixels either; the label is what
+        // carries the fact that there was an image and of what kind.
+        MessageContent::Image(image) => {
+            format!("[{:?}] [image: {}]", msg.role, image.media_type)
+        }
     }
 }
 
@@ -2468,6 +2482,7 @@ mod tests {
 
     #[test]
     fn select_strategy_max_tokens_is_reactive() {
+        // A stop reason alone wins regardless of how full the window is.
         let strategy = select_compact_strategy(
             "max_tokens",
             50000,
@@ -2481,7 +2496,19 @@ mod tests {
     fn sonnet_lines_come_from_the_window_arithmetic() {
         let thresholds = CompactThresholds::resolve(&ModelId::sonnet(), &CompactConfig::default());
 
-        // 200_000 − min(20_000, 20_000) − 13_000
+        // Sonnet 5.5 documents a 1M window: 1_000_000 − min(20_000, 20_000)
+        // − 13_000. The reserve is capped rather than proportional, so it is
+        // the same 20K it was on a 200K window.
+        assert_eq!(thresholds.auto, 967_000);
+        assert_eq!(thresholds.warn, 947_000);
+        assert_eq!(thresholds.blocked, 997_000);
+    }
+
+    #[test]
+    fn a_200k_model_still_compacts_at_the_200k_arithmetic() {
+        // The older family floor is unchanged; only the 1M models moved.
+        let model = ModelId("claude-sonnet-4-5".into());
+        let thresholds = CompactThresholds::resolve(&model, &CompactConfig::default());
         assert_eq!(thresholds.auto, 167_000);
         assert_eq!(thresholds.warn, 147_000);
         assert_eq!(thresholds.blocked, 197_000);
@@ -2491,7 +2518,7 @@ mod tests {
     fn select_strategy_over_the_compaction_line_is_auto() {
         let strategy = select_compact_strategy(
             "end_turn",
-            170_000,
+            970_000,
             &ModelId::sonnet(),
             &CompactConfig::default(),
         );
@@ -2500,9 +2527,10 @@ mod tests {
 
     #[test]
     fn select_strategy_below_the_lines_is_the_lightest_pass() {
-        // Compacting at half the window is what this used to do; a session at
-        // 110K on a 200K window still has room and must not be truncated.
-        for tokens in [50_000, 110_000, 146_999] {
+        // Compacting at half the window is what this used to do; a session
+        // well under the compaction line still has room and must not be
+        // truncated.
+        for tokens in [50_000, 110_000, 946_999] {
             let strategy = select_compact_strategy(
                 "end_turn",
                 tokens,
@@ -2520,7 +2548,7 @@ mod tests {
     fn select_strategy_above_the_blocked_line_keeps_only_what_fits() {
         let strategy = select_compact_strategy(
             "end_turn",
-            198_000,
+            998_000,
             &ModelId::sonnet(),
             &CompactConfig::default(),
         );
@@ -2530,9 +2558,9 @@ mod tests {
     #[test]
     fn history_snip_prefers_snip_over_the_compaction_line() {
         let model = ModelId::sonnet();
-        // 170_000 is over the 167_000 compaction line but under the 197_000
+        // 970_000 is over the 967_000 compaction line but under the 997_000
         // blocked line: the level where the flag changes the outcome.
-        let off = select_compact_strategy("end_turn", 170_000, &model, &CompactConfig::default());
+        let off = select_compact_strategy("end_turn", 970_000, &model, &CompactConfig::default());
         assert!(
             matches!(off, CompactStrategy::Auto),
             "with history_snip off the strategy must be unchanged: {off:?}"
@@ -2540,7 +2568,7 @@ mod tests {
 
         let on = select_compact_strategy(
             "end_turn",
-            170_000,
+            970_000,
             &model,
             &CompactConfig {
                 prefer_snip: true,
@@ -2563,7 +2591,7 @@ mod tests {
             CompactStrategy::Micro
         ));
         assert!(matches!(
-            select_compact_strategy("end_turn", 198_000, &model, &below),
+            select_compact_strategy("end_turn", 998_000, &model, &below),
             CompactStrategy::Snip
         ));
     }
@@ -2616,7 +2644,7 @@ mod tests {
             ..CompactConfig::default()
         };
         let thresholds = CompactThresholds::resolve(&ModelId::sonnet(), &config);
-        assert_eq!(thresholds.auto, 200_000 - 4_000 - 13_000);
+        assert_eq!(thresholds.auto, 1_000_000 - 4_000 - 13_000);
     }
 
     #[test]
@@ -2628,7 +2656,7 @@ mod tests {
         let thresholds = CompactThresholds::resolve(&ModelId::sonnet(), &config);
         assert_eq!(
             thresholds.auto,
-            200_000 - CompactConfig::MAX_OUTPUT_RESERVE_TOKENS - 13_000
+            1_000_000 - CompactConfig::MAX_OUTPUT_RESERVE_TOKENS - 13_000
         );
     }
 

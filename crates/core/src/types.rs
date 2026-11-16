@@ -46,6 +46,14 @@ pub enum MessageContent {
     ToolResult(ToolResult),
     /// A provider thinking block that must be round-tripped.
     Thinking(ThinkingBlock),
+    /// An image the person attached to their turn (`--image`, a pasted
+    /// screenshot, or an image `@path`).
+    ///
+    /// It rides in its own message so nothing that reads text has to know
+    /// about it, and the request builder merges it into the preceding user
+    /// message as an image block. A provider that cannot take images is
+    /// handled where the request is built, not here.
+    Image(ImageBlock),
 }
 
 /// A single message in a conversation.
@@ -179,7 +187,16 @@ fn summarize_tool_text(text: &str) -> String {
     }
 }
 
-/// An inline image carried by a tool result.
+/// Rough token cost of one attached image, for context accounting.
+///
+/// Providers bill an image by its pixel tiles, not by the length of its base64
+/// payload, and a screen-sized capture lands near 1.5k tokens. Estimating from
+/// the encoded size instead would be off by orders of magnitude in both
+/// directions — a 200 KB screenshot would look like a quarter million tokens —
+/// so compaction uses this floor for every image regardless of its size.
+pub const IMAGE_TOKEN_ESTIMATE: usize = 1_500;
+
+/// An inline image attached to a message.
 ///
 /// `data` is base64-encoded image bytes without a data-URI prefix, matching
 /// the shape providers expect for base64 image sources.
@@ -271,27 +288,88 @@ impl UsageSummary {
     }
 }
 
+/// How a model wants extended thinking expressed on the wire.
+///
+/// The Messages API changed this encoding, and the two forms are mutually
+/// exclusive: a model rejects the other one with a 400 rather than ignoring
+/// it. See [`ModelId::thinking_encoding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingEncoding {
+    /// `{"type":"adaptive"}`, with depth steered by `output_config.effort`.
+    /// Claude 4.7 and later.
+    Adaptive,
+    /// `{"type":"enabled","budget_tokens":N}`. Claude 4.6 (deprecated) and
+    /// everything older.
+    BudgetTokens,
+}
+
 /// Identifier for an Anthropic model.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelId(pub String);
 
 impl ModelId {
-    /// Claude Opus 4.6
+    /// Claude Opus 5.5
     #[must_use]
     pub fn opus() -> Self {
-        Self("claude-opus-4-6".into())
+        Self("claude-opus-5-5".into())
     }
 
-    /// Claude Sonnet 4.6
+    /// Claude Sonnet 5.5
     #[must_use]
     pub fn sonnet() -> Self {
-        Self("claude-sonnet-4-6".into())
+        Self("claude-sonnet-5-5".into())
     }
 
-    /// Claude Haiku 4.5
+    /// Claude Haiku 5.5
     #[must_use]
     pub fn haiku() -> Self {
-        Self("claude-haiku-4-5-20251001".into())
+        Self("claude-haiku-5-5".into())
+    }
+
+    /// How this model wants extended thinking expressed on the wire.
+    ///
+    /// The API changed the encoding twice, and the two are not
+    /// interchangeable: sending the wrong one is a 400, not a degradation.
+    ///
+    /// - **4.7 and later** accept only `{"type":"adaptive"}`, and depth is
+    ///   steered with a top-level `output_config.effort` rather than a token
+    ///   budget. `{"type":"enabled","budget_tokens":N}` is rejected.
+    /// - **4.6** accepts both, but `budget_tokens` is deprecated. Adaptive is
+    ///   the forward-compatible choice.
+    /// - **4.5 and earlier** accept only `{"type":"enabled","budget_tokens":N}`;
+    ///   `{"type":"adaptive"}` is rejected.
+    ///
+    /// Unknown model names use the legacy encoding, because a gateway model
+    /// that predates adaptive thinking is the likelier case, and because an
+    /// unknown model is already reported as an unknown context window.
+    #[must_use]
+    pub fn thinking_encoding(&self) -> ThinkingEncoding {
+        let name = normalized_model_name(&self.0);
+
+        // 5.x and any 4.x at 4.6 or above are adaptive.
+        let adaptive = [
+            "claude-fable",
+            "claude-mythos",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5",
+        ]
+        .iter()
+        .any(|prefix| family_matches(&name, prefix))
+            || [
+                "claude-opus-4-7",
+                "claude-opus-4-8",
+                "claude-opus-4-6",
+                "claude-sonnet-4-6",
+            ]
+            .iter()
+            .any(|prefix| family_matches(&name, prefix));
+
+        if adaptive {
+            ThinkingEncoding::Adaptive
+        } else {
+            ThinkingEncoding::BudgetTokens
+        }
     }
 
     /// Return the model's context window size in tokens.
@@ -341,9 +419,18 @@ impl ModelId {
 /// Context window for Claude model families.
 ///
 /// Kept at 200k deliberately: it is the conservative floor across the Claude
-/// family, including older and gateway-provided variants. Newer models with
-/// larger windows can be raised per model through an override.
+/// family, including older and gateway-provided variants. The 1M families —
+/// Fable, Mythos, Opus 5.x, Sonnet 5.x, Haiku 5.5, Opus 4.7/4.8, Opus 4.6 and
+/// Sonnet 4.6 — are listed explicitly in [`MODEL_CONTEXT_WINDOWS`] ahead of
+/// this prefix so they resolve to their documented window instead of the
+/// family floor. Anything older, or an unrecognised gateway alias, keeps 200k.
 pub const CLAUDE_CONTEXT_WINDOW: usize = 200_000;
+
+/// The context window of a Claude model that documents 1M tokens.
+///
+/// Long-context requests are billed at standard pricing on these models, so
+/// this is a real window rather than a paid upgrade.
+pub const CLAUDE_LONG_CONTEXT_WINDOW: usize = 1_000_000;
 
 /// Conservative window assumed for models we cannot identify.
 ///
@@ -415,7 +502,18 @@ pub const TOKEN_RATIO_DECAY_TOKENS: u64 = 4_000_000;
 /// callers can see the guess, override it, and never enforce a hard limit on
 /// it. See [`ContextWindowResolver::resolve_detailed`].
 pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
-    // Anthropic Claude: 200k across the family (conservative floor).
+    // Anthropic Claude, 1M families. These must precede the bare `claude`
+    // entry below, which is the 200k floor for everything else in the family.
+    ("claude-fable", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-mythos", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-opus-5", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-sonnet-5", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-haiku-5", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-opus-4-8", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-opus-4-7", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-opus-4-6", CLAUDE_LONG_CONTEXT_WINDOW),
+    ("claude-sonnet-4-6", CLAUDE_LONG_CONTEXT_WINDOW),
+    // Anthropic Claude, everything else: 200k family floor.
     ("claude", CLAUDE_CONTEXT_WINDOW),
     // OpenAI.
     ("gpt-4o", 128_000),
@@ -1219,16 +1317,25 @@ fn lookup_model_window(models: &HashMap<String, usize>, name: &str) -> Option<us
     matches.first().map(|(_, tokens)| *tokens)
 }
 
+/// Whether a normalized model name belongs to a model family.
+///
+/// Exact match or a dated/provider-suffixed variant, so `claude-sonnet-4-6`
+/// does not match `claude-sonnet-4-60` and `claude-opus-4-6` does not match
+/// `claude-opus-4-6x`. The separator check is what keeps prefix matching
+/// honest.
+#[must_use]
+pub fn family_matches(normalized: &str, prefix: &str) -> bool {
+    normalized == prefix
+        || normalized
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
 fn table_context_window(name: &str) -> Option<usize> {
     let normalized = normalized_model_name(name);
     MODEL_CONTEXT_WINDOWS
         .iter()
-        .find(|(prefix, _)| {
-            normalized == *prefix
-                || normalized
-                    .strip_prefix(*prefix)
-                    .is_some_and(|rest| rest.starts_with('-'))
-        })
+        .find(|(prefix, _)| family_matches(&normalized, prefix))
         .map(|(_, window)| *window)
 }
 
@@ -1619,7 +1726,7 @@ mod tests {
         let json = serde_json::to_string(&model).unwrap();
         let decoded: ModelId = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, model);
-        assert_eq!(decoded.0, "claude-sonnet-4-6");
+        assert_eq!(decoded.0, "claude-sonnet-5-5");
     }
 
     #[test]
@@ -1696,44 +1803,98 @@ mod context_window_tests {
     }
 
     #[test]
-    fn known_families_report_their_full_window() {
+    fn the_1m_families_report_their_documented_window() {
+        for name in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5",
+            "claude-opus-4-8",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ] {
+            assert_eq!(
+                ModelId::table_context_window_for(name),
+                CLAUDE_LONG_CONTEXT_WINDOW,
+                "{name}"
+            );
+        }
+        assert_eq!(ModelId::opus().context_window(), CLAUDE_LONG_CONTEXT_WINDOW);
         assert_eq!(
-            ModelId::table_context_window_for("claude-opus-4-6"),
-            CLAUDE_CONTEXT_WINDOW
+            ModelId::sonnet().context_window(),
+            CLAUDE_LONG_CONTEXT_WINDOW
         );
-        assert_eq!(ModelId::opus().context_window(), CLAUDE_CONTEXT_WINDOW);
-        assert_eq!(ModelId::sonnet().context_window(), CLAUDE_CONTEXT_WINDOW);
-        assert_eq!(ModelId::haiku().context_window(), CLAUDE_CONTEXT_WINDOW);
+        assert_eq!(
+            ModelId::haiku().context_window(),
+            CLAUDE_LONG_CONTEXT_WINDOW
+        );
+    }
+
+    /// The 200k entry is a floor for the rest of the family, not a default
+    /// that swallows the newer models listed ahead of it.
+    #[test]
+    fn older_claude_models_keep_the_200k_floor() {
+        for name in [
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5",
+            "claude-opus-4-5",
+            "claude-3-5-haiku-20241022",
+        ] {
+            assert_eq!(
+                ModelId::table_context_window_for(name),
+                CLAUDE_CONTEXT_WINDOW,
+                "{name}"
+            );
+        }
     }
 
     /// Dated releases and aliases must resolve by family, not by exact string.
     #[test]
     fn family_prefix_covers_dated_variants() {
         for name in [
-            "claude-sonnet-4-6-20260101",
-            "claude-opus-4-6-20260215",
+            "claude-sonnet-5-5-20270101",
+            "claude-opus-5-5-20270215",
             "claude-3-5-haiku-20241022",
         ] {
+            let expected = if name.contains("3-5-haiku") {
+                CLAUDE_CONTEXT_WINDOW
+            } else {
+                CLAUDE_LONG_CONTEXT_WINDOW
+            };
             assert_eq!(
                 ModelId(name.to_string()).context_window(),
-                CLAUDE_CONTEXT_WINDOW,
-                "{name} should resolve to the Claude window"
+                expected,
+                "{name} should resolve to its family's window"
             );
         }
+    }
+
+    /// Prefix matching must stop at a separator: a made-up longer version
+    /// number is not the same family.
+    #[test]
+    fn family_matching_requires_a_separator() {
+        assert!(family_matches("claude-opus-4-6", "claude-opus-4-6"));
+        assert!(family_matches(
+            "claude-opus-4-6-20260101",
+            "claude-opus-4-6"
+        ));
+        assert!(!family_matches("claude-opus-4-60", "claude-opus-4-6"));
+        assert!(!family_matches("claude-opus-4-6x", "claude-opus-4-6"));
     }
 
     #[test]
     fn normalization_handles_case_and_provider_prefixes() {
         for name in [
-            "CLAUDE-SONNET-4-6",
-            "anthropic/claude-sonnet-4-6",
-            "models/claude-sonnet-4-6",
-            "us.anthropic.claude-sonnet-4-6",
-            "claude-sonnet-4-6[1m]",
+            "CLAUDE-SONNET-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "models/claude-sonnet-5-5",
+            "us.anthropic.claude-sonnet-5-5",
+            "claude-sonnet-5-5[1m]",
         ] {
             assert_eq!(
                 ModelId::table_context_window_for(name),
-                CLAUDE_CONTEXT_WINDOW,
+                CLAUDE_LONG_CONTEXT_WINDOW,
                 "{name} should normalize before matching"
             );
         }
@@ -1863,8 +2024,13 @@ mod context_window_tests {
         let resolver = ContextWindowResolver::default();
         assert_eq!(
             resolver.resolve("claude-sonnet-4-6"),
-            CLAUDE_CONTEXT_WINDOW,
+            CLAUDE_LONG_CONTEXT_WINDOW,
             "table is the final known source"
+        );
+        assert_eq!(
+            resolver.resolve("claude-sonnet-4-5"),
+            CLAUDE_CONTEXT_WINDOW,
+            "older families keep the 200k floor"
         );
         assert_eq!(
             resolver.resolve(model),

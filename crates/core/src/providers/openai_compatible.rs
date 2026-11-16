@@ -307,9 +307,11 @@ impl OpenAiCompatibleProvider {
     /// equivalent for it.
     ///
     /// OpenAI-style endpoints take `reasoning_effort` (Chat Completions) or
-    /// `reasoning.effort` (Responses). A provider with no verified equivalent
-    /// is left untouched and a warning names it, so the user's `--effort` is
-    /// never dropped in silence.
+    /// `reasoning.effort` (Responses). Their ladder stops at `high`, so the two
+    /// Anthropic-only levels above it are sent as `high` rather than as a value
+    /// the endpoint would reject. A provider with no verified equivalent is
+    /// left untouched and a warning names it, so the user's `--effort` is never
+    /// dropped in silence.
     fn apply_reasoning_effort(&self, body: &mut serde_json::Value, style: ProviderApiStyle) {
         let Some(effort) = self
             .request_context()
@@ -321,6 +323,15 @@ impl OpenAiCompatibleProvider {
             ReasoningEffortSupport::OpenAiReasoningEffort => {
                 let Some(object) = body.as_object_mut() else {
                     return;
+                };
+                // `xhigh` and `max` are Anthropic levels; this ladder ends at
+                // `high`, and sending anything else is a 400.
+                let effort = match effort {
+                    crate::api_client::ReasoningEffort::XHigh
+                    | crate::api_client::ReasoningEffort::Max => {
+                        crate::api_client::ReasoningEffort::High
+                    }
+                    other => other,
                 };
                 if style == ProviderApiStyle::OpenAiResponses {
                     object.insert(
@@ -1758,6 +1769,32 @@ mod tests {
         );
         assert_eq!(body["reasoning"]["effort"], "low");
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn the_two_levels_above_high_are_sent_as_high_to_an_openai_endpoint() {
+        for level in [
+            crate::api_client::ReasoningEffort::XHigh,
+            crate::api_client::ReasoningEffort::Max,
+        ] {
+            let mut context = RequestContext::default();
+            context.set_reasoning_effort(level);
+            let provider = OpenAiCompatibleProvider::new("openai", "https://api.openai.com", "k")
+                .with_request_context(context);
+            let body = provider.build_chat_request_body(
+                "sys",
+                &[],
+                &ModelId("gpt-4o".into()),
+                64,
+                &[],
+                "req-1",
+                false,
+            );
+            assert_eq!(
+                body["reasoning_effort"], "high",
+                "{level} is not on this ladder"
+            );
+        }
     }
 
     #[test]

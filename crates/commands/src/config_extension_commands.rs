@@ -599,11 +599,18 @@ pub fn register(registry: &mut CommandRegistry) {
             // from `/skills`, which reads as "this skill does not exist".
             let skill_dirs = [
                 home.join("skills"),                                   // ~/.codape/skills/
-                home.join("bundled-skills"),                           // bundled with Codape
+                home.join("bundled-skills"),                           // unpacked by hand
                 std::path::Path::new(&ctx.cwd).join(".codape/skills"), // project
             ];
 
-            let mut all_skills: Vec<String> = Vec::new();
+            // The skills compiled in. They are not on disk, so the directory
+            // scan above cannot see them — and `/skills` listing a shorter
+            // list than the advert the model received is the same bug as
+            // before, one layer down.
+            let mut all_skills: Vec<String> = codape_core::bundled_skills::names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
             for dir in &skill_dirs {
                 all_skills.extend(list_skill_names(dir));
             }

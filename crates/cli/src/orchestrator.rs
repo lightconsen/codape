@@ -297,6 +297,8 @@ pub struct SessionContext {
     pub add_dir: Vec<String>,
     /// Files included in context.
     pub file: Vec<std::path::PathBuf>,
+    /// Images attached to the prompt (`--image`), already base64-encoded.
+    pub images: Vec<codape_core::types::ImageBlock>,
     /// Custom system prompt.
     pub system_prompt: Option<String>,
     /// Text appended to the default system prompt.
@@ -734,6 +736,7 @@ impl StartupOrchestrator {
                 skip_permissions: false,
                 add_dir: Vec::new(),
                 file: Vec::new(),
+                images: Vec::new(),
                 system_prompt: None,
                 append_system_prompt: None,
                 no_persistence: false,
@@ -809,6 +812,28 @@ impl StartupOrchestrator {
         self.ctx.skip_permissions = args.dangerously_skip_permissions;
         self.ctx.add_dir.clone_from(&args.add_dir);
         self.ctx.file.clone_from(&args.file);
+        // An image that cannot be attached is a startup failure, not a
+        // warning: `--image shot.png` that silently sends a text-only prompt
+        // is the failure this flag exists to prevent.
+        //
+        // `--file` naming an image is the same request under a flag people
+        // already reach for, so it is routed the same way instead of failing
+        // `read_to_string` later.
+        let mut image_paths = args.image.clone();
+        for path in &self.ctx.file {
+            if crate::image_input::is_image_path(path) && !image_paths.contains(path) {
+                image_paths.push(path.clone());
+            }
+        }
+        self.ctx.images = image_paths
+            .iter()
+            .map(|path| {
+                crate::image_input::load_image(path).map_err(|e| anyhow::anyhow!("--image {e}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.ctx
+            .file
+            .retain(|path| !crate::image_input::is_image_path(path));
         self.ctx.system_prompt.clone_from(&args.system_prompt);
         self.ctx
             .append_system_prompt
@@ -1652,12 +1677,19 @@ impl StartupOrchestrator {
         // `model` resolves to the built-in default; copying that into
         // `ctx.model` would make it look explicitly chosen and would stop
         // `--betas +fast_mode` from selecting the lightweight profile.
+        //
+        // `--model` is explicit by construction, and a diff against the
+        // defaults cannot tell that apart from "nothing was chosen" when the
+        // value happens to equal the default — which is how `--model
+        // claude-sonnet-4-6` used to be silently replaced by whatever
+        // `ModelId::sonnet()` names today.
         if let Some(ref settings) = self.ctx.settings {
-            let model_is_explicit = settings
-                .diff_from_defaults("resolved")
-                .changes
-                .iter()
-                .any(|change| change.key == "model");
+            let model_is_explicit = self.ctx.model_explicit
+                || settings
+                    .diff_from_defaults("resolved")
+                    .changes
+                    .iter()
+                    .any(|change| change.key == "model");
             if model_is_explicit && let Some(ref model_name) = settings.model {
                 self.ctx.model = Some(ModelId(model_name.clone()));
             }
@@ -1701,14 +1733,17 @@ impl StartupOrchestrator {
     /// `configure_repl` to advertise.
     fn phase_load_skills(&mut self) {
         let mut loader = codape_plugins::skills::SkillLoader::new(
-            // Nothing ships a bundled skill tree yet, so this path is a
-            // convention the loader already understands rather than a
-            // resource that exists today. Pointing at it costs one failed
-            // `read_dir` and leaves room for one later.
+            // A directory someone unpacked a skill into by hand. It is not the
+            // source of the bundled tree — those are compiled in and added
+            // below — but it is the path the loader has always read, and a
+            // user who put a file there should still win the name.
             codape_config::config_home().join("bundled-skills"),
             codape_config::config_home().join("skills"),
         );
         loader.load_all(Some(std::path::Path::new(&self.ctx.cwd)));
+        // The product's own skills. Compiled in, so a fresh install has them
+        // without a session writing to the config home.
+        loader.add_bundled_skills();
 
         for (source, count) in loader.count_by_source() {
             tracing::info!("skills loaded: {count} from {source}");
@@ -2596,24 +2631,27 @@ impl StartupOrchestrator {
         None
     }
 
-    /// Accept `--effort low|medium|high`, rejecting anything else.
+    /// Accept `--effort low|medium|high|xhigh|max`, rejecting anything else.
     ///
     /// The level is carried into every request context. A provider with no
     /// reasoning-effort control omits it and warns, so this checks the spelling
-    /// of the request rather than promising that every provider honours it.
+    /// of the request rather than promising that every provider honours it. A
+    /// level the turn's model does not have is stepped down to the highest one
+    /// it does, so `--effort xhigh` on a 4.6 model means `high` rather than a
+    /// 400.
     fn validate_effort(effort: Option<&str>) -> Result<()> {
         if let Some(level) = effort
             && ReasoningEffort::parse(level).is_none()
         {
-            bail!("invalid --effort '{level}': expected one of low, medium, high");
+            bail!("invalid --effort '{level}': expected one of low, medium, high, xhigh, max");
         }
         Ok(())
     }
 
     /// Wrap an API client so the chosen reasoning effort rides every request.
     ///
-    /// `validate_effort` has already rejected anything but low/medium/high, so
-    /// an unparsable value cannot reach here; `None` covers the unset flag.
+    /// `validate_effort` has already rejected anything unparsable, so an
+    /// invalid value cannot reach here; `None` covers the unset flag.
     fn apply_effort(client: Box<dyn ApiClient>, effort: Option<&str>) -> Box<dyn ApiClient> {
         match effort.and_then(ReasoningEffort::parse) {
             Some(effort) => Box::new(EffortClient::new(client, effort)),
@@ -2942,6 +2980,12 @@ impl StartupOrchestrator {
         repl.with_fork_session(self.ctx.fork_session.clone());
         repl.with_from_pr(self.ctx.from_pr.clone());
         repl.with_pr_context(self.interactive_context(interactive));
+        // `--image` applies to the first turn of either mode. The interactive
+        // loop holds it until the person sends their prompt; headless sends it
+        // with the turn it is about to run.
+        if !self.ctx.images.is_empty() {
+            repl.with_pending_images(self.ctx.images.clone());
+        }
         repl.with_session_name(self.ctx.session_name.clone());
         repl.with_add_dir(self.ctx.add_dir.clone());
         repl.with_input_format(self.ctx.input_format.clone());
@@ -3223,6 +3267,19 @@ impl StartupOrchestrator {
             prompt.to_string()
         };
 
+        // `@path` in a headless prompt means what it does at the interactive
+        // prompt: attach the file. A mention that names an image becomes an
+        // image on the turn; one that cannot be read is reported rather than
+        // silently dropped from the request.
+        let expansion = crate::file_mentions::expand(&user_prompt, std::path::Path::new(cwd));
+        if !expansion.skipped.is_empty() {
+            eprintln!("Not attached: {}", expansion.skipped.join("; "));
+        }
+        let user_prompt = if expansion.changed_anything() {
+            expansion.text
+        } else {
+            user_prompt
+        };
         let final_prompt = self.build_headless_prompt(&user_prompt);
 
         // `stream-json` is a protocol, not a formatted answer: the turn is
@@ -3231,6 +3288,9 @@ impl StartupOrchestrator {
         // loop before the turn starts, and nothing is echoed after it.
         let streaming_protocol = self.ctx.output_format == "stream-json";
         let mut repl = self.prepare_repl(cwd, model.clone(), streaming_protocol, false);
+        if !expansion.images.is_empty() {
+            repl.with_pending_images(expansion.images);
+        }
 
         // What this run owes. The caller may name the paths, and the request
         // usually names them too: the headless loop checks both, because a run
@@ -5212,6 +5272,7 @@ mod tests {
             system_prompt: None,
             append_system_prompt: None,
             file: Vec::new(),
+            image: Vec::new(),
             print: false,
             brief: false,
             bare: false,
@@ -5585,8 +5646,8 @@ mod tests {
     }
 
     #[test]
-    fn effort_accepts_the_three_levels_and_rejects_anything_else() {
-        for level in ["low", "medium", "high", "HIGH"] {
+    fn effort_accepts_every_documented_level_and_rejects_anything_else() {
+        for level in ["low", "medium", "high", "xhigh", "max", "HIGH", "XHigh"] {
             assert!(
                 StartupOrchestrator::validate_effort(Some(level)).is_ok(),
                 "{level} should be accepted"
@@ -5598,7 +5659,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("expected one of low, medium, high"),
+                .contains("expected one of low, medium, high, xhigh, max"),
             "{error}"
         );
     }

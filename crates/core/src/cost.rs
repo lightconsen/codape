@@ -36,7 +36,7 @@ impl ModelPricing {
 
 /// Known model pricing.
 impl ModelPricing {
-    /// Claude Sonnet 4.6 pricing (approximate).
+    /// Claude Sonnet 4.6 pricing; also correct for Sonnet 4.5 and 4.
     #[must_use]
     pub const fn sonnet() -> Self {
         Self {
@@ -47,25 +47,100 @@ impl ModelPricing {
         }
     }
 
-    /// Claude Opus 4.6 pricing (approximate).
+    /// Claude Fable 5.2 and Mythos 5.2 pricing.
     #[must_use]
-    pub const fn opus() -> Self {
+    pub const fn fable_5_2() -> Self {
         Self {
-            input_per_million: 15.0,
-            output_per_million: 75.0,
-            cache_read_per_million: 1.5,
-            cache_creation_per_million: 18.75,
+            input_per_million: 8.0,
+            output_per_million: 40.0,
+            cache_read_per_million: 0.2,
+            cache_creation_per_million: 10.0,
         }
     }
 
-    /// Claude Haiku 4.5 pricing (approximate).
+    /// Claude Fable 5.1 and Mythos 5.1 pricing.
+    #[must_use]
+    pub const fn fable_5_1() -> Self {
+        Self {
+            input_per_million: 10.0,
+            output_per_million: 50.0,
+            cache_read_per_million: 0.25,
+            cache_creation_per_million: 12.5,
+        }
+    }
+
+    /// Claude Fable 5 and Mythos 5 pricing.
+    ///
+    /// Same headline rates as 5.1, but a cache read costs four times as much.
+    #[must_use]
+    pub const fn fable_5() -> Self {
+        Self {
+            input_per_million: 10.0,
+            output_per_million: 50.0,
+            cache_read_per_million: 1.0,
+            cache_creation_per_million: 12.5,
+        }
+    }
+
+    /// Claude Opus 5.5 pricing.
+    #[must_use]
+    pub const fn opus_5() -> Self {
+        Self {
+            input_per_million: 4.0,
+            output_per_million: 20.0,
+            cache_read_per_million: 0.2,
+            cache_creation_per_million: 5.0,
+        }
+    }
+
+    /// Claude Opus 4.6 pricing; also correct for Opus 4.5, 4.7 and 4.8.
+    ///
+    /// Those four sit at the same $5 / $25 rates.
+    #[must_use]
+    pub const fn opus() -> Self {
+        Self {
+            input_per_million: 5.0,
+            output_per_million: 25.0,
+            cache_read_per_million: 0.5,
+            cache_creation_per_million: 6.25,
+        }
+    }
+
+    /// Claude Sonnet 5.5 pricing; also correct for Sonnet 5.
+    #[must_use]
+    pub const fn sonnet_5() -> Self {
+        Self {
+            input_per_million: 2.0,
+            output_per_million: 10.0,
+            cache_read_per_million: 0.1,
+            cache_creation_per_million: 2.5,
+        }
+    }
+
+    /// Claude Haiku 5.5 pricing at the ≤100k-prompt tier.
+    ///
+    /// Haiku 5.5 raises its rates on prompts over 100k tokens. A per-turn
+    /// estimate does not know which tier a request landed in, so this uses the
+    /// cheaper tier: the figure under-reports rather than inventing a
+    /// surcharge that may not apply.
+    #[must_use]
+    pub const fn haiku_5() -> Self {
+        Self {
+            input_per_million: 0.1,
+            output_per_million: 0.5,
+            cache_read_per_million: 0.01,
+            cache_creation_per_million: 0.125,
+        }
+    }
+
+    /// Claude Haiku 4.5 pricing.
     #[must_use]
     pub const fn haiku() -> Self {
         Self {
-            input_per_million: 0.8,
-            output_per_million: 4.0,
-            cache_read_per_million: 0.08,
-            cache_creation_per_million: 1.0,
+            input_per_million: 1.0,
+            output_per_million: 5.0,
+            cache_read_per_million: 0.1,
+            cache_creation_per_million: 1.25,
         }
     }
 }
@@ -78,14 +153,46 @@ impl ModelPricing {
 /// difference between a cost estimate and an invented number. Callers that
 /// report a dollar figure check this first; [`pricing_for_model`] keeps the
 /// lenient behaviour for internal budgeting.
+///
+/// Matching is by family prefix, so a dated release
+/// (`claude-opus-5-5-20270101`) and a provider-prefixed alias
+/// (`anthropic/claude-sonnet-5-5`) resolve to their family's rates. The order
+/// below is specific-before-general for the same reason the context-window
+/// table is: `claude-opus-5-5` must win over `claude-opus-5`.
 #[must_use]
 pub fn known_model_pricing(model: &str) -> Option<ModelPricing> {
-    match model {
-        "claude-opus-4-6" => Some(ModelPricing::opus()),
-        "claude-haiku-4-5-20251001" => Some(ModelPricing::haiku()),
-        "claude-sonnet-4-6" => Some(ModelPricing::sonnet()),
-        _ => None,
-    }
+    let name = crate::types::normalized_model_name(model);
+    // The first family that matches wins.
+    let families: &[(&str, ModelPricing)] = &[
+        // Fable and Mythos: 5.2 is cheaper than 5.1/5, and 5's cache read is
+        // four times 5.1's, so the two are separate entries.
+        ("claude-fable-5-2", ModelPricing::fable_5_2()),
+        ("claude-mythos-5-2", ModelPricing::fable_5_2()),
+        ("claude-fable-5-1", ModelPricing::fable_5_1()),
+        ("claude-mythos-5-1", ModelPricing::fable_5_1()),
+        ("claude-fable-5", ModelPricing::fable_5()),
+        ("claude-mythos-5", ModelPricing::fable_5()),
+        // Opus.
+        ("claude-opus-5-5", ModelPricing::opus_5()),
+        ("claude-opus-5", ModelPricing::opus()),
+        ("claude-opus-4-8", ModelPricing::opus()),
+        ("claude-opus-4-7", ModelPricing::opus()),
+        ("claude-opus-4-6", ModelPricing::opus()),
+        ("claude-opus-4-5", ModelPricing::opus()),
+        // Sonnet.
+        ("claude-sonnet-5-5", ModelPricing::sonnet_5()),
+        ("claude-sonnet-5", ModelPricing::sonnet_5()),
+        ("claude-sonnet-4-6", ModelPricing::sonnet()),
+        ("claude-sonnet-4-5", ModelPricing::sonnet()),
+        ("claude-sonnet-4", ModelPricing::sonnet()),
+        // Haiku.
+        ("claude-haiku-5-5", ModelPricing::haiku_5()),
+        ("claude-haiku-4-5", ModelPricing::haiku()),
+    ];
+    families
+        .iter()
+        .find(|(prefix, _)| crate::types::family_matches(&name, prefix))
+        .map(|(_, pricing)| *pricing)
 }
 
 /// Resolve pricing for a given model, falling back to Sonnet's.
@@ -521,14 +628,47 @@ mod tests {
 
     #[test]
     fn pricing_for_model_resolves_correctly() {
-        let sonnet_p = pricing_for_model(&ModelId::sonnet());
-        assert_eq!(sonnet_p.input_per_million, 3.0);
+        // Current-generation rates.
+        assert_eq!(pricing_for_model(&ModelId::sonnet()).input_per_million, 2.0);
+        assert_eq!(pricing_for_model(&ModelId::opus()).input_per_million, 4.0);
+        assert_eq!(pricing_for_model(&ModelId::haiku()).input_per_million, 0.1);
 
-        let opus_p = pricing_for_model(&ModelId::opus());
-        assert_eq!(opus_p.input_per_million, 15.0);
+        // The previous generation keeps its own rates rather than inheriting
+        // the newer (cheaper) numbers.
+        assert_eq!(
+            pricing_for_model(&ModelId("claude-sonnet-4-6".into())).input_per_million,
+            3.0
+        );
+        assert_eq!(
+            pricing_for_model(&ModelId("claude-opus-4-6".into())).input_per_million,
+            5.0
+        );
+        assert_eq!(
+            pricing_for_model(&ModelId("claude-haiku-4-5-20251001".into())).input_per_million,
+            1.0
+        );
+    }
 
-        let haiku_p = pricing_for_model(&ModelId::haiku());
-        assert_eq!(haiku_p.input_per_million, 0.8);
+    /// A dated release and a provider-prefixed alias are the same model.
+    #[test]
+    fn pricing_matches_by_family_not_exact_string() {
+        for name in [
+            "claude-opus-5-5-20270101",
+            "anthropic/claude-opus-5-5",
+            "CLAUDE-OPUS-5-5",
+        ] {
+            assert_eq!(
+                known_model_pricing(name).map(|p| p.input_per_million),
+                Some(4.0),
+                "{name}"
+            );
+        }
+        // 5.5 must win over the bare `claude-opus-5` entry.
+        assert_eq!(
+            known_model_pricing("claude-opus-5").map(|p| p.input_per_million),
+            Some(5.0)
+        );
+        assert!(known_model_pricing("claude-opus-4-50").is_none());
     }
 
     #[test]
@@ -821,7 +961,7 @@ mod tests {
     fn custom_pricing_overrides_default() {
         let mut tracker = CostTracker::new();
         tracker.register_pricing(
-            "claude-sonnet-4-6".into(),
+            "claude-sonnet-5-5".into(),
             ModelPricing {
                 input_per_million: 1.0,
                 output_per_million: 1.0,

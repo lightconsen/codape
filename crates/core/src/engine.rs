@@ -767,6 +767,12 @@ pub struct SubmitOptions {
     pub append_system_prompt: Option<String>,
     /// User messages to replay (for session resume).
     pub replay_user_messages: Option<Vec<Message>>,
+    /// Images the person attached to this turn (`--image`, a pasted
+    /// screenshot, or an image `@path`), in order.
+    ///
+    /// They are stored as their own messages right after the user text and
+    /// merged back into that message when the provider request is built.
+    pub attached_images: Vec<crate::types::ImageBlock>,
     /// Include partial messages in output.
     pub include_partial_messages: bool,
     /// Whether to handle elicitation requests.
@@ -791,6 +797,7 @@ impl Default for SubmitOptions {
             custom_system_prompt: None,
             append_system_prompt: None,
             replay_user_messages: None,
+            attached_images: Vec::new(),
             include_partial_messages: false,
             handle_elicitation: true,
             orphaned_permission: false,
@@ -2221,6 +2228,13 @@ pub struct QueryEngine {
     /// Whether the `SessionStart` hook has run. The engine has no explicit
     /// "the session begins" call, so the session's first turn fires it, once.
     session_started: bool,
+    /// Whether the `SessionEnd` hook has already run.
+    ///
+    /// The session can be closed from more than one place — the interactive
+    /// loop's exit, its last headless turn, an interrupt, and the REPL's
+    /// shutdown path — and a hook that records the session must run exactly
+    /// once, not once per close path.
+    session_ended: std::sync::atomic::AtomicBool,
     /// The background prompt-cache TTL timer, once a session has sent a turn
     /// and a TTL is configured. Dropping the engine stops it.
     cache_ttl_timer: Option<CacheTtlTimer>,
@@ -2417,6 +2431,35 @@ impl QueryEngine {
                 continue;
             }
 
+            // An attached image rides in its own message so that nothing which
+            // reads text has to know about it; here it joins the user turn it
+            // belongs to as an image block. A tool-result message is off
+            // limits — its blocks are already ordered for the provider — so
+            // that case opens a fresh user message instead.
+            if let crate::types::MessageContent::Image(image) = &m.content {
+                pending_thinking = None;
+                let block = serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": &image.media_type,
+                        "data": &image.data,
+                    }
+                });
+                if !last_user_is_tool_results
+                    && let Some((role, existing)) = out.last_mut()
+                    && role == "user"
+                {
+                    let mut blocks = content_blocks(std::mem::take(existing));
+                    blocks.push(block);
+                    *existing = serde_json::Value::Array(blocks);
+                } else {
+                    out.push(("user".to_string(), serde_json::Value::Array(vec![block])));
+                    last_user_is_tool_results = false;
+                }
+                continue;
+            }
+
             let Some(role_str) = (match (&m.role, &m.content) {
                 (crate::types::Role::User, _)
                 | (crate::types::Role::Tool, crate::types::MessageContent::ToolResult(_)) => {
@@ -2458,8 +2501,10 @@ impl QueryEngine {
                         {"type": "tool_result", "tool_use_id": &tr.tool_call_id, "content": blocks}
                     ])
                 }
-                // Handled above; kept so the match stays exhaustive.
-                crate::types::MessageContent::Thinking(_) => unreachable!(),
+                // Thinking and images are handled above; kept so the match
+                // stays exhaustive.
+                crate::types::MessageContent::Thinking(_)
+                | crate::types::MessageContent::Image(_) => unreachable!(),
             };
 
             if role_str == "assistant" {
@@ -2557,6 +2602,7 @@ impl QueryEngine {
             compaction_backend: None,
             last_request_at: Arc::new(Mutex::new(None)),
             session_started: false,
+            session_ended: AtomicBool::new(false),
             cache_ttl_timer: None,
             pending_summary: Arc::new(Mutex::new(None)),
             summary_prefetch_in_flight: Arc::new(AtomicBool::new(false)),
@@ -3495,7 +3541,8 @@ impl QueryEngine {
     /// The engine has no explicit "the session begins" call — a session is
     /// this engine plus the prompts submitted to it — so the first turn is the
     /// earliest honest point at which a session hook can run. Its partner,
-    /// `SessionEnd`, is emitted by [`interrupt`](Self::interrupt).
+    /// `SessionEnd`, has no such problem: it runs when the session is over,
+    /// which a host knows before it returns.
     async fn fire_session_start_hook(&mut self) {
         if self.session_started {
             return;
@@ -3526,6 +3573,41 @@ impl QueryEngine {
     /// `session_started` latch.
     pub async fn ensure_session_started(&mut self) {
         self.fire_session_start_hook().await;
+    }
+
+    /// Fire `SessionEnd`, once, when the session is over.
+    ///
+    /// This is the only hook that runs after the last turn, so it is where a
+    /// session-wide record is written. `reason` says how the session closed —
+    /// `completed`, `interrupted`, `error` — because a hook that files a run
+    /// needs to tell a finished session from an abandoned one.
+    ///
+    /// Closing from several places is the point: the interactive exit, a
+    /// headless run's last turn, and an interrupt all call this, and the
+    /// `session_ended` latch makes the second and later calls no-ops. Without
+    /// that, a hook that appends a record would write one per close path.
+    pub async fn fire_session_end_hook(&self, reason: &str) {
+        if self
+            .session_ended
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let session_id = self.session.session_id.to_string();
+        let mut ctx = std::collections::HashMap::new();
+        ctx.insert("session_id".to_string(), session_id.clone());
+        ctx.insert("cwd".to_string(), self.session.cwd.display().to_string());
+        ctx.insert("reason".to_string(), reason.to_string());
+        ctx.insert("turns".to_string(), self.current_turn().to_string());
+        // The reason is also the hook's `input`, because that is the only
+        // free-form field a `command` hook receives on stdin — exactly how
+        // `SessionStart` passes its session id. A hook that files a run reads
+        // it from there; `turns` and `cwd` stay in the context map, which the
+        // executor and an embedder can see.
+        let result = self.fire_hook(hook_events::SESSION_END, reason, &ctx).await;
+        if !result.errors.is_empty() {
+            tracing::warn!("SessionEnd hook errors: {:?}", result.errors);
+        }
     }
 
     /// Set the JSON schema for structured output validation.
@@ -3579,6 +3661,23 @@ impl QueryEngine {
         self.session.cost_usd = self.cost_tracker.known_total_cost();
     }
 
+    /// Append the turn's attached images to the session, right after the user
+    /// text they belong to.
+    ///
+    /// Each image is its own `MessageContent::Image` message so that every
+    /// reader of text stays untouched; [`Self::provider_messages`] merges them
+    /// back into the user turn. The model sees the text and the pictures as
+    /// one message, which is what a screenshot plus "what is wrong here"
+    /// means.
+    fn attach_turn_images(&mut self, options: &SubmitOptions) {
+        for image in &options.attached_images {
+            self.session.messages.push(Message {
+                role: crate::types::Role::User,
+                content: crate::types::MessageContent::Image(image.clone()),
+            });
+        }
+    }
+
     /// Submit a user message and run the full turn loop.
     ///
     /// This is the main entry point for conversation turns. It will:
@@ -3618,6 +3717,7 @@ impl QueryEngine {
 
         // Add user message
         self.session.messages.push(Message::user(prompt.clone()));
+        self.attach_turn_images(&options);
 
         // Main turn loop
         // A request that arrives after an interrupt is a fresh one.
@@ -3757,6 +3857,7 @@ impl QueryEngine {
 
         // Add user message
         self.session.messages.push(Message::user(prompt.clone()));
+        self.attach_turn_images(&options);
 
         // Main turn loop
         // A request that arrives after an interrupt is a fresh one.
@@ -10845,6 +10946,87 @@ mod tests {
         assert_eq!(tool_results[1]["tool_use_id"], "tc_b");
     }
 
+    /// An attached image joins the user turn it belongs to: the model has to
+    /// see the text and the picture as one message, which is what a screenshot
+    /// plus "what is wrong here" means.
+    #[test]
+    fn provider_messages_merge_an_attached_image_into_the_user_turn() {
+        let messages = QueryEngine::provider_messages(&[
+            Message::user("what is wrong with this?"),
+            Message {
+                role: crate::types::Role::User,
+                content: crate::types::MessageContent::Image(crate::types::ImageBlock {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }),
+            },
+        ]);
+
+        assert_eq!(messages.len(), 1, "one user turn: {}", messages.len());
+        let content = messages[0]["content"]
+            .as_array()
+            .expect("text plus an image must be a block array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is wrong with this?");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aGVsbG8=");
+    }
+
+    /// An image with no preceding user text still becomes a user turn of its
+    /// own rather than being dropped.
+    #[test]
+    fn provider_messages_keep_an_image_with_no_preceding_text() {
+        let messages = QueryEngine::provider_messages(&[Message {
+            role: crate::types::Role::User,
+            content: crate::types::MessageContent::Image(crate::types::ImageBlock {
+                media_type: "image/jpeg".into(),
+                data: "aGVsbG8=".into(),
+            }),
+        }]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_array().expect("block array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+        // The same base64 must not also be sent as text.
+        assert!(!messages[0].to_string().contains("\"text\""));
+    }
+
+    /// After a tool result, the image starts a new user message: the tool
+    /// result's blocks are already ordered for the provider and cannot be
+    /// mixed with turn content.
+    #[test]
+    fn provider_messages_do_not_merge_an_image_into_a_tool_result_message() {
+        let tool_result = ToolResult {
+            tool_call_id: "tc_1".into(),
+            output: "done".into(),
+            is_error: false,
+            images: Vec::new(),
+        };
+        let messages = QueryEngine::provider_messages(&[
+            Message::user("look"),
+            Message {
+                role: crate::types::Role::Tool,
+                content: crate::types::MessageContent::ToolResult(tool_result),
+            },
+            Message {
+                role: crate::types::Role::User,
+                content: crate::types::MessageContent::Image(crate::types::ImageBlock {
+                    media_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                }),
+            },
+        ]);
+
+        assert_eq!(messages.len(), 3, "{messages:#?}");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "image");
+    }
+
     #[test]
     fn provider_messages_keep_consecutive_user_text_messages_separate() {
         let messages =
@@ -11212,6 +11394,47 @@ mod tests {
         assert!(
             starts[0].1.contains_key("cwd"),
             "SessionStart should see the working directory: {starts:?}"
+        );
+    }
+
+    /// A session fires `SessionEnd` once, however many close paths reach it.
+    ///
+    /// The interactive exit, a headless run's last turn, an interrupt and the
+    /// REPL's shutdown path each call this. A hook that appends a record must
+    /// see one call, not one per path, so the engine latches on the first.
+    #[tokio::test]
+    async fn session_end_fires_once_however_many_close_paths_reach_it() {
+        let (engine, recorded) = engine_with_recording_hooks(Box::new(MockApiClient));
+        let session_id = engine.session.session_id.to_string();
+
+        engine.fire_session_end_hook("completed").await;
+        engine.fire_session_end_hook("interrupted").await;
+        engine.fire_session_end_hook("error").await;
+
+        let events = recorded
+            .lock()
+            .expect("the recording hook lock is not poisoned");
+        let ends: Vec<_> = events
+            .iter()
+            .filter(|(name, _)| name == hook_events::SESSION_END)
+            .collect();
+        assert_eq!(ends.len(), 1, "SessionEnd must fire once: {events:?}");
+        assert_eq!(
+            ends[0].1.get("session_id").map(String::as_str),
+            Some(session_id.as_str())
+        );
+        assert_eq!(
+            ends[0].1.get("reason").map(String::as_str),
+            Some("completed"),
+            "the first close path names how the session ended"
+        );
+        assert!(
+            ends[0].1.contains_key("cwd"),
+            "SessionEnd should see the working directory: {ends:?}"
+        );
+        assert!(
+            ends[0].1.contains_key("turns"),
+            "SessionEnd should see the turn count: {ends:?}"
         );
     }
 
@@ -13747,7 +13970,10 @@ mod tests {
         );
         engine.set_tool_executor(Box::new(StubOkToolExecutor));
         engine.compact_config.max_recovery_retries = 3;
-        assert_eq!(engine.context_window().tokens, 200_000);
+        assert_eq!(
+            engine.context_window().tokens,
+            crate::types::CLAUDE_LONG_CONTEXT_WINDOW
+        );
 
         let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
         turn.messages = vec![Message::user("the request")];

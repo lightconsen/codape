@@ -64,6 +64,10 @@ fn content_text(content: &codape_core::types::MessageContent) -> String {
         MessageContent::ToolResult(tr) => format!("[tool_result: {}]", tr.output),
         // Provider state, not conversation: never exported as visible text.
         MessageContent::Thinking(_) => String::new(),
+        // An attached image has no text body; its base64 payload would be
+        // useless in a transcript anyway, so the placeholder carries what a
+        // reader needs: that an image was there, and what kind.
+        MessageContent::Image(image) => format!("[image: {}]", image.media_type),
         _ => "[unknown content]".into(),
     }
 }
@@ -114,6 +118,9 @@ fn format_markdown(messages: &[&Message]) -> String {
             }
             // Provider state, not conversation.
             codape_core::types::MessageContent::Thinking(_) => {}
+            codape_core::types::MessageContent::Image(image) => {
+                let _ = writeln!(out, "![image]({})", image.media_type);
+            }
             _ => out.push_str("[unknown]\n"),
         }
     }

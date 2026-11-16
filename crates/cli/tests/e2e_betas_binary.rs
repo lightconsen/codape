@@ -168,7 +168,7 @@ async fn fast_mode_selects_the_lightweight_model() {
     let normal = model_for(Vec::new()).await;
     let fast = model_for(vec!["--betas".into(), "+fast_mode".into()]).await;
 
-    assert_eq!(normal, "claude-sonnet-4-6", "{normal}");
+    assert_eq!(normal, "claude-sonnet-5-5", "{normal}");
     assert!(
         fast.contains("haiku"),
         "fast_mode did not switch to the lightweight model: {fast}"

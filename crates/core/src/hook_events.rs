@@ -21,6 +21,8 @@ pub const POST_TOOL_USE_FAILURE: &str = "PostToolUseFailure";
 pub const USER_PROMPT_SUBMIT: &str = "UserPromptSubmit";
 /// Once, before the session's first turn.
 pub const SESSION_START: &str = "SessionStart";
+/// Once, when the session is over.
+pub const SESSION_END: &str = "SessionEnd";
 /// When the engine emits an advisory notification.
 pub const NOTIFICATION: &str = "Notification";
 /// When the engine asks the person a question mid-turn.
@@ -53,6 +55,7 @@ mod tests {
         assert_eq!(POST_TOOL_USE_FAILURE, "PostToolUseFailure");
         assert_eq!(USER_PROMPT_SUBMIT, "UserPromptSubmit");
         assert_eq!(SESSION_START, "SessionStart");
+        assert_eq!(SESSION_END, "SessionEnd");
         assert_eq!(NOTIFICATION, "Notification");
         assert_eq!(ELICITATION, "Elicitation");
         assert_eq!(ELICITATION_RESULT, "ElicitationResult");
@@ -72,6 +75,7 @@ mod tests {
             POST_TOOL_USE_FAILURE,
             USER_PROMPT_SUBMIT,
             SESSION_START,
+            SESSION_END,
             NOTIFICATION,
             ELICITATION,
             ELICITATION_RESULT,

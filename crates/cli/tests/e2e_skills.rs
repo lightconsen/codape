@@ -153,3 +153,79 @@ fn the_skills_command_lists_a_project_skill() {
         "the project skill is missing from /skills:\n{stdout}"
     );
 }
+
+/// A skill compiled into the binary is announced with nothing on disk.
+///
+/// This is the gap the bundled tree closes: a fresh install had no skill tree
+/// at all, so the model was never told any skill existed. The workspace here
+/// has no `.codape/skills/` and the config home has none either — the advert
+/// can only come from the binary.
+#[test]
+fn a_bundled_skill_is_announced_with_no_skill_files_on_disk() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("config home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    assert!(!workspace.path().join(".codape/skills").exists());
+    assert!(!home.path().join("skills").exists());
+    assert!(!home.path().join("bundled-skills").exists());
+
+    let recorded = workspace.path().join("requests.log");
+    let (mut provider, base_url) = start_static_provider(&recorded);
+
+    let output = run_codape(workspace.path(), home.path(), &base_url, "hello");
+    let _ = provider.kill();
+    let _ = provider.wait();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+
+    let requests = std::fs::read_to_string(&recorded).unwrap_or_default();
+    assert!(
+        requests.contains("code-review"),
+        "the bundled skill was not announced:\n{requests}"
+    );
+    assert!(
+        requests.contains("Review pending changes for security defects"),
+        "the bundled skill's description did not reach the prompt:\n{requests}"
+    );
+
+    // The binary must not have installed anything to make that work.
+    assert!(
+        !home.path().join("skills").join("code-review").exists(),
+        "a bundled skill was written to the config home"
+    );
+}
+
+/// `/skills` lists the bundled tree, so it names the same skills the model was
+/// told about.
+#[test]
+fn the_skills_command_lists_the_bundled_tree() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("config home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    let recorded = workspace.path().join("requests.log");
+    let (mut provider, base_url) = start_static_provider(&recorded);
+
+    let output = run_codape(workspace.path(), home.path(), &base_url, "/skills");
+    let _ = provider.kill();
+    let _ = provider.wait();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    for name in ["code-review", "security-review", "test-failure-triage"] {
+        assert!(
+            stdout.contains(name),
+            "{name} is missing from /skills:\n{stdout}"
+        );
+    }
+}

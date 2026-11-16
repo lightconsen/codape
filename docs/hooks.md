@@ -279,7 +279,7 @@ prints non-JSON will deny the tool rather than silently allowing it.
 
 ## What actually fires
 
-`HookEvent` has **22 names**, and every one is wired to a firing site.
+`HookEvent` has **23 names**, and every one is wired to a firing site.
 `HookEvent::is_triggered()` is the single source of truth, and a test pins the
 list; the test that used to name reserved events now asserts that none is
 reserved.
@@ -292,9 +292,9 @@ A `PostToolUse` hook may return **`updatedToolOutput`** (or
 model sees it. That is the hook's decision power, not just a veto — an
 auditing hook can redact, reformat or annotate a result. The first hook that
 supplies one wins; hooks without it leave the result unchanged.
-- `UserPromptSubmit`, `SessionStart`, `TurnEnd`, `Stop`, `PreCompact`,
-  `PostCompact`, `Notification`, `Elicitation`, `ElicitationResult` —
-  `codape_core::engine`.
+- `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `TurnEnd`, `Stop`,
+  `PreCompact`, `PostCompact`, `Notification`, `Elicitation`,
+  `ElicitationResult` — `codape_core::engine`.
 - `SubagentStart`, `SubagentStop`, `TeammateIdle` —
   `codape_agents::manager`.
 - `WorktreeCreate` — the `EnterWorktree` tool.
@@ -306,6 +306,18 @@ supplies one wins; hooks without it leave the result unchanged.
 
 `SessionStart` fires on the first turn the engine runs (`submit` /
 `submit_streaming`), since a session in this engine has no separate begin call.
+`SessionEnd` is its other bookend: the only hook that runs *after* the last
+turn, which makes it the place to write a session record. It fires once, from
+whichever close path gets there first — the interactive exit, a headless run's
+own completion, or an interrupt — and the engine latches so the second call is
+a no-op. Its context carries `session_id`, `cwd`, `reason` (`completed`,
+`interrupted`, `error`) and `turns`, and the same reason is the hook's `input`
+field on stdin — the one free-form field a `command` hook reads — exactly as
+`SessionStart` passes its session id. A hook that files a run can tell a
+finished session from an abandoned one. A headless run fires it after its final
+turn, before the transcript is persisted, so a hook that reads that transcript
+on disk sees the state from *before* this run — use the hook's own input
+instead.
 `Notification` fires where the engine raises one — a provider error the user is
 told about. It is reached from the blocking client's `RetryExhausted`; a
 failed *stream* takes the `TurnError::Fatal` path instead, so a CLI session

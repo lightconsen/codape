@@ -146,7 +146,7 @@ pub fn register(registry: &mut CommandRegistry) {
             Arc::new(|ctx: &CommandContext, args: &[String]| {
                 if args.is_empty() {
                     CommandResult::success(format!(
-                        "Current model: {}\nUsage: /model <opus|sonnet|haiku|custom-model-id>",
+                        "Current model: {}\nUsage: /model <opus|sonnet|haiku|opus-4|sonnet-4|haiku-4|custom-model-id>",
                         ctx.model.0
                     ))
                 } else {
@@ -154,6 +154,11 @@ pub fn register(registry: &mut CommandRegistry) {
                         "opus" => ModelId::opus().0,
                         "sonnet" => ModelId::sonnet().0,
                         "haiku" => ModelId::haiku().0,
+                        // Family aliases pin the family without pinning the
+                        // version, so a new release does not need a CLI change.
+                        "opus-4" => "claude-opus-4-6".to_string(),
+                        "sonnet-4" => "claude-sonnet-4-6".to_string(),
+                        "haiku-4" => "claude-haiku-4-5-20251001".to_string(),
                         other => other.to_string(),
                     };
                     // Also persist to settings.json so the change survives restart

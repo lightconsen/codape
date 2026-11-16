@@ -45,7 +45,7 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 - **`Skill`** — Loaded skill with metadata, source, path, and **plugin_name** (for plugin-owned skills).
 - **`SkillSource`** — Enum: Bundled, UserDir, RepoDir, Plugin, Mcp. Precedence ordering for conflict resolution.
 - **`SkillFile`** — Parsed content: metadata + script body.
-- **`SkillLoader`** — Loads `.md` skill files from configured directories with conflict resolution. Plugin and MCP skills can be added programmatically.
+- **`SkillLoader`** — Loads skill files from configured directories with conflict resolution, and adds the skills compiled into the binary (`add_bundled_skills`). Plugin and MCP skills can be added programmatically.
 
 ### Architecture Patterns
 
@@ -53,6 +53,7 @@ Manages plugin lifecycle (discovery, loading, execution, unloading), marketplace
 - **AtomicBool** for refresh flag.
 - **YAML frontmatter parsing** via `serde_yaml` with custom `deserialize_string_or_list` for scalar/array fields.
 - **Layered skill loading**: bundled -> user -> repo (`.codape/skills`) with precedence-based conflict resolution.
+- **Bundled skills are compiled in** (`codape_core::bundled_skills`), not unpacked to the config home: `code-review`, `security-review` and `test-failure-triage`. `SkillLoader::add_bundled_skills` adds them in memory after the directory scan, so a fresh install has them without a session writing a file, and a test run cannot leave anything behind. The three readers agree because they all read the same list: the loader (adverts), the `Skill` tool (opening one), and `/skills` (listing them). A user or repo skill of the same name wins by precedence and does not appear twice.
 - **Atomic install staging**: temp directory + validation + atomic rename + cleanup on failure.
 - **Install locks**: `DashMap<String, Arc<tokio::sync::Mutex<()>>>` prevents concurrent installs.
 - **Version compatibility**: SemVer comparison of `min_version` against app version on load and install.
@@ -766,7 +767,7 @@ During REPL construction:
 ### Tests
 
 - 169 tests in `plugins.rs` (manager ops, load/unload, marketplace, discovery, reconciler, URL validation, version checks, signature verification, dependency resolution, error recovery, custom endpoints, the manifest field table, `userConfig` resolution and injection end-to-end including the WASM required-option path, `userConfig` schema validation (`options`/`min`/`max`/`type`), plugin channels (live report states and notification routing), the plugin type registry, source detection and git URL validation, directory/git/git-subdir installs, structured source specs, the `npm`/`command` refusals, SHA-256 vectors and pin enforcement).
-- 14 tests in `skills.rs` (parsing, loader, plugin/MCP skills, repo dir, conflict resolution, precedence, quoted strings).
+- 17 tests in `skills.rs` (parsing, loader, plugin/MCP skills, repo dir, conflict resolution, precedence, quoted strings, and the bundled tree: it loads without touching the disk, it reaches the adverts, and a user skill of the same name still wins).
 - 7 tests in `runtime.rs` (spawn, initialize, terminate, invalid command).
 - 20 tests in `wasm_runtime.rs`, all run by the default `cargo test -p codape-plugins`: 4 core/unit tests (the loader stub, the injected command's program/leading-argument shape, helper discovery, and the platform rlimit plan), 10 sandbox tests (fuel, memory growth, initial memory, shared memory, WASI import, the 3 size-cap cases, `userConfig` injection into an importing module, and an empty-import module still running), and 6 pre-scan tests (normal module, oversized code section, too many functions, too many operators, excessive nesting, nesting exactly at the cap).
 - Integration tests in `tests/wasm_compile_subprocess.rs`: an injected command compiles, serializes, and deserializes; leading arguments are forwarded; the host-injected global command is used; a missing command fails closed with an actionable error and leaves no artifacts; a slow helper and its spawned descendant are killed at the wall-clock limit; a second load hits the AOT cache with exactly one compiler invocation; a pathological module is rejected by the pre-scan without starting the compiler; and, on Linux, the compiler is attached to a cgroup carrying the memory ceiling.

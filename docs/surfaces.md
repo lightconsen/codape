@@ -84,7 +84,9 @@ element tree is the shared contract; the surface decides how it looks.
 ## Boundaries
 
 - The terminal does not render images (`images: false`); the element tree has no
-  image element.
+  image element. That is about display only: a person can still *send* an image
+  (`--image`, `@shot.png`, or Ctrl+V) and the model receives it as an image
+  block. The transcript shows an `[image: image/png]` placeholder.
 - A surface that reports `interactive: false` still receives hooks and UI; it is
   the host's job to hide affordances it cannot honour.
 - The registry is in-memory and per session. Persisting a preference for a

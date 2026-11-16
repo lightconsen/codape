@@ -564,6 +564,9 @@ impl PromptCompiler {
             crate::types::MessageContent::Thinking(block) => {
                 Self::estimate_tokens(&block.thinking) + Self::estimate_tokens(&block.signature)
             }
+            crate::types::MessageContent::Image(image) => {
+                Self::estimate_tokens(&image.media_type) + crate::types::IMAGE_TOKEN_ESTIMATE
+            }
         }
     }
 

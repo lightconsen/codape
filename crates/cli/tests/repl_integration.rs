@@ -138,7 +138,8 @@ fn run_headless_exit_command() {
 
 #[test]
 fn run_headless_session_command() {
-    let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+    let model = ModelId::sonnet();
+    let mut repl = ReplLoop::new("/tmp".into(), model.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(repl.run_headless("/session")).unwrap();
     assert!(
@@ -146,8 +147,8 @@ fn run_headless_session_command() {
         "expected session info, got: {result}"
     );
     assert!(
-        result.contains("claude-sonnet-4-6"),
-        "expected model name in output"
+        result.contains(&model.0),
+        "expected model name in output: {result}"
     );
 }
 

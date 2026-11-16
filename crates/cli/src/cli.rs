@@ -56,6 +56,10 @@ pub struct Cli {
     #[arg(short = 'f', long, value_name = "FILE")]
     pub file: Vec<PathBuf>,
 
+    /// Attach an image to the prompt. Repeatable; png, jpeg, gif and webp.
+    #[arg(long, value_name = "IMAGE")]
+    pub image: Vec<PathBuf>,
+
     /// Non-interactive mode: read prompt from stdin, print response, exit.
     #[arg(short = 'p', long)]
     pub print: bool,
@@ -213,7 +217,7 @@ pub struct Cli {
     #[arg(long)]
     pub include_partial_messages: bool,
 
-    /// Set reasoning effort (low, medium, high).
+    /// Set reasoning effort (low, medium, high, xhigh, max).
     #[arg(long, value_name = "LEVEL")]
     pub effort: Option<String>,
 

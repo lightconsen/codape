@@ -23,6 +23,13 @@ pub enum HookEvent {
     ///
     /// Fired once by `codape_core::engine` before the session's first turn.
     SessionStart,
+    /// When a session ends.
+    ///
+    /// Fired once, when the session is over: the interactive loop is about to
+    /// exit, a headless run has finished its last turn, or the session was
+    /// interrupted. It sums up the session — id, cwd, reason — for a hook that
+    /// records it, and it is the only hook that runs after the last turn.
+    SessionEnd,
     /// During initial setup.
     ///
     /// Fired by the REPL when the `/init` slash command succeeds — the
@@ -112,6 +119,7 @@ impl HookEvent {
             Self::PostToolUseFailure => codape_core::hook_events::POST_TOOL_USE_FAILURE,
             Self::UserPromptSubmit => codape_core::hook_events::USER_PROMPT_SUBMIT,
             Self::SessionStart => "SessionStart",
+            Self::SessionEnd => codape_core::hook_events::SESSION_END,
             Self::Setup => "Setup",
             Self::SubagentStart => "SubagentStart",
             Self::Notification => "Notification",
@@ -206,6 +214,7 @@ impl HookEvent {
                 | Self::PostToolUseFailure
                 | Self::UserPromptSubmit
                 | Self::SessionStart
+                | Self::SessionEnd
                 | Self::Setup
                 | Self::Notification
                 | Self::PermissionRequest
@@ -247,6 +256,7 @@ impl std::str::FromStr for HookEvent {
             "PostToolUseFailure" | "PostToolUseFail" => Self::PostToolUseFailure,
             "UserPromptSubmit" => Self::UserPromptSubmit,
             "SessionStart" => Self::SessionStart,
+            "SessionEnd" => Self::SessionEnd,
             "Setup" => Self::Setup,
             "SubagentStart" => Self::SubagentStart,
             "Notification" => Self::Notification,
@@ -454,6 +464,7 @@ mod tests {
                 "PostToolUseFailure",
                 "UserPromptSubmit",
                 "SessionStart",
+                "SessionEnd",
                 "Setup",
                 "SubagentStart",
                 "Notification",
@@ -560,6 +571,7 @@ mod tests {
             HookEvent::PostToolUseFailure,
             HookEvent::UserPromptSubmit,
             HookEvent::SessionStart,
+            HookEvent::SessionEnd,
             HookEvent::Notification,
             HookEvent::PermissionRequest,
             HookEvent::PermissionDenied,
@@ -576,6 +588,7 @@ mod tests {
             core_events::POST_TOOL_USE_FAILURE,
             core_events::USER_PROMPT_SUBMIT,
             core_events::SESSION_START,
+            core_events::SESSION_END,
             core_events::NOTIFICATION,
             core_events::PERMISSION_REQUEST,
             core_events::PERMISSION_DENIED,

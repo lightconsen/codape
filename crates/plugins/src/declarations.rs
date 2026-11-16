@@ -238,6 +238,7 @@ const HOOK_EVENTS: &[&str] = &[
     "PostToolUseFailure",
     "UserPromptSubmit",
     "SessionStart",
+    "SessionEnd",
     "Setup",
     "SubagentStart",
     "Notification",

@@ -12,9 +12,9 @@ pub struct SkillTool;
 impl Tool for SkillTool {
     fn description(&self) -> Option<&'static str> {
         Some(
-            "Loads a skill: a markdown file under .codape/skills/ or ~/.codape/skills/ that \
-             carries instructions for a repeatable task. Only call it when the adverts you were \
-             given name the skill.",
+            "Loads a skill: a markdown file under .codape/skills/ or ~/.codape/skills/, or one of \
+             the skills built into Codape. A skill carries instructions for a repeatable task. \
+             Only call it when the adverts you were given name the skill.",
         )
     }
 
@@ -54,6 +54,23 @@ impl Tool for SkillTool {
         let skill = extract_string(&input.arguments, "skill")?;
         let args = extract_string_opt(&input.arguments, "args");
 
+        // A bundled skill is compiled into the binary, so it is not under any
+        // directory the search below can reach. Look it up first: the listing
+        // the model was given names it, and a tool that cannot open what the
+        // advert offered is worse than no advert at all.
+        if let Some(bundled) = codape_core::bundled_skills::find(&skill) {
+            let mut output = format!("Skill '{skill}' (bundled)\n\n");
+            output.push_str(bundled.content);
+            if let Some(a) = args {
+                let _ = write!(output, "\n\nArguments: {a}");
+            }
+            return Ok(ToolOutput {
+                output,
+                is_display: true,
+                images: Vec::new(),
+            });
+        }
+
         // A skill is either a single Markdown file — `pdf.md` — or a directory
         // that owns its assets and enters through `SKILL.md`. The loader
         // accepts both; this tool has to accept the same two forms or a skill
@@ -92,7 +109,10 @@ impl Tool for SkillTool {
         }
 
         // Skill not found — list available skills
-        let mut available = Vec::new();
+        let mut available: Vec<String> = codape_core::bundled_skills::names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         for dir in &search_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -202,6 +222,49 @@ mod tests {
             .unwrap();
         assert!(output.output.contains("pdf"));
         assert!(output.output.contains("Extract text"));
+    }
+
+    /// A bundled skill is compiled in, so it is not under any directory the
+    /// tool searches. If the adverts name it, the tool has to be able to open
+    /// it — and it must open without the config home being touched.
+    #[tokio::test]
+    async fn a_bundled_skill_loads_from_the_binary() {
+        let output = SkillTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "Skill".into(),
+                    arguments: serde_json::json!({ "skill": "code-review" }),
+                },
+                test_ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(output.output.contains("(bundled)"), "{}", output.output);
+        assert!(
+            output.output.contains("name: code-review"),
+            "{}",
+            output.output
+        );
+    }
+
+    /// A miss names the bundled skills, or a model that guessed wrong is told
+    /// only about what happens to be on disk.
+    #[tokio::test]
+    async fn a_missed_name_lists_bundled_skills() {
+        let error = SkillTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "Skill".into(),
+                    arguments: serde_json::json!({ "skill": "nope" }),
+                },
+                test_ctx(),
+            )
+            .await
+            .expect_err("a missing skill is an error");
+        let message = format!("{error:?}");
+        assert!(message.contains("code-review"), "{message}");
     }
 
     #[tokio::test]

@@ -62,7 +62,8 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--fallback-model MODEL` | | Retry the same request once with this model when the primary is unavailable; if that succeeds the session continues on the fallback. Works in interactive and headless mode; other errors never trigger it |
 | `--system-prompt PROMPT` | | Custom system prompt (replaces default), in headless and interactive mode |
 | `--append-system-prompt TEXT` | | Append TEXT to the default system prompt instead of replacing it. Independent of `--system-prompt`; when both are given, the replacement is authoritative and TEXT is added as extra instructions |
-| `--file FILE` | `-f` | Include a file in context (can be repeated) |
+| `--file FILE` | `-f` | Include a file in context (can be repeated). A path naming an image is attached as an image instead of read as text |
+| `--image IMAGE` | | Attach an image to the prompt: png, jpeg, gif or webp, up to 5 MiB each, can be repeated. An image that cannot be read, is too large, or is a format the provider does not take is a startup error rather than a silent text-only turn |
 | `--print` | `-p` | Non-interactive mode: read from stdin, print response, exit |
 | `--brief` | | Concise output (minimal formatting) |
 | `--bare` | | Minimal output (no decorations) |
@@ -95,7 +96,7 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--json-schema SCHEMA` | | JSON schema for structured output (passed to `SubmitOptions`) |
 | `--replay-user-messages` | | Replay user messages from most recent session transcript |
 | `--include-partial-messages` | | Include partial assistant messages in context |
-| `--effort LEVEL` | | Reasoning effort: `low`, `medium`, or `high` (case-insensitive). Any other value is rejected at startup. The level is carried on every request context and mapped per provider — see "Reasoning effort" below |
+| `--effort LEVEL` | | Reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max` (case-insensitive). Any other value is rejected at startup; a level the model does not have is stepped down. The level is carried on every request context and mapped per provider — see "Reasoning effort" below |
 | `--betas FLAGS` | | Comma-separated feature flags (`+name`, `-name`, or bare `name`) applied to the session |
 | `--chrome` | | Enable browser / web integration |
 | `--no-chrome` | | Disable browser / web integration (removes `ChromeClient` from dispatcher) |
@@ -131,17 +132,25 @@ main() → parse_args() → StartupOrchestrator::run()
 
 ### Reasoning effort
 
-`--effort low|medium|high` asks the provider to spend a matching amount of
-reasoning on each turn. The value is stamped onto every request context by an
-`EffortClient` that wraps the provider router, so it reaches whichever provider
-serves the turn, and each provider maps it onto the control its API actually
-exposes:
+`--effort low|medium|high|xhigh|max` asks the provider to spend a matching
+amount of reasoning on each turn. The value is stamped onto every request
+context by an `EffortClient` that wraps the provider router, so it reaches
+whichever provider serves the turn, and each provider maps it onto the control
+its API actually exposes:
 
 | Provider profile | Mapping |
 |---|---|
-| Anthropic (`anthropic`, and cloud endpoints such as Bedrock/Vertex that use the Anthropic Messages shape) | `thinking: {"type": "enabled", "budget_tokens": N}` — `low` = 1024, `medium` = 4096, `high` = 16384. `max_tokens` is raised above the budget when the caller's ceiling is lower, because Anthropic rejects a body where it is not. |
-| OpenAI and Groq | `reasoning_effort: "<level>"` on Chat Completions; `reasoning: {"effort": "<level>"}` on the Responses API. |
+| Anthropic, adaptive models (4.6 and later) | `thinking: {"type": "adaptive"}` plus `output_config: {"effort": "<level>"}`. This is the only encoding 4.7+ accepts; `budget_tokens` there is a 400. |
+| Anthropic, legacy models (4.5 and earlier) | `thinking: {"type": "enabled", "budget_tokens": N}` — `low` = 1024, `medium` = 4096, `high` = 16384, `xhigh` = 32768, `max` = 65536. `max_tokens` is raised above the budget when the caller's ceiling is lower, because Anthropic rejects a body where it is not. |
+| OpenAI and Groq | `reasoning_effort: "<level>"` on Chat Completions; `reasoning: {"effort": "<level>"}` on the Responses API. Their ladder stops at `high`, so `xhigh` and `max` are sent as `high`. |
 | Kimi, DashScope, and unnamed OpenAI-compatible endpoints | No verified equivalent. The field is **omitted** and a warning names the provider — the request is never silently reshaped, and the choice is not silently dropped. |
+
+Not every Anthropic model has every level. `xhigh` arrived with Opus 4.7 and the
+5.x generation; `max` with 4.6. A level the turn's model does not have is
+stepped down to the highest one it does, so `--effort xhigh` on Sonnet 4.6
+means `high` rather than a 400. Omitting `--effort` is not "effort off": the
+model runs at its own default, which is equivalent to sending that level
+explicitly.
 
 The effort is carried on `RequestContext` under the `reasoning_effort` provider
 hint, and a per-turn value on the context wins over a client-level default. An

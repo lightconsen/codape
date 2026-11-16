@@ -65,26 +65,69 @@ pub fn mentions(text: &str) -> Vec<(String, std::ops::Range<usize>)> {
     found
 }
 
-/// Expand every `@path` in `text` into a labelled file block.
+/// What expanding a prompt's `@path` mentions produced.
+#[derive(Debug, Default)]
+pub struct Expansion {
+    /// The prompt with text files inlined. An image mention becomes a
+    /// `[image: path]` marker instead, since its bytes travel separately.
+    pub text: String,
+    /// Text files that were attached.
+    pub attached: Vec<PathBuf>,
+    /// Images that were attached, ready for the turn.
+    pub images: Vec<codape_core::types::ImageBlock>,
+    /// Mentions that could not be attached, each with the reason.
+    pub skipped: Vec<String>,
+}
+
+impl Expansion {
+    /// Whether anything was attached or refused.
+    #[must_use]
+    pub const fn changed_anything(&self) -> bool {
+        !self.attached.is_empty() || !self.images.is_empty() || !self.skipped.is_empty()
+    }
+}
+
+/// Expand every `@path` in `text` into a labelled file block, or into an image
+/// when the path names one.
 ///
-/// Returns the expanded text and the paths that were attached. A path that
-/// does not exist, is not a regular file, or is too large is left in the text
-/// untouched and reported in `skipped`, so the model still sees what the
-/// person meant and the person is told why it was not attached.
+/// A path that does not exist, is not a regular file, is too large, or names an
+/// image format the model cannot take is left in the text untouched and
+/// reported in `skipped`, so the model still sees what the person meant and the
+/// person is told why it was not attached.
 #[must_use]
-pub fn expand(text: &str, cwd: &Path) -> (String, Vec<PathBuf>, Vec<String>) {
+pub fn expand(text: &str, cwd: &Path) -> Expansion {
     let entries = mentions(text);
     if entries.is_empty() {
-        return (text.to_string(), Vec::new(), Vec::new());
+        return Expansion {
+            text: text.to_string(),
+            ..Expansion::default()
+        };
     }
 
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0usize;
     let mut attached = Vec::new();
+    let mut images = Vec::new();
     let mut skipped = Vec::new();
     for (token, range) in entries {
         out.push_str(&text[cursor..range.start]);
         let path = resolve(&token, cwd);
+        // An image is read as bytes, never as text: `read_to_string` would
+        // fail on it, and the model needs the picture, not a filename.
+        if crate::image_input::is_image_path(&path) {
+            match crate::image_input::load_image(&path) {
+                Ok(image) => {
+                    let _ = write!(out, "[image: {}]", path.display());
+                    images.push(image);
+                }
+                Err(error) => {
+                    skipped.push(error);
+                    out.push_str(&text[range.clone()]);
+                }
+            }
+            cursor = range.end;
+            continue;
+        }
         match std::fs::read_to_string(&path) {
             Ok(content) if content.len() <= MAX_FILE_BYTES => {
                 let _ = write!(out, "--- {} ---\n{content}", path.display());
@@ -107,7 +150,12 @@ pub fn expand(text: &str, cwd: &Path) -> (String, Vec<PathBuf>, Vec<String>) {
         cursor = range.end;
     }
     out.push_str(&text[cursor..]);
-    (out, attached, skipped)
+    Expansion {
+        text: out,
+        attached,
+        images,
+        skipped,
+    }
 }
 
 /// Completion candidates for a partial mention.
@@ -235,22 +283,48 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
 
-        let (expanded, attached, skipped) = expand("read @note.txt please", tmp.path());
+        let expansion = expand("read @note.txt please", tmp.path());
+        let expanded = &expansion.text;
         assert!(expanded.starts_with("read --- "), "{expanded}");
         assert!(expanded.contains("hello"), "{expanded}");
         assert!(expanded.ends_with(" please"), "{expanded}");
-        assert_eq!(attached.len(), 1);
-        assert!(skipped.is_empty());
+        assert_eq!(expansion.attached.len(), 1);
+        assert!(expansion.skipped.is_empty());
     }
 
     #[test]
     fn a_missing_file_is_reported_and_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
-        let (expanded, attached, skipped) = expand("read @nope.txt", tmp.path());
-        assert_eq!(expanded, "read @nope.txt");
-        assert!(attached.is_empty());
-        assert_eq!(skipped.len(), 1);
-        assert!(skipped[0].contains("nope.txt"), "{skipped:?}");
+        let expansion = expand("read @nope.txt", tmp.path());
+        assert_eq!(expansion.text, "read @nope.txt");
+        assert!(expansion.attached.is_empty());
+        assert_eq!(expansion.skipped.len(), 1);
+        assert!(
+            expansion.skipped[0].contains("nope.txt"),
+            "{:?}",
+            expansion.skipped
+        );
+    }
+
+    /// A picture is attached as an image block, not inlined as text — and the
+    /// line it came from is not silently rewritten into something the model
+    /// would read as prose.
+    #[test]
+    fn an_image_mention_becomes_an_image_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("shot.png"),
+            [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+        )
+        .unwrap();
+
+        let expansion = expand("what is wrong with @shot.png ?", tmp.path());
+        assert_eq!(expansion.images.len(), 1);
+        assert_eq!(expansion.images[0].media_type, "image/png");
+        assert!(expansion.attached.is_empty());
+        assert!(expansion.skipped.is_empty());
+        assert!(expansion.text.contains("[image:"), "{}", expansion.text);
+        assert!(!expansion.text.contains("PNG"), "base64 leaked into text");
     }
 
     #[test]

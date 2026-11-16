@@ -2,7 +2,7 @@
 
 use crate::provider::{ProviderApiStyle, ReasoningEffortSupport, ResolvedProviderProfile};
 use crate::tool_executor::ToolInfo;
-use crate::types::{ModelId, ThinkingBlock, ToolCall, UsageSummary};
+use crate::types::{ModelId, ThinkingBlock, ThinkingEncoding, ToolCall, UsageSummary};
 use futures::Stream;
 use futures::StreamExt;
 use reqwest::Client;
@@ -421,6 +421,11 @@ impl From<reqwest::Error> for ApiError {
 /// `reasoning_effort` field). A provider with no equivalent omits it and says
 /// so rather than silently dropping the request — see
 /// [`ResolvedProviderProfile::reasoning_effort_support`].
+///
+/// The five levels are the ones the Messages API documents for
+/// `output_config.effort`. A model does not necessarily accept all of them:
+/// `xhigh` and `max` are newer than the rest, and which models take which is
+/// recorded in [`model_supports_effort`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -428,11 +433,18 @@ pub enum ReasoningEffort {
     Low,
     /// The provider's middle setting.
     Medium,
-    /// Spend as much as the provider allows.
+    /// Spend as much as the provider allows by default.
     High,
+    /// Extended capability for long-horizon agentic work.
+    XHigh,
+    /// No constraint on token spending.
+    Max,
 }
 
 impl ReasoningEffort {
+    /// Every level, cheapest first.
+    pub const ALL: [Self; 5] = [Self::Low, Self::Medium, Self::High, Self::XHigh, Self::Max];
+
     /// The wire spelling accepted by the CLI and by OpenAI-style APIs.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -440,6 +452,20 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Position in the ordering, used to step down to a supported level.
+    #[must_use]
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+            Self::XHigh => 3,
+            Self::Max => 4,
         }
     }
 
@@ -450,6 +476,8 @@ impl ReasoningEffort {
             "low" => Some(Self::Low),
             "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
             _ => None,
         }
     }
@@ -457,13 +485,17 @@ impl ReasoningEffort {
     /// The Anthropic extended-thinking budget for this level.
     ///
     /// Anthropic requires a budget of at least 1024 tokens, so `Low` is the
-    /// floor rather than something smaller.
+    /// floor rather than something smaller. The top two levels only reach here
+    /// on a model that still uses the budget encoding, and effort composes with
+    /// the budget there.
     #[must_use]
     pub const fn anthropic_thinking_budget(self) -> u32 {
         match self {
             Self::Low => 1024,
             Self::Medium => 4096,
             Self::High => 16_384,
+            Self::XHigh => 32_768,
+            Self::Max => 65_536,
         }
     }
 }
@@ -479,9 +511,49 @@ impl std::str::FromStr for ReasoningEffort {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value).ok_or_else(|| {
-            format!("invalid reasoning effort '{value}': expected one of low, medium, high")
+            format!(
+                "invalid reasoning effort '{value}': expected one of low, medium, high, xhigh, max"
+            )
         })
     }
+}
+
+/// Whether a model accepts this `output_config.effort` level.
+///
+/// `low`/`medium`/`high` are accepted by every model that supports effort at
+/// all. `xhigh` arrived with the 5.x generation and Opus 4.7, and `max` with
+/// 4.6; sending a level a model does not have is a 400, so the caller steps
+/// down rather than passing it through.
+fn model_supports_effort(model: &ModelId, effort: ReasoningEffort) -> bool {
+    const XHIGH: &[&str] = &[
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-haiku-5",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+    ];
+    const XHIGH_AND_MAX: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-6"];
+    let name = crate::types::normalized_model_name(&model.0);
+    match effort {
+        ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High => true,
+        ReasoningEffort::XHigh => XHIGH
+            .iter()
+            .any(|prefix| crate::types::family_matches(&name, prefix)),
+        ReasoningEffort::Max => XHIGH
+            .iter()
+            .chain(XHIGH_AND_MAX.iter())
+            .any(|prefix| crate::types::family_matches(&name, prefix)),
+    }
+}
+
+/// The highest level at or below `effort` that the model accepts.
+fn supported_effort(model: &ModelId, effort: ReasoningEffort) -> Option<ReasoningEffort> {
+    (0..=effort.rank())
+        .rev()
+        .map(|rank| ReasoningEffort::ALL[usize::from(rank)])
+        .find(|candidate| model_supports_effort(model, *candidate))
 }
 
 /// The environment variable that overrides the prompt-caching setting.
@@ -1053,25 +1125,64 @@ impl AnthropicApiClient {
     /// Apply a reasoning effort to the request body, when this endpoint has an
     /// equivalent for it.
     ///
-    /// Anthropic-style endpoints express effort as extended thinking: a
-    /// `thinking.budget_tokens` value. Anthropic rejects a body whose
-    /// `max_tokens` is not above that budget, so the ceiling is raised when the
-    /// caller's is too low. An endpoint with no equivalent is left untouched
-    /// and a warning says so — the request is not silently reshaped.
-    fn apply_reasoning_effort(&self, body: &mut serde_json::Value, max_tokens: u32) {
+    /// Anthropic-style endpoints express effort as thinking, and *how* they
+    /// express it depends on the model: 4.7 and later reject
+    /// `budget_tokens` with a 400 and take `{"type":"adaptive"}` plus a
+    /// top-level `output_config.effort`; 4.6 accepts both but deprecates the
+    /// budget; 4.5 and earlier reject `adaptive`. The choice is made by
+    /// [`ModelId::thinking_encoding`] rather than by guessing from the
+    /// provider, because the wrong one is a hard error, not a degradation.
+    ///
+    /// On the budget encoding, Anthropic rejects a body whose `max_tokens` is
+    /// not above that budget, so the ceiling is raised when the caller's is
+    /// too low. The adaptive encoding has no budget, so the ceiling is left
+    /// alone. An endpoint with no equivalent is left untouched and a warning
+    /// says so — the request is not silently reshaped.
+    fn apply_reasoning_effort(
+        &self,
+        body: &mut serde_json::Value,
+        model: &ModelId,
+        max_tokens: u32,
+    ) {
         let Some(effort) = self.config.effective_reasoning_effort() else {
             return;
         };
         match self.reasoning_effort_support() {
             ReasoningEffortSupport::AnthropicThinking => {
-                let budget = effort.anthropic_thinking_budget();
-                if let Some(object) = body.as_object_mut() {
-                    object.insert(
-                        "thinking".into(),
-                        serde_json::json!({"type": "enabled", "budget_tokens": budget}),
+                let Some(object) = body.as_object_mut() else {
+                    return;
+                };
+                // A level this model does not have is a 400, so the request
+                // steps down to the highest level it does have instead of
+                // failing the turn. `low`..=`high` are accepted by every model
+                // that supports effort, so this only ever trims `xhigh`/`max`.
+                let requested = effort;
+                let effort = supported_effort(model, effort).unwrap_or(effort);
+                if effort != requested {
+                    tracing::debug!(
+                        model = %model.0,
+                        requested = %requested,
+                        applied = %effort,
+                        "model has no such effort level; stepped down"
                     );
-                    if max_tokens <= budget {
-                        object.insert("max_tokens".into(), serde_json::json!(budget + 1024));
+                }
+                match model.thinking_encoding() {
+                    ThinkingEncoding::Adaptive => {
+                        object.insert("thinking".into(), serde_json::json!({"type": "adaptive"}));
+                        object.insert(
+                            "output_config".into(),
+                            serde_json::json!({"effort": effort.as_str()}),
+                        );
+                    }
+                    ThinkingEncoding::BudgetTokens => {
+                        let budget = effort.anthropic_thinking_budget();
+                        object.insert(
+                            "thinking".into(),
+                            serde_json::json!({"type": "enabled", "budget_tokens": budget}),
+                        );
+                        if max_tokens <= budget {
+                            object.insert("max_tokens".into(), serde_json::json!(budget + 1024));
+                        }
                     }
                 }
             }
@@ -1422,7 +1533,7 @@ impl ApiClient for AnthropicApiClient {
         });
         self.attach_metadata(&mut body, &request_id);
         self.shape_body(&mut body, model_name);
-        self.apply_reasoning_effort(&mut body, max_tokens);
+        self.apply_reasoning_effort(&mut body, model, max_tokens);
 
         let capabilities = self.resolved_profile().capabilities;
         let tool_fallback = !tools.is_empty() && !capabilities.tool_use;
@@ -1630,7 +1741,7 @@ impl ApiClient for AnthropicApiClient {
         });
         self.attach_metadata(&mut body, &request_id);
         self.shape_body(&mut body, &model_name);
-        self.apply_reasoning_effort(&mut body, max_tokens);
+        self.apply_reasoning_effort(&mut body, model, max_tokens);
 
         let capabilities = self.resolved_profile().capabilities;
         let tool_fallback = !tools.is_empty() && !capabilities.tool_use;
@@ -2283,11 +2394,18 @@ mod tests {
         assert_eq!(ReasoningEffort::parse("low"), Some(ReasoningEffort::Low));
         assert_eq!(ReasoningEffort::parse("HIGH"), Some(ReasoningEffort::High));
         assert_eq!(
+            ReasoningEffort::parse("XHigh"),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
+        assert_eq!(
             ReasoningEffort::parse(" medium "),
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(ReasoningEffort::parse("maximum"), None);
         assert_eq!(ReasoningEffort::High.as_str(), "high");
+        assert_eq!(ReasoningEffort::XHigh.as_str(), "xhigh");
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
         assert_eq!(
             "medium".parse::<ReasoningEffort>(),
             Ok(ReasoningEffort::Medium)
@@ -2298,6 +2416,57 @@ mod tests {
         assert_eq!(json, "\"low\"");
         let parsed: ReasoningEffort = serde_json::from_str("\"high\"").expect("deserializes");
         assert_eq!(parsed, ReasoningEffort::High);
+        let parsed: ReasoningEffort = serde_json::from_str("\"xhigh\"").expect("deserializes");
+        assert_eq!(parsed, ReasoningEffort::XHigh);
+
+        // ALL is ordered cheapest-first, which is what the step-down relies on.
+        assert_eq!(
+            ReasoningEffort::ALL,
+            [
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_level_the_model_lacks_steps_down_to_one_it_has() {
+        // 5.x has all five.
+        let opus = ModelId("claude-opus-5-5".into());
+        assert_eq!(
+            supported_effort(&opus, ReasoningEffort::XHigh),
+            Some(ReasoningEffort::XHigh)
+        );
+        assert_eq!(
+            supported_effort(&opus, ReasoningEffort::Max),
+            Some(ReasoningEffort::Max)
+        );
+
+        // Sonnet 4.6 has `max` but not `xhigh`.
+        let sonnet_46 = ModelId("claude-sonnet-4-6".into());
+        assert_eq!(
+            supported_effort(&sonnet_46, ReasoningEffort::XHigh),
+            Some(ReasoningEffort::High),
+            "xhigh is not a 4.6 level, so it lands on high"
+        );
+        assert_eq!(
+            supported_effort(&sonnet_46, ReasoningEffort::Max),
+            Some(ReasoningEffort::Max)
+        );
+
+        // 4.5 has neither.
+        let haiku_45 = ModelId("claude-haiku-4-5-20251001".into());
+        assert_eq!(
+            supported_effort(&haiku_45, ReasoningEffort::Max),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            supported_effort(&haiku_45, ReasoningEffort::Low),
+            Some(ReasoningEffort::Low)
+        );
     }
 
     fn count_cache_markers(value: &serde_json::Value) -> usize {
@@ -2462,16 +2631,22 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_effort_becomes_a_thinking_budget() {
+    fn anthropic_effort_becomes_a_thinking_budget_on_a_legacy_model() {
         let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::High);
         let client = AnthropicApiClient::new(config);
         let mut body = serde_json::json!({"max_tokens": 1024});
-        client.apply_reasoning_effort(&mut body, 1024);
+        // 4.5 and earlier accept only the extended-thinking encoding.
+        let model = ModelId("claude-haiku-4-5-20251001".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
 
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 16_384);
         // Anthropic rejects max_tokens <= budget_tokens, so the ceiling moves.
         assert_eq!(body["max_tokens"], 16_384 + 1024);
+        assert!(
+            body.get("output_config").is_none(),
+            "effort rides inside thinking on this encoding"
+        );
     }
 
     #[test]
@@ -2479,11 +2654,95 @@ mod tests {
         let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::Low);
         let client = AnthropicApiClient::new(config);
         let mut body = serde_json::json!({"max_tokens": 8192});
-        client.apply_reasoning_effort(&mut body, 8192);
+        let model = ModelId("claude-haiku-4-5-20251001".into());
+        client.apply_reasoning_effort(&mut body, &model, 8192);
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
         assert_eq!(
             body["max_tokens"], 8192,
             "a ceiling above the budget is left alone"
+        );
+    }
+
+    /// The bug this guards against: 4.7+ rejects `budget_tokens` outright, so
+    /// a session on a 5.x model with `--effort` used to 400 on every turn.
+    #[test]
+    fn a_modern_model_gets_adaptive_thinking_not_a_budget() {
+        for name in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-opus-4-7",
+        ] {
+            let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::Medium);
+            let client = AnthropicApiClient::new(config);
+            let mut body = serde_json::json!({"max_tokens": 1024});
+            let model = ModelId(name.into());
+            client.apply_reasoning_effort(&mut body, &model, 1024);
+
+            assert_eq!(body["thinking"]["type"], "adaptive", "{name}");
+            assert!(
+                body["thinking"].get("budget_tokens").is_none(),
+                "{name} must not send a budget"
+            );
+            assert_eq!(body["output_config"]["effort"], "medium", "{name}");
+            assert_eq!(
+                body["max_tokens"], 1024,
+                "{name}: the adaptive encoding has no budget to clear"
+            );
+        }
+    }
+
+    #[test]
+    fn xhigh_reaches_a_5_x_model_and_steps_down_on_a_4_6() {
+        let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::XHigh);
+        let client = AnthropicApiClient::new(config);
+
+        let mut body = serde_json::json!({"max_tokens": 1024});
+        let model = ModelId("claude-opus-5-5".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+
+        // 4.6 has no `xhigh`; sending it would be a 400.
+        let mut body = serde_json::json!({"max_tokens": 1024});
+        let model = ModelId("claude-sonnet-4-6".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
+        assert_eq!(body["output_config"]["effort"], "high");
+
+        // On the legacy budget encoding the effort modulates the budget, and
+        // a level the model lacks still steps down rather than 400ing.
+        let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::Max);
+        let client = AnthropicApiClient::new(config);
+        let mut body = serde_json::json!({"max_tokens": 1024});
+        let model = ModelId("claude-haiku-4-5-20251001".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
+        assert_eq!(
+            body["thinking"]["budget_tokens"], 16_384,
+            "4.5 tops out at high, so max lands on the high budget"
+        );
+    }
+
+    #[test]
+    fn a_4_6_model_uses_adaptive_because_the_budget_is_deprecated() {
+        for name in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            assert_eq!(
+                ModelId(name.into()).thinking_encoding(),
+                ThinkingEncoding::Adaptive,
+                "{name}"
+            );
+        }
+        for name in ["claude-haiku-4-5-20251001", "claude-sonnet-4-5"] {
+            assert_eq!(
+                ModelId(name.into()).thinking_encoding(),
+                ThinkingEncoding::BudgetTokens,
+                "{name}"
+            );
+        }
+        // An unknown name is not assumed to be new.
+        assert_eq!(
+            ModelId("my-gateway-model".into()).thinking_encoding(),
+            ThinkingEncoding::BudgetTokens
         );
     }
 
@@ -2494,7 +2753,7 @@ mod tests {
             .with_reasoning_effort(ReasoningEffort::High);
         let client = AnthropicApiClient::new(config);
         let mut body = serde_json::json!({"max_tokens": 1024});
-        client.apply_reasoning_effort(&mut body, 1024);
+        client.apply_reasoning_effort(&mut body, &ModelId::opus(), 1024);
         // The field is omitted rather than sent to a provider that would
         // reject it; the warning is what makes that honest.
         assert!(body.get("thinking").is_none());
@@ -3021,15 +3280,15 @@ mod tests {
     fn model_routing_resolves_correctly() {
         assert_eq!(
             AnthropicApiClient::resolve_model(&ModelId::sonnet()),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5-5"
         );
         assert_eq!(
             AnthropicApiClient::resolve_model(&ModelId::opus()),
-            "claude-opus-4-6"
+            "claude-opus-5-5"
         );
         assert_eq!(
             AnthropicApiClient::resolve_model(&ModelId::haiku()),
-            "claude-haiku-4-5-20251001"
+            "claude-haiku-5-5"
         );
     }
 

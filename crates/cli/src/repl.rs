@@ -65,6 +65,14 @@ struct SessionEffects {
     pending_submit_prompt: Option<String>,
     /// Whether a title has been generated for this session.
     title_generated: bool,
+    /// Images waiting to ride on the next turn.
+    ///
+    /// `--image` fills this at startup, `@shot.png` and a clipboard paste fill
+    /// it as the person composes a prompt, and the next submission takes it.
+    /// An image belongs to exactly one turn, which is why this is drained
+    /// rather than copied: re-sending a screenshot with every later request
+    /// would charge for it again and confuse "this one" with "that one".
+    pending_images: Vec<codape_core::types::ImageBlock>,
 }
 
 // ─── Runtime tool handles ───────────────────────────────────────────────────
@@ -1542,6 +1550,15 @@ fn core_message_to_ui_message(
                 folded,
             )
         }
+        // An image the person attached. The base64 payload must never reach
+        // the debug fallback below — it is megabytes of noise and it would
+        // bury the conversation.
+        (_, codape_core::types::MessageContent::Image(image)) => (
+            codape_ui::message_list::MessageRole::User,
+            format!("[image: {}]", image.media_type),
+            None,
+            false,
+        ),
         (_, content) => (
             codape_ui::message_list::MessageRole::System,
             format!("{content:?}"),
@@ -4285,6 +4302,12 @@ impl ReplLoop {
         self.options.pr_context = context;
     }
 
+    /// Queue images to attach to the next turn (`--image`, or one attached
+    /// before the loop starts).
+    pub fn with_pending_images(&mut self, images: Vec<codape_core::types::ImageBlock>) {
+        self.session.effects.pending_images.extend(images);
+    }
+
     /// The feature flags resolved for this session.
     #[must_use]
     pub const fn feature_flags(&self) -> &codape_config::flags::FeatureFlags {
@@ -5974,6 +5997,35 @@ impl ReplLoop {
             return TuiKeyFlow::Handled;
         }
 
+        // Ctrl+V: attach the image on the clipboard. A screenshot is usually
+        // taken *because* there is no file to name, so requiring `--image
+        // shot.png` first would be the whole problem. Text on the clipboard
+        // is not pasted here — the terminal's own paste already does that —
+        // and a clipboard with no image says so instead of doing nothing.
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !ui_state.overlays.is_active()
+            && live.pending_confirmation.is_none()
+            && self.mcp.pending_form.is_none()
+            && self.mcp.pending_elicitation.is_none()
+        {
+            match crate::image_input::read_clipboard_image() {
+                Ok(image) => {
+                    let media_type = image.media_type.clone();
+                    self.session.effects.pending_images.push(image);
+                    ui_state
+                        .notifications
+                        .success(format!("Image attached on the next prompt ({media_type})"));
+                }
+                Err(error) => {
+                    ui_state
+                        .notifications
+                        .warn(format!("No image attached: {error}"));
+                }
+            }
+            return TuiKeyFlow::Handled;
+        }
+
         // Handle Confirm overlay for destructive commands
         if matches!(
             ui_state.overlays.top(),
@@ -7575,6 +7627,20 @@ impl ReplLoop {
         }
         let _ = terminal_ui.exit();
         let _ = disable_raw_mode();
+
+        // The session is over. A hook that records it runs here, after the
+        // terminal is restored — and the engine latches, so a headless run's
+        // own completion and an interrupt cannot make it run twice. A
+        // terminating signal counts as an interruption: the person did not
+        // close the session, something did.
+        let end_reason = match (&result, signal_exit) {
+            (Err(_), _) => "error",
+            (_, Some(_)) => "interrupted",
+            _ => "completed",
+        };
+        if let Some(engine) = self.session.engine.as_ref() {
+            engine.fire_session_end_hook(end_reason).await;
+        }
         self.session.event_rx = event_rx;
         self.stop_artifact_serving().await;
 
@@ -7688,6 +7754,15 @@ impl ReplLoop {
                     result = Ok(answer);
                 }
             }
+        }
+
+        // The session is over: this is the only hook that runs after the last
+        // turn, so a session record is written here rather than from the
+        // command that happened to end it. The engine latches, so the
+        // interactive exit path and an interrupt cannot fire it a second time.
+        if let Some(engine) = self.session.engine.as_ref() {
+            let reason = if result.is_ok() { "completed" } else { "error" };
+            engine.fire_session_end_hook(reason).await;
         }
 
         // Headless runs used to leave no transcript behind, so `--print`
@@ -8824,6 +8899,13 @@ impl ReplLoop {
                     .map(|ctx| Message::user(format!("Additional context: {ctx}")))
                     .collect(),
             );
+        }
+
+        // An image belongs to the turn it was attached for. Draining here
+        // means a retry after a failure does not silently send it twice, and
+        // a later unrelated prompt does not carry a stale screenshot.
+        if !self.session.effects.pending_images.is_empty() {
+            options.attached_images = std::mem::take(&mut self.session.effects.pending_images);
         }
 
         // Apply CLI flag overrides
@@ -10394,15 +10476,29 @@ impl ReplLoop {
         // turn text and the person is told why.
         let mut expanded = text.to_string();
         if !text.starts_with('/') {
-            let (expanded_text, attached, skipped) =
-                crate::file_mentions::expand(text, std::path::Path::new(&self.cwd));
-            if !attached.is_empty() || !skipped.is_empty() {
-                expanded = expanded_text;
+            let expansion = crate::file_mentions::expand(text, std::path::Path::new(&self.cwd));
+            if expansion.changed_anything() {
+                expanded = expansion.text;
             }
-            if !skipped.is_empty() {
+            if !expansion.images.is_empty() {
+                let count = expansion.images.len();
+                self.session.effects.pending_images.extend(expansion.images);
                 ui_state.messages.push(codape_ui::message_list::Message {
                     role: codape_ui::message_list::MessageRole::System,
-                    content: format!("Not attached: {}", skipped.join("; ")).into(),
+                    content: match count {
+                        1 => "Attached 1 image to this prompt".to_string(),
+                        other => format!("Attached {other} images to this prompt"),
+                    }
+                    .into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                });
+            }
+            if !expansion.skipped.is_empty() {
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
+                    content: format!("Not attached: {}", expansion.skipped.join("; ")).into(),
                     tool_name: None,
                     streaming: false,
                     folded: false,

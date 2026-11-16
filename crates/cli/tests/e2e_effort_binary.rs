@@ -54,8 +54,9 @@ fn chunk(delta: &serde_json::Value, finish: Option<&str>) -> String {
     )
 }
 
-#[tokio::test]
-async fn effort_reaches_an_openai_shaped_provider() {
+/// Run one turn against a capture server and return every body it saw, plus
+/// the child's output.
+async fn capture_one_turn(effort: &str) -> (Vec<serde_json::Value>, std::process::Output) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let base_url = format!("http://{}", listener.local_addr().expect("addr"));
     let bodies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
@@ -103,18 +104,25 @@ async fn effort_reaches_an_openai_shaped_provider() {
     let cwd = dir.path().to_path_buf();
     let base_for_child = base_url.clone();
     let home = config_home.path().to_path_buf();
-    let output = tokio::task::spawn_blocking(move || run(&cwd, &base_for_child, &home, "high"))
+    let effort = effort.to_string();
+    let output = tokio::task::spawn_blocking(move || run(&cwd, &base_for_child, &home, &effort))
         .await
         .expect("join");
     server.abort();
     let _ = server.await;
+    let bodies = bodies.lock().unwrap().clone();
+    (bodies, output)
+}
+
+#[tokio::test]
+async fn effort_reaches_an_openai_shaped_provider() {
+    let (bodies, output) = capture_one_turn("high").await;
 
     assert!(
         output.status.success(),
         "codape failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let bodies = bodies.lock().unwrap().clone();
     assert!(!bodies.is_empty(), "no provider request was made");
     let main = bodies
         .iter()
@@ -128,6 +136,28 @@ async fn effort_reaches_an_openai_shaped_provider() {
         String::from_utf8_lossy(&output.stdout).contains("effort answer"),
         "{}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// `xhigh` and `max` are Anthropic levels; an OpenAI-shaped endpoint's ladder
+/// ends at `high`, so the top two must arrive as `high` rather than as a value
+/// it would reject.
+#[tokio::test]
+async fn xhigh_is_sent_as_high_to_an_openai_shaped_provider() {
+    let (bodies, output) = capture_one_turn("xhigh").await;
+
+    assert!(
+        output.status.success(),
+        "codape failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let main = bodies
+        .iter()
+        .find(|body| body["max_tokens"] == 32_768)
+        .expect("the turn request is present");
+    assert_eq!(
+        main["reasoning_effort"], "high",
+        "xhigh must be capped at this endpoint's top level: {main:?}"
     );
 }
 

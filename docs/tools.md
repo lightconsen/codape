@@ -34,7 +34,7 @@ Implements the tool trait system, registers built-in tools, and provides executi
 | Read, Write, Edit, Glob, Grep, NotebookEdit | File I/O | Functional |
 | Bash, PowerShell | Shell execution | Functional (sandbox + allowlist + metacharacter rejection). **One of the two is registered, chosen by platform**: PowerShell on Windows, Bash everywhere else — see below. |
 | WebSearch | Web | Functional (rate limiting, domain whitelist, redirect validation) |
-| Skill | Skill loading | Functional (reads `.md` files) |
+| Skill | Skill loading | Functional (bundled skills compiled into the binary, plus `.md` files on disk) |
 | Brief | Session summary | Functional |
 | TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, TaskOutput | Task management | Functional (JSONL persistence via `TaskStore`) |
 | JobList, JobOutput, JobKill | Background shell jobs | Functional (reads and stops the jobs `Bash` records under `.codape/jobs`) |

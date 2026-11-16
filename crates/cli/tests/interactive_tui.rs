@@ -945,6 +945,64 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
     );
 }
 
+/// A TUI session fires `SessionEnd` on the way out, with the reason it closed.
+///
+/// This is the close path a headless run does not exercise: the person ends the
+/// session from the terminal, and the hook is the only thing that runs after
+/// the last turn.
+#[cfg(unix)]
+#[test]
+fn closing_the_tui_fires_sessionend_with_the_reason() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = setup_project_dir();
+    let marker = dir.path().join("session-end.jsonl");
+    let script = dir.path().join("session-end.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat >> {}\nprintf '\\n' >> {}\nprintf '%s\\n' '{{}}'\n",
+            marker.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let home = tempfile::tempdir().expect("config home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        serde_json::json!({
+            "config_version": 4,
+            "telemetry_enabled": false,
+            "hooks": [{
+                "event": "SessionEnd",
+                "command": script.display().to_string(),
+                "timeout_ms": 5000,
+                "sandbox": {"enabled": false}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
+    session.ctrl_d();
+    session.wait_for_exit(SCREEN_TIMEOUT);
+
+    let recorded = std::fs::read_to_string(&marker).unwrap_or_default();
+    let inputs: Vec<&str> = recorded.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(inputs.len(), 1, "SessionEnd must fire once: {recorded}");
+    let input: serde_json::Value =
+        serde_json::from_str(inputs[0]).expect("SessionEnd input is JSON");
+    assert_eq!(input["event"], "SessionEnd");
+    assert_eq!(
+        input["input"], "completed",
+        "a session closed from the prompt reports completed: {input}"
+    );
+}
+
 /// Ported from kimi-code's terminal-notification contract: a terminal that
 /// supports OSC 9 receives the notification when a turn completes, and the
 /// payload is exactly the formatted message.

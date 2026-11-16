@@ -528,8 +528,8 @@ fn cost_tracker_with_cache_tokens() {
     tracker.record_usage(&usage, &ModelId::sonnet());
     let cost = tracker.get_turn_cost();
 
-    // Cost should include cache tokens
-    let pricing = ModelPricing::sonnet();
+    // Cost should include cache tokens, at Sonnet 5.5's rates.
+    let pricing = ModelPricing::sonnet_5();
     let expected = pricing.calculate(&usage);
     assert!((cost - expected).abs() < 1e-9);
 }
@@ -544,13 +544,18 @@ fn pricing_for_model_defaults() {
 #[test]
 fn pricing_for_opus() {
     let p = pricing_for_model(&ModelId::opus());
-    assert_eq!(p.input_per_million, 15.0);
+    assert_eq!(p.input_per_million, 4.0);
+    // The previous generation is a separate price, not an alias.
+    let legacy = pricing_for_model(&ModelId("claude-opus-4-6".into()));
+    assert_eq!(legacy.input_per_million, 5.0);
 }
 
 #[test]
 fn pricing_for_haiku() {
     let p = pricing_for_model(&ModelId::haiku());
-    assert_eq!(p.input_per_million, 0.8);
+    assert_eq!(p.input_per_million, 0.1);
+    let legacy = pricing_for_model(&ModelId("claude-haiku-4-5-20251001".into()));
+    assert_eq!(legacy.input_per_million, 1.0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

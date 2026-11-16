@@ -15,7 +15,7 @@
 | `plugins` | PluginManager, marketplace reconciliation, manifest loading |
 | `bridge` | Remote session orchestration, transport, heartbeat, state machine |
 | `server` | WebSocket daemon server, session auth, idle cleanup |
-| `hooks` | Hook event system (22 events), sync/async execution, timeout |
+| `hooks` | Hook event system (23 events), sync/async execution, timeout |
 | `config` | Settings merge (defaults->user->project), feature flags, enterprise |
 | `events` | In-process broadcast event bus (session event fan-out; external I/O is `server`) |
 

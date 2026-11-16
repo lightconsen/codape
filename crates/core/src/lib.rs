@@ -8,6 +8,7 @@
 
 pub mod api_client;
 pub mod budget;
+pub mod bundled_skills;
 pub mod checkpoints;
 pub mod compact;
 pub mod compaction_backend;

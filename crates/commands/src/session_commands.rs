@@ -114,7 +114,7 @@ mod tests {
         let result = reg.execute("session", &ctx(), &[]);
         assert!(result.output.contains("s1"));
         assert!(result.output.contains("Test"));
-        assert!(result.output.contains("claude-sonnet-4-6"));
+        assert!(result.output.contains("claude-sonnet-5-5"));
         assert!(result.output.contains("10"));
         assert!(result.output.contains("120s"));
         assert!(result.output.contains("main"));
