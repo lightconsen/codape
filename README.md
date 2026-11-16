@@ -45,13 +45,14 @@ OpenAI-compatible endpoint, configured by environment or settings file, with
 model, endpoint and credentials swappable per project.
 
 **It works in the terminal you already use.** A ratatui REPL with Vim
-bindings, syntax highlighting and themes; or one-shot non-interactive runs for
-scripts and CI; or a server mode for editors and other clients.
+bindings, syntax highlighting and themes; shortcuts you can rebind in
+`keybindings.json`; or one-shot non-interactive runs for scripts and CI; or a
+server mode for editors and other clients.
 
 | | |
 |---|---|
 | **Tools** | 54 tool types registered at startup — read, write, edit, glob, grep, shell, web fetch and search, LSP, notebook editing, tasks, cron, MCP, and the Chrome DevTools family |
-| **Commands** | 77 slash commands — `/commit`, `/compact`, `/review`, `/diff`, `/resume` and the rest of the daily-driver set (the count is what `/help` prints) |
+| **Commands** | 78 slash commands — `/commit`, `/compact`, `/review`, `/diff`, `/resume` and the rest of the daily-driver set (the count is what `/help` prints) |
 | **Sub-agents** | Six built-in agents (general, explore, plan, verification, and two setup helpers), plus your own; parallel and background execution in isolated worktrees |
 | **Memory** | JSONL transcripts, a searchable session index, and long-term memory that survives across sessions |
 | **Extensibility** | MCP servers, WASM and process plugins, hooks on 22 lifecycle events, and an embeddable WebSocket server |

@@ -77,6 +77,25 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
+    // /keybindings — handled directly by the REPL (built-in command).
+    //
+    // The live keymap belongs to the session: the REPL loads it from
+    // `keybindings.json` and resolves keys through it. This registry entry
+    // exists so `/help` lists the command and a remote consumer gets an answer
+    // that names the REPL instead of "Unknown command".
+    registry.register(SlashCommand::local(
+        "keybindings",
+        "List the active keyboard shortcuts and where they came from",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "Keybindings are handled by the REPL. Use /keybindings to list the active table.",
+            )
+        }),
+    ));
+
     // /ultraplan — super plan mode (feature-gated)
     registry.register(SlashCommand::local(
         "ultraplan",

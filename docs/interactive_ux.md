@@ -339,7 +339,7 @@ A Claude Code-like UX must be interruptible.
 
 Add support for:
 
-- `Esc` or `Ctrl+C` to cancel the current stage when safe
+- `Esc` or `Ctrl+C` to cancel the current stage when safe (`Esc` is the `chat:cancel` binding and can be moved or removed in `keybindings.json`; `Ctrl+C` is the terminal's interrupt and stays hardcoded)
 - cancelling while waiting on permission
 - cancelling long-running tool/test phases
 - recovering cleanly to `Idle`

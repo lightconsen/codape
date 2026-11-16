@@ -2692,6 +2692,17 @@ struct UiPreferences {
     /// The directory `--worktree` moved the session out of, replayed into
     /// `CwdChanged` once the hooks are installed.
     worktree_previous_cwd: Option<std::path::PathBuf>,
+    /// The shortcuts this session answers to.
+    ///
+    /// Loaded from `keybindings.json` in the config home and the project, over
+    /// the built-in defaults. `apply_cli_config` fills it in; until then the
+    /// defaults are what `Default` builds, so a session that never runs the
+    /// loader still has working keys.
+    keybindings: codape_ui::keybindings::KeyBindings,
+    /// What loading `keybindings.json` reported, shown by `/keybindings`.
+    keybinding_notes: Vec<String>,
+    /// Files the keybindings were read from, in application order.
+    keybinding_sources: Vec<std::path::PathBuf>,
 }
 
 /// Which model to call, how much it may emit, and whether it was chosen.
@@ -3203,6 +3214,9 @@ impl ReplLoop {
                 settings_statusline_theme: None,
                 settings_statusline_format: None,
                 worktree_previous_cwd: None,
+                keybindings: codape_ui::keybindings::KeyBindings::default(),
+                keybinding_notes: Vec::new(),
+                keybinding_sources: Vec::new(),
             },
             shell_results: ShellResults {
                 tx: shell_results_tx,
@@ -3710,6 +3724,9 @@ impl ReplLoop {
                 settings_statusline_theme: None,
                 settings_statusline_format: None,
                 worktree_previous_cwd: None,
+                keybindings: codape_ui::keybindings::KeyBindings::default(),
+                keybinding_notes: Vec::new(),
+                keybinding_sources: Vec::new(),
             },
             shell_results: ShellResults {
                 tx: shell_results_tx,
@@ -4418,6 +4435,7 @@ impl ReplLoop {
         if let Some(ref theme) = self.ui.settings_statusline_theme {
             self.ui.current_theme = theme.clone();
         }
+        self.reload_keybindings();
 
         // 0. Named custom agent. The orchestrator rejects unknown names before
         // the loop starts; applying the definition here makes the selection
@@ -4922,6 +4940,27 @@ impl ReplLoop {
             }
         }
         self.hooks.active = installed_hook_count;
+    }
+
+    /// Read `keybindings.json` over the built-in defaults.
+    ///
+    /// The config home comes first and the project second, so a repository can
+    /// adjust what the user set without loosening it. Both files are optional,
+    /// and a broken one costs only itself: the defaults still apply and every
+    /// problem is kept as a note for `/keybindings` rather than failing the
+    /// startup of a session that would otherwise work.
+    fn reload_keybindings(&mut self) {
+        let home_file = codape_config::config_home().join("keybindings.json");
+        let project_file = std::path::Path::new(&self.cwd).join(".codape/keybindings.json");
+        let loaded = codape_ui::keybindings::KeyBindings::load(&[&home_file, &project_file]);
+        for note in &loaded.notes {
+            // Validation problems are warnings to the person who wrote the
+            // file, not reasons to start without keys.
+            tracing::warn!(note, "keybindings.json");
+        }
+        self.ui.keybinding_notes = loaded.notes;
+        self.ui.keybinding_sources = loaded.sources;
+        self.ui.keybindings = loaded.bindings;
     }
 
     /// Apply the named custom agent selected with `--agent`.
@@ -5794,6 +5833,20 @@ impl ReplLoop {
         }
     }
 
+    /// The shortcut a key performs in a context, if any.
+    ///
+    /// A thin wrapper so the handler reads as a lookup rather than a chain of
+    /// literal key comparisons; the table lives in
+    /// [`codape_ui::keybindings`], which also owns the `keybindings.json`
+    /// parsing and the defaults these replace.
+    fn shortcut(
+        &self,
+        context: codape_ui::keybindings::Context,
+        key: &crossterm::event::KeyEvent,
+    ) -> Option<codape_ui::keybindings::Action> {
+        self.ui.keybindings.resolve(context, key)
+    }
+
     /// Handle one key press from the interactive loop.
     ///
     /// Returns [`TuiKeyFlow::Handled`] for every key it consumed and
@@ -5821,6 +5874,7 @@ impl ReplLoop {
         queued_prompts: &mut std::collections::VecDeque<String>,
     ) -> TuiKeyFlow {
         use codape_ui::input::{InputAction, InputBuffer};
+        use codape_ui::keybindings::{Action as Shortcut, Context as ShortcutContext};
         use codape_ui::message_list::MessageRole;
         use codape_ui::overlay::Overlay;
         use codape_ui::state::ViewMode;
@@ -5882,8 +5936,8 @@ impl ReplLoop {
         // owns the keyboard, the way the MCP form does, so a query character
         // cannot land on the line behind it.
         if ui_state.history_search.is_none()
-            && key.code == KeyCode::Char('r')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.shortcut(codape_ui::keybindings::Context::Chat, &key)
+                == Some(codape_ui::keybindings::Action::HistorySearch)
         {
             ui_state.history_search = Some(codape_ui::history_search::HistorySearch::new(
                 &ui_state.input.history,
@@ -5892,18 +5946,22 @@ impl ReplLoop {
             return TuiKeyFlow::Handled;
         }
         if ui_state.history_search.is_some() {
+            // The search has its own key table: up/down walk the matches,
+            // enter/tab put one on the line, esc drops back to what was typed.
+            // Keys the table does not name still edit the query below.
+            let shortcut = self.shortcut(codape_ui::keybindings::Context::HistorySearch, &key);
             let history = ui_state.input.history.clone();
             let mut accept: Option<String> = None;
             let mut cancel = false;
             if let Some(search) = ui_state.history_search.as_mut() {
-                match key.code {
-                    KeyCode::Esc => cancel = true,
+                match shortcut {
+                    Some(Shortcut::HistorySearchCancel) => cancel = true,
                     // Enter puts the highlighted entry on the line rather
                     // than submitting it: Ctrl+R followed by Enter in a shell
                     // *runs* the command, but here Enter submits a prompt to
                     // the model, and picking from the list is not the same
                     // decision as sending it.
-                    KeyCode::Enter | KeyCode::Tab => {
+                    Some(Shortcut::HistorySearchAccept) => {
                         accept = Some(
                             search
                                 .current()
@@ -5911,15 +5969,18 @@ impl ReplLoop {
                                 .to_string(),
                         );
                     }
-                    KeyCode::Up => search.move_selection(-1),
-                    KeyCode::Down => search.move_selection(1),
-                    KeyCode::Backspace => search.pop_char(&history),
-                    KeyCode::Char(c)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL) && !c.is_control() =>
-                    {
-                        search.push_char(c, &history);
-                    }
-                    _ => {}
+                    Some(Shortcut::HistorySearchPrevious) => search.move_selection(-1),
+                    Some(Shortcut::HistorySearchNext) => search.move_selection(1),
+                    _ => match key.code {
+                        KeyCode::Backspace => search.pop_char(&history),
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !c.is_control() =>
+                        {
+                            search.push_char(c, &history);
+                        }
+                        _ => {}
+                    },
                 }
             }
             if cancel {
@@ -5983,79 +6044,76 @@ impl ReplLoop {
             return TuiKeyFlow::Handled;
         }
 
-        // Shift+Tab: cycle permission mode
-        if key.code == KeyCode::BackTab {
-            ui_state.permission_bar.cycle_mode();
-            if let Some(ref mut engine) = self.session.engine {
-                let checker = engine.permission_checker();
-                if let Ok(mut c) = checker.lock() {
-                    c.set_mode(ui_state.permission_bar.mode);
+        // Global shortcuts, from the keybindings table rather than a literal
+        // key: `Shift+Tab` cycles the permission mode, `Ctrl+O` folds tool
+        // output, and `Ctrl+Shift+S` splits the pane. Rebinding one in
+        // keybindings.json moves it here.
+        if let Some(shortcut) = self.shortcut(ShortcutContext::Chat, &key) {
+            match shortcut {
+                Shortcut::CyclePermissionMode => {
+                    ui_state.permission_bar.cycle_mode();
+                    if let Some(ref mut engine) = self.session.engine {
+                        let checker = engine.permission_checker();
+                        if let Ok(mut c) = checker.lock() {
+                            c.set_mode(ui_state.permission_bar.mode);
+                        }
+                    }
+                    return TuiKeyFlow::Handled;
                 }
+                Shortcut::ToggleToolOutput => {
+                    let fold = ui_state.messages.messages.iter().any(|message| {
+                        matches!(
+                            message.role,
+                            MessageRole::ToolCall | MessageRole::ToolResult
+                        ) && !message.folded
+                    });
+                    for message in &mut ui_state.messages.messages {
+                        if matches!(
+                            message.role,
+                            MessageRole::ToolCall | MessageRole::ToolResult
+                        ) {
+                            message.folded = fold;
+                        }
+                    }
+                    ui_state.notifications.info(if fold {
+                        "Tool output folded (Ctrl+O to expand)"
+                    } else {
+                        "Tool output expanded"
+                    });
+                    return TuiKeyFlow::Handled;
+                }
+                Shortcut::ToggleSplitPane => {
+                    use codape_ui::state::LayoutMode;
+                    ui_state.layout_mode = match ui_state.layout_mode {
+                        LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
+                        LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
+                    };
+                    return TuiKeyFlow::Handled;
+                }
+                Shortcut::ImagePaste
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none()
+                        && self.mcp.pending_elicitation.is_none() =>
+                {
+                    match crate::image_input::read_clipboard_image() {
+                        Ok(image) => {
+                            let media_type = image.media_type.clone();
+                            self.session.effects.pending_images.push(image);
+                            ui_state.notifications.success(format!(
+                                "Image attached on the next prompt ({media_type})"
+                            ));
+                        }
+                        Err(error) => {
+                            ui_state
+                                .notifications
+                                .warn(format!("No image attached: {error}"));
+                        }
+                    }
+                    return TuiKeyFlow::Handled;
+                }
+                _ => {}
             }
-            return TuiKeyFlow::Handled;
-        }
-
-        // Ctrl+O: fold or unfold every tool call/result row.
-        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            let fold = ui_state.messages.messages.iter().any(|message| {
-                matches!(
-                    message.role,
-                    MessageRole::ToolCall | MessageRole::ToolResult
-                ) && !message.folded
-            });
-            for message in &mut ui_state.messages.messages {
-                if matches!(
-                    message.role,
-                    MessageRole::ToolCall | MessageRole::ToolResult
-                ) {
-                    message.folded = fold;
-                }
-            }
-            ui_state.notifications.info(if fold {
-                "Tool output folded (Ctrl+O to expand)"
-            } else {
-                "Tool output expanded"
-            });
-            return TuiKeyFlow::Handled;
-        }
-
-        // Ctrl+Shift+S: toggle split-pane view
-        if key.code == KeyCode::Char('S') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            use codape_ui::state::LayoutMode;
-            ui_state.layout_mode = match ui_state.layout_mode {
-                LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
-                LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
-            };
-            return TuiKeyFlow::Handled;
-        }
-
-        // Ctrl+V: attach the image on the clipboard. A screenshot is usually
-        // taken *because* there is no file to name, so requiring `--image
-        // shot.png` first would be the whole problem. Text on the clipboard
-        // is not pasted here — the terminal's own paste already does that —
-        // and a clipboard with no image says so instead of doing nothing.
-        if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && !ui_state.overlays.is_active()
-            && live.pending_confirmation.is_none()
-            && self.mcp.pending_form.is_none()
-            && self.mcp.pending_elicitation.is_none()
-        {
-            match crate::image_input::read_clipboard_image() {
-                Ok(image) => {
-                    let media_type = image.media_type.clone();
-                    self.session.effects.pending_images.push(image);
-                    ui_state
-                        .notifications
-                        .success(format!("Image attached on the next prompt ({media_type})"));
-                }
-                Err(error) => {
-                    ui_state
-                        .notifications
-                        .warn(format!("No image attached: {error}"));
-                }
-            }
-            return TuiKeyFlow::Handled;
         }
 
         // Handle Confirm overlay for destructive commands
@@ -6063,8 +6121,10 @@ impl ReplLoop {
             ui_state.overlays.top(),
             Some(codape_ui::overlay::Overlay::Confirm { .. })
         ) {
-            match key.code {
-                KeyCode::Char('y' | 'Y') => {
+            // `y` runs, `n` and `esc` cancel — all three from the table, so a
+            // person who bound something else to them gets it.
+            match self.shortcut(ShortcutContext::Confirmation, &key) {
+                Some(Shortcut::ConfirmYes) => {
                     ui_state.overlays.pop();
                     if let Some((cmd, args)) = self.permissions.pending_destructive_cmd.take() {
                         self.execute_and_display_command(&cmd, &args, ui_state);
@@ -6072,7 +6132,7 @@ impl ReplLoop {
                         self.spawn_shell_command(command, ui_state);
                     }
                 }
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                Some(Shortcut::ConfirmNo) => {
                     ui_state.overlays.pop();
                     self.permissions.pending_destructive_cmd = None;
                     if let Some(command) = self.permissions.pending_shell_command.take() {
@@ -6102,8 +6162,8 @@ impl ReplLoop {
             ui_state.overlays.top(),
             Some(codape_ui::overlay::Overlay::PermissionDialog { .. })
         ) {
-            match key.code {
-                KeyCode::Char('a') => {
+            match self.shortcut(ShortcutContext::PermissionDialog, &key) {
+                Some(Shortcut::PermissionAllow) => {
                     if let Some(request) = live.pending_confirmation.take() {
                         self.respond_to_confirmation(
                             request,
@@ -6114,7 +6174,7 @@ impl ReplLoop {
                         .await;
                     }
                 }
-                KeyCode::Char('A') => {
+                Some(Shortcut::PermissionAllowSession) => {
                     if let Some(request) = live.pending_confirmation.take() {
                         self.respond_to_confirmation(
                             request,
@@ -6125,7 +6185,7 @@ impl ReplLoop {
                         .await;
                     }
                 }
-                KeyCode::Char('d' | 'D') | KeyCode::Esc => {
+                Some(Shortcut::PermissionDeny) => {
                     if let Some(request) = live.pending_confirmation.take() {
                         self.respond_to_confirmation(
                             request,
@@ -6148,17 +6208,19 @@ impl ReplLoop {
             Some(codape_ui::overlay::Overlay::CommandPalette { query, .. })
                 if query.starts_with('/')
         );
-        if inline_palette_active {
-            match key.code {
-                KeyCode::Up => {
+        if inline_palette_active
+            && let Some(shortcut) = self.shortcut(ShortcutContext::Autocomplete, &key)
+        {
+            match shortcut {
+                Shortcut::AutocompletePrevious => {
                     ui_state.overlays.move_palette_selection(-1);
                     return TuiKeyFlow::Handled;
                 }
-                KeyCode::Down => {
+                Shortcut::AutocompleteNext => {
                     ui_state.overlays.move_palette_selection(1);
                     return TuiKeyFlow::Handled;
                 }
-                KeyCode::Tab => {
+                Shortcut::AutocompleteAccept => {
                     if let Some(command) = selected_palette_command(ui_state) {
                         ui_state.input.text = format!("{command} ");
                         ui_state.input.cursor = ui_state.input.text.len();
@@ -6166,7 +6228,7 @@ impl ReplLoop {
                     }
                     return TuiKeyFlow::Handled;
                 }
-                KeyCode::Esc if vim.is_insert() => {
+                Shortcut::AutocompleteDismiss if vim.is_insert() => {
                     if matches!(
                         ui_state.overlays.top(),
                         Some(codape_ui::overlay::Overlay::CommandPalette { .. })
@@ -6189,6 +6251,10 @@ impl ReplLoop {
             ui_state.overlays.top(),
             Some(codape_ui::overlay::Overlay::FileMention { .. })
         ) {
+            // `FileMention` inherits the palette's keys and adds Enter, which
+            // is absent from the palette on purpose: in the `/` list Enter
+            // submits the line, and only here does it mean "take this entry".
+            let shortcut = self.shortcut(ShortcutContext::FileMention, &key);
             let mut insert: Option<String> = None;
             let mut dismiss = false;
             let mut consume = true;
@@ -6196,13 +6262,17 @@ impl ReplLoop {
                 files, selected, ..
             }) = ui_state.overlays.top_mut()
             {
-                match key.code {
-                    KeyCode::Up => *selected = selected.saturating_sub(1),
-                    KeyCode::Down if !files.is_empty() => {
+                match shortcut {
+                    Some(Shortcut::AutocompletePrevious) => {
+                        *selected = selected.saturating_sub(1);
+                    }
+                    Some(Shortcut::AutocompleteNext) if !files.is_empty() => {
                         *selected = (*selected + 1).min(files.len() - 1);
                     }
-                    KeyCode::Tab | KeyCode::Enter => insert = files.get(*selected).cloned(),
-                    KeyCode::Esc => dismiss = true,
+                    Some(Shortcut::FileMentionAccept | Shortcut::AutocompleteAccept) => {
+                        insert = files.get(*selected).cloned();
+                    }
+                    Some(Shortcut::AutocompleteDismiss) => dismiss = true,
                     // Everything else edits the line, which the sync at the
                     // end of the handler then folds into the list.
                     _ => consume = false,
@@ -6222,12 +6292,13 @@ impl ReplLoop {
             }
         }
 
-        if !self.ui.vim_mode_enabled && key.code == KeyCode::Esc {
-            // Esc means "stop the run" whether or not Vim
-            // mode is on. Only the Vim path used to reach
-            // the interrupt, so in the default mode Esc did
-            // nothing while the model was answering — the
-            // one moment a person most wants it to.
+        // The cancel key (Esc unless rebound) means "stop the run" whether or
+        // not Vim mode is on. Only the Vim path used to reach the interrupt,
+        // so in the default mode Esc did nothing while the model was answering
+        // — the one moment a person most wants it to.
+        if !self.ui.vim_mode_enabled
+            && self.shortcut(ShortcutContext::Chat, &key) == Some(Shortcut::Cancel)
+        {
             if *thinking {
                 self.stop_running_query(
                     ui_state,
@@ -10819,6 +10890,22 @@ impl ReplLoop {
                         }
                         return;
                     }
+                    "keybindings" => {
+                        // Reading the file again is what makes the command
+                        // useful: otherwise the table it prints is only what
+                        // startup saw, and a person who just edited the file
+                        // would be told their edit did nothing.
+                        self.reload_keybindings();
+                        let message = self.handle_keybindings_command();
+                        ui_state.messages.push(codape_ui::message_list::Message {
+                            role: codape_ui::message_list::MessageRole::System,
+                            content: message.into(),
+                            tool_name: None,
+                            streaming: false,
+                            folded: false,
+                        });
+                        return;
+                    }
                     "style" => {
                         let message = self.handle_output_style_command(&args);
                         ui_state.messages.push(codape_ui::message_list::Message {
@@ -11725,6 +11812,14 @@ impl ReplLoop {
                     writeln!(stdout, "{message}")?;
                     return Ok(());
                 }
+                "keybindings" => {
+                    // Same reason as the TUI arm: print what the session would
+                    // do after the file as it is now, not as it was at startup.
+                    self.reload_keybindings();
+                    let message = self.handle_keybindings_command();
+                    writeln!(stdout, "{message}")?;
+                    return Ok(());
+                }
                 "macro" => {
                     match self.handle_macro_command(&args) {
                         MacroCommandOutcome::Message(message) => {
@@ -12249,6 +12344,67 @@ impl ReplLoop {
             request = request.union(&codape_config::TrustRequest::from_settings_json(&value));
         }
         request
+    }
+
+    /// Handle /keybindings — what the shortcuts are and where they came from.
+    ///
+    /// The table is the session's live keymap, not the defaults: a binding the
+    /// person wrote is shown as it was applied (including the ones that were
+    /// rejected, which appear as notes). A command that printed only the file
+    /// would tell them what they wrote, not what the session does.
+    fn handle_keybindings_command(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::from("Keybindings");
+        if self.ui.keybinding_sources.is_empty() {
+            output.push_str("\nSources: built-in defaults only\nNo keybindings.json was found at ");
+            let _ = writeln!(
+                output,
+                "{} or {}.",
+                codape_config::config_home()
+                    .join("keybindings.json")
+                    .display(),
+                std::path::Path::new(&self.cwd)
+                    .join(".codape/keybindings.json")
+                    .display()
+            );
+        } else {
+            output.push_str("\nSources (applied in this order):");
+            for path in &self.ui.keybinding_sources {
+                let _ = write!(output, "\n  {}", path.display());
+            }
+        }
+        if !self.ui.keybinding_notes.is_empty() {
+            let _ = write!(
+                output,
+                "\n\n{} problem(s) in the files:",
+                self.ui.keybinding_notes.len()
+            );
+            for note in &self.ui.keybinding_notes {
+                let _ = write!(output, "\n  {note}");
+            }
+        }
+        output.push_str("\n\nShortcuts:");
+        for (action, strokes) in self.ui.keybindings.table() {
+            let keys = if strokes.is_empty() {
+                "(unbound)".to_string()
+            } else {
+                strokes.join(", ")
+            };
+            let _ = write!(
+                output,
+                "\n  {:<28} {:<32} {}",
+                action.as_str(),
+                keys,
+                action.context().as_str()
+            );
+        }
+        output.push_str(
+            "\n\nRebind with keybindings.json: \
+             {\"bindings\":[{\"context\":\"Chat\",\"bindings\":{\"ctrl+o\":\"app:toggleToolOutput\"}}]}. \
+             A key assigned to another action moves it; `null` removes a binding.",
+        );
+        output
     }
 
     /// Handle /recover command — restore session from crash recovery snapshot.
@@ -16668,6 +16824,99 @@ mod tests {
         }
         assert!(ui_state.history_search.is_none());
         assert_eq!(ui_state.input.text, "kept", "Esc lost the draft");
+    }
+
+    /// A key from `keybindings.json` reaches the branch it names.
+    ///
+    /// The point of the table is that the handler consults it rather than a
+    /// second copy of the defaults: a key that resolves to an action but never
+    /// reaches the code that performs it would make the file decorative.
+    #[tokio::test]
+    async fn a_remapped_key_reaches_its_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("keybindings.json");
+        std::fs::write(
+            &file,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+j":"app:toggleToolOutput"}},
+                            {"context":"Chat","bindings":{"esc":null}}]}"#,
+        )
+        .unwrap();
+        let loaded = codape_ui::keybindings::KeyBindings::load(&[&file]);
+        assert!(loaded.notes.is_empty(), "{:?}", loaded.notes);
+
+        let mut repl = repl_with_keys(tmp.path());
+        repl.ui.keybindings = loaded.bindings;
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::ToolCall,
+            content: "Read(src/lib.rs)".into(),
+            tool_name: Some("Read".into()),
+            streaming: false,
+            folded: false,
+        });
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let mut thinking = false;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.handle_key_event(
+            ctrl('j'),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(
+            ui_state.messages.messages[0].folded,
+            "the rebound key did not fold the tool output"
+        );
+
+        // Esc still stops a run: the default survived the file, which only
+        // added a key. This is the branch the table was just moved onto, so
+        // the test would catch it going back to a literal that no longer
+        // matches what the session resolves.
+        thinking = true;
+        repl.handle_key_event(
+            press(KeyCode::Esc),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(!thinking, "Esc no longer cancels the running turn");
+    }
+
+    /// The command prints the live table, its provenance, and the problems it
+    /// found — the three things a person needs to explain why a key does not
+    /// do what they wrote.
+    #[test]
+    fn keybindings_command_prints_the_table_and_its_sources() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        let defaults = repl.handle_keybindings_command();
+        assert!(defaults.contains("built-in defaults only"), "{defaults}");
+        assert!(defaults.contains("ctrl+o"), "{defaults}");
+        assert!(defaults.contains("app:toggleToolOutput"), "{defaults}");
+        assert!(defaults.contains("HistorySearch"), "{defaults}");
+
+        repl.ui.keybinding_sources = vec![std::path::PathBuf::from("/tmp/keybindings.json")];
+        repl.ui.keybinding_notes = vec!["Global: \"ctl+j\" is not a modifier".into()];
+        let reported = repl.handle_keybindings_command();
+        assert!(reported.contains("/tmp/keybindings.json"), "{reported}");
+        assert!(reported.contains("1 problem(s)"), "{reported}");
+        assert!(reported.contains("not a modifier"), "{reported}");
     }
 
     #[tokio::test]

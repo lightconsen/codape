@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 77 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
+Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 78 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
 
 ## Design
 
@@ -18,7 +18,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (77 commands across 13 registered modules)
+### Command Inventory (78 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
@@ -33,7 +33,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |
-| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/agents`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/agents` is a REPL built-in the registry also lists so `/help` shows it |
+| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/agents`, `/keybindings`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/agents` and `/keybindings` are REPL built-ins the registry also lists so `/help` shows them |
 | `misc_commands` | `/advisor`, `/btw`, `/good-claude`, `/stickers`, `/bughunter`, `/issue`, `/env`, `/diff`, `/oauth-refresh`, `/backfill-sessions`, `/history` | Miscellaneous. `/history [n]` and `/history search <q>` read the session's recorded command lines. |
 | `macro_commands` | `/macro` (REPL built-in) | `MacroRegistry` loads, persists and expands macros. `/macro define <name> <command[; command…]>`, `list`, `run <name>`, `delete <name>` are handled by the REPL; a defined macro also runs by typing `/<name>`. |
 
@@ -64,6 +64,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/status` and `/doctor` show comprehensive system health (API key, MCP, git, model, feature flags).
 - `/memory` reads and searches long-term memory entries.
 - `/hooks`, `/mcp`, `/plugin`, `/skills`, `/tasks` list and manage subsystem state. `/hooks` names each installed hook with its event, kind, tier and target — taken from the registry the session built, not from a directory. `/mcp` reports the servers `.mcp.json` configures even when the session is not connected. `/plugin` reads both the project's `.codape/plugins` and the config home, and `/plugin install <source>` installs from a directory, git URL, `github:owner/repo` shorthand or archive. `/plugin components` lists the themes, output styles, workflows, monitors, LSP servers, channels, binaries, types and experimental data contributed by active plugins.
+- `/keybindings` prints the live keymap: every action, its keystrokes and its context, the files it was read from, and every problem found in them. It re-reads the files before printing, so a person who just edited `keybindings.json` sees the edit without restarting. Bindings live in `keybindings.json` under the config home and `.codape/`; see [ui.md](ui.md) → *Architecture Patterns*.
 - `/agents [list|logs <id> [count]|follow <id|all>]` is a REPL built-in: `list` names the agent definitions the session can spawn and the agents it has spawned, `logs` replays one agent's log, and `follow` subscribes to its events. A registry entry mirrors it so `/help` lists it.
 - `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins.
 - `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing.

@@ -1,0 +1,1266 @@
+//! User-configurable keybindings.
+//!
+//! Every shortcut the REPL answers to used to be a literal `KeyCode::Char(..)`
+//! comparison inside `handle_key_event`, so changing one meant editing Rust.
+//! This module owns the table instead: a fixed catalogue of actions, the
+//! keystrokes bound to each, and a `keybindings.json` that moves them.
+//!
+//! The file is keyed by *keystroke*, the way a person thinks about it:
+//!
+//! ```json
+//! {
+//!   "bindings": [
+//!     { "context": "Global", "bindings": { "ctrl+o": "app:toggleToolOutput" } },
+//!     { "context": "Confirmation", "bindings": { "ctrl+y": "confirm:yes" } }
+//!   ]
+//! }
+//! ```
+//!
+//! Assigning a keystroke to an action takes it away from whatever held it, so
+//! one key never means two things. `null` unbinds a keystroke entirely.
+//!
+//! Text editing keys (typing, backspace, cursor movement) are not here: they
+//! are the terminal's contract, not a preference, and rebinding them would
+//! make the input line unusable rather than configurable.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// The UI state a binding applies in.
+///
+/// A key means different things depending on what is on screen — `esc` closes
+/// an autocomplete list, cancels a run, and denies a permission prompt — so a
+/// binding names the context it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Context {
+    /// Active in every context; checked before the others.
+    Global,
+    /// The chat input line.
+    Chat,
+    /// A yes/no confirmation for a destructive command.
+    Confirmation,
+    /// The permission dialog.
+    PermissionDialog,
+    /// The `/` command palette.
+    Autocomplete,
+    /// The `@` file list.
+    ///
+    /// Its own context because accepting an entry there inserts a path, while
+    /// accepting one in the `/` palette replaces the line with a command — and
+    /// Enter means "take this entry" here but submits the prompt everywhere
+    /// else. The palette's keys are inherited, so Tab completes either.
+    FileMention,
+    /// Reverse history search (opened by `history:search`).
+    HistorySearch,
+}
+
+impl Context {
+    /// The name this context has in `keybindings.json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "Global",
+            Self::Chat => "Chat",
+            Self::Confirmation => "Confirmation",
+            Self::PermissionDialog => "PermissionDialog",
+            Self::Autocomplete => "Autocomplete",
+            Self::FileMention => "FileMention",
+            Self::HistorySearch => "HistorySearch",
+        }
+    }
+
+    /// Parse a context name from a file.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        // Case-insensitive so `chat` and `Chat` both work; the documented
+        // spelling is capitalised, matching the reference.
+        let lowered = name.to_ascii_lowercase();
+        [
+            Self::Global,
+            Self::Chat,
+            Self::Confirmation,
+            Self::PermissionDialog,
+            Self::Autocomplete,
+            Self::FileMention,
+            Self::HistorySearch,
+        ]
+        .into_iter()
+        .find(|context| context.as_str().to_ascii_lowercase() == lowered)
+    }
+
+    /// Every context, for help text and validation messages.
+    #[must_use]
+    pub const fn all() -> [Self; 7] {
+        [
+            Self::Global,
+            Self::Chat,
+            Self::Confirmation,
+            Self::PermissionDialog,
+            Self::Autocomplete,
+            Self::FileMention,
+            Self::HistorySearch,
+        ]
+    }
+}
+
+/// A shortcut the REPL performs.
+///
+/// The list is deliberately short enough to read: each variant is a branch of
+/// `handle_key_event` that used to compare a literal key. Adding one means
+/// adding that branch too, so the enum is not a wish list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Action {
+    /// Fold or unfold every tool call and result row.
+    ToggleToolOutput,
+    /// Switch between one pane and a split view.
+    ToggleSplitPane,
+    /// Advance the permission mode (default → accept edits → plan → …).
+    CyclePermissionMode,
+    /// Attach the image on the clipboard to the next prompt.
+    ImagePaste,
+    /// Stop the running turn, clear the input line, or close the overlay.
+    Cancel,
+    /// Open reverse history search.
+    HistorySearch,
+    /// Answer yes to a destructive-command confirmation.
+    ConfirmYes,
+    /// Answer no to a destructive-command confirmation.
+    ConfirmNo,
+    /// Allow this one tool call.
+    PermissionAllow,
+    /// Allow this tool for the rest of the session.
+    PermissionAllowSession,
+    /// Deny the tool call.
+    PermissionDeny,
+    /// Move the highlight up in the palette.
+    AutocompletePrevious,
+    /// Move the highlight down in the palette.
+    AutocompleteNext,
+    /// Insert the highlighted entry.
+    AutocompleteAccept,
+    /// Close the palette and keep the text as typed.
+    AutocompleteDismiss,
+    /// Insert the highlighted path into the input line.
+    FileMentionAccept,
+    /// Move to the previous history-search match.
+    HistorySearchPrevious,
+    /// Move to the next history-search match.
+    HistorySearchNext,
+    /// Put the selected history entry on the input line.
+    HistorySearchAccept,
+    /// Close history search without changing the line.
+    HistorySearchCancel,
+}
+
+impl Action {
+    /// The name this action has in `keybindings.json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToggleToolOutput => "app:toggleToolOutput",
+            Self::ToggleSplitPane => "app:toggleSplitPane",
+            Self::CyclePermissionMode => "app:cyclePermissionMode",
+            Self::ImagePaste => "chat:imagePaste",
+            Self::Cancel => "chat:cancel",
+            Self::HistorySearch => "history:search",
+            Self::ConfirmYes => "confirm:yes",
+            Self::ConfirmNo => "confirm:no",
+            Self::PermissionAllow => "permission:allow",
+            Self::PermissionAllowSession => "permission:allowSession",
+            Self::PermissionDeny => "permission:deny",
+            Self::AutocompletePrevious => "autocomplete:previous",
+            Self::AutocompleteNext => "autocomplete:next",
+            Self::AutocompleteAccept => "autocomplete:accept",
+            Self::AutocompleteDismiss => "autocomplete:dismiss",
+            Self::FileMentionAccept => "fileMention:accept",
+            Self::HistorySearchPrevious => "historySearch:previous",
+            Self::HistorySearchNext => "historySearch:next",
+            Self::HistorySearchAccept => "historySearch:accept",
+            Self::HistorySearchCancel => "historySearch:cancel",
+        }
+    }
+
+    /// The context this action is resolved in.
+    #[must_use]
+    pub const fn context(self) -> Context {
+        match self {
+            Self::ToggleToolOutput | Self::ToggleSplitPane | Self::CyclePermissionMode => {
+                Context::Global
+            }
+            Self::ImagePaste | Self::Cancel | Self::HistorySearch => Context::Chat,
+            Self::ConfirmYes | Self::ConfirmNo => Context::Confirmation,
+            Self::PermissionAllow | Self::PermissionAllowSession | Self::PermissionDeny => {
+                Context::PermissionDialog
+            }
+            Self::AutocompletePrevious
+            | Self::AutocompleteNext
+            | Self::AutocompleteAccept
+            | Self::AutocompleteDismiss => Context::Autocomplete,
+            Self::FileMentionAccept => Context::FileMention,
+            Self::HistorySearchPrevious
+            | Self::HistorySearchNext
+            | Self::HistorySearchAccept
+            | Self::HistorySearchCancel => Context::HistorySearch,
+        }
+    }
+
+    /// Parse an action name from a file.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        ALL_ACTIONS
+            .into_iter()
+            .find(|action| action.as_str() == name)
+    }
+
+    /// Every action, in a stable order.
+    #[must_use]
+    pub const fn all() -> [Self; 20] {
+        ALL_ACTIONS
+    }
+
+    /// The keystrokes this action has unless `keybindings.json` moves them.
+    #[must_use]
+    pub const fn defaults(self) -> &'static [&'static str] {
+        match self {
+            Self::ToggleToolOutput => &["ctrl+o"],
+            Self::ToggleSplitPane => &["ctrl+shift+s"],
+            Self::CyclePermissionMode => &["shift+tab"],
+            Self::ImagePaste => &["ctrl+v"],
+            Self::Cancel | Self::AutocompleteDismiss | Self::HistorySearchCancel => &["esc"],
+            Self::HistorySearch => &["ctrl+r"],
+            Self::ConfirmYes => &["y", "Y"],
+            Self::ConfirmNo => &["n", "N", "esc"],
+            Self::PermissionAllow => &["a"],
+            Self::PermissionAllowSession => &["A"],
+            Self::PermissionDeny => &["d", "D"],
+            // The palette and the history search navigate with the same keys;
+            // they are separate actions because a binding may move one
+            // without moving the other. Esc closes either, and also cancels a
+            // run, which is why the three share a line.
+            Self::AutocompletePrevious | Self::HistorySearchPrevious => &["up"],
+            Self::AutocompleteNext | Self::HistorySearchNext => &["down"],
+            // The `/` palette completes on Tab. Enter is deliberately not in
+            // its table, so it falls through and submits the line — a list
+            // that swallowed Enter made the prompt untypeable while a
+            // suggestion was showing. The `@` list inserts on Tab too, through
+            // the palette bindings it inherits, and on Enter.
+            Self::AutocompleteAccept => &["tab"],
+            // Enter is how a shell's reverse search hands back the command,
+            // and it does not submit anything here either.
+            Self::HistorySearchAccept => &["tab", "enter"],
+            Self::FileMentionAccept => &["enter"],
+        }
+    }
+}
+
+const ALL_ACTIONS: [Action; 20] = [
+    Action::ToggleToolOutput,
+    Action::ToggleSplitPane,
+    Action::CyclePermissionMode,
+    Action::ImagePaste,
+    Action::Cancel,
+    Action::HistorySearch,
+    Action::ConfirmYes,
+    Action::ConfirmNo,
+    Action::PermissionAllow,
+    Action::PermissionAllowSession,
+    Action::PermissionDeny,
+    Action::AutocompletePrevious,
+    Action::AutocompleteNext,
+    Action::AutocompleteAccept,
+    Action::AutocompleteDismiss,
+    Action::FileMentionAccept,
+    Action::HistorySearchPrevious,
+    Action::HistorySearchNext,
+    Action::HistorySearchAccept,
+    Action::HistorySearchCancel,
+];
+
+/// A named key, for everything that is not a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NamedKey {
+    /// Escape.
+    Escape,
+    /// Enter / Return.
+    Enter,
+    /// Tab.
+    Tab,
+    /// Space (a character in the terminal, a named key to a person).
+    Space,
+    /// Backspace.
+    Backspace,
+    /// Delete (forward delete).
+    Delete,
+    /// Up arrow.
+    Up,
+    /// Down arrow.
+    Down,
+    /// Left arrow.
+    Left,
+    /// Right arrow.
+    Right,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
+    /// Insert.
+    Insert,
+}
+
+impl NamedKey {
+    /// The canonical spelling, used when printing the table back.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Escape => "esc",
+            Self::Enter => "enter",
+            Self::Tab => "tab",
+            Self::Space => "space",
+            Self::Backspace => "backspace",
+            Self::Delete => "delete",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Home => "home",
+            Self::End => "end",
+            Self::PageUp => "pageup",
+            Self::PageDown => "pagedown",
+            Self::Insert => "insert",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "escape" | "esc" => Some(Self::Escape),
+            "enter" | "return" => Some(Self::Enter),
+            "tab" => Some(Self::Tab),
+            "space" => Some(Self::Space),
+            "backspace" => Some(Self::Backspace),
+            "delete" | "del" => Some(Self::Delete),
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "home" => Some(Self::Home),
+            "end" => Some(Self::End),
+            "pageup" | "page_up" | "pgup" => Some(Self::PageUp),
+            "pagedown" | "page_down" | "pgdn" => Some(Self::PageDown),
+            "insert" | "ins" => Some(Self::Insert),
+            _ => None,
+        }
+    }
+}
+
+/// What the key itself is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StrokeCode {
+    /// A character key.
+    Char(char),
+    /// A named key.
+    Named(NamedKey),
+}
+
+/// One keystroke: a key plus the modifiers held with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeyStroke {
+    /// The key.
+    pub code: StrokeCode,
+    /// Control held.
+    pub ctrl: bool,
+    /// Alt (Option on macOS) held.
+    pub alt: bool,
+    /// Shift held.
+    ///
+    /// A capital letter counts as shifted even when the terminal does not
+    /// report the modifier, which most do not.
+    pub shift: bool,
+}
+
+impl KeyStroke {
+    /// Parse a keystroke such as `ctrl+shift+s`, `esc`, or `space`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of what was wrong, suitable for a validation
+    /// note.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("empty keystroke".into());
+        }
+        if trimmed.contains(' ') {
+            return Err(format!(
+                "\"{trimmed}\" is a chord; only single keystrokes are supported"
+            ));
+        }
+        // The last `+` separates the modifiers from the key, and a key may
+        // itself be `+`, so everything after the final `+` is the key when
+        // there is one — `ctrl++` is ctrl plus the key named `+`.
+        let (modifier_text, key) = match trimmed.rsplit_once('+') {
+            Some((modifiers, "")) => match modifiers.strip_suffix('+') {
+                // `ctrl++`: the plus is the key, `ctrl` the modifier.
+                Some(modifiers) => (modifiers, "+"),
+                // A bare `+` is the plus key with no modifiers.
+                None if modifiers.is_empty() => ("", "+"),
+                // `ctrl+` names no key; the empty key reports that.
+                None => (modifiers, ""),
+            },
+            Some((modifiers, key)) => (modifiers, key),
+            // `+` on its own: no modifier text, the key is the plus itself.
+            None => ("", trimmed),
+        };
+        let modifiers = Self::parse_modifiers(modifier_text, trimmed)?;
+        let (code, shift) = Self::parse_key(key, trimmed)?;
+        Ok(Self {
+            code,
+            shift: modifiers.shift || shift,
+            ..modifiers
+        })
+    }
+
+    /// Parse the modifier list of a keystroke.
+    fn parse_modifiers(text: &str, full: &str) -> Result<Self, String> {
+        let mut ctrl = false;
+        let mut alt = false;
+        let mut shift = false;
+        if !text.is_empty() {
+            for modifier in text.split('+') {
+                if is_ctrl(modifier) {
+                    ctrl = true;
+                } else if is_alt(modifier) {
+                    alt = true;
+                } else if modifier.eq_ignore_ascii_case("shift") {
+                    shift = true;
+                } else if is_cmd(modifier) {
+                    // Most terminals never deliver it; rejected with the
+                    // reason so the config author knows why it would not fire.
+                    return Err(format!(
+                        "\"{modifier}\" (the command key) is not delivered by terminals"
+                    ));
+                } else {
+                    return Err(format!("\"{modifier}\" is not a modifier (in \"{full}\")"));
+                }
+            }
+        }
+        Ok(Self {
+            code: StrokeCode::Char('\0'),
+            ctrl,
+            alt,
+            shift,
+        })
+    }
+
+    /// Parse the key half, and whether the spelling implies shift.
+    fn parse_key(key: &str, full: &str) -> Result<(StrokeCode, bool), String> {
+        if key.is_empty() {
+            return Err(format!("\"{full}\" names no key"));
+        }
+        if let Some(named) = NamedKey::parse(&key.to_ascii_lowercase()) {
+            return Ok((StrokeCode::Named(named), false));
+        }
+        let mut chars = key.chars();
+        match (chars.next(), chars.next()) {
+            // A capital letter means the shifted key, whether or not the
+            // person wrote `shift+`; most terminals do not report SHIFT.
+            (Some(c), None) => Ok((StrokeCode::Char(c), c.is_uppercase())),
+            _ => Err(format!("\"{key}\" is not a key name (in \"{full}\")")),
+        }
+    }
+
+    /// The canonical spelling of this keystroke.
+    #[must_use]
+    pub fn display(&self) -> String {
+        let mut out = String::new();
+        if self.ctrl {
+            out.push_str("ctrl+");
+        }
+        if self.alt {
+            out.push_str("alt+");
+        }
+        if self.shift {
+            out.push_str("shift+");
+        }
+        match self.code {
+            StrokeCode::Char(c) => out.push(c),
+            StrokeCode::Named(named) => out.push_str(named.as_str()),
+        }
+        out
+    }
+
+    /// Whether this keystroke is one the terminal has already claimed.
+    ///
+    /// `ctrl+c` and `ctrl+d` are the interrupt and exit keys before any
+    /// application sees them (they are the shell's SIGINT and EOF), and
+    /// `ctrl+m`, `ctrl+[`, `ctrl+i` and `ctrl+h` are indistinguishable from
+    /// enter, escape, tab and backspace in most terminals. A binding on one of
+    /// them would either never fire or fire twice.
+    #[must_use]
+    pub const fn is_reserved(&self) -> bool {
+        if self.alt || self.shift {
+            return false;
+        }
+        match self.code {
+            StrokeCode::Char(c) => {
+                self.ctrl && matches!(c.to_ascii_lowercase(), 'c' | 'd' | 'm' | '[' | 'i' | 'h')
+            }
+            StrokeCode::Named(_) => false,
+        }
+    }
+
+    /// Whether a key event is this keystroke.
+    ///
+    /// Letters compare case-insensitively: a terminal may report
+    /// `Ctrl+Shift+S` as `'S'` or `'s'` with `SHIFT`, depending on which
+    /// keyboard-enhancement flags are on, and both are the same keystroke to
+    /// the person pressing it.
+    #[must_use]
+    pub fn matches(&self, event: &KeyEvent) -> bool {
+        if self.ctrl != event.modifiers.contains(KeyModifiers::CONTROL)
+            || self.alt != event.modifiers.contains(KeyModifiers::ALT)
+        {
+            return false;
+        }
+        match (self.code, event.code) {
+            (StrokeCode::Named(NamedKey::Tab), KeyCode::Tab)
+            | (StrokeCode::Named(NamedKey::Space), KeyCode::Char(' ')) => {
+                self.shift == event.modifiers.contains(KeyModifiers::SHIFT)
+            }
+            // `BackTab` *is* shift-tab; some terminals send it with the
+            // modifier already stripped.
+            (StrokeCode::Named(NamedKey::Tab), KeyCode::BackTab) => self.shift,
+            (StrokeCode::Named(named), code) => {
+                named_matches(named, code)
+                    && self.shift == event.modifiers.contains(KeyModifiers::SHIFT)
+            }
+            (StrokeCode::Char(expected), KeyCode::Char(actual)) => {
+                let shifted =
+                    event.modifiers.contains(KeyModifiers::SHIFT) || actual.is_uppercase();
+                expected.eq_ignore_ascii_case(&actual) && self.shift == shifted
+            }
+            _ => false,
+        }
+    }
+}
+
+fn named_matches(named: NamedKey, code: KeyCode) -> bool {
+    match named {
+        NamedKey::Escape => code == KeyCode::Esc,
+        NamedKey::Enter => code == KeyCode::Enter,
+        NamedKey::Tab => code == KeyCode::Tab,
+        NamedKey::Space => code == KeyCode::Char(' '),
+        NamedKey::Backspace => code == KeyCode::Backspace,
+        NamedKey::Delete => code == KeyCode::Delete,
+        NamedKey::Up => code == KeyCode::Up,
+        NamedKey::Down => code == KeyCode::Down,
+        NamedKey::Left => code == KeyCode::Left,
+        NamedKey::Right => code == KeyCode::Right,
+        NamedKey::Home => code == KeyCode::Home,
+        NamedKey::End => code == KeyCode::End,
+        NamedKey::PageUp => code == KeyCode::PageUp,
+        NamedKey::PageDown => code == KeyCode::PageDown,
+        NamedKey::Insert => code == KeyCode::Insert,
+    }
+}
+
+const fn is_ctrl(modifier: &str) -> bool {
+    modifier.eq_ignore_ascii_case("ctrl") || modifier.eq_ignore_ascii_case("control")
+}
+
+fn is_alt(modifier: &str) -> bool {
+    ["alt", "opt", "option", "meta"]
+        .iter()
+        .any(|name| modifier.eq_ignore_ascii_case(name))
+}
+
+fn is_cmd(modifier: &str) -> bool {
+    ["cmd", "command", "super", "win"]
+        .iter()
+        .any(|name| modifier.eq_ignore_ascii_case(name))
+}
+
+/// The effective keymap: every action and the keystrokes that reach it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBindings {
+    bindings: std::collections::BTreeMap<Action, Vec<KeyStroke>>,
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        let mut bindings = std::collections::BTreeMap::new();
+        for action in ALL_ACTIONS {
+            let strokes: Vec<KeyStroke> = action
+                .defaults()
+                .iter()
+                .filter_map(|text| KeyStroke::parse(text).ok())
+                .collect();
+            bindings.insert(action, strokes);
+        }
+        Self { bindings }
+    }
+}
+
+/// What loading a `keybindings.json` produced.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    /// The effective keymap.
+    pub bindings: KeyBindings,
+    /// Problems with the files, one line each.
+    ///
+    /// A malformed entry does not discard the rest of the file: a typo in one
+    /// binding should cost that binding, not the whole configuration.
+    pub notes: Vec<String>,
+    /// Files that were read, in application order.
+    pub sources: Vec<std::path::PathBuf>,
+}
+
+impl KeyBindings {
+    /// The keystrokes bound to an action.
+    #[must_use]
+    pub fn strokes(&self, action: Action) -> &[KeyStroke] {
+        self.bindings
+            .get(&action)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// The action a key performs in a context, if any.
+    ///
+    /// `Global` bindings are checked first, then the context's own, so a
+    /// global shortcut cannot be shadowed by a palette key.
+    #[must_use]
+    pub fn resolve(&self, context: Context, event: &KeyEvent) -> Option<Action> {
+        let wanted: Vec<Context> = match context {
+            Context::Global => vec![Context::Global],
+            // The file list walks and dismisses with the palette's keys and
+            // adds Enter; it is a list with one extra decision, not a second
+            // vocabulary.
+            Context::FileMention => vec![Context::Global, Context::Autocomplete, context],
+            _ => vec![Context::Global, context],
+        };
+        for check in wanted {
+            for (action, strokes) in &self.bindings {
+                if action.context() != check {
+                    continue;
+                }
+                if strokes.iter().any(|stroke| stroke.matches(event)) {
+                    return Some(*action);
+                }
+            }
+        }
+        None
+    }
+
+    /// Bind a keystroke to an action, taking it from whoever held it.
+    ///
+    /// Returns the action that lost the key, if any, so the caller can say so:
+    /// a silent move is how a config ends up doing nothing.
+    pub fn assign(&mut self, action: Action, stroke: KeyStroke) -> Option<Action> {
+        let context = action.context();
+        let mut displaced = None;
+        for (existing, strokes) in &mut self.bindings {
+            if existing.context() != context || *existing == action {
+                continue;
+            }
+            if let Some(index) = strokes.iter().position(|bound| *bound == stroke) {
+                strokes.remove(index);
+                displaced = Some(*existing);
+            }
+        }
+        let strokes = self.bindings.entry(action).or_default();
+        if !strokes.contains(&stroke) {
+            strokes.push(stroke);
+        }
+        displaced
+    }
+
+    /// Remove a keystroke from every action in a context.
+    ///
+    /// Returns the actions that lost it, so an unbind of a key nothing bound
+    /// can be reported rather than silently accepted.
+    pub fn unbind(&mut self, context: Context, stroke: KeyStroke) -> Vec<Action> {
+        let mut removed = Vec::new();
+        for (action, strokes) in &mut self.bindings {
+            if action.context() != context {
+                continue;
+            }
+            if let Some(index) = strokes.iter().position(|bound| *bound == stroke) {
+                strokes.remove(index);
+                removed.push(*action);
+            }
+        }
+        removed
+    }
+
+    /// Apply one `{context: {keystroke: action}}` document on top of this map.
+    fn apply_document(&mut self, document: &serde_json::Value, notes: &mut Vec<String>) {
+        let Some(entries) = document.get("bindings").and_then(|value| value.as_array()) else {
+            notes.push("\"bindings\" must be an array of {context, bindings} objects".into());
+            return;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(context_name) = entry.get("context").and_then(|value| value.as_str()) else {
+                notes.push(format!("bindings[{index}] has no \"context\""));
+                continue;
+            };
+            let Some(context) = Context::parse(context_name) else {
+                let valid: Vec<&str> = Context::all().iter().map(|c| c.as_str()).collect();
+                notes.push(format!(
+                    "bindings[{index}]: unknown context \"{context_name}\" (valid: {})",
+                    valid.join(", ")
+                ));
+                continue;
+            };
+            let Some(map) = entry.get("bindings").and_then(|value| value.as_object()) else {
+                notes.push(format!(
+                    "bindings[{index}] ({context_name}) has no \"bindings\" object"
+                ));
+                continue;
+            };
+            for (key_text, value) in map {
+                self.apply_entry(context, key_text, value, notes);
+            }
+        }
+    }
+
+    fn apply_entry(
+        &mut self,
+        context: Context,
+        key_text: &str,
+        value: &serde_json::Value,
+        notes: &mut Vec<String>,
+    ) {
+        let stroke = match KeyStroke::parse(key_text) {
+            Ok(stroke) => stroke,
+            Err(problem) => {
+                notes.push(format!("{}: {problem}", context.as_str()));
+                return;
+            }
+        };
+        if stroke.is_reserved() {
+            notes.push(format!(
+                "{}: {} is reserved by the terminal and cannot be bound",
+                context.as_str(),
+                stroke.display()
+            ));
+            return;
+        }
+        match value {
+            serde_json::Value::Null => {
+                let removed = self.unbind(context, stroke);
+                if removed.is_empty() {
+                    notes.push(format!(
+                        "{}: {} was not bound to anything",
+                        context.as_str(),
+                        stroke.display()
+                    ));
+                }
+            }
+            serde_json::Value::String(action_name) => {
+                let Some(action) = Action::parse(action_name) else {
+                    let valid: Vec<&str> = ALL_ACTIONS.iter().map(|a| a.as_str()).collect();
+                    notes.push(format!(
+                        "{}: unknown action \"{action_name}\" (valid: {})",
+                        context.as_str(),
+                        valid.join(", ")
+                    ));
+                    return;
+                };
+                if action.context() != context {
+                    notes.push(format!(
+                        "{}: {} belongs to the {} context; the binding was applied there",
+                        context.as_str(),
+                        action.as_str(),
+                        action.context().as_str()
+                    ));
+                }
+                if let Some(displaced) = self.assign(action, stroke) {
+                    notes.push(format!(
+                        "{}: {} moved from {} to {}",
+                        context.as_str(),
+                        stroke.display(),
+                        displaced.as_str(),
+                        action.as_str()
+                    ));
+                }
+            }
+            other => notes.push(format!(
+                "{}: {} must be an action name or null, not {other}",
+                context.as_str(),
+                stroke.display()
+            )),
+        }
+    }
+
+    /// Load and merge keybinding files over the defaults.
+    ///
+    /// Later files win, so the caller passes the user's file before the
+    /// project's. A file that cannot be read or parsed is a note, not a
+    /// failure: the defaults still apply.
+    #[must_use]
+    pub fn load(paths: &[&std::path::Path]) -> Loaded {
+        let mut bindings = Self::default();
+        let mut notes = Vec::new();
+        let mut sources = Vec::new();
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            let content = match std::fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(error) => {
+                    notes.push(format!("could not read {}: {error}", path.display()));
+                    continue;
+                }
+            };
+            let document: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(document) => document,
+                Err(error) => {
+                    notes.push(format!("{} is not valid JSON: {error}", path.display()));
+                    continue;
+                }
+            };
+            bindings.apply_document(&document, &mut notes);
+            sources.push(path.to_path_buf());
+        }
+        Loaded {
+            bindings,
+            notes,
+            sources,
+        }
+    }
+
+    /// Every action with its keystrokes, for `/keybindings`.
+    #[must_use]
+    pub fn table(&self) -> Vec<(Action, Vec<String>)> {
+        ALL_ACTIONS
+            .iter()
+            .map(|action| {
+                (
+                    *action,
+                    self.strokes(*action)
+                        .iter()
+                        .map(KeyStroke::display)
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    fn stroke(text: &str) -> KeyStroke {
+        KeyStroke::parse(text).expect("keystroke parses")
+    }
+
+    #[test]
+    fn a_parsed_keystroke_matches_the_event_it_names() {
+        assert!(stroke("ctrl+o").matches(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        assert!(stroke("esc").matches(&key(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(stroke("shift+tab").matches(&key(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert!(stroke("shift+tab").matches(&key(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(stroke("enter").matches(&key(KeyCode::Enter, KeyModifiers::NONE)));
+        // Modifiers are part of the keystroke: ctrl+o is not plain o.
+        assert!(!stroke("ctrl+o").matches(&key(KeyCode::Char('o'), KeyModifiers::NONE)));
+        assert!(!stroke("o").matches(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    }
+
+    /// A capital letter in the file means the shifted key even when the
+    /// terminal does not report SHIFT — which most do not.
+    #[test]
+    fn a_capital_letter_is_the_shifted_key() {
+        assert!(stroke("A").matches(&key(KeyCode::Char('A'), KeyModifiers::NONE)));
+        assert!(stroke("A").matches(&key(KeyCode::Char('A'), KeyModifiers::SHIFT)));
+        assert!(!stroke("a").matches(&key(KeyCode::Char('A'), KeyModifiers::NONE)));
+        assert!(stroke("a").matches(&key(KeyCode::Char('a'), KeyModifiers::NONE)));
+        // Ctrl chords are case-insensitive on the letter.
+        assert!(stroke("ctrl+shift+s").matches(&key(KeyCode::Char('S'), KeyModifiers::CONTROL)));
+        assert!(!stroke("ctrl+s").matches(&key(KeyCode::Char('S'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn aliases_and_spellings_resolve_to_one_keystroke() {
+        for (a, b) in [
+            ("escape", "esc"),
+            ("return", "enter"),
+            ("control+space", "ctrl+space"),
+            ("opt+x", "alt+x"),
+            ("pgup", "pageup"),
+        ] {
+            assert_eq!(stroke(a), stroke(b), "{a} and {b} differ");
+        }
+        assert_eq!(stroke("ctrl+shift+s").display(), "ctrl+shift+s");
+        assert_eq!(stroke("B").display(), "shift+B");
+    }
+
+    #[test]
+    fn a_bad_keystroke_says_what_is_wrong() {
+        assert!(KeyStroke::parse("").is_err());
+        assert!(KeyStroke::parse("ctrl+").is_err());
+        assert!(
+            KeyStroke::parse("ctl+o")
+                .unwrap_err()
+                .contains("not a modifier")
+        );
+        assert!(
+            KeyStroke::parse("ctrl+k ctrl+s")
+                .unwrap_err()
+                .contains("chord")
+        );
+        assert!(
+            KeyStroke::parse("cmd+p")
+                .unwrap_err()
+                .contains("command key")
+        );
+    }
+
+    #[test]
+    fn reserved_keys_are_refused() {
+        for reserved in ["ctrl+c", "ctrl+d", "ctrl+m", "ctrl+[", "ctrl+i", "ctrl+h"] {
+            assert!(stroke(reserved).is_reserved(), "{reserved}");
+        }
+        for allowed in ["ctrl+o", "ctrl+v", "ctrl+shift+c", "esc", "ctrl+x"] {
+            assert!(!stroke(allowed).is_reserved(), "{allowed}");
+        }
+    }
+
+    #[test]
+    fn defaults_resolve_in_their_context() {
+        let bindings = KeyBindings::default();
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::HistorySearch)
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Confirmation,
+                &key(KeyCode::Char('y'), KeyModifiers::NONE)
+            ),
+            Some(Action::ConfirmYes)
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::PermissionDialog,
+                &key(KeyCode::Char('A'), KeyModifiers::NONE)
+            ),
+            Some(Action::PermissionAllowSession)
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Autocomplete,
+                &key(KeyCode::Tab, KeyModifiers::NONE)
+            ),
+            Some(Action::AutocompleteAccept)
+        );
+        // A confirmation key does nothing on the chat line.
+        assert_eq!(
+            bindings.resolve(Context::Chat, &key(KeyCode::Char('y'), KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    fn document(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "bindings": entries })
+    }
+
+    fn apply(bindings: &mut KeyBindings, entries: serde_json::Value) -> Vec<String> {
+        let mut notes = Vec::new();
+        bindings.apply_document(&document(entries), &mut notes);
+        notes
+    }
+
+    /// Moving a shortcut takes it from the action that held it; a key must
+    /// never mean two things.
+    #[test]
+    fn assigning_a_key_moves_it() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Global",
+                "bindings": { "ctrl+j": "app:toggleToolOutput" }
+            }]),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ToggleToolOutput)
+        );
+        // The default still works: bindings are additive.
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ToggleToolOutput)
+        );
+
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Global",
+                "bindings": { "ctrl+o": "app:toggleSplitPane" }
+            }]),
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("moved")),
+            "the move was not reported: {notes:?}"
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ToggleSplitPane)
+        );
+    }
+
+    #[test]
+    fn null_unbinds_a_key() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Confirmation",
+                "bindings": { "esc": null }
+            }]),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            bindings.resolve(
+                Context::Confirmation,
+                &key(KeyCode::Esc, KeyModifiers::NONE)
+            ),
+            None
+        );
+        // Other keys for the same action are untouched.
+        assert_eq!(
+            bindings.resolve(
+                Context::Confirmation,
+                &key(KeyCode::Char('n'), KeyModifiers::NONE)
+            ),
+            Some(Action::ConfirmNo)
+        );
+
+        // Unbinding a key nothing holds is said out loud.
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Confirmation",
+                "bindings": { "esc": null }
+            }]),
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("not bound")),
+            "{notes:?}"
+        );
+    }
+
+    /// One bad entry costs that entry, not the file.
+    #[test]
+    fn a_bad_entry_is_a_note_and_the_rest_applies() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Global",
+                "bindings": {
+                    "ctl+j": "app:toggleToolOutput",
+                    "ctrl+c": "app:toggleToolOutput",
+                    "ctrl+n": "app:noSuchAction",
+                    "ctrl+b": 7,
+                    "ctrl+j": "app:toggleSplitPane"
+                }
+            }]),
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("not a modifier")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("reserved")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("unknown action")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("must be an action")),
+            "{notes:?}"
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ToggleSplitPane)
+        );
+    }
+
+    /// An action filed under the wrong context is applied where it belongs and
+    /// the mismatch is reported.
+    #[test]
+    fn an_action_in_the_wrong_context_is_placed_and_reported() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Global",
+                "bindings": { "ctrl+y": "confirm:yes" }
+            }]),
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("Confirmation context")),
+            "{notes:?}"
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Confirmation,
+                &key(KeyCode::Char('y'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ConfirmYes)
+        );
+    }
+
+    #[test]
+    fn an_unknown_context_is_reported_and_skipped() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "chat room",
+                "bindings": { "ctrl+o": "app:toggleToolOutput" }
+            }]),
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("unknown context")),
+            "{notes:?}"
+        );
+        assert_eq!(
+            bindings.strokes(Action::ToggleToolOutput),
+            vec![stroke("ctrl+o")]
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_json_is_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keybindings.json");
+        std::fs::write(&path, "{not json").unwrap();
+
+        let loaded = KeyBindings::load(&[&path]);
+        assert!(
+            loaded
+                .notes
+                .iter()
+                .any(|note| note.contains("not valid JSON"))
+        );
+        assert!(loaded.sources.is_empty());
+        // The defaults are still there, so the session is usable.
+        assert_eq!(
+            loaded.bindings.strokes(Action::ToggleToolOutput),
+            vec![stroke("ctrl+o")]
+        );
+    }
+
+    #[test]
+    fn later_files_win() {
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let user_file = user.path().join("keybindings.json");
+        let project_file = project.path().join("keybindings.json");
+        std::fs::write(
+            &user_file,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+o":"app:toggleSplitPane"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project_file,
+            r#"{"bindings":[{"context":"Global","bindings":{"ctrl+o":"app:toggleToolOutput"}}]}"#,
+        )
+        .unwrap();
+
+        let loaded = KeyBindings::load(&[&user_file, &project_file]);
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(
+            loaded.bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ToggleToolOutput)
+        );
+    }
+
+    #[test]
+    fn a_missing_file_is_not_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = KeyBindings::load(&[&dir.path().join("absent.json")]);
+        assert!(loaded.notes.is_empty(), "{:?}", loaded.notes);
+        assert!(loaded.sources.is_empty());
+    }
+
+    /// Enter must not be a palette key: a `/` suggestion that swallowed Enter
+    /// made the line unsubmittable while a lookup was showing. In the `@` list
+    /// it inserts the path instead, which is the one place it does not submit.
+    #[test]
+    fn enter_submits_from_the_palette_but_inserts_from_a_mention() {
+        let bindings = KeyBindings::default();
+        assert_eq!(
+            bindings.resolve(
+                Context::Autocomplete,
+                &key(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            None,
+            "Enter is bound inside the `/` palette and can never submit the line"
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::FileMention,
+                &key(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            Some(Action::FileMentionAccept)
+        );
+        // The palette's keys are inherited, so Tab still completes a path.
+        assert_eq!(
+            bindings.resolve(Context::FileMention, &key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::AutocompleteAccept)
+        );
+        assert_eq!(
+            bindings.resolve(Context::FileMention, &key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(Action::AutocompleteDismiss)
+        );
+    }
+
+    /// The table `/keybindings` prints covers every action, and each action
+    /// belongs to a real context.
+    #[test]
+    fn the_table_is_complete() {
+        let table = KeyBindings::default().table();
+        assert_eq!(table.len(), Action::all().len());
+        for (action, strokes) in table {
+            assert!(!strokes.is_empty(), "{} has no keystrokes", action.as_str());
+            for context in Context::all() {
+                assert!(!context.as_str().is_empty());
+            }
+        }
+    }
+}
