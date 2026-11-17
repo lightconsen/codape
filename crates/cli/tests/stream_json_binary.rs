@@ -224,3 +224,89 @@ fn stream_json_writes_one_frame_per_line() {
         "no non-result protocol frame was emitted; frames: {frames:#?}"
     );
 }
+
+/// Reasoning reaches a stream-json host as its own delta, ahead of the answer.
+///
+/// The engine kept the thinking block for the provider round trip and emitted
+/// nothing, so a host attached to the binary saw an answer with no reasoning
+/// even when the provider sent a page of it. The frame carries the provider's
+/// own `thinking_delta` shape, so a host that already understands an Anthropic
+/// stream needs no new case.
+#[test]
+fn reasoning_reaches_the_host_as_its_own_delta() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let (mut provider, base_url) = start_static_provider();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
+        .args([
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--dangerously-skip-permissions",
+        ])
+        .current_dir(workspace.path())
+        .env("ANTHROPIC_API_KEY", "mock")
+        .env("ANTHROPIC_BASE_URL", &base_url)
+        .env("HOME", workspace.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn codape");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"reason-then-answer\n")
+        .expect("write prompt");
+
+    let output = child.wait_with_output().expect("wait for codape");
+    let _ = provider.kill();
+    let _ = provider.wait();
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_eq!(output.status.code(), Some(0), "codape failed:\n{stderr}");
+
+    let frames: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("line is not one JSON object ({error}): {line}"))
+        })
+        .collect();
+
+    let thinking_at = frames.iter().position(|frame| {
+        frame["type"] == "stream_event" && frame["event"]["delta"]["type"] == "thinking_delta"
+    });
+    let answer_at = frames.iter().position(|frame| {
+        frame["type"] == "stream_event" && frame["event"]["delta"]["type"] == "text_delta"
+    });
+    let thinking_at = thinking_at.unwrap_or_else(|| {
+        panic!("no thinking_delta frame; a host saw the answer alone: {frames:#?}")
+    });
+    let answer_at = answer_at.unwrap_or_else(|| panic!("no text_delta frame: {frames:#?}"));
+
+    assert!(
+        thinking_at < answer_at,
+        "reasoning arrived after the answer it explains: {frames:#?}"
+    );
+    let reasoning = frames[thinking_at]["event"]["delta"]["thinking"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reasoning.contains("say what I am considering"),
+        "the reasoning text did not survive the frame: {reasoning}"
+    );
+
+    // The answer is still the answer: reasoning must not be mixed into it.
+    let answered = frames[answer_at]["event"]["delta"]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !answered.contains("say what I am considering"),
+        "reasoning leaked into the answer text: {answered}"
+    );
+}

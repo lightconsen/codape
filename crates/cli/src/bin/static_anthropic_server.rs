@@ -231,6 +231,18 @@ fn handle_connection(mut stream: TcpStream, responses: &std::sync::Arc<StaticRes
             } else {
                 sse_thinking_only_with_stop("max_tokens")
             }
+        } else if p_lower.contains("reason-then-answer") {
+            // Reasoning that is followed by an answer, which is the shape a
+            // reader actually sees: the thinking block closes and the text
+            // block starts, in one response. Two blocks, not one.
+            //
+            // Multi-line on purpose: a folded row previews its first line, so
+            // only a second line can prove that unfolding revealed something.
+            sse_thinking_then_text(
+                "The reader asked to see the reasoning, so the plan is to say what I am considering.\n\
+                 Second thought: the answer has to stand on its own, with no reasoning mixed into it.",
+                "Here is the answer.",
+            )
         } else if p_lower.contains("decline-this-request") {
             sse_text_block_with_stop("I can't help with that.", "refusal")
         } else if has_tool_result && body_str.contains("soak turn") {
@@ -586,6 +598,37 @@ fn sse_thinking_only_with_stop(stop_reason: &str) -> String {
          data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
          event: message_delta\n\
          data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{stop_reason}\"}},\"usage\":{{\"input_tokens\":10,\"output_tokens\":4096}}}}\n\n\
+         event: message_stop\n\
+         data: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+/// A reasoning block followed by an answer, which is the shape a reader sees
+/// when a model thinks and then responds.
+///
+/// Deliberately two blocks in one response rather than two responses: the
+/// thinking has to close before the text starts, and the client has to keep
+/// both — one for the round trip, one for the transcript.
+fn sse_thinking_then_text(thinking: &str, text: &str) -> String {
+    let thinking = json_escape_string(thinking);
+    let text = json_escape_string(text);
+    format!(
+        "event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"thinking_delta\",\"thinking\":\"{thinking}\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"signature_delta\",\"signature\":\"mock-signature\"}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{text}\"}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":1}}\n\n\
+         event: message_delta\n\
+         data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"input_tokens\":10,\"output_tokens\":40}}}}\n\n\
          event: message_stop\n\
          data: {{\"type\":\"message_stop\"}}\n\n"
     )

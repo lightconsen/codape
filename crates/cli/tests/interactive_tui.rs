@@ -3293,3 +3293,45 @@ fn interrupting_before_the_tool_call_leaves_no_tool_or_history() {
         "an unanswered tool_use was left in the transcript:\n{history}"
     );
 }
+
+/// Reasoning is visible in the TUI, and Ctrl+E unfolds it.
+///
+/// The engine parsed thinking deltas for the provider round trip but emitted
+/// nothing, so the one surface someone actually watches showed an answer with
+/// no reasoning. The row is folded by default with a preview of its first
+/// line; Ctrl+E unfolds it to the full text.
+#[test]
+fn reasoning_is_shown_folded_and_ctrl_e_unfolds_it() {
+    let dir = setup_project_dir();
+    let (_server, mut session) = session_with_static_server(dir.path());
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
+    session.send_line("reason-then-answer");
+
+    // Wait for the answer, so the turn is over and the folded row has
+    // settled; checking earlier would race the stream.
+    let screen = session.wait_for_text("Here is the answer", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("say what I am considering"),
+        "reasoning never reached the transcript:\n{screen}"
+    );
+    assert!(
+        screen.contains("lines]"),
+        "the folded row carries no line count:\n{screen}"
+    );
+
+    // Unfolded: the second line of the reasoning was not on screen while the
+    // row was folded, so seeing it is proof that Ctrl+E expanded the row
+    // rather than the assertion merely meeting text that was already there.
+    assert!(
+        !screen.contains("Second thought"),
+        "the second reasoning line was visible while folded:\n{screen}"
+    );
+    session.send_bytes(&[0x05]); // Ctrl+E
+    let screen = session.wait_for_text("Second thought", SCREEN_TIMEOUT);
+    drop(session);
+    assert!(
+        screen.contains("Second thought"),
+        "Ctrl+E did not unfold the reasoning:\n{screen}"
+    );
+    assert!(screen.contains("✻"), "no reasoning marker on screen");
+}
