@@ -1,10 +1,10 @@
 {
-  "key": "e7be1bdb36741547",
+  "key": "87a47dffba45bc9d",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"71c6863a-b899-4d9a-8fc1-c3b15e6a2ac7\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"71c6863a-b899-4d9a-8fc1-c3b15e6a2ac7\"},{\"type\":\"text\",\"text\":\"The magic phrase is **xyzzy**.\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4620,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":9,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"1818ad8d-f350-4c4d-840d-ff2642e5bd4d\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"The user asked me to remember the secret word 'apple' and to just say 'ok'. Now they're asking what the secret word was. I should reply with just the word: apple.\",\"signature\":\"1818ad8d-f350-4c4d-840d-ff2642e5bd4d\"},{\"type\":\"text\",\"text\":\"apple\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4494,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":41,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,7 +13,7 @@
     "messages": [
       {
         "role": "user",
-        "content": "Read the file '<tmp>' and tell me the magic phrase inside it."
+        "content": "Remember the secret word is 'apple'. Just say 'ok'."
       },
       {
         "role": "assistant",
@@ -23,15 +23,7 @@
           },
           {
             "type": "text",
-            "text": "I'll read that file for you."
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_ET_UhKTzKylau4fFvX5eOyF4799",
-            "name": "Read",
-            "input": {
-              "file_path": "<tmp>"
-            }
+            "text": "ok"
           }
         ]
       },
@@ -39,9 +31,8 @@
         "role": "user",
         "content": [
           {
-            "type": "tool_result",
-            "tool_use_id": "call_00_ET_UhKTzKylau4fFvX5eOyF4799",
-            "content": "<tool-result>"
+            "type": "text",
+            "text": "What was the secret word I asked you to remember? Reply with just the word."
           }
         ]
       }
@@ -1112,13 +1103,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1127,7 +1137,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1137,13 +1147,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1177,13 +1184,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

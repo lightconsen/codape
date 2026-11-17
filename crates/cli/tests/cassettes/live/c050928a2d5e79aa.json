@@ -1,10 +1,10 @@
 {
-  "key": "d123d2910eee66cb",
+  "key": "c050928a2d5e79aa",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"8fa5f75d-5c94-46fc-957a-7c50c767aff2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"8fa5f75d-5c94-46fc-957a-7c50c767aff2\"},{\"type\":\"text\",\"text\":\"I'll read that file for you.\"},{\"type\":\"tool_use\",\"id\":\"call_00_ET_UhKTzKylau4fFvX5eOyF4799\",\"name\":\"Read\",\"input\":{\"file_path\":\"/var/folders/41/3x0f_6y942jfqz8x0vyvp94m0000gn/T/.tmpHtF6gI/test_live_read.txt\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4514,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":87,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"43017556-c005-4e0e-856f-17d3bf82ca24\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Bash is unavailable. Use Glob to check for hidden entries.\",\"signature\":\"43017556-c005-4e0e-856f-17d3bf82ca24\"},{\"type\":\"tool_use\",\"id\":\"call_00_hnIeeEg7vlA2DQd6RiIc3999\",\"name\":\"Glob\",\"input\":{\"pattern\":\"{*,.*}\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4785,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":52,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,10 +13,81 @@
     "messages": [
       {
         "role": "user",
+        "content": "List the files in the current directory using the bash tool and tell me how many files/directories you see. Just give a number."
+      },
+      {
+        "role": "assistant",
         "content": [
           {
-            "type": "text",
-            "text": "Read the file '<tmp>' and tell me the magic phrase inside it."
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
+            "name": "Bash",
+            "input": {
+              "command": "ls -A | wc -l; echo \"---\"; ls -A"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
+            "content": "<tool-result>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_sU105QkHbdtBdQlK9yks9014",
+            "name": "ListDir",
+            "input": {}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_sU105QkHbdtBdQlK9yks9014",
+            "content": "<tool-result>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_hjfYaNGwcOJ36wTmjU7F3341",
+            "name": "Bash",
+            "input": {
+              "command": "ls -A"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_hjfYaNGwcOJ36wTmjU7F3341",
+            "content": "<tool-result>"
           }
         ]
       }
@@ -1087,13 +1158,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1102,7 +1192,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1112,13 +1202,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1152,13 +1239,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }
@@ -1189,6 +1331,6 @@
     "recorded_at": "2026-10-26T00:00:00Z",
     "suite": "live",
     "backfilled": true,
-    "system_sha256": "42751b7326412158657f20ee879d92e12bbbebe26976305e153c5a78ffed32cd"
+    "system_sha256": "f85253c976cfc818df2bb3b01e8bea23a5d69ec10b42e99b6e01c4ab2aeb03b7"
   }
 }

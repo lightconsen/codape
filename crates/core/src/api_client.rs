@@ -1175,7 +1175,18 @@ impl AnthropicApiClient {
                         );
                     }
                     ThinkingEncoding::BudgetTokens => {
-                        let budget = effort.anthropic_thinking_budget();
+                        // A thinking budget is spent out of the same
+                        // `max_tokens` ceiling, so the request has to carry at
+                        // least the budget. On a model whose output cap is
+                        // *below* the budget (Haiku 4.5 caps at 64k while
+                        // `effort=max` asks for 65 536) raising `max_tokens`
+                        // to clear the budget would instead push it past the
+                        // cap, and the provider rejects the whole request. The
+                        // budget is trimmed to the room that actually exists.
+                        let mut budget = effort.anthropic_thinking_budget();
+                        if let Some(cap) = crate::types::table_max_output_tokens(&model.0) {
+                            budget = budget.min(cap.saturating_sub(1024).max(1024));
+                        }
                         object.insert(
                             "thinking".into(),
                             serde_json::json!({"type": "enabled", "budget_tokens": budget}),
@@ -2661,6 +2672,46 @@ mod tests {
             body["max_tokens"], 8192,
             "a ceiling above the budget is left alone"
         );
+    }
+
+    /// A thinking budget is spent out of `max_tokens`, so a budget larger than
+    /// the model's output cap produced a `max_tokens` above the cap — and the
+    /// provider rejects the whole request rather than trimming it.
+    ///
+    /// Haiku 4.5 and the 3.5 generation are the reachable cases: neither is
+    /// adaptive, so effort rides in a token budget, and their output caps are
+    /// 64k and 8k. `effort=high` asks for 16 384, which is already over the
+    /// 3.5 generation's 8 192 cap.
+    #[test]
+    fn a_thinking_budget_is_trimmed_to_the_models_output_cap() {
+        let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::High);
+        let client = AnthropicApiClient::new(config);
+        let mut body = serde_json::json!({"max_tokens": 1024});
+        let model = ModelId("claude-3-5-sonnet-20241022".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
+
+        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
+        assert_eq!(budget, 8_192 - 1024, "trimmed below the model's output cap");
+        assert_eq!(
+            body["max_tokens"], 8_192,
+            "the ceiling lands exactly on the cap rather than above it"
+        );
+        assert!(body["max_tokens"].as_u64().unwrap() > budget);
+    }
+
+    /// The clamp is a correction, not a new default: a model this build does
+    /// not know keeps whatever budget the (already stepped-down) effort level
+    /// asks for, so nothing about a known-working gateway changes. An unknown
+    /// model has no table entry, so `max` steps down to `high` — 16 384 — and
+    /// the output-cap clamp finds nothing to trim.
+    #[test]
+    fn an_unknown_model_keeps_the_budget_its_effort_level_asks_for() {
+        let config = ApiConfig::new("k".into()).with_reasoning_effort(ReasoningEffort::Max);
+        let client = AnthropicApiClient::new(config);
+        let mut body = serde_json::json!({"max_tokens": 1024});
+        let model = ModelId("some-gateway-model".into());
+        client.apply_reasoning_effort(&mut body, &model, 1024);
+        assert_eq!(body["thinking"]["budget_tokens"], 16_384);
     }
 
     /// The bug this guards against: 4.7+ rejects `budget_tokens` outright, so

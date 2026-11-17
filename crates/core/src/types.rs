@@ -1367,6 +1367,58 @@ fn table_context_window(name: &str) -> Option<usize> {
         .map(|(_, window)| *window)
 }
 
+/// The largest `max_tokens` a model accepts in one request.
+///
+/// This is a different number from the context window and the two are easy to
+/// conflate: a 1M-window model can still cap its *output* at 128k, and a
+/// request whose `max_tokens` exceeds that cap is rejected outright rather than
+/// trimmed. The ceiling matters because the extended-thinking budget is
+/// expressed on the same request — `effort=max` asks for a 65 536-token
+/// thinking budget, and a model whose output cap is below that would 400 on
+/// every turn.
+///
+/// A table cannot keep up with new models, so an unknown model returns `None`
+/// and the caller leaves the ceiling alone. Guessing low would silently cost
+/// output; guessing high would fail the request. Saying nothing is the answer
+/// that keeps the old behaviour for every model this build does not know.
+pub const MODEL_MAX_OUTPUT_TOKENS: &[(&str, u32)] = &[
+    // Anthropic Claude. The 1M-context families all document a 128k output cap.
+    // Haiku 4.5 is the notable exception at 64k, and it is the model this table
+    // exists for: `effort=max`'s 65 536 budget is already over its cap.
+    ("claude-fable", 128_000),
+    ("claude-mythos", 128_000),
+    ("claude-opus-5", 128_000),
+    ("claude-sonnet-5", 128_000),
+    ("claude-haiku-5", 128_000),
+    ("claude-opus-4-8", 128_000),
+    ("claude-opus-4-7", 128_000),
+    ("claude-opus-4-6", 128_000),
+    ("claude-sonnet-4-6", 128_000),
+    ("claude-haiku-4-5", 64_000),
+    // Older Claude: 8192 output on the 3.x and 3.5 generations.
+    ("claude-3-5", 8_192),
+    ("claude-3", 4_096),
+    // OpenAI.
+    ("gpt-4o", 16_384),
+    ("gpt-4.1", 32_768),
+    ("o1", 100_000),
+    ("o3", 100_000),
+    ("o4-mini", 100_000),
+    // DeepSeek: an 8k output cap behind a 64k window.
+    ("deepseek-chat", 8_192),
+    ("deepseek-reasoner", 8_192),
+];
+
+/// The `max_tokens` ceiling for a model, when this build knows it.
+#[must_use]
+pub fn table_max_output_tokens(name: &str) -> Option<u32> {
+    let normalized = normalized_model_name(name);
+    MODEL_MAX_OUTPUT_TOKENS
+        .iter()
+        .find(|(prefix, _)| family_matches(&normalized, prefix))
+        .map(|(_, cap)| *cap)
+}
+
 /// Lifecycle events for a sub-agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentLifecycleEvent {

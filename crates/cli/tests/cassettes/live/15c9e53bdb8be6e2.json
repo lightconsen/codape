@@ -1,15 +1,10 @@
 {
-  "key": "aaa0f12f47255801",
+  "key": "15c9e53bdb8be6e2",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"5a03277f-16e9-4ce7-9dee-ca5e5a103d33\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"5a03277f-16e9-4ce7-9dee-ca5e5a103d33\"},{\"type\":\"text\",\"text\":\"I'll run that command now.\"},{\"type\":\"tool_use\",\"id\":\"call_00_ET_uzTFvYeYoXjTffPFBHTr4109\",\"name\":\"Bash\",\"input\":{\"command\":\"echo 'hello-from-live-test'\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4479,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":51,\"service_tier\":\"standard\"}}"
-    },
-    {
-      "status": 200,
-      "content_type": "application/json",
-      "body": "{\"id\":\"b3b9931c-7eaf-4950-acf8-59084263365b\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"b3b9931c-7eaf-4950-acf8-59084263365b\"},{\"type\":\"text\",\"text\":\"I'll run that command now.\"},{\"type\":\"tool_use\",\"id\":\"call_00_ET_sT5HGOXeOhoFPNjZxjBG6580\",\"name\":\"Bash\",\"input\":{\"command\":\"echo 'hello-from-live-test'\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4479,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":51,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"0609ded6-e3b0-4527-ab56-a5d280f2f73f\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"0609ded6-e3b0-4527-ab56-a5d280f2f73f\"},{\"type\":\"text\",\"text\":\"pong\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4469,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":3,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -21,7 +16,7 @@
         "content": [
           {
             "type": "text",
-            "text": "Use the bash tool to echo 'hello-from-live-test'. Then report back exactly what was echoed."
+            "text": "Say exactly the word 'pong' and nothing else."
           }
         ]
       }
@@ -1092,13 +1087,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1107,7 +1121,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1117,13 +1131,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1157,13 +1168,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

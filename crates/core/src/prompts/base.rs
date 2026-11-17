@@ -194,6 +194,28 @@ impl CompactConfig {
     /// drops below half the window.
     #[must_use]
     pub const fn resolve_auto_threshold(&self, context_window: usize) -> usize {
+        self.resolve_auto_threshold_for_cap(context_window, None)
+    }
+
+    /// Resolve the auto-compact threshold for a model with a known output cap.
+    ///
+    /// Same line as [`Self::resolve_auto_threshold`], but the reserve is sized
+    /// from the model rather than from a constant. Claude's arithmetic is
+    /// `window − min(maxOutputTokens, 20 000) − trigger_buffer`: a model that
+    /// can only emit 8 192 tokens does not need 20 000 held back, and holding
+    /// them back compacts the conversation thousands of tokens earlier than it
+    /// has to. That is the difference between treating a model as "wired up"
+    /// and tuning the session to it.
+    ///
+    /// `output_cap` is the model's documented `max_tokens` ceiling, or `None`
+    /// when this build does not know it. `None` keeps the flat 20 000 reserve,
+    /// so an unrecognised model behaves exactly as before.
+    #[must_use]
+    pub const fn resolve_auto_threshold_for_cap(
+        &self,
+        context_window: usize,
+        output_cap: Option<u32>,
+    ) -> usize {
         if context_window == 0 {
             return self.auto_compact_threshold;
         }
@@ -201,6 +223,16 @@ impl CompactConfig {
             self.output_reserve_tokens
         } else {
             Self::MAX_OUTPUT_RESERVE_TOKENS
+        };
+        // A model that reports a smaller output cap gets the smaller reserve.
+        // A larger cap does not raise the reserve above the constant: the
+        // reserve exists to keep a reply's worth of room, and 20 000 already
+        // covers the default ceiling. `u32 as usize` cannot lose a bit on any
+        // target this crate builds for, and a widened cast is the only form
+        // available inside a `const fn`.
+        let reserve = match output_cap {
+            Some(cap) if (cap as usize) < reserve => cap as usize,
+            _ => reserve,
         };
         let threshold =
             context_window.saturating_sub(reserve.saturating_add(self.trigger_buffer_tokens));
@@ -215,7 +247,17 @@ impl CompactConfig {
     /// line at zero and warn about nothing.
     #[must_use]
     pub const fn resolve_warning_threshold(&self, context_window: usize) -> usize {
-        let auto = self.resolve_auto_threshold(context_window);
+        self.resolve_warning_threshold_for_auto(self.resolve_auto_threshold(context_window))
+    }
+
+    /// Resolve the warning line from an already-computed compaction line.
+    ///
+    /// The gating rule is `warning_buffer_tokens` capped at half the line;
+    /// callers that resolved the line themselves (for instance with a
+    /// model-aware reserve) need this rather than a second window lookup, which
+    /// would resolve a different line and warn against the wrong number.
+    #[must_use]
+    pub const fn resolve_warning_threshold_for_auto(&self, auto: usize) -> usize {
         let margin = if self.warning_buffer_tokens < auto / 2 {
             self.warning_buffer_tokens
         } else {

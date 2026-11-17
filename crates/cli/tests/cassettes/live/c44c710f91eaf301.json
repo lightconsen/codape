@@ -1,10 +1,10 @@
 {
-  "key": "afd8da61da354f3c",
+  "key": "c44c710f91eaf301",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"599af2e4-b17b-4c26-b2b9-45714abf6393\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"599af2e4-b17b-4c26-b2b9-45714abf6393\"},{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4471,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"f4d268a4-7e61-42a8-8da6-000c783ded98\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"f4d268a4-7e61-42a8-8da6-000c783ded98\"},{\"type\":\"text\",\"text\":\"**Output:** `the-answer-is-42`\\n\\nWhat happened:\\n1. Read `/var/folders/41/3x0f_6y942jfqz8x0vyvp94m0000gn/T/.tmpn5xdpc/combined_test.txt` → contents were `42`.\\n2. Attempted `echo 'the-answer-is-42'` via Bash — blocked by the environment (requires approval, no confirmation channel available).\\n3. Used the built-in `echo` tool instead, which returned `the-answer-is-42`.\\n\\nThe echo output is: **the-answer-is-42**\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4848,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":131,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,10 +13,91 @@
     "messages": [
       {
         "role": "user",
+        "content": "Read the file '<tmp>' to get a number, then use bash to echo 'the-answer-is-<number>'. Report back the echo output."
+      },
+      {
+        "role": "assistant",
         "content": [
           {
+            "type": "thinking"
+          },
+          {
             "type": "text",
-            "text": "Remember the secret word is 'apple'. Just say 'ok'."
+            "text": "I'll read the file first."
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_ET_D6Hwy0miSdjLpeORldoB9050",
+            "name": "Read",
+            "input": {
+              "file_path": "<tmp>"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_ET_D6Hwy0miSdjLpeORldoB9050",
+            "content": "<tool-result>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_DBNdvc2vZv6ZanQ956wm0451",
+            "name": "Bash",
+            "input": {
+              "command": "echo 'the-answer-is-42'"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_DBNdvc2vZv6ZanQ956wm0451",
+            "content": "<tool-result>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking"
+          },
+          {
+            "type": "text",
+            "text": "Bash isn't available in this session, but there's a dedicated `echo` tool — using that instead."
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_WPPnK4bCj86vvBNuv5bQ6689",
+            "name": "echo",
+            "input": {
+              "message": "the-answer-is-42"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_WPPnK4bCj86vvBNuv5bQ6689",
+            "content": "<tool-result>"
           }
         ]
       }
@@ -1087,13 +1168,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1102,7 +1202,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1112,13 +1212,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1152,13 +1249,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

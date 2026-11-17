@@ -746,7 +746,7 @@ impl CompactThresholds {
         config: &CompactConfig,
         resolver: &ContextWindowResolver,
     ) -> Self {
-        Self::resolve_detailed(config, resolver.resolve_detailed(&model.0))
+        Self::resolve_detailed_for(model, config, resolver.resolve_detailed(&model.0))
     }
 
     /// Resolve the lines for a context window that has already been looked up.
@@ -769,6 +769,29 @@ impl CompactThresholds {
         Self {
             auto: config.resolve_auto_threshold(window.tokens),
             warn: config.resolve_warning_threshold(window.tokens),
+            blocked: config.resolve_blocked_threshold(window.tokens),
+            window_source: window.source,
+        }
+    }
+
+    /// Resolve the lines for a window, sizing the reserve from the model.
+    ///
+    /// The reserve the compaction line holds back for the model's own reply is
+    /// `min(maxOutputTokens, 20 000)` on Claude. Using the flat 20 000 for
+    /// every model compacts an 8 192-output model 12 000 tokens earlier than it
+    /// has to, which is context thrown away for a reply that could never have
+    /// used it. See [`CompactConfig::resolve_auto_threshold_for_cap`].
+    #[must_use]
+    pub fn resolve_detailed_for(
+        model: &ModelId,
+        config: &CompactConfig,
+        window: ResolvedContextWindow,
+    ) -> Self {
+        let cap = crate::types::table_max_output_tokens(&model.0);
+        let auto = config.resolve_auto_threshold_for_cap(window.tokens, cap);
+        Self {
+            auto,
+            warn: config.resolve_warning_threshold_for_auto(auto),
             blocked: config.resolve_blocked_threshold(window.tokens),
             window_source: window.source,
         }
@@ -2658,6 +2681,44 @@ mod tests {
             thresholds.auto,
             1_000_000 - CompactConfig::MAX_OUTPUT_RESERVE_TOKENS - 13_000
         );
+    }
+
+    /// The reserve is `min(maxOutputTokens, 20 000)` on Claude. A model that
+    /// can only emit 8 192 tokens should not hold 20 000 back — doing so
+    /// compacts the conversation 12 000 tokens earlier than it has to, which is
+    /// context thrown away for a reply that could never have used it.
+    #[test]
+    fn the_model_output_cap_sizes_the_reserve() {
+        let config = CompactConfig::default();
+
+        // Haiku 4.5: a 200k window and a 64k output cap. The cap is above the
+        // 20k constant, so the line is unchanged.
+        let haiku =
+            CompactThresholds::resolve(&ModelId("claude-haiku-4-5-20251001".into()), &config);
+        assert_eq!(
+            haiku.auto,
+            200_000 - CompactConfig::MAX_OUTPUT_RESERVE_TOKENS - 13_000
+        );
+
+        // The 3.5 generation: an 8 192 output cap, below the constant.
+        let old =
+            CompactThresholds::resolve(&ModelId("claude-3-5-sonnet-20241022".into()), &config);
+        assert_eq!(
+            old.auto,
+            200_000 - 8_192 - 13_000,
+            "the reserve follows the model's cap"
+        );
+        assert!(
+            old.auto > haiku.auto,
+            "a smaller cap must leave more room for the conversation"
+        );
+
+        // An unknown model resolves to the 32k guessed window, where the
+        // reserves would eat the whole thing. It floors at half the window
+        // instead — and because the model has no table entry there is no cap
+        // to size the reserve from either way.
+        let unknown = CompactThresholds::resolve(&ModelId("gateway-alias".into()), &config);
+        assert_eq!(unknown.auto, 32_000 / 2, "an unknown window floors at half");
     }
 
     #[test]

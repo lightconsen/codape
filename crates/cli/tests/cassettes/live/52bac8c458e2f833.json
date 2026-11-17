@@ -1,10 +1,15 @@
 {
-  "key": "d891aa10880b75f0",
+  "key": "52bac8c458e2f833",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"69e6c0c7-4490-499f-9029-b30f86ae296e\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"Report back. Be honest: the Bash tool call was denied, so I echoed via the dedicated `echo` tool instead. The output was exactly `hello-from-live-test`.\\n\\nNote that the `echo` tool returns the message; it's a mock/tool-level echo, not a shell. I should be clear that the literal `echo 'hello-from-live-test'` shell command did not run.\",\"signature\":\"69e6c0c7-4490-499f-9029-b30f86ae296e\"},{\"type\":\"text\",\"text\":\"The Bash tool call did not go through — it came back with:\\n\\n> `tool 'Bash' requires approval but no confirmation channel is available: tool 'Bash' requires approval (dangerous operation)`\\n\\nSo no shell process ever ran `echo 'hello-from-live-test'`. Earlier in this session every Bash call was blocked the same way.\\n\\nI did get the string back through the standalone `echo` tool instead (a direct message-echo utility, not a shell), which returned exactly:\\n\\n```\\nhello-from-live-test\\n```\\n\\nTo be precise about what that does and doesn't demonstrate: it confirms the string `hello-from-live-test` round-tripped unchanged, but it is *not* evidence that shell execution works in this environment. If your goal was specifically to verify that a shell can execute commands, that is still unverified and needs an approval channel for Bash. If you have a way to grant that approval, I can retry the actual command.\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4810,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":282,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"c9fadccb-262e-4ef9-9584-70ad4de3e334\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"c9fadccb-262e-4ef9-9584-70ad4de3e334\"},{\"type\":\"tool_use\",\"id\":\"call_00_ET_37PUIgv8pP47xV7LFTSK2669\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -A | wc -l; echo \\\"---\\\"; ls -A\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4486,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":53,\"service_tier\":\"standard\"}}"
+    },
+    {
+      "status": 200,
+      "content_type": "application/json",
+      "body": "{\"id\":\"411d5940-21c6-47f2-a7d9-3940656d3ce8\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"The user wants me to list files in the current directory using bash tool and tell how many files/directories. Just give a number.\\n\\nLet me run ls -A and count.\\n\\nNote: the task says \\\"Just give a number.\\\" So I should just output the number. Let me run the command.\",\"signature\":\"411d5940-21c6-47f2-a7d9-3940656d3ce8\"},{\"type\":\"tool_use\",\"id\":\"call_00_JW2QDi6zuklpJhcBIbmn9277\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -A | wc -l\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4486,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":107,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,61 +18,10 @@
     "messages": [
       {
         "role": "user",
-        "content": "Use the bash tool to echo 'hello-from-live-test'. Then report back exactly what was echoed."
-      },
-      {
-        "role": "assistant",
         "content": [
-          {
-            "type": "thinking"
-          },
           {
             "type": "text",
-            "text": "I'll run that command now."
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_ET_uzTFvYeYoXjTffPFBHTr4109",
-            "name": "Bash",
-            "input": {
-              "command": "echo 'hello-from-live-test'"
-            }
-          }
-        ]
-      },
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "tool_result",
-            "tool_use_id": "call_00_ET_uzTFvYeYoXjTffPFBHTr4109",
-            "content": "<tool-result>"
-          }
-        ]
-      },
-      {
-        "role": "assistant",
-        "content": [
-          {
-            "type": "thinking"
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_qUwWcpwD0aY1fYJeew7C0478",
-            "name": "echo",
-            "input": {
-              "message": "hello-from-live-test"
-            }
-          }
-        ]
-      },
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "tool_result",
-            "tool_use_id": "call_00_qUwWcpwD0aY1fYJeew7C0478",
-            "content": "<tool-result>"
+            "text": "List the files in the current directory using the bash tool and tell me how many files/directories you see. Just give a number."
           }
         ]
       }
@@ -1138,13 +1092,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1153,7 +1126,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1163,13 +1136,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1203,13 +1173,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

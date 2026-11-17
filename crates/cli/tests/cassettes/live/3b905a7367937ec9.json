@@ -1,10 +1,10 @@
 {
-  "key": "c53aab7967edfaaa",
+  "key": "3b905a7367937ec9",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"bdb7af7b-a8d5-4018-9ed1-830f745c78b8\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"bdb7af7b-a8d5-4018-9ed1-830f745c78b8\"},{\"type\":\"text\",\"text\":\"3\\n\\n(Bash wasn't available — it requires approval and no confirmation channel exists — so I listed the directory with the built-in file tools instead: `Cargo.toml`, `src/`, `tests/`.)\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4807,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":47,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"71c6863a-b899-4d9a-8fc1-c3b15e6a2ac7\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"71c6863a-b899-4d9a-8fc1-c3b15e6a2ac7\"},{\"type\":\"text\",\"text\":\"The magic phrase is **xyzzy**.\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4620,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":9,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,7 +13,7 @@
     "messages": [
       {
         "role": "user",
-        "content": "List the files in the current directory using the bash tool and tell me how many files/directories you see. Just give a number."
+        "content": "Read the file '<tmp>' and tell me the magic phrase inside it."
       },
       {
         "role": "assistant",
@@ -22,11 +22,15 @@
             "type": "thinking"
           },
           {
+            "type": "text",
+            "text": "I'll read that file for you."
+          },
+          {
             "type": "tool_use",
-            "id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
-            "name": "Bash",
+            "id": "call_00_ET_UhKTzKylau4fFvX5eOyF4799",
+            "name": "Read",
             "input": {
-              "command": "ls -A | wc -l; echo \"---\"; ls -A"
+              "file_path": "<tmp>"
             }
           }
         ]
@@ -36,83 +40,7 @@
         "content": [
           {
             "type": "tool_result",
-            "tool_use_id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
-            "content": "<tool-result>"
-          }
-        ]
-      },
-      {
-        "role": "assistant",
-        "content": [
-          {
-            "type": "thinking"
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_sU105QkHbdtBdQlK9yks9014",
-            "name": "ListDir",
-            "input": {}
-          }
-        ]
-      },
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "tool_result",
-            "tool_use_id": "call_00_sU105QkHbdtBdQlK9yks9014",
-            "content": "<tool-result>"
-          }
-        ]
-      },
-      {
-        "role": "assistant",
-        "content": [
-          {
-            "type": "thinking"
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_hjfYaNGwcOJ36wTmjU7F3341",
-            "name": "Bash",
-            "input": {
-              "command": "ls -A"
-            }
-          }
-        ]
-      },
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "tool_result",
-            "tool_use_id": "call_00_hjfYaNGwcOJ36wTmjU7F3341",
-            "content": "<tool-result>"
-          }
-        ]
-      },
-      {
-        "role": "assistant",
-        "content": [
-          {
-            "type": "thinking"
-          },
-          {
-            "type": "tool_use",
-            "id": "call_00_hnIeeEg7vlA2DQd6RiIc3999",
-            "name": "Glob",
-            "input": {
-              "pattern": "{*,.*}"
-            }
-          }
-        ]
-      },
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "tool_result",
-            "tool_use_id": "call_00_hnIeeEg7vlA2DQd6RiIc3999",
+            "tool_use_id": "call_00_ET_UhKTzKylau4fFvX5eOyF4799",
             "content": "<tool-result>"
           }
         ]
@@ -1184,13 +1112,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1199,7 +1146,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1209,13 +1156,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1249,13 +1193,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

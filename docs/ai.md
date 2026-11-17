@@ -423,10 +423,18 @@ Chrome DevTools Protocol (CDP) integration provides browser automation tools:
 
 **Tools:**
 - `chrome_list_tabs` — List open tabs
-- `chrome_navigate` — Open URL in new tab
-- `chrome_execute_js` — Execute JavaScript (requires approval)
-- `chrome_screenshot` — Capture base64 PNG
+- `chrome_navigate` — Navigate the driven tab (page URL opens a tab only when there is none)
+- `chrome_wait_for_load` — Poll `document.readyState` until the page is complete
+- `chrome_screenshot` — Capture the viewport **as an image block** the model can see
 - `chrome_get_content` — Extract page HTML as markdown
+- `chrome_click` — Click a CSS selector with real mouse events (requires approval)
+- `chrome_type` — Insert text into a form field via `Input.insertText` (requires approval)
+- `chrome_scroll` — Scroll the page by a pixel delta
+- `chrome_execute_js` — Execute JavaScript (requires approval)
+
+`ws_url` is an optional override on every tool. Omitting it drives the tab the
+session already selected, which the client remembers across calls; a bare
+`navigate` therefore drives one tab instead of opening a new one per step.
 
 The `ChromeClient` is injected into `ToolContext.extra` via `RegistryToolDispatcher::set_chrome_client()`.
 
@@ -664,6 +672,29 @@ than interleaved output, so a copy of the response is the response.
 The display path and the round-trip path both read every delta. A retried
 request can replay a prefix the reader already has, so `ThinkingDelta` goes
 through the same `StreamTextMerger` as text and only the growth is emitted.
+
+#### Encoding and budget
+
+Which encoding a request uses is decided per model by `ModelId::thinking_encoding`,
+because getting it wrong is a 400 rather than a degradation: 4.7 and later accept
+only `{"type":"adaptive"}` plus a top-level `output_config.effort`, 4.6 accepts
+both but deprecates `budget_tokens`, and 4.5 and earlier reject `adaptive`.
+
+On the budget encoding the budget is spent out of the same `max_tokens` ceiling,
+so the request raises `max_tokens` above the budget. That arithmetic has to
+respect the model's own output cap, which is a different number from its context
+window: `MODEL_MAX_OUTPUT_TOKENS` records it, and a budget larger than the cap is
+trimmed to `cap − 1024` rather than pushed past it. An unknown model has no entry
+and keeps the budget the effort level asks for.
+
+#### The compaction reserve follows the model
+
+The compaction line is `window − reserve − trigger_buffer`, where the reserve is
+`min(maxOutputTokens, 20 000)` on Claude. `CompactThresholds::resolve` sizes it
+from `MODEL_MAX_OUTPUT_TOKENS` per model rather than using the flat 20 000: a
+model that can only emit 8 192 tokens should not hold 20 000 back, which would
+compact the conversation thousands of tokens earlier than necessary. An unknown
+model keeps the flat reserve and therefore behaves exactly as before.
 
 ### 14.7 Tool Execution Orchestration
 

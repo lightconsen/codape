@@ -1,10 +1,10 @@
 {
-  "key": "d29b5ad23768375b",
+  "key": "d5abf7e7e18ed68e",
   "responses": [
     {
       "status": 200,
       "content_type": "application/json",
-      "body": "{\"id\":\"0b23822a-3936-49d2-a1b1-9a76081ab03a\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"0b23822a-3936-49d2-a1b1-9a76081ab03a\"},{\"type\":\"text\",\"text\":\"I'll read the file first.\"},{\"type\":\"tool_use\",\"id\":\"call_00_ET_D6Hwy0miSdjLpeORldoB9050\",\"name\":\"Read\",\"input\":{\"file_path\":\"/var/folders/41/3x0f_6y942jfqz8x0vyvp94m0000gn/T/.tmpn5xdpc/combined_test.txt\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4527,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":83,\"service_tier\":\"standard\"}}"
+      "body": "{\"id\":\"a7c80f80-3605-4f48-97d4-5d581876e6b9\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-flash\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"ListDir shows 3 entries. But hidden files may be excluded. Let me check with Glob for hidden files too.\",\"signature\":\"a7c80f80-3605-4f48-97d4-5d581876e6b9\"},{\"type\":\"tool_use\",\"id\":\"call_00_hjfYaNGwcOJ36wTmjU7F3341\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -A\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":4638,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":64,\"service_tier\":\"standard\"}}"
     }
   ],
   "request": {
@@ -13,10 +13,55 @@
     "messages": [
       {
         "role": "user",
+        "content": "List the files in the current directory using the bash tool and tell me how many files/directories you see. Just give a number."
+      },
+      {
+        "role": "assistant",
         "content": [
           {
-            "type": "text",
-            "text": "Read the file '<tmp>' to get a number, then use bash to echo 'the-answer-is-<number>'. Report back the echo output."
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
+            "name": "Bash",
+            "input": {
+              "command": "ls -A | wc -l; echo \"---\"; ls -A"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_ET_37PUIgv8pP47xV7LFTSK2669",
+            "content": "<tool-result>"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking"
+          },
+          {
+            "type": "tool_use",
+            "id": "call_00_sU105QkHbdtBdQlK9yks9014",
+            "name": "ListDir",
+            "input": {}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_00_sU105QkHbdtBdQlK9yks9014",
+            "content": "<tool-result>"
           }
         ]
       }
@@ -1087,13 +1132,32 @@
         }
       },
       {
+        "name": "chrome_click",
+        "description": "chrome_click",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the element to click"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
         "name": "chrome_execute_js",
         "description": "chrome_execute_js",
         "input_schema": {
           "type": "object",
           "required": [
-            "expression",
-            "ws_url"
+            "expression"
           ],
           "properties": {
             "expression": {
@@ -1102,7 +1166,7 @@
             },
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab (from chrome_navigate or chrome_list_tabs)"
+              "description": "Optional tab to act on. Omit to use the session's current tab."
             }
           }
         }
@@ -1112,13 +1176,10 @@
         "description": "chrome_get_content",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to read. Omit to use the session's current tab."
             }
           }
         }
@@ -1152,13 +1213,68 @@
         "description": "chrome_screenshot",
         "input_schema": {
           "type": "object",
-          "required": [
-            "ws_url"
-          ],
           "properties": {
             "ws_url": {
               "type": "string",
-              "description": "WebSocket debugger URL of the target tab"
+              "description": "Optional tab to capture. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_scroll",
+        "description": "chrome_scroll",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "delta_y"
+          ],
+          "properties": {
+            "delta_y": {
+              "type": "number",
+              "description": "Pixels to scroll; positive scrolls down"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_type",
+        "description": "chrome_type",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "text"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector of the input to type into"
+            },
+            "text": {
+              "type": "string",
+              "description": "Text to insert"
+            },
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to act on. Omit to use the session's current tab."
+            }
+          }
+        }
+      },
+      {
+        "name": "chrome_wait_for_load",
+        "description": "chrome_wait_for_load",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ws_url": {
+              "type": "string",
+              "description": "Optional tab to wait on. Omit to use the session's current tab."
             }
           }
         }

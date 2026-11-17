@@ -51,8 +51,9 @@ pub use ask_user_question_tool::AskUserQuestionTool;
 pub use bash_tool::BashTool;
 pub use brief_tool::BriefTool;
 pub use chrome::{
-    ChromeClient, ChromeExecuteJsTool, ChromeGetContentTool, ChromeListTabsTool,
-    ChromeNavigateTool, ChromeScreenshotTool,
+    ChromeClickTool, ChromeClient, ChromeExecuteJsTool, ChromeGetContentTool, ChromeListTabsTool,
+    ChromeNavigateTool, ChromeScreenshotTool, ChromeScrollTool, ChromeTypeTool,
+    ChromeWaitForLoadTool,
 };
 pub use config_tool::ConfigTool;
 pub use cron_create_tool::CronCreateTool;
@@ -308,6 +309,10 @@ pub fn register_builtin_tools(reg: &mut crate::registry::ToolRegistry) {
     reg.register(Arc::new(ChromeExecuteJsTool));
     reg.register(Arc::new(ChromeScreenshotTool));
     reg.register(Arc::new(ChromeGetContentTool));
+    reg.register(Arc::new(ChromeClickTool));
+    reg.register(Arc::new(ChromeTypeTool));
+    reg.register(Arc::new(ChromeScrollTool));
+    reg.register(Arc::new(ChromeWaitForLoadTool));
 }
 
 #[cfg(test)]
@@ -623,8 +628,8 @@ mod tests {
         );
     }
 
-    /// The registry carries 49 baseline tools and 6 feature-gated tools — the
-    /// 5 Chrome DevTools tools and `WebFetch` (55 in total). Nothing is
+    /// The registry carries 49 baseline tools and 10 feature-gated tools — the
+    /// 9 Chrome DevTools tools and `WebFetch` (59 in total). Nothing is
     /// registered that the model cannot use: the former feature-gated stubs
     /// are gone, and every descriptor is enabled.
     #[test]
@@ -633,7 +638,7 @@ mod tests {
         register_builtin_tools(&mut registry);
         let descriptors = registry.all_descriptors();
 
-        assert_eq!(descriptors.len(), 55, "unexpected registration count");
+        assert_eq!(descriptors.len(), 59, "unexpected registration count");
         assert_eq!(
             descriptors
                 .iter()
@@ -647,7 +652,7 @@ mod tests {
                 .iter()
                 .filter(|d| matches!(d.tier, ToolTier::FeatureGated))
                 .count(),
-            6,
+            10,
             "the feature-gated tools are the Chrome DevTools tools and WebFetch"
         );
         assert!(
