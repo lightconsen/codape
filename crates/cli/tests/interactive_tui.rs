@@ -3335,3 +3335,103 @@ fn reasoning_is_shown_folded_and_ctrl_e_unfolds_it() {
     );
     assert!(screen.contains("✻"), "no reasoning marker on screen");
 }
+
+/// `/diff` puts the patch beside the transcript, and `/open` takes the pane back.
+///
+/// Before this the only way to see a diff was to let the model run `git diff`
+/// as a tool, which meant a permission prompt and a wall of text in the
+/// conversation. The pane shows the patch itself, coloured per line and
+/// unwrapped, and a file opened over it replaces it — the pane shows one
+/// thing at a time.
+#[test]
+fn diff_command_draws_the_patch_beside_the_transcript() {
+    let dir = setup_git_project_dir();
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n\
+         pub fn multiply(a: i32, b: i32) -> i32 {\n    a * b\n}\n",
+    )
+    .expect("modify src/lib.rs");
+
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
+    session.send_line("/diff");
+
+    // The title carries the counted summary, which is the pane's own reading
+    // of the patch rather than the text git happened to print. The exact count
+    // is a `diff.rs` unit test's job; here the point is that the pane counted.
+    session.wait_for_text("diff  1 file(s)", SCREEN_TIMEOUT);
+    // The gutter mark is what makes this a diff and not a file view: the
+    // viewer would show the line without a `+` beside it.
+    session.wait_for_text("+pub fn multiply", SCREEN_TIMEOUT);
+    session.wait_for_text("PgUp/PgDn to scroll", SCREEN_TIMEOUT);
+
+    session.send_line("/open src/lib.rs");
+    session.wait_for_text("Opened src/lib.rs", SCREEN_TIMEOUT);
+    // The pane title is what distinguishes the two views: the diff's summary
+    // is drawn on its border. Waiting for it to go is the same wait as the
+    // redraw, so the check below cannot read a frame from before the switch.
+    session.wait_for_text_absent("diff  1 file(s)", SCREEN_TIMEOUT);
+    let screen = session.screen_text();
+    drop(session);
+    assert!(
+        !screen.contains("+pub fn multiply"),
+        "the diff stayed in the pane after a file was opened over it:\n{screen}"
+    );
+    assert!(
+        screen.contains("pub fn multiply"),
+        "the file never reached the pane:\n{screen}"
+    );
+}
+
+/// `Ctrl+P` changes the model and the reasoning effort without leaving the
+/// session, and both changes are visible afterwards.
+///
+/// The effort has to reach the engine, not just the dialog: the client is
+/// built at startup, so an effort that only changed the REPL would be a
+/// setting the provider never hears about. The model has to reach the
+/// statusline for the same reason — a switch nobody can see is not a switch.
+#[test]
+fn ctrl_p_changes_the_model_and_effort_in_session() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text("Codape v", SCREEN_TIMEOUT);
+
+    session.send_bytes(&[0x10]); // Ctrl+P
+    session.wait_for_text("Effort: off", SCREEN_TIMEOUT);
+    session.wait_for_text("[tab] model/effort", SCREEN_TIMEOUT);
+
+    // The model list opens on the model in use and the next entry is `opus`;
+    // then Tab moves focus to the effort, the arrow raises it one step, and
+    // Enter applies both halves as one decision.
+    session.right();
+    let screen = session.wait_for_text("▸ claude-opus-5-5", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("▸ claude-opus-5-5"),
+        "the picker did not move to the next model:\n{screen}"
+    );
+    session.send_bytes(b"\t");
+    session.right();
+    session.send_bytes(b"\r");
+    let raw = session.wait_for_raw_text("claude-opus-5-5 · effort low", SCREEN_TIMEOUT);
+    assert!(
+        squeeze_whitespace(&raw).contains(&squeeze_whitespace("claude-opus-5-5 · effort low")),
+        "the applied choice was not reported:\n{raw}"
+    );
+
+    session.send_line("/effort");
+    let screen = session.wait_for_text("Reasoning effort: low", SCREEN_TIMEOUT);
+    let statusline_row = screen
+        .lines()
+        .find(|line| line.contains("tok:"))
+        .unwrap_or_else(|| panic!("no statusline row:\n{screen}"));
+    drop(session);
+    assert!(
+        screen.contains("Reasoning effort: low"),
+        "the picker changed the dialog but not the session:\n{screen}"
+    );
+    assert!(
+        statusline_row.contains("claude-opus-5-5"),
+        "the statusline still shows the old model: {statusline_row}"
+    );
+}
