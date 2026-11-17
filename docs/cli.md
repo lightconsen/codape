@@ -349,7 +349,7 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - Session transcript persistence to `.codape/transcripts/`.
 - Settings loading from `~/.codape/settings.json` and `.codape/settings.json`.
 - Tracing setup with JSON formatter option and `--debug-file` file appender.
-- Welcome screen with T-Rex ASCII art.
+- Welcome screen with a block-letter wordmark, the session's provider, model and directory, and a `--continue` / `--resume` tip. Falls back to plain lines when the terminal is too narrow for the card.
 - Ctrl+C interrupt handling.
 - Non-interactive headless mode (`--print` or positional prompt): reads input, runs a single turn, prints response, exits.
 - Crash telemetry: SQLite store ingests pending panic hooks at startup.

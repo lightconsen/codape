@@ -2764,6 +2764,13 @@ struct UiPreferences {
     settings_statusline_theme: Option<String>,
     /// `statusline.format` from settings, applied at startup.
     settings_statusline_format: Option<String>,
+    /// Who answers this session's requests, as the welcome page names them.
+    ///
+    /// The orchestrator sets it from the provider configuration it built the
+    /// client from (`ProviderConfig::display_label`); a loop built without a
+    /// client keeps it empty and the page omits the row. It is a fact about
+    /// startup, so it is not recomputed per frame.
+    provider_label: String,
     /// The directory `--worktree` moved the session out of, replayed into
     /// `CwdChanged` once the hooks are installed.
     worktree_previous_cwd: Option<std::path::PathBuf>,
@@ -3291,6 +3298,7 @@ impl ReplLoop {
                 settings_vim_mode: None,
                 settings_statusline_theme: None,
                 settings_statusline_format: None,
+                provider_label: String::new(),
                 worktree_previous_cwd: None,
                 keybindings: codape_ui::keybindings::KeyBindings::default(),
                 keybinding_notes: Vec::new(),
@@ -3802,6 +3810,7 @@ impl ReplLoop {
                 settings_vim_mode: None,
                 settings_statusline_theme: None,
                 settings_statusline_format: None,
+                provider_label: String::new(),
                 worktree_previous_cwd: None,
                 keybindings: codape_ui::keybindings::KeyBindings::default(),
                 keybinding_notes: Vec::new(),
@@ -4391,6 +4400,15 @@ impl ReplLoop {
         self.ui.settings_vim_mode = vim_mode;
         self.ui.settings_statusline_theme = statusline_theme;
         self.ui.settings_statusline_format = statusline_format;
+    }
+
+    /// Name the provider the welcome page reports.
+    ///
+    /// Set by the orchestrator from the same [`codape_core::provider_config::ProviderConfig`]
+    /// it built the client from, so the page cannot name a provider the
+    /// session is not talking to.
+    pub fn with_provider_label(&mut self, label: String) {
+        self.ui.provider_label = label;
     }
 
     pub fn with_betas(&mut self, betas: Vec<String>) {
@@ -10822,6 +10840,8 @@ impl ReplLoop {
             "New Session".into()
         };
         statusline.git_branch = current_git_branch(&self.cwd);
+        statusline.provider.clone_from(&self.ui.provider_label);
+        statusline.cwd = display_cwd(&self.cwd);
         // The two numbers here used to be invented: `self.history` is the list
         // of prompts the user typed, not a token count, and the cost was a
         // literal 0.0. Both read from the engine now, which is the only place
@@ -13580,6 +13600,24 @@ fn current_git_branch(cwd: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A directory as the welcome page shows it: the home directory written `~`.
+///
+/// The comparison is on whole path components, not on a string prefix: a home
+/// at `/Users/sam` must not turn `/Users/samantha/project` into
+/// `~antha/project`. A path outside the home, or one where the home cannot be
+/// determined, is returned unchanged.
+fn display_cwd(cwd: &str) -> String {
+    let Some(home) = home::home_dir() else {
+        return cwd.to_string();
+    };
+    let path = std::path::Path::new(cwd);
+    match path.strip_prefix(&home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => cwd.to_string(),
+    }
+}
+
 /// Session state for the REPL.
 #[derive(Debug)]
 pub struct ReplSession {
@@ -15198,6 +15236,40 @@ mod tests {
     fn current_git_branch_falls_back() {
         let branch = current_git_branch("/nonexistent");
         assert_eq!(branch, "");
+    }
+
+    /// The home directory is written `~`, and only when it is the whole path
+    /// prefix: a sibling directory whose name merely starts with the home's
+    /// must not be folded into it.
+    #[test]
+    fn display_cwd_folds_only_the_actual_home() {
+        let home = home::home_dir().expect("a home directory");
+        let home = home.display().to_string();
+
+        assert_eq!(display_cwd(&home), "~");
+        assert_eq!(display_cwd(&format!("{home}/work/codape")), "~/work/codape");
+
+        // `/Users/sam` must not claim `/Users/samantha`.
+        let sibling = format!("{home}antha/project");
+        assert_eq!(display_cwd(&sibling), sibling);
+    }
+
+    #[test]
+    fn display_cwd_leaves_a_path_outside_the_home_alone() {
+        assert_eq!(display_cwd("/definitely/not/home"), "/definitely/not/home");
+    }
+
+    /// The welcome page reports what `sync_statusline` pushed: the provider
+    /// label the orchestrator captured and the directory folded to `~`.
+    #[test]
+    fn syncing_the_statusline_carries_the_provider_and_the_directory() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_provider_label("Anthropic API".into());
+        let mut statusline = codape_ui::statusline::Statusline::new();
+        repl.sync_statusline(&mut statusline);
+
+        assert_eq!(statusline.provider, "Anthropic API");
+        assert_eq!(statusline.cwd, "/tmp");
     }
 
     #[test]

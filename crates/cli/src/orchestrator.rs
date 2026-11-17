@@ -2706,13 +2706,30 @@ impl StartupOrchestrator {
         prompt_caching: Option<bool>,
         provider: Option<&codape_config::ProviderSettings>,
     ) -> Option<Box<dyn ApiClient>> {
-        Self::api_client_from_provider_config(
-            ProviderConfig::from_env(),
+        Self::try_create_api_client_with_label(api_key_override, prompt_caching, provider).0
+    }
+
+    /// Create the API client and the name of the provider behind it.
+    ///
+    /// The label comes from the same configuration the client was built from,
+    /// so the welcome page cannot name a provider the session is not talking
+    /// to. Built once, here, rather than re-derived from the environment at
+    /// draw time.
+    fn try_create_api_client_with_label(
+        api_key_override: Option<&str>,
+        prompt_caching: Option<bool>,
+        provider: Option<&codape_config::ProviderSettings>,
+    ) -> (Option<Box<dyn ApiClient>>, String) {
+        let config = ProviderConfig::from_env();
+        let label = config.display_label();
+        let client = Self::api_client_from_provider_config(
+            config,
             api_key_override,
             prompt_caching,
             provider,
             |name| std::env::var(name).ok(),
-        )
+        );
+        (client, label)
     }
 
     /// Build an API client from a [`ProviderConfig`], gated on usable
@@ -3246,15 +3263,19 @@ impl StartupOrchestrator {
     ) -> crate::repl::ReplLoop {
         let api_key = self.api_key_from_settings();
         let prompt_caching = self.prompt_caching_from_settings();
-        let mut repl = if let Some(api_client) =
-            Self::try_create_api_client(api_key, prompt_caching, self.provider_settings())
-        {
+        let (client, provider_label) = Self::try_create_api_client_with_label(
+            api_key,
+            prompt_caching,
+            self.provider_settings(),
+        );
+        let mut repl = if let Some(api_client) = client {
             let api_client = Self::apply_effort(api_client, self.ctx.effort.as_deref());
             self.install_sampling_handler(api_client.as_ref(), &model);
             crate::repl::ReplLoop::with_engine(api_client, cwd.to_string(), model)
         } else {
             crate::repl::ReplLoop::new(cwd.to_string(), model)
         };
+        repl.with_provider_label(provider_label);
         if let Some(ref pm) = self.ctx.plugin_manager {
             repl.with_plugin_manager(Arc::clone(pm));
         }
@@ -4507,15 +4528,19 @@ impl StartupOrchestrator {
         // Enter REPL with the resumed context
         let api_key = self.api_key_from_settings();
         let prompt_caching = self.prompt_caching_from_settings();
-        let mut repl = if let Some(api_client) =
-            Self::try_create_api_client(api_key, prompt_caching, self.provider_settings())
-        {
+        let (client, provider_label) = Self::try_create_api_client_with_label(
+            api_key,
+            prompt_caching,
+            self.provider_settings(),
+        );
+        let mut repl = if let Some(api_client) = client {
             let api_client = Self::apply_effort(api_client, self.ctx.effort.as_deref());
             self.install_sampling_handler(api_client.as_ref(), &model);
             crate::repl::ReplLoop::with_engine(api_client, cwd.to_string(), model)
         } else {
             crate::repl::ReplLoop::new(cwd.to_string(), model)
         };
+        repl.with_provider_label(provider_label);
         repl.with_resume_session(Some(resolved_session_id));
         if let Some(ref pm) = self.ctx.plugin_manager {
             repl.with_plugin_manager(Arc::clone(pm));

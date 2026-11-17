@@ -21,6 +21,19 @@ pub struct Statusline {
     pub cost_usd: Option<f64>,
     /// Git branch name.
     pub git_branch: String,
+    /// Who answers the requests, as a person would name them.
+    ///
+    /// Carried on the statusline because the welcome page is drawn from it and
+    /// the REPL already pushes the session's facts through this one channel.
+    /// Empty when the session has no client, so the page omits the segment
+    /// instead of printing a placeholder.
+    pub provider: String,
+    /// The session's working directory, with the home directory as `~`.
+    ///
+    /// The welcome page shows this the way a shell prompt does: a path too
+    /// long for the card loses its start, because the leaf directory is the
+    /// part that tells the user which checkout they are in.
+    pub cwd: String,
     /// Session title.
     pub session_title: String,
     /// Whether currently thinking/streaming.
@@ -59,6 +72,8 @@ impl Statusline {
             total_tokens: 0,
             cost_usd: Some(0.0),
             git_branch: String::new(),
+            provider: String::new(),
+            cwd: String::new(),
             session_title: String::new(),
             thinking: false,
             thinking_started: None,
@@ -248,6 +263,8 @@ mod tests {
             total_tokens: 1234,
             cost_usd: Some(0.42),
             git_branch: "main".into(),
+            provider: "Anthropic API".into(),
+            cwd: "~/work".into(),
             session_title: "Fix bug".into(),
             thinking: false,
             thinking_started: None,
@@ -303,6 +320,8 @@ mod tests {
             total_tokens: 1234,
             cost_usd: Some(0.42),
             git_branch: "main".into(),
+            provider: "Anthropic API".into(),
+            cwd: "~/work".into(),
             session_title: "Fix bug".into(),
             thinking: false,
             thinking_started: None,
@@ -329,6 +348,8 @@ mod tests {
             total_tokens: 0,
             cost_usd: Some(0.0),
             git_branch: "main".into(),
+            provider: "Anthropic API".into(),
+            cwd: "~/work".into(),
             session_title: String::new(),
             thinking: false,
             thinking_started: None,
@@ -388,6 +409,8 @@ mod tests {
             total_tokens: 0,
             cost_usd: Some(0.0),
             git_branch: "main".into(),
+            provider: "Anthropic API".into(),
+            cwd: "~/work".into(),
             session_title: String::new(),
             thinking: false,
             thinking_started: None,

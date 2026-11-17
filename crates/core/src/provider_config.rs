@@ -200,6 +200,43 @@ impl ProviderConfig {
         }
     }
 
+    /// How a person would name the provider this configuration talks to.
+    ///
+    /// The order mirrors [`Self::build_router`]: the first provider it adds is
+    /// the one that serves the default model, so naming anything else would
+    /// describe an endpoint requests never reach.
+    ///
+    /// A configured `base_url` names its host instead of the protocol. An
+    /// Anthropic-compatible endpoint is not Anthropic — calling a DeepSeek or
+    /// OpenRouter endpoint "Anthropic API" would answer a question the user did
+    /// not ask, while the host is exactly what they typed.
+    ///
+    /// Empty when nothing is configured, so a caller can omit the segment
+    /// rather than print a placeholder.
+    #[must_use]
+    pub fn display_label(&self) -> String {
+        if let Some(cloud) = self.cloud.as_ref() {
+            return cloud.kind.display_name().to_string();
+        }
+        if let Some(endpoint) = self.anthropic.as_ref() {
+            return endpoint
+                .base_url
+                .as_deref()
+                .and_then(url_host)
+                .unwrap_or_else(|| ProviderKind::FirstParty.display_name().to_string());
+        }
+        if self.openai.is_some() {
+            return "OpenAI".to_string();
+        }
+        if self.groq.is_some() {
+            return "Groq".to_string();
+        }
+        if let Some(custom) = self.custom.first() {
+            return custom.name.clone();
+        }
+        String::new()
+    }
+
     /// Build a [`ModelRouter`] from this configuration.
     ///
     /// Providers are added in priority order: Anthropic > OpenAI > Groq > custom.
@@ -309,6 +346,18 @@ impl ProviderConfig {
 
         ProviderRouter::from_model_router(router)
     }
+}
+
+/// The host of a URL, without the scheme or a `www.` prefix.
+///
+/// `reqwest::Url` is already a dependency of this crate and parses the
+/// authority the same way a request will, so a host that renders here is the
+/// host the transport connects to. A URL that does not parse is omitted rather
+/// than shown raw: half a URL in a provider label reads as a bug.
+fn url_host(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.trim_start_matches("www.").to_string();
+    (!host.is_empty()).then_some(host)
 }
 
 fn parse_custom_headers_env() -> BTreeMap<String, String> {
@@ -512,5 +561,60 @@ mod tests {
         ];
 
         assert_eq!(ProviderConfig::from_env().request_timeout_secs, Some(3000));
+    }
+
+    /// A plain key with no endpoint override talks to Anthropic's own API.
+    #[test]
+    fn the_display_label_names_the_first_provider_the_router_adds() {
+        // Built rather than `set_anthropic_api_key`'d: that setter seeds the
+        // base URL from the ambient environment, and this test is about the
+        // label for a config with no override at all.
+        let endpoint = |base_url: Option<&str>| ProviderEndpoint {
+            api_key: "sk-test".into(),
+            base_url: base_url.map(str::to_string),
+            provider_profile: None,
+            custom_headers: BTreeMap::new(),
+        };
+
+        let mut config = ProviderConfig::default();
+        assert_eq!(config.display_label(), "", "nothing configured, no label");
+
+        config.anthropic = Some(endpoint(None));
+        assert_eq!(config.display_label(), "Anthropic API");
+
+        // An override names its host: requests do not reach Anthropic, so the
+        // label must not claim they do.
+        config.anthropic = Some(endpoint(Some("https://api.deepseek.com/anthropic")));
+        assert_eq!(config.display_label(), "api.deepseek.com");
+
+        // Anthropic outranks the other providers, exactly as the router does.
+        config.openai = Some(ProviderEndpoint {
+            api_key: "sk-openai".into(),
+            base_url: None,
+            provider_profile: None,
+            custom_headers: BTreeMap::new(),
+        });
+        assert_eq!(config.display_label(), "api.deepseek.com");
+
+        // An unparsable URL leaves the protocol name rather than half a URL.
+        config.anthropic = Some(endpoint(Some("not a url")));
+        assert_eq!(config.display_label(), "Anthropic API");
+
+        // With no Anthropic endpoint the next provider the router adds answers.
+        config.anthropic = None;
+        assert_eq!(config.display_label(), "OpenAI");
+    }
+
+    /// A cloud deployment is a provider in its own right and outranks the key.
+    #[test]
+    fn a_cloud_deployment_is_named_in_the_display_label() {
+        let config = ProviderConfig {
+            cloud: Some(CloudEndpoint::new(
+                ProviderKind::Vertex,
+                "us-central1".to_string(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(config.display_label(), "Google Vertex AI");
     }
 }

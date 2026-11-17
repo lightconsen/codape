@@ -440,7 +440,8 @@ Use three layers of assertion:
 
 Validate:
 
-- welcome text
+- the welcome page: block wordmark, `>_ Codape` title, provider/model/directory
+  rows, and the `--continue` / `--resume` tip
 - user messages
 - assistant replies
 - system activity events

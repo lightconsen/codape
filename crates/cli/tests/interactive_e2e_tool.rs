@@ -25,7 +25,7 @@ fn interactive_e2e_tool_runs_scenario_file() {
             "model": "K2.6"
         },
         "steps": [
-            { "action": "wait_for_text", "text": "Codape v" },
+            { "action": "wait_for_text", "text": ">_ Codape" },
             { "action": "assert_core_regions_clean" },
             { "action": "send_line", "text": "hello" },
             { "action": "wait_for_text", "text": "Hello!" },

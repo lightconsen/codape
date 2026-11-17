@@ -58,27 +58,30 @@ fn syntax_highlighter() -> &'static codape_core::syntax::SyntaxHighlighter {
     HIGHLIGHTER.get_or_init(codape_core::syntax::SyntaxHighlighter::new)
 }
 
-/// ASCII T-Rex on the welcome page.
+/// `CODAPE` in half blocks, four rows tall.
 ///
-/// Deliberately the compact variant: the page has to fit above the input box
-/// on a standard 24-row terminal, and the taller CLI banner does not leave
-/// room for the wordmark and hints.
-const WELCOME_T_REX: &str = r"
-                      __
-                     / _)
-            _.----._/ /
-           /         /
-        __/ (  | (  |
-       /__.-'|_|--|_|
+/// Seven glyph rows folded in pairs, so the wordmark costs four of the sixteen
+/// rows the card has at 80x24. Drawn as ordinary styled spans: the kitty
+/// graphics protocol writes outside the cell buffer and fights the virtualised
+/// transcript, so every picture in this UI is text.
+const WELCOME_WORDMARK: &str = r"
+▄▀▀▀▄ ▄▀▀▀▄ █▀▀▀▄ ▄▀▀▀▄ █▀▀▀▄ █▀▀▀▀
+█     █   █ █   █ █▄▄▄█ █▄▄▄▀ █▄▄▄
+█   ▄ █   █ █   █ █   █ █     █
+ ▀▀▀   ▀▀▀  ▀▀▀▀  ▀   ▀ ▀     ▀▀▀▀▀
 ";
 
 /// The welcome page is drawn inside a box no wider than this. Two columns
 /// beyond the longest hint keep the text off the right border.
 const WELCOME_CARD_MAX_WIDTH: usize = 64;
-/// Below this width the box's padding and hints no longer fit; the page falls
-/// back to plain centered lines.
-const WELCOME_CARD_MIN_WIDTH: usize = 34;
+/// Below this width the box cannot hold the block wordmark (35 columns plus
+/// its indent) and the page falls back to plain lines.
+const WELCOME_CARD_MIN_WIDTH: usize = 39;
 /// Rows the full welcome card occupies, including its border.
+///
+/// This is also the message pane's height at 80x24, so growing the card past
+/// it would push the wordmark off the top of the page on the most common
+/// terminal size. [`the_welcome_card_fits_the_message_pane_at_80x24`] pins it.
 const WELCOME_CARD_HEIGHT: usize = 16;
 
 /// The main terminal UI.
@@ -962,7 +965,8 @@ fn render_messages(
                     width,
                     viewport_height,
                     &state.statusline.model,
-                    &state.statusline.git_branch,
+                    &state.statusline.provider,
+                    &state.statusline.cwd,
                 ));
             }
             state.messages.render_cache.width = width;
@@ -1061,7 +1065,8 @@ fn render_messages(
             width,
             viewport_height,
             &state.statusline.model,
-            &state.statusline.git_branch,
+            &state.statusline.provider,
+            &state.statusline.cwd,
         ));
     }
 
@@ -1601,201 +1606,331 @@ fn scroll_slice_bounds(len: usize, viewport_height: usize, scroll_offset: usize)
 
 /// The welcome page shown while the transcript is empty.
 ///
-/// It replaces the old one-line startup banner: the same facts (name, version,
-/// model, branch) plus the mascot and the keys a new user needs. The transcript
-/// is not a widget, so the page is built from [`Line`]s rather than a boxed
-/// widget; a terminal too small for the box gets plain centred lines instead of
-/// a clipped one.
+/// Modelled on Qwen Code's splash: a block-letter wordmark, a box of session
+/// facts, and the resume tip underneath. The page is built from [`Line`]s
+/// rather than a boxed widget because the transcript is not a widget, and a
+/// terminal too small for the box gets plain centred lines instead of a clipped
+/// one.
+///
+/// One deliberate departure from the reference: the wordmark and the facts are
+/// stacked, not side by side. Qwen draws them across a full-width terminal;
+/// here the card is capped at [`WELCOME_CARD_MAX_WIDTH`] and a split view
+/// halves it again, so a side-by-side layout would clip either the box or the
+/// wordmark rather than shrink gracefully.
 fn render_welcome_art(
     theme: &Theme,
     width: usize,
     viewport_height: usize,
     model: &str,
-    branch: &str,
+    provider: &str,
+    cwd: &str,
 ) -> Vec<Line<'static>> {
-    let meta = welcome_meta(model, branch);
+    let facts = WelcomeFacts {
+        model,
+        provider,
+        cwd,
+    };
     if width >= WELCOME_CARD_MIN_WIDTH && viewport_height >= WELCOME_CARD_HEIGHT {
-        welcome_card(theme, width, model, branch)
+        welcome_card(theme, width, &facts)
     } else {
-        welcome_plain(theme, &meta)
+        welcome_plain(theme, &facts, width)
     }
 }
 
-/// `Codape v0.1.0 · model · branch`, omitting what the session does not know.
-fn welcome_meta(model: &str, branch: &str) -> String {
-    let mut parts = vec![format!("Codape v{}", env!("CARGO_PKG_VERSION"))];
-    if !model.is_empty() {
-        parts.push(model.to_string());
-    }
-    if !branch.is_empty() {
-        parts.push(branch.to_string());
-    }
-    parts.join("  ·  ")
+/// What the welcome page reports about the session.
+///
+/// A struct rather than four positional arguments: every field is a plain
+/// string the REPL already pushes, so a `&str` at the wrong position would
+/// compile and print the directory where the model belongs.
+///
+/// The branch is not here. The card is sixteen rows and the facts are its
+/// middle; the statusline already reports the branch on every frame, and
+/// spending a row on a second copy would push the wordmark off at 80x24.
+struct WelcomeFacts<'a> {
+    model: &'a str,
+    provider: &'a str,
+    cwd: &'a str,
 }
 
 /// The boxed welcome page.
 ///
 /// The card hugs the left edge: the transcript is a log, and a centred card
 /// floats away from the text it introduces. Colour carries the hierarchy
-/// instead of position: the wordmark cycles through the theme's accents, the
-/// mascot is green, the version/model/branch and the key hints each have their
-/// own colour.
-fn welcome_card(theme: &Theme, width: usize, model: &str, branch: &str) -> Vec<Line<'static>> {
+/// instead of position: the wordmark is a gradient, the session facts each have
+/// their own colour, and the tips are dim.
+fn welcome_card(theme: &Theme, width: usize, facts: &WelcomeFacts<'_>) -> Vec<Line<'static>> {
     let card_width = width.min(WELCOME_CARD_MAX_WIDTH);
     let inner = card_width.saturating_sub(2);
     let indent = "";
     let border = Style::default().fg(theme.border);
-    let art = Style::default().fg(theme.assistant);
     let muted = Style::default().fg(theme.dim);
 
     let mut lines = Vec::with_capacity(WELCOME_CARD_HEIGHT);
     lines.push(card_border(indent, '╭', '╮', inner, border));
     lines.push(card_row(indent, "", muted, inner, border));
-    lines.push(card_row_spans(indent, wordmark_spans(theme), inner, border));
-    lines.push(card_row(indent, "", muted, inner, border));
 
-    // Left-align the mascot as one block. Stripping each line's own leading
-    // spaces would distort the drawing, so remove only the indent common to
-    // every row and keep the rest.
-    let art_lines: Vec<&str> = WELCOME_T_REX
+    // The wordmark is a picture: every row is left-aligned at the same column
+    // and coloured by column, so centring or re-indenting one row would shear
+    // the letters apart.
+    for (row, art) in WELCOME_WORDMARK
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(str::trim_end)
-        .collect();
-    let common_indent = art_lines
-        .iter()
-        .map(|line| line.len() - line.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    for art_line in art_lines {
-        let art_line = &art_line[common_indent..];
-        lines.push(card_row_left(
+        .enumerate()
+    {
+        lines.push(card_row_spans(
             indent,
-            &format!("  {art_line}"),
-            art,
+            wordmark_spans(art, row),
             inner,
             border,
         ));
     }
 
     lines.push(card_row(indent, "", muted, inner, border));
-    lines.push(card_row_spans(
-        indent,
-        welcome_meta_spans(theme, model, branch),
-        inner,
-        border,
-    ));
+    lines.push(card_row_spans(indent, title_spans(theme), inner, border));
+    // No blank between the title and the facts. The card is exactly as tall
+    // as the message pane at 80x24, and the *first* rows are what a taller card
+    // loses, so an inserted blank would cost the top border and the wordmark.
+    for spans in fact_rows(theme, facts, inner) {
+        lines.push(card_row_spans(indent, spans, inner, border));
+    }
     lines.push(card_row(indent, "", muted, inner, border));
-    lines.push(card_row_spans(
-        indent,
-        welcome_hint_spans(theme, inner),
-        inner,
-        border,
-    ));
+    for spans in hint_rows(theme) {
+        lines.push(card_row_spans(indent, spans, inner, border));
+    }
     lines.push(card_row(indent, "", muted, inner, border));
     lines.push(card_border(indent, '╰', '╯', inner, border));
     lines
 }
 
-/// `C O D E R E X`, one colour per letter, hugging the left edge.
-fn wordmark_spans(theme: &Theme) -> Vec<Span<'static>> {
-    const LETTERS: [char; 7] = ['C', 'O', 'D', 'E', 'R', 'E', 'X'];
-    let colors = [
-        theme.accent,
-        theme.assistant,
-        theme.accent_secondary,
-        theme.warning,
-        theme.error,
-        theme.accent,
-        theme.assistant,
-    ];
-
-    let mut spans = vec![Span::raw("  ")];
-    for (index, letter) in LETTERS.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            letter.to_string(),
-            Style::default()
-                .fg(colors[index])
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans
-}
-
-/// Version, model and branch as separate coloured spans.
-fn welcome_meta_spans(theme: &Theme, model: &str, branch: &str) -> Vec<Span<'static>> {
-    let separator = Style::default().fg(theme.dim);
-    let mut spans = vec![
+/// `>_ Codape (v0.2.1)`, the card's title: a prompt caret and the version.
+fn title_spans(theme: &Theme) -> Vec<Span<'static>> {
+    vec![
         Span::raw("  "),
         Span::styled(
-            format!("Codape v{}", env!("CARGO_PKG_VERSION")),
+            ">_",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-    ];
-    if !model.is_empty() {
-        spans.push(Span::styled(" · ", separator));
-        spans.push(Span::styled(
-            model.to_string(),
-            Style::default().fg(theme.assistant),
-        ));
-    }
-    if !branch.is_empty() {
-        spans.push(Span::styled(" · ", separator));
-        spans.push(Span::styled(
-            branch.to_string(),
-            Style::default().fg(theme.accent_secondary),
-        ));
-    }
-    spans
-}
-
-/// `/help` and the exit keys, each in its own colour.
-fn welcome_hint_spans(theme: &Theme, inner: usize) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(theme.dim);
-    let key = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
-
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled("Type ", dim),
-        Span::styled("/help", key(theme.accent)),
-    ];
-    if inner >= 60 {
-        spans.push(Span::styled(" for commands · ", dim));
-        spans.push(Span::styled("Ctrl+C", key(theme.warning)));
-        spans.push(Span::styled(" to clear · ", dim));
-        spans.push(Span::styled("Ctrl+D", key(theme.assistant)));
-        spans.push(Span::styled(" to exit", dim));
-    } else if inner >= 42 {
-        spans.push(Span::styled(" for commands · ", dim));
-    } else {
-        spans.push(Span::styled(" · ", dim));
-    }
-    spans.push(Span::styled("Ctrl+D", key(theme.assistant)));
-    spans.push(Span::styled(" to exit", dim));
-    spans
-}
-
-/// Plain welcome lines, used when the box would not fit.
-fn welcome_plain(theme: &Theme, meta: &str) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(theme.dim);
-    vec![
-        Line::from(""),
-        Line::from(wordmark_spans(theme)),
-        Line::from(Span::styled(format!("  {meta}"), muted)),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Type /help for commands · Ctrl+D to exit",
-            muted,
-        )),
-        Line::from(""),
+        Span::styled(
+            " Codape",
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" (v{})", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(theme.dim),
+        ),
     ]
 }
 
+/// One row per fact, each labelled so the value is readable on its own.
+///
+/// The reference puts provider and model on one line and the directory under
+/// it. At this width a `provider | model` line truncates in the middle of a
+/// model name, which is the one fact a user is most likely to check, so each
+/// gets its own row here.
+fn fact_rows(theme: &Theme, facts: &WelcomeFacts<'_>, inner: usize) -> Vec<Vec<Span<'static>>> {
+    /// Columns the indent and the label take, so a path knows its own budget.
+    const PREFIX: usize = 2 + LABEL_WIDTH;
+
+    let label = Style::default().fg(theme.dim);
+    let mut rows = Vec::with_capacity(3);
+    let mut row = |name: &str, value: String, style: Style| {
+        if value.is_empty() {
+            return;
+        }
+        rows.push(vec![
+            Span::raw("  "),
+            Span::styled(format!("{name:<LABEL_WIDTH$}"), label),
+            Span::styled(value, style),
+        ]);
+    };
+    row(
+        "Provider",
+        facts.provider.to_string(),
+        Style::default().fg(theme.accent_secondary),
+    );
+    row(
+        "Model",
+        facts.model.to_string(),
+        Style::default().fg(theme.assistant),
+    );
+    row(
+        "Directory",
+        truncate_path_start(facts.cwd, inner.saturating_sub(PREFIX)),
+        Style::default().fg(theme.foreground),
+    );
+    rows
+}
+
+/// Columns the fact labels occupy, including their gap after the indent.
+const LABEL_WIDTH: usize = 10;
+
+/// Keep the end of a path, marking the cut with `…`.
+///
+/// The leaf directory is what tells the user which checkout they are in, so a
+/// long path loses its start — the same choice a shell prompt makes. The cut
+/// prefers a component boundary, because `…/work/codape` reads as a path while
+/// `…k/codape` reads as a typo.
+fn truncate_path_start(path: &str, width: usize) -> String {
+    let total = unicode_width::UnicodeWidthStr::width(path);
+    if total <= width {
+        return path.to_string();
+    }
+    // One column for the ellipsis itself.
+    let Some(room) = width.checked_sub(1) else {
+        return String::new();
+    };
+
+    // Walk components from the right, keeping as many as fit.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for component in path.rsplit('/') {
+        if component.is_empty() {
+            continue;
+        }
+        let component_width =
+            unicode_width::UnicodeWidthStr::width(component) + usize::from(!kept.is_empty());
+        if used + component_width > room {
+            break;
+        }
+        used += component_width;
+        kept.push(component);
+    }
+    if kept.is_empty() {
+        // A single component longer than the row: fall back to its tail.
+        let tail = truncate_to_width_from_end(path, room);
+        return format!("…{tail}");
+    }
+    kept.reverse();
+    format!("…/{}", kept.join("/"))
+}
+
+/// The last `width` columns of `text`, cut on a character boundary.
+fn truncate_to_width_from_end(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for character in text.chars().rev() {
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(1);
+        if used + character_width > width {
+            break;
+        }
+        out.insert(0, character);
+        used += character_width;
+    }
+    out
+}
+
+/// What a new user needs: the command list and, below it, the resume tip.
+///
+/// `--continue` and `--resume` are the two flags that reconnect a session, and
+/// a user who does not know they exist starts over instead of picking up where
+/// they left off — the same reason Qwen's splash names them.
+fn hint_rows(theme: &Theme) -> Vec<Vec<Span<'static>>> {
+    let dim = Style::default().fg(theme.dim);
+    let key = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
+    vec![
+        vec![
+            Span::raw("  "),
+            Span::styled("Type ", dim),
+            Span::styled("/help", key(theme.accent)),
+            Span::styled(" for commands", dim),
+        ],
+        vec![
+            Span::raw("  "),
+            Span::styled("Resume with ", dim),
+            Span::styled("--continue", key(theme.accent_secondary)),
+            Span::styled(" or ", dim),
+            Span::styled("--resume", key(theme.accent_secondary)),
+        ],
+    ]
+}
+
+/// The wordmark as coloured spans.
+///
+/// The colour runs blue → purple across the columns and brightens down the
+/// rows, so the mark reads as one object rather than six differently coloured
+/// letters. Whitespace is emitted unstyled: a styled space would paint over the
+/// gap between letters and draw visible bands.
+///
+/// The ramp is the blue → purple of the reference splash, not the theme's
+/// accents: the page is the one place the product names itself, and a wordmark
+/// that re-tinted per theme would be a different logo in each one.
+fn wordmark_spans(art: &str, row: usize) -> Vec<Span<'static>> {
+    const RAMP: [Color; 5] = [
+        Color::Rgb(96, 165, 250),
+        Color::Rgb(129, 140, 248),
+        Color::Rgb(167, 139, 250),
+        Color::Rgb(192, 132, 252),
+        Color::Rgb(244, 114, 182),
+    ];
+
+    let columns = art.chars().count().max(1);
+    let mut spans = vec![Span::raw("  ")];
+    for (column, character) in art.chars().enumerate() {
+        if character == ' ' {
+            spans.push(Span::raw(" "));
+            continue;
+        }
+        // The column picks the step along the ramp; the row lightens it so the
+        // letters do not look flat. Integer arithmetic throughout: a float ramp
+        // would need a cast per channel, and the `round` in one is enough to
+        // put two neighbouring cells a whole step apart.
+        let index = column
+            .saturating_mul(RAMP.len())
+            .saturating_div(columns)
+            .min(RAMP.len() - 1);
+        let row_shade = u8::try_from(row.min(3)).unwrap_or(3);
+        spans.push(Span::styled(
+            character.to_string(),
+            Style::default()
+                .fg(lighten(RAMP[index], row_shade * 12))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
+}
+
+/// `color` brightened by `amount` per channel, saturating at 255.
+///
+/// A non-RGB colour is returned unchanged rather than converted: the ramp is
+/// always RGB, so the branch only guards against a future caller handing in an
+/// ANSI index the terminal might not have.
+fn lighten(color: Color, amount: u8) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let lift = |channel: u8| channel.saturating_add(amount);
+    Color::Rgb(lift(r), lift(g), lift(b))
+}
+
+/// Plain welcome lines, used when the box would not fit.
+///
+/// The wordmark is dropped rather than clipped: half a wordmark is not a
+/// wordmark, and the `>_ Codape` title plus the facts are what have to survive.
+fn welcome_plain(theme: &Theme, facts: &WelcomeFacts<'_>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(title_spans(theme)),
+        Line::from(""),
+    ];
+    for spans in fact_rows(theme, facts, width) {
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    for spans in hint_rows(theme) {
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Ctrl+D to exit",
+        Style::default().fg(theme.dim),
+    )));
+    lines.push(Line::from(""));
+    lines
+}
 fn card_border(indent: &str, left: char, right: char, inner: usize, style: Style) -> Line<'static> {
     Line::from(Span::styled(
         format!("{indent}{left}{}{right}", "─".repeat(inner)),
@@ -1850,32 +1985,10 @@ fn card_row_spans(
     Line::from(line)
 }
 
-/// Like [`card_row`], but the content is already laid out and is only padded
-/// on the right. Used for multi-line art, where centring each line separately
-/// would distort the drawing.
-fn card_row_left(
-    indent: &str,
-    text: &str,
-    style: Style,
-    inner: usize,
-    border: Style,
-) -> Line<'static> {
-    let text = truncate_to_width(text, inner);
-    let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
-    Line::from(vec![
-        Span::styled(format!("{indent}│"), border),
-        Span::styled(
-            format!("{text}{}", " ".repeat(inner.saturating_sub(text_width))),
-            style,
-        ),
-        Span::styled("│", border),
-    ])
-}
-
 /// Pad `text` with spaces so it is centred in `width` display columns.
 ///
 /// A string longer than the space is truncated first; the caller passes text
-/// that renders as a single line (the mascot rows have no styling).
+/// that renders as a single line.
 fn center_padded(text: &str, width: usize) -> String {
     let text = truncate_to_width(text, width);
     let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
@@ -2505,6 +2618,8 @@ mod tests {
             total_tokens: 100,
             cost_usd: Some(0.01),
             git_branch: "main".into(),
+            provider: "Anthropic API".into(),
+            cwd: "~/work".into(),
             session_title: "test".into(),
             thinking: false,
             thinking_started: None,
@@ -3323,31 +3438,137 @@ mod layout_tests {
         assert!(row_text(&buffer, chunks[INPUT_IDX].y).contains('❯'));
     }
 
-    /// An empty transcript paints the welcome page: name, version, model and
-    /// the T-Rex mascot, not just a one-line banner.
+    /// The card must be no taller than the pane it is drawn into at 80x24.
+    ///
+    /// `trim_lines_to_viewport` keeps the *last* rows, so a card one row too
+    /// tall loses its top border and the first row of the wordmark — the page
+    /// is clipped at the one size most terminals are. This asserts the whole
+    /// card is on screen, wordmark included, rather than only that some of it
+    /// rendered.
+    #[test]
+    fn the_welcome_card_fits_the_message_pane_at_80x24() {
+        let mut state = UiState::default();
+        state.statusline.model = "claude-sonnet-4-6".into();
+        state.statusline.provider = "Anthropic API".into();
+        state.statusline.cwd = "~/work/codape".into();
+        // A full 80x24 frame: compact mode is off and every pane is drawn, so
+        // the message area is exactly what a real terminal gives it.
+        let buffer = render_to_buffer(80, 24, &mut state);
+        let rows: Vec<String> = (0..24).map(|y| row_text(&buffer, y)).collect();
+        let screen = rows.join("\n");
+
+        let top = rows
+            .iter()
+            .position(|row| row.starts_with('╭'))
+            .expect("the card's top border was clipped off the page");
+        let bottom = rows
+            .iter()
+            .position(|row| row.starts_with('╰'))
+            .expect("the card's bottom border is missing");
+        assert_eq!(
+            bottom + 1 - top,
+            WELCOME_CARD_HEIGHT,
+            "card height drifted from the constant:\n{screen}"
+        );
+        // Every row of the wordmark, in order: a card that is one row short
+        // loses the first of these, not the last.
+        let wordmark: Vec<&str> = WELCOME_WORDMARK
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let mut cursor = top;
+        for art in wordmark {
+            let found = (cursor..=bottom)
+                .find(|row| rows[*row].contains(art.trim_end()))
+                .unwrap_or_else(|| panic!("wordmark row {art:?} is not on the page:\n{screen}"));
+            cursor = found + 1;
+        }
+    }
+
+    /// An empty transcript paints the welcome page: block wordmark, title,
+    /// the session's own facts and the resume tip.
     #[test]
     fn the_welcome_page_shows_the_name_version_and_model() {
         let mut state = UiState::default();
         state.statusline.model = "claude-sonnet-4-6".into();
+        state.statusline.provider = "Anthropic API".into();
+        state.statusline.cwd = "~/work/codape".into();
         let buffer = render_to_buffer(80, 30, &mut state);
         let screen: String = (0..30)
             .map(|y| row_text(&buffer, y))
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(screen.contains("C O D E R E X"), "{screen}");
-        assert!(screen.contains("Codape v"), "{screen}");
-        assert!(screen.contains("claude-sonnet-4-6"), "{screen}");
-        assert!(screen.contains("Type /help for commands"), "{screen}");
         assert!(
-            screen.contains("__.-'|_|--|_|"),
-            "the mascot is missing:\n{screen}"
+            screen.contains("█▀▀▀▄"),
+            "the block wordmark is missing:\n{screen}"
         );
+        assert!(screen.contains(">_ Codape"), "{screen}");
+        assert!(screen.contains("(v"), "{screen}");
+        assert!(screen.contains("claude-sonnet-4-6"), "{screen}");
+        assert!(screen.contains("Anthropic API"), "{screen}");
+        assert!(screen.contains("~/work/codape"), "{screen}");
+        assert!(screen.contains("Type /help for commands"), "{screen}");
+        assert!(screen.contains("--continue"), "{screen}");
+        assert!(screen.contains("--resume"), "{screen}");
         assert!(screen.contains('╭') && screen.contains('╯'), "{screen}");
         assert!(
             (0..30).any(|y| row_text(&buffer, y).starts_with('╭')),
             "the welcome card is not left-aligned:\n{screen}"
         );
+    }
+
+    /// A path too long for its row keeps its tail: the leaf directory is what
+    /// says which checkout this is.
+    #[test]
+    fn a_long_directory_keeps_its_end_not_its_start() {
+        let kept = truncate_path_start("~/work/clients/acme/mono/codape", 20);
+        assert!(kept.starts_with('…'), "{kept}");
+        assert!(
+            kept.ends_with("codape"),
+            "the leaf directory was dropped: {kept}"
+        );
+        assert!(unicode_width::UnicodeWidthStr::width(kept.as_str()) <= 20);
+
+        // A path that fits is returned untouched.
+        assert_eq!(truncate_path_start("~/work/codape", 20), "~/work/codape");
+        // One component longer than the row falls back to its tail.
+        let long = "x".repeat(40);
+        let taken = truncate_path_start(&long, 10);
+        assert_eq!(unicode_width::UnicodeWidthStr::width(taken.as_str()), 10);
+        assert!(taken.starts_with('…'), "{taken}");
+    }
+
+    /// The truncation is on display columns, not bytes: a path with a
+    /// multi-byte name must not be cut through a character.
+    #[test]
+    fn path_truncation_counts_display_columns() {
+        let kept = truncate_path_start("~/文档/项目/测试", 8);
+        assert!(
+            unicode_width::UnicodeWidthStr::width(kept.as_str()) <= 8,
+            "{kept}"
+        );
+        assert!(kept.ends_with("测试"), "{kept}");
+    }
+
+    /// The facts the session does not know are omitted, not printed empty:
+    /// a loop with no client has no provider, and an `Provider` row with a
+    /// blank value reads as a bug in the page.
+    #[test]
+    fn unknown_session_facts_are_left_out_of_the_card() {
+        let mut state = UiState::default();
+        let buffer = render_to_buffer(80, 30, &mut state);
+        let screen: String = (0..30)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!screen.contains("Provider"), "{screen}");
+        assert!(!screen.contains("Model"), "{screen}");
+        assert!(!screen.contains("Directory"), "{screen}");
+        // The parts that do not depend on the session are still there.
+        assert!(screen.contains(">_ Codape"), "{screen}");
+        assert!(screen.contains("--resume"), "{screen}");
     }
 
     /// The theme background is painted across the frame, so dark and light are
@@ -3436,25 +3657,51 @@ mod layout_tests {
         }
     }
 
-    /// The wordmark carries a colour per letter, so the page is not a block of
-    /// dim text.
+    /// The wordmark is a gradient: several shades across the columns, so the
+    /// page is not a block of dim text.
     #[test]
     fn the_welcome_wordmark_is_colourful() {
         let mut state = UiState::default();
         let buffer = render_to_buffer(80, 30, &mut state);
         let y = (0..30)
-            .find(|y| row_text(&buffer, *y).contains("C O D E R E X"))
+            .find(|y| row_text(&buffer, *y).contains("█▀▀▀▄"))
             .expect("wordmark row");
 
+        // Every painted block character, not just letters: the wordmark is
+        // drawn in half blocks, so filtering on `C`..`X` would find nothing.
         let colours: std::collections::HashSet<Color> = (0..80)
             .filter_map(|x| buffer.cell((x, y)))
-            .filter(|cell| matches!(cell.symbol(), "C" | "O" | "D" | "E" | "R" | "X"))
+            .filter(|cell| cell.symbol().chars().all(|c| "█▀▄".contains(c)))
+            .filter(|cell| !cell.symbol().trim().is_empty())
             .map(|cell| cell.fg)
             .collect();
         assert!(
-            colours.len() >= 5,
-            "the wordmark should use several colours, got {colours:?}"
+            colours.len() >= 4,
+            "the wordmark should run a gradient, got {colours:?}"
         );
+    }
+
+    /// The gradient must not paint the gaps between letters: a styled space
+    /// carries a background that draws visible bands across the card.
+    #[test]
+    fn the_wordmark_paints_only_its_glyphs() {
+        let theme = Theme::dark();
+        let row = WELCOME_WORDMARK
+            .lines()
+            .find(|line| line.contains('█'))
+            .expect("a wordmark row");
+        let spans = wordmark_spans(row, 0);
+
+        for span in &spans {
+            if span.content.chars().all(|c| c == ' ') {
+                assert_eq!(
+                    span.style,
+                    Style::default(),
+                    "whitespace carries a style: {span:?}"
+                );
+            }
+        }
+        let _ = theme;
     }
 
     /// A transcript taller than the screen must never push the input box or
@@ -3661,8 +3908,7 @@ mod layout_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(screen.contains("C O D E R E X"), "{screen}");
-        assert!(screen.contains("Codape v"), "{screen}");
+        assert!(screen.contains(">_ Codape"), "{screen}");
         assert!(screen.contains("Type /help for commands"), "{screen}");
         assert!(
             !screen.contains('╭'),
@@ -3690,7 +3936,8 @@ mod layout_tests {
             .join("\n");
 
         assert!(screen.contains("hello from the transcript"), "{screen}");
-        assert!(!screen.contains("C O D E R E X"), "{screen}");
+        assert!(!screen.contains("█▀▀▀▄"), "{screen}");
+        assert!(!screen.contains(">_ Codape"), "{screen}");
     }
 
     /// A multi-line buffer renders one row per line, with the continuation
