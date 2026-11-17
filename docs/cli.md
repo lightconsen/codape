@@ -59,7 +59,7 @@ main() → parse_args() → StartupOrchestrator::run()
 | `--permissions MODE` | | Permission mode: `default`, `accept-edits`, `plan`, `dont-ask` |
 | `--dangerously-skip-permissions` | | Skip all permission prompts (sets `BypassPermissions` mode) |
 | `--allowed-tools TOOLS` | | Comma-separated list of allowed tools (restricts tool executor) |
-| `--model MODEL` | `-m` | Model to use (e.g., `claude-sonnet-4-6`, `claude-opus-4-6`) |
+| `--model MODEL` | `-m` | Model to use. A version-free alias (`opus`, `sonnet`, `haiku`) follows the release this build targets; `opus-4`/`sonnet-4`/`haiku-4` pin the family; anything else is sent as written (e.g. `claude-sonnet-4-6`, `deepseek/deepseek-v4.1-flash`) |
 | `--fallback-model MODEL` | | Retry the same request once with this model when the primary is unavailable; if that succeeds the session continues on the fallback. Works in interactive and headless mode; other errors never trigger it |
 | `--system-prompt PROMPT` | | Custom system prompt (replaces default), in headless and interactive mode |
 | `--append-system-prompt TEXT` | | Append TEXT to the default system prompt instead of replacing it. Independent of `--system-prompt`; when both are given, the replacement is authoritative and TEXT is added as extra instructions |

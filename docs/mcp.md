@@ -298,10 +298,13 @@ session's own API client and model:
 - `maxTokens` is honoured only up to a ceiling: **32768** output tokens by
   default. Raise or lower it with `CODAPE_MCP_SAMPLING_MAX_TOKENS` (a positive
   integer; an invalid or zero value falls back to 32768).
-- A model named in `modelPreferences.hints` is used only when Codape knows it
-  (`opus`/`claude-opus-4-6`, `sonnet`/`claude-sonnet-4-6`,
-  `haiku`/`claude-haiku-4-5-20251001`). Any other hint is ignored and the
-  session's resolved model answers instead.
+- A model named in `modelPreferences.hints` is used only when Codape knows it:
+  a version-free alias (`opus`, `sonnet`, `haiku`, or the pinned-family forms
+  `opus-4`/`sonnet-4`/`haiku-4`) resolves through the same table `/model` and
+  `-m` use, and a full `claude-…` id is taken as written, so a server asking
+  for `claude-opus-4-6` gets 4.6 rather than whatever the alias currently
+  means. Any other hint is ignored and the session's resolved model answers
+  instead.
 - Only `text` content blocks are forwarded. A request whose messages are
   empty, whose `maxTokens` is zero, or whose params do not parse is rejected
   with `-32602` (invalid params); an unsupported content type or a provider

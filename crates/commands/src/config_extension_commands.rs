@@ -4,26 +4,11 @@ use crate::registry::{CommandArgs, CommandContext, CommandRegistry, CommandResul
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-thread_local! {
-    static TEST_CONFIG_HOME: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn set_test_config_home(path: std::path::PathBuf) {
-    TEST_CONFIG_HOME.with(|h| *h.borrow_mut() = Some(path));
-}
-
-fn config_home() -> std::path::PathBuf {
-    TEST_CONFIG_HOME.with(|h| {
-        h.borrow()
-            .clone()
-            .unwrap_or_else(codape_config::settings::config_home)
-    })
-}
-
 /// Read the user settings.json as a JSON object.
-fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
-    let path = config_home().join("settings.json");
+fn read_user_settings_at(
+    dir: &std::path::Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let path = dir.join("settings.json");
     if !path.exists() {
         return None;
     }
@@ -34,12 +19,12 @@ fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
 }
 
 /// Write the user settings.json.
-fn write_user_settings(
+fn write_user_settings_at(
+    dir: &std::path::Path,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let home = config_home();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("settings.json");
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
     let value = serde_json::Value::Object(settings.clone());
     let json = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -263,8 +248,8 @@ fn installed_plugin_names(path: &std::path::Path) -> Vec<String> {
 }
 
 /// Read memory entries from the memory file.
-fn read_memory_entries() -> Vec<String> {
-    let memory_path = config_home().join("memory").join("MEMORY.md");
+fn read_memory_entries(home: &std::path::Path) -> Vec<String> {
+    let memory_path = home.join("memory").join("MEMORY.md");
     if memory_path.exists() {
         std::fs::read_to_string(&memory_path).map_or_else(
             |_| Vec::new(),
@@ -399,7 +384,7 @@ pub fn register(registry: &mut CommandRegistry) {
             true,
             Arc::new(|ctx: &CommandContext, args: &[String]| {
                 if args.is_empty() {
-                    let home = config_home();
+                    let home = ctx.config_dir.clone();
                     let themes_path = home.join("themes");
                     let available = available_themes(&themes_path, &ctx.plugin_themes);
                     let mut output = format!("Current theme: {}", ctx.theme);
@@ -418,7 +403,7 @@ pub fn register(registry: &mut CommandRegistry) {
                     CommandResult::success(output)
                 } else {
                     let new_theme = &args[0];
-                    let home = config_home();
+                    let home = ctx.config_dir.clone();
                     let themes_path = home.join("themes");
                     if available_themes(&themes_path, &ctx.plugin_themes)
                         .iter()
@@ -428,7 +413,8 @@ pub fn register(registry: &mut CommandRegistry) {
                         // known settings field). Writing a top-level `theme`
                         // made the next startup reject the whole file as an
                         // unknown field.
-                        let mut settings = read_user_settings().unwrap_or_default();
+                        let mut settings =
+                            read_user_settings_at(&ctx.config_dir).unwrap_or_default();
                         let mut statusline = settings
                             .get("statusline")
                             .and_then(|value| value.as_object().cloned())
@@ -441,7 +427,7 @@ pub fn register(registry: &mut CommandRegistry) {
                             "statusline".to_string(),
                             serde_json::Value::Object(statusline),
                         );
-                        let _ = write_user_settings(&settings);
+                        let _ = write_user_settings_at(&ctx.config_dir, &settings);
                         CommandResult::success(format!(
                             "Theme changed to: {new_theme}\nSaved to settings.json.",
                         ))
@@ -478,7 +464,7 @@ pub fn register(registry: &mut CommandRegistry) {
             // on every tool call. What the session actually installed comes
             // from the registry it built.
             let details = &ctx.active_hook_details;
-            let home = config_home();
+            let home = ctx.config_dir.clone();
             let hooks_path = home.join("hooks");
             let files = list_dir_items(&hooks_path);
 
@@ -638,7 +624,7 @@ pub fn register(registry: &mut CommandRegistry) {
             // both that and the config home, so a listing that read only the
             // home showed "no plugins" straight after a successful install.
             let project_path = std::path::Path::new(&ctx.cwd).join(".codape/plugins");
-            let home_path = config_home().join("plugins");
+            let home_path = ctx.config_dir.join("plugins");
             let mut installed = installed_plugin_names(&project_path);
             installed.extend(installed_plugin_names(&home_path));
             installed.sort();
@@ -694,7 +680,7 @@ pub fn register(registry: &mut CommandRegistry) {
                         CommandResult::success(output)
                     }
                     "types" => {
-                        let root = config_home().join("plugin-types");
+                        let root = ctx.config_dir.join("plugin-types");
                         let declarations = generated_declarations(&root);
                         if declarations.is_empty() {
                             return CommandResult::success(format!(
@@ -748,9 +734,9 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, args: &[String]| {
-            let entries = read_memory_entries();
-            let home = config_home();
+        Arc::new(|ctx: &CommandContext, args: &[String]| {
+            let entries = read_memory_entries(&ctx.config_dir);
+            let home = ctx.config_dir.clone();
             let memory_path = home.join("memory");
             let memory_files = list_dir_items(&memory_path);
 
@@ -794,7 +780,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         Arc::new(|ctx: &CommandContext, args: &[String]| {
-            let home = config_home();
+            let home = ctx.config_dir.clone();
 
             // Scan every directory the loader scans: the config home, the
             // project, and the bundled tree. Listing only the config home
@@ -860,9 +846,9 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, args: &[String]| {
+        Arc::new(|ctx: &CommandContext, args: &[String]| {
             // Look for task files in .codape/tasks/ and cwd
-            let home = config_home();
+            let home = ctx.config_dir.clone();
             let tasks_path = home.join("tasks");
             let task_files = list_dir_items(&tasks_path);
 
@@ -896,7 +882,7 @@ pub fn register(registry: &mut CommandRegistry) {
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             // Try to find and read the plan file
-            let home = config_home();
+            let home = ctx.config_dir.clone();
             let plans_path = home.join("plans");
             let plan_files = list_dir_items(&plans_path);
             if ctx.has_plan {
@@ -938,6 +924,17 @@ mod tests {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
     }
 
+    /// A context whose config home is `dir`.
+    ///
+    /// The persisting commands (`/theme`, `/vim`, `/statusline-setup`) write
+    /// under `ctx.config_dir`; leaving it at the default writes the real
+    /// `~/.codape/settings.json` when the test suite runs.
+    fn ctx_in(dir: &std::path::Path) -> CommandContext {
+        let mut ctx = ctx();
+        ctx.config_dir = dir.to_path_buf();
+        ctx
+    }
+
     #[test]
     fn theme_shows_current() {
         let reg = {
@@ -952,13 +949,12 @@ mod tests {
     #[test]
     fn theme_changes() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("theme", &ctx(), &["dark".into()]);
+        let result = reg.execute("theme", &ctx_in(tmp.path()), &["dark".into()]);
         assert!(result.output.contains("dark"));
         assert!(result.state_changed);
         // Verify settings.json was written
@@ -971,7 +967,6 @@ mod tests {
     #[test]
     fn theme_accepts_an_installed_custom_theme() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("themes")).unwrap();
         std::fs::write(
             tmp.path().join("themes").join("mine.json"),
@@ -985,14 +980,14 @@ mod tests {
             r
         };
 
-        let listed = reg.execute("theme", &ctx(), &[]);
+        let listed = reg.execute("theme", &ctx_in(tmp.path()), &[]);
         assert!(listed.output.contains("my-theme"), "{}", listed.output);
         assert!(!listed.output.contains("mine.json"), "{}", listed.output);
         for builtin in BUILTIN_THEMES {
             assert!(listed.output.contains(builtin), "{}", listed.output);
         }
 
-        let switched = reg.execute("theme", &ctx(), &["my-theme".into()]);
+        let switched = reg.execute("theme", &ctx_in(tmp.path()), &["my-theme".into()]);
         assert!(switched.state_changed, "{}", switched.output);
         assert!(switched.output.contains("my-theme"), "{}", switched.output);
 
@@ -1122,8 +1117,6 @@ mod tests {
     /// reported "no hooks" while a configured hook ran on every tool call.
     #[test]
     fn hooks_names_the_configured_hooks() {
-        let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let c = CommandContext {
             active_hooks: 1,
             active_hook_details: vec!["Core PreToolUse command: cargo fmt".into()],
@@ -1154,8 +1147,6 @@ mod tests {
     /// connected.
     #[test]
     fn mcp_names_servers_configured_in_the_project() {
-        let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(
             workspace.path().join(".mcp.json"),
@@ -1191,8 +1182,6 @@ mod tests {
     /// servers".
     #[test]
     fn mcp_reports_an_unparseable_config() {
-        let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join(".mcp.json"), "{not json").unwrap();
 
@@ -1219,8 +1208,6 @@ mod tests {
     /// in `codape-mcp`, which this crate cannot reach.
     #[test]
     fn mcp_subcommands_defer_to_the_session() {
-        let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let c = CommandContext {
             cwd: tempfile::tempdir()
                 .unwrap()
@@ -1303,8 +1290,6 @@ mod tests {
     /// `/plugin` lists the project's install directory, where installs land.
     #[test]
     fn plugin_lists_a_project_install() {
-        let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let workspace = tempfile::tempdir().unwrap();
         let plugins = workspace.path().join(".codape/plugins");
         std::fs::create_dir_all(plugins.join("acme-tools")).unwrap();
@@ -1364,7 +1349,6 @@ mod tests {
     #[test]
     fn plugin_types_lists_and_prints_generated_declarations() {
         let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let types_root = home.path().join("plugin-types");
         std::fs::create_dir_all(types_root.join("codape-tools")).unwrap();
         std::fs::create_dir_all(types_root.join("acme")).unwrap();
@@ -1386,23 +1370,31 @@ mod tests {
             r
         };
 
-        let listing = reg.execute("plugin", &ctx(), &["types".into()]);
+        let listing = reg.execute("plugin", &ctx_in(home.path()), &["types".into()]);
         assert!(!listing.output.starts_with("Error:"), "{listing:?}");
         for name in ["acme", "codape-tools", "tsconfig"] {
             assert!(listing.output.contains(name), "{listing:?}");
         }
 
-        let printed = reg.execute("plugin", &ctx(), &["types".into(), "codape-tools".into()]);
+        let printed = reg.execute(
+            "plugin",
+            &ctx_in(home.path()),
+            &["types".into(), "codape-tools".into()],
+        );
         assert_eq!(printed.output, "declare module 'codape-tools' {}");
 
         let by_path = reg.execute(
             "plugin",
-            &ctx(),
+            &ctx_in(home.path()),
             &["types".into(), "acme/index.d.ts".into()],
         );
         assert_eq!(by_path.output, "declare module 'acme' {}");
 
-        let missing = reg.execute("plugin", &ctx(), &["types".into(), "nope".into()]);
+        let missing = reg.execute(
+            "plugin",
+            &ctx_in(home.path()),
+            &["types".into(), "nope".into()],
+        );
         assert!(missing.output.starts_with("Error:"), "{missing:?}");
         assert!(missing.output.contains("nope"));
     }
@@ -1410,13 +1402,12 @@ mod tests {
     #[test]
     fn plugin_types_reports_an_empty_root() {
         let home = tempfile::tempdir().unwrap();
-        set_test_config_home(home.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("plugin", &ctx(), &["types".into()]);
+        let result = reg.execute("plugin", &ctx_in(home.path()), &["types".into()]);
         assert!(!result.output.starts_with("Error:"), "{result:?}");
         assert!(
             result

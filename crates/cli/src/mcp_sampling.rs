@@ -135,11 +135,18 @@ impl CliSamplingHandler {
 ///
 /// An unknown name is not forwarded: the provider would reject it, and a
 /// server should not be able to name an arbitrary model.
+///
+/// A hint that names a version outright keeps that version. This used to map
+/// `claude-opus-4-6` to whatever `ModelId::opus()` currently is, so a server
+/// asking for 4.6 got 5.5 and could not tell — the names differ, and only the
+/// version-free aliases (`opus`) were meant to follow the release.
 fn known_model(name: &str) -> Option<ModelId> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "opus" | "claude-opus-4-6" => Some(ModelId::opus()),
-        "sonnet" | "claude-sonnet-4-6" => Some(ModelId::sonnet()),
-        "haiku" | "claude-haiku-4-5-20251001" => Some(ModelId::haiku()),
+    let trimmed = name.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "opus" | "sonnet" | "haiku" | "opus-4" | "sonnet-4" | "haiku-4" => {
+            Some(ModelId::from_alias(trimmed))
+        }
+        lower if lower.starts_with("claude-") => Some(ModelId(trimmed.to_string())),
         _ => None,
     }
 }
@@ -286,6 +293,29 @@ mod tests {
         with_env(SAMPLING_OPT_IN_ENV, Some("yes"), || {
             assert!(!enabled_from_env());
         });
+    }
+
+    /// A server that names a version gets that version. The table used to
+    /// fold `claude-opus-4-6` into `ModelId::opus()`, so asking for 4.6 was
+    /// answered by 5.5 and nothing said so.
+    #[test]
+    fn a_hint_that_names_a_version_keeps_it() {
+        assert_eq!(
+            known_model("claude-opus-4-6"),
+            Some(ModelId("claude-opus-4-6".into()))
+        );
+        assert_eq!(
+            known_model("claude-haiku-4-5-20251001"),
+            Some(ModelId("claude-haiku-4-5-20251001".into()))
+        );
+        // A version-free alias follows the release, which is the whole point
+        // of the alias.
+        assert_eq!(known_model("opus"), Some(ModelId::opus()));
+        assert_eq!(known_model("haiku"), Some(ModelId::haiku()));
+        // A name this binary does not know is still refused, and a name that
+        // is not Claude is not smuggled through by the `claude-` prefix rule.
+        assert_eq!(known_model("not-a-model"), None);
+        assert_eq!(known_model("gpt-4o"), None);
     }
 
     #[test]

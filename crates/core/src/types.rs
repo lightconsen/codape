@@ -326,6 +326,34 @@ impl ModelId {
         Self("claude-haiku-5-5".into())
     }
 
+    /// Resolve the names a person types for a model.
+    ///
+    /// `/model`, `-m`, a settings `model`, and an MCP server's model hint all
+    /// name a model the same way, and each used to carry its own match arm.
+    /// They drifted: the interactive path resolved `opus` while the headless
+    /// one forwarded the literal string, which the provider rejects. This is
+    /// the one table they all read.
+    ///
+    /// A bare family name (`opus`) follows the release the binary was built
+    /// against; `opus-4` and friends pin the family without pinning the
+    /// version, so a new release does not need a CLI change. Anything else is
+    /// taken as a model id verbatim, which is what lets a provider-specific
+    /// name through.
+    #[must_use]
+    pub fn from_alias(name: &str) -> Self {
+        let trimmed = name.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "opus" => Self::opus(),
+            "sonnet" => Self::sonnet(),
+            "haiku" => Self::haiku(),
+            "opus-4" => Self("claude-opus-4-6".into()),
+            "sonnet-4" => Self("claude-sonnet-4-6".into()),
+            "haiku-4" => Self("claude-haiku-4-5-20251001".into()),
+            _ => Self(trimmed.to_string()),
+        }
+    }
+
     /// How this model wants extended thinking expressed on the wire.
     ///
     /// The API changed the encoding twice, and the two are not
@@ -1829,6 +1857,33 @@ mod context_window_tests {
             ModelId::haiku().context_window(),
             CLAUDE_LONG_CONTEXT_WINDOW
         );
+    }
+
+    /// A bare family name follows the release the binary was built against;
+    /// a pinned family and a full id are left alone.
+    #[test]
+    fn an_alias_names_one_model_and_anything_else_passes_through() {
+        assert_eq!(ModelId::from_alias("opus"), ModelId::opus());
+        assert_eq!(ModelId::from_alias("OPUS"), ModelId::opus());
+        assert_eq!(ModelId::from_alias("  sonnet  "), ModelId::sonnet());
+        assert_eq!(ModelId::from_alias("haiku"), ModelId::haiku());
+        assert_eq!(
+            ModelId::from_alias("opus-4"),
+            ModelId("claude-opus-4-6".into())
+        );
+        assert_eq!(
+            ModelId::from_alias("sonnet-4"),
+            ModelId("claude-sonnet-4-6".into())
+        );
+        // A full id is the caller's business, not this table's, and a
+        // provider-specific name has to survive unchanged.
+        for id in [
+            "claude-sonnet-4-5",
+            "deepseek/deepseek-v4.1-flash",
+            "some-custom-model",
+        ] {
+            assert_eq!(ModelId::from_alias(id), ModelId(id.into()), "{id}");
+        }
     }
 
     /// The 200k entry is a floor for the rest of the family, not a default

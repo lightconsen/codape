@@ -2624,12 +2624,42 @@ impl StartupOrchestrator {
     }
 
     /// Find project config in CWD or nearest ancestor.
+    ///
+    /// The walk stops at the home directory. Without that, a session started
+    /// anywhere under `$HOME` — which is where most repositories live — found
+    /// `~/.codape/settings.json` as the nearest ancestor and treated the user's
+    /// own file as *project* config. The two files are loaded by different
+    /// paths, and the project one is migrated and written back on load, so
+    /// simply running `codape` rewrote `~/.codape/settings.json` with a
+    /// migration merge every time. The user file is the fallback for
+    /// [`config_home`](codape_config::config_home), never a project override.
     pub(crate) fn find_project_config(cwd: &str) -> Option<std::path::PathBuf> {
+        // Both boundaries matter: `CLAUDE_CONFIG_DIR` may point outside the
+        // home directory, and the user's file may be under either one.
+        let user_file = codape_config::config_home().join("settings.json");
+        let boundaries = [
+            codape_config::config_home(),
+            home::home_dir().unwrap_or_default(),
+        ];
+        Self::find_project_config_bounded(cwd, &user_file, &boundaries)
+    }
+
+    /// [`Self::find_project_config`] with the user's file and the stop
+    /// boundaries passed in, so the rule can be tested without touching a real
+    /// config home or the process environment.
+    fn find_project_config_bounded(
+        cwd: &str,
+        user_file: &std::path::Path,
+        boundaries: &[std::path::PathBuf],
+    ) -> Option<std::path::PathBuf> {
         let mut current = std::path::Path::new(cwd);
         loop {
             let candidate = current.join(".codape/settings.json");
-            if candidate.exists() {
+            if candidate.exists() && candidate != user_file {
                 return Some(candidate);
+            }
+            if boundaries.contains(&current.to_path_buf()) {
+                break;
             }
             match current.parent() {
                 Some(parent) => current = parent,
@@ -5536,6 +5566,44 @@ mod tests {
     fn find_project_config_returns_none_for_empty_cwd() {
         let result = StartupOrchestrator::find_project_config("/nonexistent");
         assert!(result.is_none());
+    }
+
+    /// A repository under `$HOME` must not treat the user's own settings as
+    /// project config.
+    ///
+    /// The ancestor walk used to find `~/.codape/settings.json` from any cwd
+    /// below `$HOME`. `ConfigService` migrates the project file and writes it
+    /// back, so merely starting a session rewrote the user's file.
+    #[test]
+    fn find_project_config_never_returns_the_user_settings_file() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let repo = home.join("src/project");
+        std::fs::create_dir_all(home.join(".codape")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let user_file = home.join(".codape/settings.json");
+        std::fs::write(&user_file, "{}").unwrap();
+
+        let found = StartupOrchestrator::find_project_config_bounded(
+            &repo.to_string_lossy(),
+            &user_file,
+            std::slice::from_ref(&home),
+        );
+        assert!(
+            found.is_none(),
+            "the user's settings file was found as project config: {found:?}"
+        );
+
+        // A settings file inside the repository is still project config.
+        let project_file = repo.join(".codape/settings.json");
+        std::fs::create_dir_all(repo.join(".codape")).unwrap();
+        std::fs::write(&project_file, "{}").unwrap();
+        let found = StartupOrchestrator::find_project_config_bounded(
+            &repo.to_string_lossy(),
+            &user_file,
+            &[home],
+        );
+        assert_eq!(found, Some(project_file));
     }
 
     #[test]

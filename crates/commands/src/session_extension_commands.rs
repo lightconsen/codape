@@ -65,9 +65,13 @@ fn save_session_meta(
         .map_err(|e| format!("failed to write metadata: {e}"))
 }
 
-/// Get the default session base path.
-fn default_session_base() -> std::path::PathBuf {
-    codape_config::settings::config_home().join("sessions")
+/// The session directory under the config home carried by `ctx`.
+///
+/// Taken from the context rather than resolved here: `config_home()` writes
+/// the developer's real `~/.codape/sessions` when the suite runs, which is
+/// where a stray `~/.codape/sessions/s1/meta.json` came from.
+fn session_base(ctx: &CommandContext) -> std::path::PathBuf {
+    ctx.config_dir.join("sessions")
 }
 
 /// Register session extension commands.
@@ -80,11 +84,11 @@ pub fn register(registry: &mut CommandRegistry) {
             true,
             true,
             true,
-            Arc::new(|_ctx: &CommandContext, args: &[String]| {
-            let session_base = default_session_base();
+            Arc::new(|ctx: &CommandContext, args: &[String]| {
+            let base = session_base(ctx);
             if args.is_empty() {
                 // Resume most recent session
-                match most_recent_session(&session_base) {
+                match most_recent_session(&base) {
                     Ok(Some((id, title))) => {
                         CommandResult::success(format!(
                             "Resuming session: {id} — '{title}'"
@@ -98,7 +102,6 @@ pub fn register(registry: &mut CommandRegistry) {
                 }
             } else {
                 let session_id = &args[0];
-                let base = default_session_base();
                 session_dir(&base, session_id).map_or_else(
                     || {
                         // Check for sessions with matching prefix
@@ -147,7 +150,7 @@ pub fn register(registry: &mut CommandRegistry) {
                 // Arity is enforced by the registry (`AtLeast(1)`); the title
                 // may span multiple words, so the remainder is joined.
                 let new_title = args.join(" ");
-                let session_base = default_session_base();
+                let session_base = session_base(ctx);
                 // Persist the rename to disk
                 let save_result = save_session_meta(
                     &session_base,
@@ -279,22 +282,29 @@ mod tests {
 
     #[test]
     fn rename_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            config_dir: tmp.path().to_path_buf(),
+            ..ctx()
+        };
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("rename", &ctx(), &["New".into(), "Title".into()]);
+        let result = reg.execute("rename", &c, &["New".into(), "Title".into()]);
         assert!(result.output.contains("New Title"));
         assert!(result.state_changed);
     }
 
     #[test]
     fn rename_persists_to_disk() {
-        let _tmp = tempfile::tempdir().unwrap();
-        // Create a fake home dir by setting up session dir
+        let tmp = tempfile::tempdir().unwrap();
+        // A rename writes `sessions/<id>/meta.json` under the config home, so
+        // the home has to be temporary: the default is the developer's own.
         let c = CommandContext {
             message_count: 5,
+            config_dir: tmp.path().to_path_buf(),
             ..CommandContext::new(
                 "/src".into(),
                 "test-rename".into(),
@@ -302,16 +312,20 @@ mod tests {
                 ModelId::sonnet(),
             )
         };
-        // The command will try to write to ~/.codape/sessions/test-rename/meta.json
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
         let result = reg.execute("rename", &c, &["New Title".into()]);
-        // Should either succeed or fail gracefully
         assert!(result.output.contains("New Title"));
         assert!(result.state_changed);
+        let meta = tmp.path().join("sessions/test-rename/meta.json");
+        assert!(
+            meta.exists(),
+            "rename did not persist to {}",
+            meta.display()
+        );
     }
 
     #[test]

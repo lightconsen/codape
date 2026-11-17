@@ -5,26 +5,13 @@ use codape_core::permissions::PermissionMode;
 use codape_core::types::ModelId;
 use std::sync::Arc;
 
-thread_local! {
-    static TEST_CONFIG_HOME: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn set_test_config_home(path: std::path::PathBuf) {
-    TEST_CONFIG_HOME.with(|h| *h.borrow_mut() = Some(path));
-}
-
-fn config_home_for_commands() -> std::path::PathBuf {
-    TEST_CONFIG_HOME.with(|h| {
-        h.borrow()
-            .clone()
-            .unwrap_or_else(codape_config::settings::config_home)
-    })
-}
-
 /// Read the user settings.json as a JSON object.
-fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
-    let path = config_home_for_commands().join("settings.json");
+///
+/// `dir` comes from the command context, never from the environment: a handler
+/// that resolved the config home itself wrote the real `~/.codape/settings.json`
+/// under `cargo test`.
+fn read_user_settings(dir: &std::path::Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let path = dir.join("settings.json");
     if !path.exists() {
         return None;
     }
@@ -36,11 +23,11 @@ fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
 
 /// Write the user settings.json.
 fn write_user_settings(
+    dir: &std::path::Path,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let home = config_home_for_commands();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("settings.json");
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
     let value = serde_json::Value::Object(settings.clone());
     let json = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -69,7 +56,7 @@ pub fn register(registry: &mut CommandRegistry) {
                     format!("Working Dir: {}", ctx.cwd),
                     format!("MCP Connected: {}", ctx.mcp_connected),
                 ];
-                if let Some(settings) = read_user_settings() {
+                if let Some(settings) = read_user_settings(&ctx.config_dir) {
                     lines.push(String::new());
                     lines.push("User settings.json:".to_string());
                     for (k, v) in settings {
@@ -100,22 +87,22 @@ pub fn register(registry: &mut CommandRegistry) {
                     },
                     |v| serde_json::Value::Number(v.into()),
                 );
-                let mut settings = read_user_settings().unwrap_or_default();
+                let mut settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
                 settings.insert(key.clone(), value);
-                match write_user_settings(&settings) {
+                match write_user_settings(&ctx.config_dir, &settings) {
                     Ok(()) => CommandResult::success(format!("Set {key} in settings.json"))
                         .with_state_change(true),
                     Err(e) => CommandResult::error(format!("Failed to write settings: {e}")),
                 }
             } else if args.len() == 2 && args[0] == "get" {
                 let key = &args[1];
-                let settings = read_user_settings().unwrap_or_default();
+                let settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
                 settings.get(key).map_or_else(
                     || CommandResult::error(format!("Key '{key}' not found in settings")),
                     |v| CommandResult::success(format!("{key}: {v}")),
                 )
             } else if args.len() == 1 && args[0] == "list" {
-                let settings = read_user_settings().unwrap_or_default();
+                let settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
                 if settings.is_empty() {
                     CommandResult::success("No user settings configured.\nUse /config set <key> <value> to add settings.\nKeys: model, permission_mode, max_budget_usd, telemetry_enabled, api_key")
                 } else {
@@ -150,21 +137,15 @@ pub fn register(registry: &mut CommandRegistry) {
                         ctx.model.0
                     ))
                 } else {
-                    let model_name = match args[0].to_lowercase().as_str() {
-                        "opus" => ModelId::opus().0,
-                        "sonnet" => ModelId::sonnet().0,
-                        "haiku" => ModelId::haiku().0,
-                        // Family aliases pin the family without pinning the
-                        // version, so a new release does not need a CLI change.
-                        "opus-4" => "claude-opus-4-6".to_string(),
-                        "sonnet-4" => "claude-sonnet-4-6".to_string(),
-                        "haiku-4" => "claude-haiku-4-5-20251001".to_string(),
-                        other => other.to_string(),
-                    };
+                    // One alias table for the whole binary; see
+                    // [`ModelId::from_alias`]. `/model`, `-m` and an MCP
+                    // server's model hint used to carry their own, and they
+                    // had already drifted apart.
+                    let model_name = ModelId::from_alias(&args[0]).0;
                     // Also persist to settings.json so the change survives restart
-                    let mut settings = read_user_settings().unwrap_or_default();
+                    let mut settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
                     settings.insert("model".to_string(), serde_json::Value::String(model_name.clone()));
-                    let _ = write_user_settings(&settings);
+                    let _ = write_user_settings(&ctx.config_dir, &settings);
                     CommandResult::success(format!(
                         "Model switched to: {model_name}\nSaved to settings.json. Use in the REPL for immediate effect.",
                     )).with_state_change(true)
@@ -203,9 +184,9 @@ pub fn register(registry: &mut CommandRegistry) {
                 };
                 // Also persist to settings.json so the change survives restart
                 let mode_str = format!("{mode:?}").to_lowercase();
-                let mut settings = read_user_settings().unwrap_or_default();
+                let mut settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
                 settings.insert("permission_mode".to_string(), serde_json::Value::String(mode_str));
-                let _ = write_user_settings(&settings);
+                let _ = write_user_settings(&ctx.config_dir, &settings);
                 CommandResult::success(format!(
                     "Permission mode set to: {mode:?}\nSaved to settings.json. Use in the REPL for immediate effect.",
                 )).with_state_change(true)
@@ -223,6 +204,17 @@ mod tests {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
     }
 
+    /// A context whose config home is `dir`.
+    ///
+    /// Commands that persist (`/model`, `/config set`, `/permissions`) write
+    /// `settings.json` under `ctx.config_dir`. A test that leaves that at its
+    /// default writes the developer's real `~/.codape/settings.json`.
+    fn ctx_in(dir: &std::path::Path) -> CommandContext {
+        let mut ctx = ctx();
+        ctx.config_dir = dir.to_path_buf();
+        ctx
+    }
+
     #[test]
     fn config_shows_current_state() {
         let reg = {
@@ -238,7 +230,6 @@ mod tests {
     #[test]
     fn config_set_writes_value() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
@@ -246,7 +237,7 @@ mod tests {
         };
         let result = reg.execute(
             "config",
-            &ctx(),
+            &ctx_in(tmp.path()),
             &["set".into(), "model".into(), "opus".into()],
         );
         assert!(result.output.contains("Set model"));
@@ -262,7 +253,6 @@ mod tests {
     #[test]
     fn config_get_reads_value() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         // Pre-write a settings file
         let settings = serde_json::json!({"model": "sonnet"});
         std::fs::write(tmp.path().join("settings.json"), settings.to_string()).unwrap();
@@ -271,14 +261,17 @@ mod tests {
             register(&mut r);
             r
         };
-        let result = reg.execute("config", &ctx(), &["get".into(), "model".into()]);
+        let result = reg.execute(
+            "config",
+            &ctx_in(tmp.path()),
+            &["get".into(), "model".into()],
+        );
         assert!(result.output.contains("sonnet"));
     }
 
     #[test]
     fn config_list_shows_entries() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let settings = serde_json::json!({"model": "haiku", "telemetry_enabled": false});
         std::fs::write(tmp.path().join("settings.json"), settings.to_string()).unwrap();
         let reg = {
@@ -286,7 +279,7 @@ mod tests {
             register(&mut r);
             r
         };
-        let result = reg.execute("config", &ctx(), &["list".into()]);
+        let result = reg.execute("config", &ctx_in(tmp.path()), &["list".into()]);
         assert!(result.output.contains("haiku"));
     }
 
@@ -304,13 +297,12 @@ mod tests {
     #[test]
     fn model_switch_to_opus() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("model", &ctx(), &["opus".into()]);
+        let result = reg.execute("model", &ctx_in(tmp.path()), &["opus".into()]);
         assert!(result.output.contains("claude-opus"));
         assert!(result.state_changed);
         // Verify settings.json was written
@@ -320,23 +312,28 @@ mod tests {
 
     #[test]
     fn model_switch_to_haiku() {
+        // `/model <name>` writes settings.json. A test that does not point the
+        // command at a temporary home writes the developer's real
+        // `~/.codape/settings.json`, so the empty `ctx()` is not enough here.
+        let tmp = tempfile::tempdir().unwrap();
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("model", &ctx(), &["haiku".into()]);
+        let result = reg.execute("model", &ctx_in(tmp.path()), &["haiku".into()]);
         assert!(result.output.contains("haiku"));
     }
 
     #[test]
     fn model_switch_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("model", &ctx(), &["unknown-model".into()]);
+        let result = reg.execute("model", &ctx_in(tmp.path()), &["unknown-model".into()]);
         assert!(result.output.contains("unknown-model"));
     }
 
@@ -354,13 +351,12 @@ mod tests {
     #[test]
     fn permissions_set_bypass() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("permissions", &ctx(), &["bypass".into()]);
+        let result = reg.execute("permissions", &ctx_in(tmp.path()), &["bypass".into()]);
         assert!(result.output.contains("BypassPermissions"));
         assert!(result.state_changed);
         // Verify settings.json was written
@@ -370,12 +366,13 @@ mod tests {
 
     #[test]
     fn permissions_set_plan() {
+        let tmp = tempfile::tempdir().unwrap();
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("permissions", &ctx(), &["plan".into()]);
+        let result = reg.execute("permissions", &ctx_in(tmp.path()), &["plan".into()]);
         assert!(result.output.contains("Plan"));
     }
 

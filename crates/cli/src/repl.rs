@@ -5072,6 +5072,30 @@ impl ReplLoop {
         }
     }
 
+    /// Switch the session to `model`, on the REPL and on the engine.
+    ///
+    /// The engine owns the model a request is built from, and it is moved out
+    /// into the turn task and handed back afterwards. Writing only
+    /// `self.model.current` left the engine on whatever it was constructed
+    /// with, so `/model` printed the new name while every later request in
+    /// that session still carried the old one. The two are set together here
+    /// because they are one value.
+    fn set_model(&mut self, model: ModelId) {
+        self.model.current = model.clone();
+        if let Some(ref mut engine) = self.session.engine {
+            engine.set_model(model);
+        }
+        // Sub-agents inherit the session model when their definition names
+        // none, so a switch has to reach the manager too. This is best-effort:
+        // a manager locked by a spawn in flight keeps the model it had, and the
+        // next switch reaches it.
+        if let Some(manager) = self.agents.manager.as_ref()
+            && let Ok(mut manager) = manager.try_lock()
+        {
+            manager.set_model(self.model.current.clone());
+        }
+    }
+
     /// Apply `CODAPE_MAX_TOKENS`, clamped to half the model's context window.
     ///
     /// A named agent definition that set its own limit wins: the environment
@@ -11053,13 +11077,7 @@ impl ReplLoop {
                     }
                     "model" => {
                         if let Some(model) = args.first() {
-                            let mapped = match model.to_lowercase().as_str() {
-                                "opus" => ModelId::opus(),
-                                "sonnet" => ModelId::sonnet(),
-                                "haiku" => ModelId::haiku(),
-                                other => ModelId(other.to_string()),
-                            };
-                            self.model.current = mapped;
+                            self.set_model(ModelId::from_alias(model));
                         }
                         self.execute_and_display_command(cmd_name, &args, ui_state);
                         return;
@@ -12103,9 +12121,9 @@ impl ReplLoop {
                     if args.is_empty() {
                         writeln!(stdout, "Current model: {}", self.model.current.0)?;
                     } else {
-                        let model_name = args[0].clone();
-                        self.model.current = ModelId(model_name.clone());
-                        writeln!(stdout, "Model switched to: {model_name}")?;
+                        let model = ModelId::from_alias(&args[0]);
+                        self.set_model(model.clone());
+                        writeln!(stdout, "Model switched to: {}", model.0)?;
                     }
                     return Ok(());
                 }

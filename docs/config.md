@@ -48,6 +48,14 @@ deduplication, because the layers are additive: a user allow must survive a
 project layer that only adds a deny. A higher layer can neutralize a lower allow
 with a deny/ask rule, but cannot delete it.
 
+The project layer is found by walking up from the working directory, and the
+walk **stops at the home directory and at the config home**. Without that stop,
+a session started anywhere below `$HOME` — where most repositories live — found
+`~/.codape/settings.json` as its nearest ancestor and loaded the user's own file
+a second time as *project* config. The project file is migrated and written back
+on load, so merely running `codape` rewrote the user's settings. The user file is
+never a project override.
+
 ### Context Window Overrides
 
 `context_window` maps model names to context-window sizes in tokens and may

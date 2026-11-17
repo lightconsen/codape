@@ -22,8 +22,10 @@ fn config_home() -> std::path::PathBuf {
 }
 
 /// Read the user settings.json as a JSON object.
-fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
-    let path = config_home().join("settings.json");
+fn read_user_settings_at(
+    dir: &std::path::Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let path = dir.join("settings.json");
     if !path.exists() {
         return None;
     }
@@ -34,12 +36,12 @@ fn read_user_settings() -> Option<serde_json::Map<String, serde_json::Value>> {
 }
 
 /// Write the user settings.json.
-fn write_user_settings(
+fn write_user_settings_at(
+    dir: &std::path::Path,
     settings: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let home = config_home();
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let path = home.join("settings.json");
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
     let value = serde_json::Value::Object(settings.clone());
     let json = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
@@ -218,9 +220,9 @@ chrome_get_content    — Extract page HTML as markdown"
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             let new_state = !ctx.vim_mode;
-            let mut settings = read_user_settings().unwrap_or_default();
+            let mut settings = read_user_settings_at(&ctx.config_dir).unwrap_or_default();
             settings.insert("vim_mode".to_string(), serde_json::Value::Bool(new_state));
-            let persist_msg = match write_user_settings(&settings) {
+            let persist_msg = match write_user_settings_at(&ctx.config_dir, &settings) {
                 Ok(()) => "Saved to settings.json.".to_string(),
                 Err(e) => {
                     return CommandResult::error(format!("Failed to save vim mode: {e}"));
@@ -336,7 +338,7 @@ chrome_get_content    — Extract page HTML as markdown"
             } else {
                 "[model] [tokens] [cost] [permissions]"
             };
-            let mut settings = read_user_settings().unwrap_or_default();
+            let mut settings = read_user_settings_at(&ctx.config_dir).unwrap_or_default();
             let mut statusline = settings
                 .get("statusline")
                 .and_then(|v| v.as_object().cloned())
@@ -353,7 +355,7 @@ chrome_get_content    — Extract page HTML as markdown"
                 "statusline".to_string(),
                 serde_json::Value::Object(statusline),
             );
-            let persist_msg = match write_user_settings(&settings) {
+            let persist_msg = match write_user_settings_at(&ctx.config_dir, &settings) {
                 Ok(()) => "Saved to settings.json.".to_string(),
                 Err(e) => {
                     return CommandResult::error(format!(
@@ -377,6 +379,17 @@ mod tests {
 
     fn ctx() -> CommandContext {
         CommandContext::new("/src".into(), "s1".into(), "Test".into(), ModelId::sonnet())
+    }
+
+    /// A context whose config home is `dir`.
+    ///
+    /// The persisting commands (`/theme`, `/vim`, `/statusline-setup`) write
+    /// under `ctx.config_dir`; leaving it at the default writes the real
+    /// `~/.codape/settings.json` when the test suite runs.
+    fn ctx_in(dir: &std::path::Path) -> CommandContext {
+        let mut ctx = ctx();
+        ctx.config_dir = dir.to_path_buf();
+        ctx
     }
 
     #[test]
@@ -451,14 +464,13 @@ mod tests {
     #[test]
     fn vim_toggle() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
         // Default is false
-        let result = reg.execute("vim", &ctx(), &[]);
+        let result = reg.execute("vim", &ctx_in(tmp.path()), &[]);
         assert!(result.output.contains("enabled"));
         assert!(result.state_changed);
         // Verify settings.json was written and is a valid Settings document
@@ -472,10 +484,9 @@ mod tests {
     #[test]
     fn vim_already_on() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let c = CommandContext {
             vim_mode: true,
-            ..ctx()
+            ..ctx_in(tmp.path())
         };
         let reg = {
             let mut r = CommandRegistry::new();
@@ -611,13 +622,12 @@ mod tests {
     #[test]
     fn statusline_setup_opens_wizard() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("statusline-setup", &ctx(), &[]);
+        let result = reg.execute("statusline-setup", &ctx_in(tmp.path()), &[]);
         assert!(result.output.contains("Statusline Setup"));
         assert!(result.state_changed);
         // Verify settings.json was written with a real statusline section
@@ -636,11 +646,10 @@ mod tests {
     #[test]
     fn statusline_includes_vim_segment_when_enabled() {
         let tmp = tempfile::tempdir().unwrap();
-        set_test_config_home(tmp.path().to_path_buf());
         let c = CommandContext {
             vim_mode: true,
             theme: "dark".into(),
-            ..ctx()
+            ..ctx_in(tmp.path())
         };
         let reg = {
             let mut r = CommandRegistry::new();

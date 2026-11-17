@@ -8,6 +8,7 @@ The foundational engine of Codape. Manages LLM API communication, conversation t
 
 ### Key Types
 
+- **`ModelId`** (`types.rs`) — A provider model name. `ModelId::from_alias` is the one alias table: a version-free name (`opus`, `sonnet`, `haiku`) follows the release the binary targets, a pinned family (`opus-4`, `sonnet-4`, `haiku-4`) fixes the version without fixing the release, and anything else passes through verbatim so a provider-specific id works. `/model`, `-m`, a settings `model` and an MCP server's model hint all resolve through it — they used to carry separate tables, and the headless path resolved none of them. Switching a session's model has to reach the `QueryEngine`'s own field, not only the REPL's; see [commands.md](commands.md).
 - **`QueryEngine`** (`engine.rs`) — The main conversation orchestrator. Manages turns through a 14-state state machine (`TurnState`).
 - **`TurnState`** (`engine.rs`) — State machine: Initialize -> BuildContext -> RunPreSubmitHooks -> StartRequest -> StreamAssistant -> ExecuteTools -> AwaitPermission -> AwaitElicitation -> ApplyToolResults -> EvaluateContinuation -> CompactRecovery -> StopHooks -> Finalize -> Terminated. `QueryEngine::set_transition_observer` installs a callback that sees every `(from, to)` pair in release builds; integration tests use it to assert the exact sequence of a tool-using turn.
 - **`TurnRuntime`** (`engine.rs`) — Per-turn mutable state: messages, pending tool calls, budget, recovery count, terminal reason.
@@ -129,3 +130,14 @@ No known production gaps in the core loop itself. Documented platform and librar
 ## Recently Fixed
 
 All 21 previously identified items have been resolved: SSE parser edge cases, API request timeouts, tool call extraction reliability, `Runtime::bootstrap()` stub, connection pooling, tool call validation, compact strategy thresholds, scheduler wiring, elicitation heuristics, cron scheduling, syntax highlighting, team/worktree/coordinator integration, pricing file loading, graceful degradation, dead code removal, elicitation handler implementations, ModelRouter wiring, cost summary usage, permission explanation events, and orphaned permission recovery UI.
+
+- **2026-11-17 — `/model` reached the transcript but not the wire.** Switching a
+  session's model wrote the REPL's record and left the `QueryEngine` on the
+  model it was constructed with, so `/model opus` printed the new name while
+  every later request in that session still carried the old one. The headless
+  path also skipped alias resolution entirely and forwarded the literal string
+  `opus`, which the provider rejects. There were three alias tables — `/model`,
+  the registry handler and the MCP sampling hint — and the sampling one folded
+  an exact `claude-opus-4-6` hint into `ModelId::opus()`, answering a version
+  the server had not asked for. One table now (`ModelId::from_alias`), and one
+  setter writes the REPL, the engine and the sub-agent manager together.

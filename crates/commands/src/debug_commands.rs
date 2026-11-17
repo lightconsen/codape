@@ -199,7 +199,7 @@ pub fn register(registry: &mut CommandRegistry) {
             let mut discovered = 0;
             let plugin_dirs = [
                 std::path::Path::new(&ctx.cwd).join(".codape/plugins"),
-                codape_config::settings::config_home().join("plugins"),
+                ctx.config_dir.join("plugins"),
             ];
             for dir in &plugin_dirs {
                 if !dir.exists() {

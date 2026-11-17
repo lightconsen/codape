@@ -57,7 +57,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 
 - Full command registry with name-to-handler mapping, argument validation, and availability filtering.
 - `/clear`, `/exit`, `/help`, `/version`, `/compact` fully functional. `/clear` requires confirmation in TUI mode.
-- `/model` switches active model; `/permissions` manages permission mode.
+- `/model` switches active model and persists the choice. It reaches the engine the turn is built from, not just the REPL's own record — it used to print the new name while every later request still carried the model the process started with. Every path (`/model`, `-m`, a settings `model`, an MCP server's model hint) resolves aliases through one table, so the interactive and headless paths cannot disagree; see `docs/core.md` → *Model ids*. `/permissions` manages permission mode.
 - `/cost`, `/stats`, `/usage` report token usage and cost breakdown.
 - Git commands (`/commit`, `/commit-push-pr`, `/review`, `/branch`) work via git CLI and prompt profiles.
 - `/theme` lists and changes themes with available theme detection.

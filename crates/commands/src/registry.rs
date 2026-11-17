@@ -263,6 +263,16 @@ pub type CommandHandler = Arc<dyn Fn(&CommandContext, &[String]) -> CommandResul
 pub struct CommandContext {
     /// Current working directory.
     pub cwd: String,
+    /// The config home commands read and write (`settings.json`, themes,
+    /// plugins…).
+    ///
+    /// Carried here rather than read from the environment inside each handler:
+    /// a handler that called `config_home()` directly wrote the real
+    /// `~/.codape/settings.json` during tests, which is how `/model` came to
+    /// rewrite a developer's own model just by running `cargo test`. A context
+    /// that is handed a temporary directory cannot reach the real one by
+    /// accident.
+    pub config_dir: std::path::PathBuf,
     /// Current model ID.
     pub model: ModelId,
     /// Current permission mode.
@@ -355,6 +365,7 @@ impl CommandContext {
     pub fn new(cwd: String, session_id: String, session_title: String, model: ModelId) -> Self {
         Self {
             cwd,
+            config_dir: codape_config::settings::config_home(),
             model,
             permission_mode: PermissionMode::default(),
             message_count: 0,

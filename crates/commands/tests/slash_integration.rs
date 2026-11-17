@@ -31,6 +31,19 @@ fn test_ctx() -> CommandContext {
     }
 }
 
+/// A context whose config home is a fresh temporary directory.
+///
+/// `/model`, `/config set` and `/permissions` persist to `settings.json` under
+/// `ctx.config_dir`. Running them against `test_ctx()` used to write the
+/// developer's real `~/.codape/settings.json` — the default is only safe for
+/// commands that read.
+fn ctx_with_temp_config_home() -> (tempfile::TempDir, CommandContext) {
+    let dir = tempfile::tempdir().expect("temp config home");
+    let mut ctx = test_ctx();
+    ctx.config_dir = dir.path().to_path_buf();
+    (dir, ctx)
+}
+
 fn full_registry() -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_commands(&mut reg);
@@ -190,7 +203,8 @@ fn model_switch_requires_arg() {
 #[test]
 fn model_switch_to_opus() {
     let reg = full_registry();
-    let result = reg.execute("model", &test_ctx(), &["opus".into()]);
+    let (_home, ctx) = ctx_with_temp_config_home();
+    let result = reg.execute("model", &ctx, &["opus".into()]);
     assert!(result.output.contains("claude-opus"));
     assert!(result.state_changed);
 }
@@ -205,7 +219,8 @@ fn permissions_shows_current_mode() {
 #[test]
 fn permissions_set_plan_mode() {
     let reg = full_registry();
-    let result = reg.execute("permissions", &test_ctx(), &["plan".into()]);
+    let (_home, ctx) = ctx_with_temp_config_home();
+    let result = reg.execute("permissions", &ctx, &["plan".into()]);
     assert!(result.output.contains("Plan"));
     assert!(result.state_changed);
 }
@@ -347,7 +362,10 @@ fn rename_requires_a_title_and_accepts_a_multiword_one() {
     );
 
     // The handler joins the remaining words, so a multiword title is valid.
-    let renamed = reg.execute("rename", &test_ctx(), &["New".into(), "Title".into()]);
+    // It also persists `sessions/<id>/meta.json`, so the home must be
+    // temporary or the test rewrites the developer's own session file.
+    let (_home, ctx) = ctx_with_temp_config_home();
+    let renamed = reg.execute("rename", &ctx, &["New".into(), "Title".into()]);
     assert!(renamed.output.contains("New Title"), "{}", renamed.output);
 }
 
@@ -384,7 +402,8 @@ fn model_accepts_zero_or_one_argument_and_rejects_two() {
         current.output
     );
 
-    let too_many = reg.execute("model", &test_ctx(), &["opus".into(), "extra".into()]);
+    let (_home, ctx) = ctx_with_temp_config_home();
+    let too_many = reg.execute("model", &ctx, &["opus".into(), "extra".into()]);
     assert!(
         too_many.output.contains("takes at most 1"),
         "{}",
@@ -396,7 +415,7 @@ fn model_accepts_zero_or_one_argument_and_rejects_two() {
         too_many.output
     );
 
-    let one = reg.execute("model", &test_ctx(), &["opus".into()]);
+    let one = reg.execute("model", &ctx, &["opus".into()]);
     assert!(one.output.contains("claude-opus"), "{}", one.output);
 }
 
@@ -419,7 +438,8 @@ fn theme_accepts_zero_or_one_argument_and_rejects_two() {
         too_many.output
     );
 
-    let one = reg.execute("theme", &test_ctx(), &["dark".into()]);
+    let (_home, ctx) = ctx_with_temp_config_home();
+    let one = reg.execute("theme", &ctx, &["dark".into()]);
     assert!(!one.output.contains("takes at most 1"), "{}", one.output);
 }
 

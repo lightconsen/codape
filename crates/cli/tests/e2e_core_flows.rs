@@ -97,14 +97,20 @@ fn e2e_vim_toggle() {
         r
     };
 
-    let ctx = test_ctx("/src");
+    // `/vim` persists to `settings.json` under the config home, so a test
+    // that leaves that at its default rewrites the developer's own settings.
+    let home = tempfile::tempdir().expect("temp config home");
+    let ctx = CommandContext {
+        config_dir: home.path().to_path_buf(),
+        ..test_ctx("/src")
+    };
     let result = reg.execute("vim", &ctx, &[]);
     assert!(result.output.contains("enabled"));
     assert!(result.state_changed);
 
     let ctx_on = CommandContext {
         vim_mode: true,
-        ..test_ctx("/src")
+        ..ctx
     };
     let result = reg.execute("vim", &ctx_on, &[]);
     assert!(result.output.contains("disabled"));

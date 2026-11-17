@@ -552,3 +552,85 @@ fn run_headless_issue_view_command() {
         "expected issue number in output, got: {result}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  14.12 Model switching reaches the wire
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `/model` changed the REPL's own record of the model but never the engine's,
+/// so every later request in that session kept the model the process started
+/// with. The transcript said one thing and the wire carried another.
+#[tokio::test]
+async fn a_model_switch_changes_the_model_the_next_request_carries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = codape_core::test_utils::MockApiClient::new();
+    mock.enqueue_response("first", 1, 1);
+    mock.enqueue_response("second", 1, 1);
+    let mut repl = ReplLoop::with_engine(
+        Box::new(mock.clone()),
+        tmp.path().to_str().unwrap().to_string(),
+        ModelId::sonnet(),
+    );
+
+    repl.run_headless("hello").await.unwrap();
+    repl.run_headless("/model opus").await.unwrap();
+    repl.run_headless("how are you").await.unwrap();
+
+    // Opus is not any profile's default, so seeing it on the wire can only
+    // mean the switch reached the engine. A background lightweight task may
+    // add calls of its own; those are a different profile.
+    let log = mock.call_log();
+    let models: Vec<&str> = log.iter().map(|entry| entry.2.as_str()).collect();
+    assert!(
+        models.contains(&ModelId::opus().0.as_str()),
+        "no request carried the model /model selected; saw {models:?}"
+    );
+    assert!(
+        models.first() == Some(&ModelId::sonnet().0.as_str()),
+        "the first turn must have used the starting model; saw {models:?}"
+    );
+}
+
+/// The alias table was three tables. A session that typed `/model opus` or
+/// `-m opus` in headless mode sent the literal string `opus` to the provider,
+/// which is not a model name, and the interactive path resolved it while the
+/// headless one did not.
+#[tokio::test]
+async fn model_aliases_resolve_the_same_way_on_every_path() {
+    for (typed, expected) in [
+        ("opus", ModelId::opus().0),
+        ("sonnet", ModelId::sonnet().0),
+        ("haiku", ModelId::haiku().0),
+        ("claude-sonnet-4-5", "claude-sonnet-4-5".to_string()),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mock = codape_core::test_utils::MockApiClient::new();
+        mock.enqueue_response("answer", 1, 1);
+        let mut repl = ReplLoop::with_engine(
+            Box::new(mock.clone()),
+            tmp.path().to_str().unwrap().to_string(),
+            ModelId::sonnet(),
+        );
+
+        repl.run_headless(&format!("/model {typed}")).await.unwrap();
+        repl.run_headless("hello").await.unwrap();
+
+        let models: Vec<String> = mock
+            .call_log()
+            .iter()
+            .map(|entry| entry.2.clone())
+            .collect();
+        assert!(
+            models.contains(&expected),
+            "`/model {typed}` must send `{expected}`; saw {models:?}"
+        );
+        // An alias is not a model id. A full name is passed through verbatim,
+        // so only an alias can still show up on the wire.
+        if typed != expected {
+            assert!(
+                !models.iter().any(|model| *model == typed),
+                "`/model {typed}` sent the alias itself to the provider: {models:?}"
+            );
+        }
+    }
+}
