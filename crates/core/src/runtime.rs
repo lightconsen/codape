@@ -113,6 +113,12 @@ pub struct ToolCallRecord {
 pub enum TranscriptEntry {
     /// Streaming assistant text (may be appended to).
     AssistantText(String),
+    /// Streaming reasoning (may be appended to).
+    ///
+    /// A separate entry from [`AssistantText`](Self::AssistantText) so a
+    /// renderer can fold it, and so the answer that follows is not prefixed by
+    /// the model's notes to itself.
+    ThinkingText(String),
     /// Completed tool call.
     ToolCall(ToolCallRecord),
     /// Visual compact boundary separator.
@@ -204,6 +210,7 @@ impl UiState {
     pub fn apply_engine_event(&mut self, event: EngineEvent) {
         match event {
             EngineEvent::TextDelta(text) => self.push_text_delta(&text),
+            EngineEvent::ThinkingDelta(text) => self.push_thinking_delta(&text),
             EngineEvent::ToolCallStart {
                 id, name, summary, ..
             } => {
@@ -288,6 +295,15 @@ impl UiState {
         } else {
             self.transcript
                 .push(TranscriptEntry::AssistantText(delta.to_string()));
+        }
+    }
+
+    fn push_thinking_delta(&mut self, delta: &str) {
+        if let Some(TranscriptEntry::ThinkingText(buf)) = self.transcript.last_mut() {
+            buf.push_str(delta);
+        } else {
+            self.transcript
+                .push(TranscriptEntry::ThinkingText(delta.to_string()));
         }
     }
 

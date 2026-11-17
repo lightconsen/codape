@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 78 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
+Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 80 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
 
 ## Design
 
@@ -18,7 +18,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (78 commands across 13 registered modules)
+### Command Inventory (80 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
@@ -33,7 +33,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |
-| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/agents`, `/keybindings`, `/ide`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/agents`, `/keybindings` and `/ide` are REPL built-ins the registry also lists so `/help` shows them |
+| `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/effort`, `/agents`, `/keybindings`, `/ide`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/effort`, `/agents`, `/keybindings` and `/ide` are REPL built-ins the registry also lists so `/help` shows them |
 | `misc_commands` | `/advisor`, `/btw`, `/good-claude`, `/stickers`, `/bughunter`, `/issue`, `/env`, `/diff`, `/oauth-refresh`, `/backfill-sessions`, `/history` | Miscellaneous. `/history [n]` and `/history search <q>` read the session's recorded command lines. |
 | `macro_commands` | `/macro` (REPL built-in) | `MacroRegistry` loads, persists and expands macros. `/macro define <name> <command[; command…]>`, `list`, `run <name>`, `delete <name>` are handled by the REPL; a defined macro also runs by typing `/<name>`. |
 
@@ -91,6 +91,9 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/heapdump` writes a process snapshot (version, OS, pid, RSS/VSZ/threads, open file
   descriptors) to `/tmp/codape-heap.prof` and reports the byte count. It is a process
   snapshot, not a heap profile, and the command says so in its output.
+- `/diff [--cached]` shows the working diff. In the TUI it fills the left pane of a split view — coloured per line, titled with the `+N -M` stat — instead of dumping the patch into the transcript where an added line and a context line looked the same; `PageUp`/`PageDown` scroll it. Headless and chained use (`/diff | /commit`) still print the text unchanged. A failure (not a repository, git missing) goes to the transcript rather than an empty pane.
+- `/effort [off|low|medium|high|xhigh|max]` reports or sets the session's reasoning effort — the same call `Ctrl+P` makes, so the two paths cannot disagree. The engine holds the value and rebuilds its request context each turn, so it reaches the next request without rebuilding the client; see [cli.md](cli.md) → *Reasoning effort*.
+- Bare `/model` opens the model picker (`Ctrl+P`): a model list plus an effort level, `Tab` to switch focus, `←`/`→` to change, `Enter` to apply. Values clamp at the ends rather than wrapping.
 - Command chaining via `|` operator (e.g., `/diff | /commit`) passes output between commands.
 - Custom Markdown commands (`custom_commands.rs`): a `.md` file under `<cwd>/.codape/commands/` or `<config home>/commands/` defines a command. The file stem is the name, optional frontmatter carries `description` (shown by `/help` and the palette) and `argument-hint`, and the body is the prompt. `$ARGUMENTS` expands to everything after the command, `$1`…`$9` to individual words. They are loaded at startup as ordinary `SlashCommand`s, so `/help`, the palette, chaining and macros treat them like built-ins; an unreadable or malformed file is skipped with a warning naming it rather than failing startup.
 - Command history is recorded for built-ins and registry commands alike (both REPL paths record before dispatch) and persisted; `/history` reads it, with `[n]` and `search <query>`.

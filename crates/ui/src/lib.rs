@@ -2,6 +2,7 @@
 
 #![warn(missing_docs)]
 
+pub mod diff;
 pub mod export;
 pub mod history_search;
 pub mod input;

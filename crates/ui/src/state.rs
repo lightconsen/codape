@@ -331,6 +331,17 @@ pub struct UiState {
     pub left_pane_content: String,
     /// Title shown on the left pane border (e.g., filename).
     pub left_pane_title: String,
+    /// The left pane is showing a diff, so its lines are coloured by kind.
+    ///
+    /// A flag rather than a second content field: the pane shows one thing at
+    /// a time, and a file opened with `/open` after `/diff` has to replace it.
+    pub left_pane_is_diff: bool,
+    /// Lines the diff pane is scrolled down.
+    ///
+    /// Clamped against the pane's drawn height when the renderer reads it, so
+    /// a frame that shrank since the key was pressed cannot scroll past the
+    /// end.
+    pub left_pane_scroll: usize,
     /// How the transcript draws an attached picture.
     ///
     /// Defaults to [`crate::transcript_image::ImageProtocol::None`] so a state
@@ -366,6 +377,8 @@ impl UiState {
             layout_mode: LayoutMode::SinglePane,
             left_pane_content: String::new(),
             left_pane_title: String::new(),
+            left_pane_is_diff: false,
+            left_pane_scroll: 0,
             image_protocol: crate::transcript_image::ImageProtocol::None,
         }
     }

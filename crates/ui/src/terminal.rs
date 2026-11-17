@@ -665,7 +665,9 @@ fn message_display_height(
     let mut height = wrapped_line_count(&msg.content, wrap_width);
     if matches!(
         msg.role,
-        crate::message_list::MessageRole::User | crate::message_list::MessageRole::Assistant
+        crate::message_list::MessageRole::User
+            | crate::message_list::MessageRole::Assistant
+            | crate::message_list::MessageRole::Thinking
     ) {
         height += 1;
     }
@@ -738,6 +740,7 @@ const fn message_prefix(role: crate::message_list::MessageRole) -> &'static str 
     match role {
         crate::message_list::MessageRole::User => "● ",
         crate::message_list::MessageRole::Assistant => "◆ ",
+        crate::message_list::MessageRole::Thinking => "✻ ",
         crate::message_list::MessageRole::ToolResult => "✓ ",
         crate::message_list::MessageRole::ToolCall => "⚙ ",
         crate::message_list::MessageRole::System => "· ",
@@ -1322,7 +1325,10 @@ fn append_message_lines(
 ) -> Option<ModUiBlockSpan> {
     if !is_compact
         && !lines.is_empty()
-        && matches!(msg.role, MessageRole::User | MessageRole::Assistant)
+        && matches!(
+            msg.role,
+            MessageRole::User | MessageRole::Assistant | MessageRole::Thinking
+        )
     {
         lines.push(Line::from(""));
     }
@@ -1330,11 +1336,29 @@ fn append_message_lines(
     // Handle folded messages
     if msg.folded {
         let style = Style::default().fg(theme.dim);
+        // A folded reasoning row shows its first line anyway: the point of
+        // surfacing thinking is to let someone see *what* the model is
+        // considering without expanding a page of it. Other roles keep the
+        // plain indicator — a folded tool result is noise, not a preview.
+        if msg.role == MessageRole::Thinking {
+            let first = msg.content.lines().next().unwrap_or("");
+            let preview_width = width.saturating_sub(24);
+            let preview: String = first.chars().take(preview_width).collect();
+            let more =
+                message_display_height(msg, width, is_compact, image_protocol).saturating_sub(1);
+            lines.push(Line::from(vec![
+                Span::styled(message_prefix(msg.role), style),
+                Span::styled(preview, style.add_modifier(Modifier::ITALIC)),
+                Span::styled(format!(" [+{more} lines]"), style),
+            ]));
+            return None;
+        }
         let fold_indicator = format!(
             "▸ {} [+{} lines folded]",
             match msg.role {
                 MessageRole::User => "User",
                 MessageRole::Assistant => "Assistant",
+                MessageRole::Thinking => "Thinking",
                 MessageRole::ToolResult => "Tool Result",
                 MessageRole::ToolCall => "Tool Call",
                 MessageRole::System => "System",
@@ -1351,6 +1375,11 @@ fn append_message_lines(
         MessageRole::Assistant => Style::default()
             .fg(theme.assistant)
             .add_modifier(Modifier::BOLD),
+        // Reasoning is deliberately quiet: it sits above the answer and must
+        // not compete with it for attention.
+        MessageRole::Thinking => Style::default()
+            .fg(theme.dim)
+            .add_modifier(Modifier::ITALIC),
         MessageRole::ToolResult | MessageRole::ToolCall => Style::default().fg(theme.tool),
         MessageRole::System => Style::default().fg(theme.dim),
     };
@@ -1909,16 +1938,10 @@ fn render_notification_bar(
 
 fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
     let content = if state.left_pane_content.is_empty() {
-        "No file open.\nUse /open <path> to view a file."
+        "No file open.\nUse /open <path> to view a file, or /diff to review changes."
     } else {
         &state.left_pane_content
     };
-
-    let wrapped = wrap_text(content, area.width.saturating_sub(2) as usize);
-    let lines: Vec<Line> = wrapped
-        .into_iter()
-        .map(|s| Line::from(Span::styled(s, Style::default().fg(state.theme.foreground))))
-        .collect();
 
     let title = if state.left_pane_title.is_empty() {
         "File Viewer"
@@ -1931,8 +1954,54 @@ fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
         .title(title)
         .style(Style::default().fg(state.theme.border));
 
+    // A diff is drawn line by line with its kind's colour and no wrapping: a
+    // wrapped diff line is not the line the file has, and the gutter mark has
+    // to stay next to the text it marks. Everything else keeps the file
+    // viewer's wrapped plain-text rendering.
+    if state.left_pane_is_diff {
+        let parsed = crate::diff::parse_unified(content);
+        let lines: Vec<Line> = parsed
+            .into_iter()
+            .map(|line| {
+                let colour = match line.kind {
+                    crate::diff::DiffLineKind::Added => state.theme.success,
+                    crate::diff::DiffLineKind::Removed => state.theme.error,
+                    crate::diff::DiffLineKind::HunkHeader => state.theme.accent_secondary,
+                    // `NoNewline` is a note about the line above it, so it is
+                    // dim like a header rather than coloured like content.
+                    crate::diff::DiffLineKind::FileHeader
+                    | crate::diff::DiffLineKind::NoNewline => state.theme.dim,
+                    crate::diff::DiffLineKind::Context => state.theme.foreground,
+                };
+                Line::from(Span::styled(line.text, Style::default().fg(colour)))
+            })
+            .collect();
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .scroll((left_pane_scroll(state, area.height), 0));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let wrapped = wrap_text(content, area.width.saturating_sub(2) as usize);
+    let lines: Vec<Line> = wrapped
+        .into_iter()
+        .map(|s| Line::from(Span::styled(s, Style::default().fg(state.theme.foreground))))
+        .collect();
+
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
+}
+
+/// How many lines the left pane is scrolled down.
+///
+/// Clamped so a diff longer than the pane stops at its last page instead of
+/// scrolling past the end into blank rows.
+fn left_pane_scroll(state: &UiState, pane_height: u16) -> u16 {
+    let total = state.left_pane_content.lines().count();
+    let visible = usize::from(pane_height.saturating_sub(2));
+    let max = total.saturating_sub(visible);
+    u16::try_from(state.left_pane_scroll.min(max)).unwrap_or(0)
 }
 
 fn render_statusline(
@@ -2285,6 +2354,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::Confirm { message } => {
             format!("{message}\n[y/n]")
         }
+        Overlay::ModelPicker(picker) => picker.render(),
     };
 
     let title = match overlay {
@@ -2294,6 +2364,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::CommandPalette { .. } => "Commands",
         Overlay::FileMention { .. } => "Files",
         Overlay::Confirm { .. } => "Confirm",
+        Overlay::ModelPicker { .. } => "Model",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2307,7 +2378,9 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
     // long: give it the full width and wrap it. Dialog bodies must not wrap —
     // a long Write argument would push the `[a] Allow once` choices out of the
     // box — so they keep their fixed layout and are clipped instead.
-    let is_detail = matches!(overlay, Overlay::Detail { .. });
+    // The picker's body is a list, so it wraps like a detail body rather than
+    // clipping like a fixed-layout dialog.
+    let is_detail = matches!(overlay, Overlay::Detail { .. } | Overlay::ModelPicker(_));
     if is_detail {
         paragraph = paragraph.wrap(Wrap { trim: false });
     }
@@ -2814,6 +2887,127 @@ mod layout_tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+
+    /// A folded reasoning row shows a preview rather than hiding entirely.
+    ///
+    /// Thinking is folded by default, so "folded" is the state a reader
+    /// actually sees. If it rendered as the generic `▸ Thinking [+N lines
+    /// folded]` indicator, surfacing reasoning would have changed nothing on
+    /// screen.
+    #[test]
+    fn a_folded_thinking_row_previews_its_first_line() {
+        let mut state = UiState::default();
+        state.messages.push(Message {
+            role: MessageRole::Thinking,
+            content: "The failing test is the PTY one\nso the fix belongs there.".into(),
+            tool_name: None,
+            streaming: false,
+            folded: true,
+            image: None,
+        });
+        let buffer = render_to_buffer(80, 12, &mut state);
+        let painted: Vec<String> = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect();
+        let text = painted.join("\n");
+        assert!(
+            text.contains("The failing test is the PTY one"),
+            "the reason's first line is not on screen:\n{text}"
+        );
+        assert!(
+            !text.contains("so the fix belongs there."),
+            "a folded row printed its whole body:\n{text}"
+        );
+        assert!(
+            text.contains("lines]"),
+            "no expansion hint on the folded row:\n{text}"
+        );
+    }
+
+    /// Reasoning is painted distinctly from the answer, so the two are not
+    /// confused at a glance.
+    #[test]
+    fn an_expanded_thinking_row_is_dim_and_marked() {
+        let mut state = UiState::default();
+        state.messages.push(Message {
+            role: MessageRole::Thinking,
+            content: "Considering the options.".into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        });
+        let buffer = render_to_buffer(80, 12, &mut state);
+        let text = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Considering the options."), "{text}");
+        assert!(
+            text.contains('✻'),
+            "no thinking marker in the gutter:\n{text}"
+        );
+    }
+
+    /// The diff pane paints added and removed lines apart.
+    ///
+    /// `/diff` used to print the whole patch into the transcript, where an
+    /// added line and a context line looked identical. The pane is only worth
+    /// having if the colours actually reach the cells.
+    #[test]
+    fn the_diff_pane_colours_added_and_removed_lines() {
+        let mut state = UiState::default();
+        state.layout_mode = crate::state::LayoutMode::HorizontalSplit { left_percent: 50 };
+        state.left_pane_title = "diff  1 file(s)  +1 -1".into();
+        state.left_pane_content = "diff --git a/a.rs b/a.rs\n\
+--- a/a.rs\n\
++++ b/a.rs\n\
+@@ -1,2 +1,2 @@\n\
+ fn keep() {}\n\
+-fn old() {}\n\
++fn new() {}\n"
+            .into();
+        state.left_pane_is_diff = true;
+        let theme = state.theme.clone();
+        let buffer = render_to_buffer(80, 30, &mut state);
+        let text = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The title carries the stat, so the reader knows the size of what
+        // they are looking at without scrolling to the end.
+        assert!(
+            text.contains("+1 -1"),
+            "diff stat is not on the pane:\n{text}"
+        );
+
+        let removed = colour_of_line(&buffer, "-fn old() {}");
+        let added = colour_of_line(&buffer, "+fn new() {}");
+        assert_eq!(removed, Some(theme.error), "removed line is not error-red");
+        assert_eq!(
+            added,
+            Some(theme.success),
+            "added line is not success-green"
+        );
+    }
+
+    /// The foreground colour of the cell that starts `needle`, if the text is
+    /// on screen at all.
+    fn colour_of_line(buffer: &Buffer, needle: &str) -> Option<ratatui::style::Color> {
+        let lead = needle.chars().next()?;
+        for y in 0..buffer.area.height {
+            let row = row_text(buffer, y);
+            let Some(at) = row.find(needle) else { continue };
+            let x = u16::try_from(row[..at].chars().count()).ok()?;
+            // Assert the row really starts with the mark, so a match inside a
+            // longer line cannot make a wrong cell look right.
+            let cell = buffer.cell((x, y))?;
+            assert_eq!(cell.symbol(), lead.to_string());
+            return cell.style().fg;
+        }
+        None
+    }
 
     fn row_text(buffer: &Buffer, y: u16) -> String {
         (0..buffer.area.width)

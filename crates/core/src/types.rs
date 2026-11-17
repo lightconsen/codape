@@ -1404,6 +1404,14 @@ pub enum AgentLifecycleEvent {
 pub enum EngineEvent {
     /// A text delta from the assistant.
     TextDelta(String),
+    /// A thinking delta from the assistant.
+    ///
+    /// The transcript shows it as a folded row, distinct from the answer:
+    /// thinking is what the model said to itself, and mixing it into
+    /// [`TextDelta`](Self::TextDelta) would put it in the middle of the
+    /// response and in every copy of it. A provider that does not stream
+    /// thinking simply never emits this.
+    ThinkingDelta(String),
     /// A tool call has started executing.
     ToolCallStart {
         /// Unique call identifier.

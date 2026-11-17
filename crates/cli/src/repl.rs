@@ -1079,6 +1079,51 @@ fn push_activity_row(ui_state: &mut codape_ui::state::UiState, label: &str) {
     });
 }
 
+/// Scroll one page, in whichever pane is being read.
+///
+/// With a diff beside the transcript, PageUp/PageDown are for the diff: that
+/// is the pane someone presses the key to move. Everything else keeps the old
+/// behaviour of scrolling the transcript.
+fn scroll_a_page(ui_state: &mut codape_ui::state::UiState, up: bool) {
+    let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
+    if ui_state.left_pane_is_diff
+        && ui_state.layout_mode != codape_ui::state::LayoutMode::SinglePane
+    {
+        ui_state.left_pane_scroll = if up {
+            ui_state.left_pane_scroll.saturating_sub(page)
+        } else {
+            ui_state.left_pane_scroll.saturating_add(page)
+        };
+        return;
+    }
+    if up {
+        ui_state.messages.scroll_up(page);
+    } else {
+        ui_state.messages.scroll_down_by(page);
+    }
+}
+
+/// Mark the turn's streamed rows as finished.
+///
+/// The answer row and the reasoning rows both arrive over the same stream and
+/// both end with it. A reasoning row left marked streaming keeps rendering
+/// dim, which is the renderer's way of saying "still arriving" about text that
+/// has finished arriving.
+fn finish_streamed_rows(ui_state: &mut codape_ui::state::UiState) {
+    if let Some(last) =
+        ui_state.messages.messages.iter_mut().rev().find(|msg| {
+            msg.role == codape_ui::message_list::MessageRole::Assistant && msg.streaming
+        })
+    {
+        last.streaming = false;
+    }
+    for msg in &mut ui_state.messages.messages {
+        if msg.role == codape_ui::message_list::MessageRole::Thinking {
+            msg.streaming = false;
+        }
+    }
+}
+
 /// How a sub-agent's lifecycle reads in the UI.
 ///
 /// The engine emits these, and nothing consumed them — the TUI's event match
@@ -1283,6 +1328,19 @@ fn protocol_frame(
             parent_tool_use_id: None,
             session_id: session_id.to_string(),
         }),
+        // The same frame shape the provider sends for reasoning, so a host
+        // that already understands an Anthropic stream needs no new case to
+        // tell it apart from the answer.
+        EngineEvent::ThinkingDelta(text) => {
+            ProtocolMessage::StreamEvent(protocol::StreamEventFrame {
+                event: serde_json::json!({
+                    "type": "content_block_delta",
+                    "delta": { "type": "thinking_delta", "thinking": text },
+                }),
+                parent_tool_use_id: None,
+                session_id: session_id.to_string(),
+            })
+        }
         EngineEvent::ToolCallStart {
             id,
             name,
@@ -1570,6 +1628,16 @@ fn core_message_to_ui_message(
                 Some(state),
             )
         }
+        // A thinking block belongs to the assistant turn it preceded, and it
+        // is shown folded like it was live. Dropping it here made a resumed
+        // session look like the model had never reasoned at all.
+        (_, codape_core::types::MessageContent::Thinking(block)) => (
+            codape_ui::message_list::MessageRole::Thinking,
+            block.thinking.clone(),
+            None,
+            true,
+            None,
+        ),
         (_, content) => (
             codape_ui::message_list::MessageRole::System,
             format!("{content:?}"),
@@ -1606,14 +1674,8 @@ fn restore_transcript_messages(
     ui_state.messages = codape_ui::message_list::MessageView::new(1000);
     ui_state.messages.start = 0;
     for message in messages {
-        // Thinking is provider state, not conversation: it must not reappear
-        // in the transcript as a debug row after a resume.
-        if matches!(
-            message.content,
-            codape_core::types::MessageContent::Thinking(_)
-        ) {
-            continue;
-        }
+        // Thinking now restores as its own folded row. Skipping it here was
+        // what made a resumed session look like the model had never reasoned.
         ui_state
             .messages
             .push(core_message_to_ui_message(message, &tool_names));
@@ -2735,6 +2797,8 @@ struct ModelSettings {
     max_tokens: u32,
     /// True when a named agent definition supplied [`Self::max_tokens`].
     max_tokens_from_agent: bool,
+    /// The reasoning effort later requests carry.
+    reasoning_effort: Option<codape_core::api_client::ReasoningEffort>,
     /// True when `--model` was given. A named custom agent's `model` must not
     /// override an explicitly chosen session model.
     explicit_model_override: bool,
@@ -3083,6 +3147,7 @@ impl ReplLoop {
                 fallback_model: None,
                 max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
                 max_tokens_from_agent: false,
+                reasoning_effort: None,
                 explicit_model_override: false,
             },
             telemetry: None,
@@ -3595,6 +3660,7 @@ impl ReplLoop {
                 fallback_model: None,
                 max_tokens: QueryEngine::DEFAULT_MAX_TOKENS,
                 max_tokens_from_agent: false,
+                reasoning_effort: None,
                 explicit_model_override: false,
             },
             telemetry: None,
@@ -4145,6 +4211,16 @@ impl ReplLoop {
 
     pub const fn with_max_turns(&mut self, turns: Option<u32>) {
         self.options.max_turns = turns;
+    }
+
+    /// Seed the session's reasoning effort (`--effort`).
+    ///
+    /// The engine is the one that matters: it stamps the effort on every
+    /// later request, so changing it in-session is the same call. This exists
+    /// so a session that started with `--effort` and one that picked it from
+    /// the picker behave identically afterwards.
+    pub fn with_reasoning_effort(&mut self, effort: Option<&str>) {
+        self.apply_reasoning_effort(effort);
     }
 
     /// Start the wall-clock budget the model is reminded of (`--time-budget`).
@@ -5096,6 +5172,78 @@ impl ReplLoop {
         }
     }
 
+    /// Open the model and effort chooser.
+    ///
+    /// The list is the alias table's families plus whatever model the session
+    /// is actually on, so a session started on a provider-specific id can
+    /// still see and keep it.
+    fn open_model_picker(&self, ui_state: &mut codape_ui::state::UiState) {
+        let current = self.model.current.0.clone();
+        let mut models = vec![ModelId::opus().0, ModelId::sonnet().0, ModelId::haiku().0];
+        if !models.contains(&current) {
+            models.insert(0, current.clone());
+        }
+        let picker = codape_ui::overlay::ModelPicker::new(
+            models,
+            &current,
+            self.model
+                .reasoning_effort
+                .map(|effort| effort.as_str().to_string()),
+        );
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::ModelPicker(picker));
+    }
+
+    /// Set the session's reasoning effort, on the REPL and on the engine.
+    ///
+    /// The engine is where it takes effect: it builds a fresh request context
+    /// per turn, so a value set here reaches the next request even though the
+    /// client was built at startup. `None` turns thinking back off, which is
+    /// what the picker's "off" entry means.
+    fn apply_reasoning_effort(&mut self, effort: Option<&str>) {
+        let parsed = effort.and_then(codape_core::api_client::ReasoningEffort::parse);
+        self.model.reasoning_effort = parsed;
+        if let Some(ref mut engine) = self.session.engine {
+            engine.set_reasoning_effort(parsed);
+        }
+    }
+
+    /// `/effort` — report the session's effort with no argument, set it with one.
+    ///
+    /// The set path goes through `apply_reasoning_effort`, which is the same
+    /// call the picker makes, so the two cannot disagree about what an effort
+    /// level is.
+    fn apply_effort_command(&mut self, args: &[String], ui_state: &mut codape_ui::state::UiState) {
+        match args.first().map(|arg| arg.to_lowercase()) {
+            None => {
+                let current = self
+                    .model
+                    .reasoning_effort
+                    .map_or_else(|| "off".to_string(), |effort| effort.as_str().to_string());
+                ui_state.notifications.info(format!(
+                    "Reasoning effort: {current} (off|low|medium|high|xhigh|max)"
+                ));
+            }
+            Some(level) if level == "off" || level == "none" => {
+                self.apply_reasoning_effort(None);
+                ui_state.notifications.success("Reasoning effort: off");
+            }
+            Some(level) => {
+                if codape_core::api_client::ReasoningEffort::parse(&level).is_some() {
+                    self.apply_reasoning_effort(Some(&level));
+                    ui_state
+                        .notifications
+                        .success(format!("Reasoning effort: {level}"));
+                } else {
+                    ui_state.notifications.warn(format!(
+                        "Unknown effort '{level}': expected off, low, medium, high, xhigh or max"
+                    ));
+                }
+            }
+        }
+    }
+
     /// Apply `CODAPE_MAX_TOKENS`, clamped to half the model's context window.
     ///
     /// A named agent definition that set its own limit wins: the environment
@@ -5446,6 +5594,8 @@ impl ReplLoop {
         ui_state.layout_mode = codape_ui::state::LayoutMode::SinglePane;
         ui_state.left_pane_content.clear();
         ui_state.left_pane_title.clear();
+        ui_state.left_pane_is_diff = false;
+        ui_state.left_pane_scroll = 0;
         ui_state.statusline.last_duration = None;
         ui_state.statusline.thinking = false;
         ui_state.statusline.thinking_label = None;
@@ -5662,6 +5812,51 @@ impl ReplLoop {
 
         self.record_engine_event_telemetry(&engine_event);
         match engine_event {
+            EngineEvent::ThinkingDelta(delta) => {
+                // Reasoning is its own row, and it belongs above the answer it
+                // explains. The turn's assistant row is pushed when the query
+                // starts, before any delta, so appending here would put the
+                // reasoning *under* an answer that has not been written yet.
+                live.phase.note_text_delta();
+                set_plan_step(ui_state, "Thinking through response");
+                // The turn's assistant row is pushed empty when the query
+                // starts, so the insertion point is that row; without one
+                // (a headless path) the reasoning goes at the end.
+                let at = ui_state
+                    .messages
+                    .messages
+                    .iter()
+                    .rposition(|msg| msg.role == MessageRole::Assistant && msg.content.is_empty())
+                    .unwrap_or(ui_state.messages.messages.len());
+                // Only the row directly above the answer belongs to this turn;
+                // an older thinking row further back is a previous turn's and
+                // must not absorb this delta.
+                if at > 0 && ui_state.messages.messages[at - 1].role == MessageRole::Thinking {
+                    let row = &mut ui_state.messages.messages[at - 1];
+                    let mut content = row.content.to_string();
+                    content.push_str(&delta);
+                    row.content = content.into();
+                } else {
+                    ui_state.messages.insert(
+                        at,
+                        Message {
+                            role: MessageRole::Thinking,
+                            content: delta.into(),
+                            tool_name: None,
+                            streaming: true,
+                            // Folded by default: the answer is what was asked
+                            // for, and a page of reasoning above it pushes the
+                            // answer off the bottom of the pane.
+                            folded: true,
+                            image: None,
+                        },
+                    );
+                }
+                if live.last_stream_snapshot.elapsed() >= Duration::from_secs(1) {
+                    self.persist_interactive_snapshot(ui_state);
+                    live.last_stream_snapshot = Instant::now();
+                }
+            }
             EngineEvent::TextDelta(delta) => {
                 live.phase.note_text_delta();
                 set_plan_step(ui_state, "Thinking through response");
@@ -6099,6 +6294,14 @@ impl ReplLoop {
         // keybindings.json moves it here.
         if let Some(shortcut) = self.shortcut(ShortcutContext::Chat, &key) {
             match shortcut {
+                Shortcut::ModelPicker
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none() =>
+                {
+                    self.open_model_picker(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
                 Shortcut::CyclePermissionMode => {
                     ui_state.permission_bar.cycle_mode();
                     if let Some(ref mut engine) = self.session.engine {
@@ -6128,6 +6331,26 @@ impl ReplLoop {
                         "Tool output folded (Ctrl+O to expand)"
                     } else {
                         "Tool output expanded"
+                    });
+                    return TuiKeyFlow::Handled;
+                }
+                Shortcut::ToggleThinking => {
+                    // Separate from tool output: reasoning is not a tool result,
+                    // and someone reading the answer usually wants one folded
+                    // while the other is open.
+                    let fold =
+                        ui_state.messages.messages.iter().any(|message| {
+                            message.role == MessageRole::Thinking && !message.folded
+                        });
+                    for message in &mut ui_state.messages.messages {
+                        if message.role == MessageRole::Thinking {
+                            message.folded = fold;
+                        }
+                    }
+                    ui_state.notifications.info(if fold {
+                        "Thinking folded (Ctrl+E to expand)"
+                    } else {
+                        "Thinking expanded"
                     });
                     return TuiKeyFlow::Handled;
                 }
@@ -6163,6 +6386,62 @@ impl ReplLoop {
                 }
                 _ => {}
             }
+        }
+
+        // The model picker owns the keyboard while it is open: the arrows
+        // change a setting, so a stray keypress must not also reach the input
+        // line behind it.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::ModelPicker(_))
+        ) {
+            let mut apply = false;
+            let mut cancel = false;
+            if let Some(codape_ui::overlay::Overlay::ModelPicker(picker)) =
+                ui_state.overlays.top_mut()
+            {
+                match key.code {
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        picker.focus = match picker.focus {
+                            codape_ui::overlay::PickerFocus::Model => {
+                                codape_ui::overlay::PickerFocus::Effort
+                            }
+                            codape_ui::overlay::PickerFocus::Effort => {
+                                codape_ui::overlay::PickerFocus::Model
+                            }
+                        };
+                    }
+                    KeyCode::Left | KeyCode::Right => {
+                        let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                        match picker.focus {
+                            codape_ui::overlay::PickerFocus::Model => picker.move_model(delta),
+                            codape_ui::overlay::PickerFocus::Effort => picker.move_effort(delta),
+                        }
+                    }
+                    KeyCode::Enter => apply = true,
+                    KeyCode::Esc => cancel = true,
+                    _ => {}
+                }
+            }
+            if apply {
+                let (model, effort) = match ui_state.overlays.pop() {
+                    Some(codape_ui::overlay::Overlay::ModelPicker(picker)) => {
+                        (picker.selected_model().map(str::to_string), picker.effort)
+                    }
+                    _ => (None, None),
+                };
+                if let Some(model) = model {
+                    self.set_model(ModelId::from_alias(&model));
+                }
+                self.apply_reasoning_effort(effort.as_deref());
+                let effort = effort.as_deref().unwrap_or("off");
+                ui_state
+                    .notifications
+                    .success(format!("{} · effort {effort}", self.model.current.0));
+            } else if cancel {
+                ui_state.overlays.pop();
+            }
+            return TuiKeyFlow::Handled;
         }
 
         // Handle Confirm overlay for destructive commands
@@ -6447,14 +6726,8 @@ impl ReplLoop {
                         KeyCode::End => {
                             ui_state.input.apply(&InputAction::MoveToEnd);
                         }
-                        KeyCode::PageUp => {
-                            let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                            ui_state.messages.scroll_up(page);
-                        }
-                        KeyCode::PageDown => {
-                            let page = ui_state.messages.viewport_height.saturating_sub(2).max(1);
-                            ui_state.messages.scroll_down_by(page);
-                        }
+                        KeyCode::PageUp => scroll_a_page(ui_state, true),
+                        KeyCode::PageDown => scroll_a_page(ui_state, false),
                         _ => {}
                     }
                 } else if self.ui.vim_mode_enabled {
@@ -6632,12 +6905,22 @@ impl ReplLoop {
                     .messages
                     .messages
                     .iter()
+                    // Reasoning is not part of the conversation: exporting it
+                    // would hand the model's notes to the recipient as if they
+                    // were the answer.
+                    .filter(|m| m.role != codape_ui::message_list::MessageRole::Thinking)
                     .map(|m| {
                         let role = match m.role {
                             codape_ui::message_list::MessageRole::User => {
                                 codape_core::types::Role::User
                             }
-                            codape_ui::message_list::MessageRole::Assistant => {
+                            // `Thinking` cannot reach here — it is filtered out
+                            // above — so it is folded in with `Assistant`
+                            // rather than given a body of its own; the arm is
+                            // still listed so a new role cannot silently
+                            // export as something else.
+                            codape_ui::message_list::MessageRole::Assistant
+                            | codape_ui::message_list::MessageRole::Thinking => {
                                 codape_core::types::Role::Assistant
                             }
                             codape_ui::message_list::MessageRole::System => {
@@ -7518,15 +7801,7 @@ impl ReplLoop {
                     complete_plan(&mut ui_state);
                     clear_permission_overlay(&mut ui_state);
 
-                    if let Some(last) = ui_state
-                        .messages
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|msg| msg.role == MessageRole::Assistant && msg.streaming)
-                    {
-                        last.streaming = false;
-                    }
+                    finish_streamed_rows(&mut ui_state);
 
                     match result {
                         Ok(TerminalReason::ApiUnavailable { message }) => {
@@ -7537,8 +7812,8 @@ impl ReplLoop {
                                 ).into(),
                                 tool_name: None,
                                 streaming: false,
-                            folded: false,
-            image: None,
+                                folded: false,
+                                image: None,
                             });
                         }
                         // The answer is on screen but the stream died
@@ -7703,15 +7978,7 @@ impl ReplLoop {
                 }, if tui_elicit_rx.is_some() => {
                     thinking = false;
                     live.phase.reset();
-                    if let Some(last) = ui_state
-                        .messages
-                        .messages
-                        .iter_mut()
-                        .rev()
-                        .find(|msg| msg.role == MessageRole::Assistant && msg.streaming)
-                    {
-                        last.streaming = false;
-                    }
+                    finish_streamed_rows(&mut ui_state);
                     ui_state.notifications.info(&request.prompt);
                     self.mcp.pending_elicitation = Some(request.response_tx);
                 }
@@ -9695,6 +9962,40 @@ impl ReplLoop {
         result.output.starts_with("Error: ")
     }
 
+    /// Run `/diff` and put the result in the split pane.
+    ///
+    /// The registry already runs git and returns the text; what the pane adds
+    /// is the per-line classification, which the renderer needs to colour an
+    /// added line apart from a removed one. A failure goes to the transcript
+    /// instead of an empty coloured pane.
+    fn show_diff_pane(&self, ui_state: &mut codape_ui::state::UiState, args: &[String]) {
+        let result = self.commands.execute("diff", &self.build_context(), args);
+        if Self::command_result_is_error(&result) {
+            ui_state.notifications.err("Could not read a diff");
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
+                content: result.output.into(),
+                tool_name: None,
+                streaming: false,
+                folded: false,
+                image: None,
+            });
+            return;
+        }
+
+        let stat = codape_ui::diff::stat(&codape_ui::diff::parse_unified(&result.output));
+        ui_state.left_pane_content.clone_from(&result.output);
+        ui_state.left_pane_title = format!("diff  {}", stat.summary());
+        ui_state.left_pane_is_diff = true;
+        ui_state.left_pane_scroll = 0;
+        ui_state.layout_mode = codape_ui::state::LayoutMode::HorizontalSplit { left_percent: 50 };
+        let summary = stat.summary();
+        ui_state
+            .notifications
+            .success(format!("{summary} (PgUp/PgDn to scroll)"));
+        self.persist_interactive_snapshot(ui_state);
+    }
+
     /// Fire a lifecycle hook that a synchronous command path queued.
     ///
     /// The pending value is taken before the await, so a hook that fails is
@@ -11062,6 +11363,10 @@ impl ReplLoop {
                         });
                         return;
                     }
+                    "effort" => {
+                        self.apply_effort_command(&args, ui_state);
+                        return;
+                    }
                     "compact" => {
                         let msg = self.compact_context(ui_state);
                         ui_state.notifications.info(&msg);
@@ -11078,8 +11383,14 @@ impl ReplLoop {
                     "model" => {
                         if let Some(model) = args.first() {
                             self.set_model(ModelId::from_alias(model));
+                            self.execute_and_display_command(cmd_name, &args, ui_state);
+                        } else {
+                            // Bare `/model` opens the chooser. Printing the
+                            // current name and stopping there was what left a
+                            // session with no way to change it but to remember
+                            // an id.
+                            self.open_model_picker(ui_state);
                         }
-                        self.execute_and_display_command(cmd_name, &args, ui_state);
                         return;
                     }
                     "vim" => {
@@ -11156,6 +11467,10 @@ impl ReplLoop {
                         show_detail_overlay(ui_state, "Recent Activity", body);
                         return;
                     }
+                    "diff" => {
+                        self.show_diff_pane(ui_state, &args);
+                        return;
+                    }
                     "open" => {
                         if args.is_empty() {
                             ui_state.messages.push(codape_ui::message_list::Message {
@@ -11179,6 +11494,10 @@ impl ReplLoop {
                             Ok(content) => {
                                 ui_state.left_pane_content = content;
                                 ui_state.left_pane_title.clone_from(&args[0]);
+                                // A file opened over a diff replaces it; the
+                                // pane shows one thing at a time.
+                                ui_state.left_pane_is_diff = false;
+                                ui_state.left_pane_scroll = 0;
                                 ui_state.layout_mode =
                                     codape_ui::state::LayoutMode::HorizontalSplit {
                                         left_percent: 50,
@@ -11498,11 +11817,15 @@ impl ReplLoop {
         if let Some(last) = ui_state.messages.messages.iter_mut().rev().find(|msg| {
             msg.role == codape_ui::message_list::MessageRole::Assistant && msg.streaming
         }) {
-            last.streaming = false;
             let mut msg = last.content.to_string();
             msg.push_str(marker);
             last.content = msg.into();
         }
+        // Clears the streaming flag on the answer row the marker was just
+        // appended to, and on the reasoning row that ended with the same
+        // stream: left streaming, it keeps drawing dim, which reads as "still
+        // arriving".
+        finish_streamed_rows(ui_state);
         if let Some(ref dispatcher) = self.agents.dispatcher {
             dispatcher.set_elicit_tx(None);
         }
@@ -12120,10 +12443,44 @@ impl ReplLoop {
                 "model" => {
                     if args.is_empty() {
                         writeln!(stdout, "Current model: {}", self.model.current.0)?;
+                        writeln!(
+                            stdout,
+                            "Usage: /model <opus|sonnet|haiku|opus-4|sonnet-4|haiku-4|id>"
+                        )?;
                     } else {
                         let model = ModelId::from_alias(&args[0]);
                         self.set_model(model.clone());
                         writeln!(stdout, "Model switched to: {}", model.0)?;
+                    }
+                    return Ok(());
+                }
+                "effort" => {
+                    match args.first().map(|arg| arg.to_lowercase()) {
+                        None => {
+                            let current = self
+                                .model
+                                .reasoning_effort
+                                .map_or("off", |effort| effort.as_str());
+                            writeln!(stdout, "Reasoning effort: {current}")?;
+                        }
+                        Some(level) if level == "off" || level == "none" => {
+                            self.apply_reasoning_effort(None);
+                            writeln!(stdout, "Reasoning effort: off")?;
+                        }
+                        Some(level)
+                            if codape_core::api_client::ReasoningEffort::parse(&level)
+                                .is_some() =>
+                        {
+                            self.apply_reasoning_effort(Some(&level));
+                            writeln!(stdout, "Reasoning effort: {level}")?;
+                        }
+                        Some(level) => {
+                            writeln!(
+                                stdout,
+                                "Unknown effort '{level}': expected off, low, medium, high, \
+                                 xhigh or max"
+                            )?;
+                        }
                     }
                     return Ok(());
                 }
@@ -13919,7 +14276,7 @@ mod tests {
     /// must not show provider thinking, must keep each tool result's identity,
     /// and must fold a long historical output.
     #[test]
-    fn resume_projection_drops_thinking_and_folds_long_tool_output() {
+    fn resume_projection_keeps_thinking_folded_and_folds_long_tool_output() {
         use codape_core::types::{MessageContent, Role, ThinkingBlock, ToolCall, ToolResult};
         use codape_ui::message_list::MessageRole;
 
@@ -13957,17 +14314,23 @@ mod tests {
         restore_transcript_messages(&mut ui, &messages);
         let rows = &ui.messages.messages;
 
-        assert_eq!(rows.len(), 3, "thinking must not be restored");
-        assert_eq!(rows[0].role, MessageRole::ToolCall);
-        assert_eq!(rows[0].tool_name.as_deref(), Some("Read"));
-        assert_eq!(rows[1].role, MessageRole::ToolResult);
+        // Thinking restores as its own folded row. Dropping it made a resumed
+        // session look like the model had never reasoned, which is exactly the
+        // state a person resumes to inspect.
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].role, MessageRole::Thinking);
+        assert!(rows[0].folded, "restored reasoning should start folded");
+        assert_eq!(rows[0].content.as_str(), "provider state");
+        assert_eq!(rows[1].role, MessageRole::ToolCall);
+        assert_eq!(rows[1].tool_name.as_deref(), Some("Read"));
+        assert_eq!(rows[2].role, MessageRole::ToolResult);
         assert_eq!(
-            rows[1].tool_name.as_deref(),
+            rows[2].tool_name.as_deref(),
             Some("Read"),
             "a tool result must keep the name of the call it answers"
         );
-        assert!(!rows[1].folded);
-        assert!(rows[2].folded, "a long historical output should be folded");
+        assert!(!rows[2].folded);
+        assert!(rows[3].folded, "a long historical output should be folded");
     }
 
     /// Themes installed as files under `~/.codape/themes` must reach the
@@ -17757,5 +18120,37 @@ mod tests {
             .expect("the approved command did not finish")
             .expect("the result channel closed");
         assert!(result.output.contains("needs-approval"), "{result:?}");
+    }
+
+    /// The reasoning row ends with the stream that produced it.
+    ///
+    /// A row left marked streaming keeps drawing dim, which is the renderer's
+    /// way of saying "still arriving". The answer row and the reasoning row
+    /// come from the same stream, so they have to finish together.
+    #[test]
+    fn finishing_a_turn_clears_the_reasoning_row_too() {
+        use codape_ui::message_list::{Message, MessageRole};
+        let mut ui_state = codape_ui::state::UiState::default();
+        ui_state.messages.push(Message {
+            role: MessageRole::Thinking,
+            content: "weighing the options".into(),
+            tool_name: None,
+            streaming: true,
+            folded: true,
+            image: None,
+        });
+        ui_state.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: "the answer".into(),
+            tool_name: None,
+            streaming: true,
+            folded: false,
+            image: None,
+        });
+        finish_streamed_rows(&mut ui_state);
+        assert!(
+            ui_state.messages.messages.iter().all(|m| !m.streaming),
+            "a row is still marked streaming after the turn ended"
+        );
     }
 }

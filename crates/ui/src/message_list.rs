@@ -13,6 +13,13 @@ pub enum MessageRole {
     User,
     /// Assistant message.
     Assistant,
+    /// The model's reasoning, shown separately from the answer it produced.
+    ///
+    /// Kept apart from [`Assistant`](Self::Assistant) because it is not part
+    /// of the answer: it is folded by default, it is never copied into a
+    /// forwarded transcript as the response, and ctrl+e can hide it without
+    /// touching the answer's own tool rows.
+    Thinking,
     /// Tool call result.
     ToolResult,
     /// Tool call request.
@@ -108,6 +115,19 @@ impl MessageView {
     pub fn push(&mut self, msg: Message) {
         self.messages.push(msg);
         // Auto-scroll to bottom if near bottom
+        if self.is_at_bottom() {
+            self.scroll_to_bottom();
+        }
+    }
+
+    /// Insert a message at `index`.
+    ///
+    /// Used for a row that belongs above one already in the list — reasoning
+    /// arrives after the turn's empty answer row was pushed, and has to sit
+    /// above it.
+    pub fn insert(&mut self, index: usize, msg: Message) {
+        let at = index.min(self.messages.len());
+        self.messages.insert(at, msg);
         if self.is_at_bottom() {
             self.scroll_to_bottom();
         }

@@ -111,6 +111,10 @@ impl Context {
 pub enum Action {
     /// Fold or unfold every tool call and result row.
     ToggleToolOutput,
+    /// Fold or unfold the model's reasoning rows.
+    ToggleThinking,
+    /// Open the model and effort chooser.
+    ModelPicker,
     /// Switch between one pane and a split view.
     ToggleSplitPane,
     /// Advance the permission mode (default → accept edits → plan → …).
@@ -157,6 +161,8 @@ impl Action {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ToggleToolOutput => "app:toggleToolOutput",
+            Self::ToggleThinking => "app:toggleThinking",
+            Self::ModelPicker => "chat:modelPicker",
             Self::ToggleSplitPane => "app:toggleSplitPane",
             Self::CyclePermissionMode => "app:cyclePermissionMode",
             Self::ImagePaste => "chat:imagePaste",
@@ -183,10 +189,13 @@ impl Action {
     #[must_use]
     pub const fn context(self) -> Context {
         match self {
-            Self::ToggleToolOutput | Self::ToggleSplitPane | Self::CyclePermissionMode => {
-                Context::Global
+            Self::ToggleToolOutput
+            | Self::ToggleThinking
+            | Self::ToggleSplitPane
+            | Self::CyclePermissionMode => Context::Global,
+            Self::ImagePaste | Self::Cancel | Self::HistorySearch | Self::ModelPicker => {
+                Context::Chat
             }
-            Self::ImagePaste | Self::Cancel | Self::HistorySearch => Context::Chat,
             Self::ConfirmYes | Self::ConfirmNo => Context::Confirmation,
             Self::PermissionAllow | Self::PermissionAllowSession | Self::PermissionDeny => {
                 Context::PermissionDialog
@@ -213,7 +222,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 20] {
+    pub const fn all() -> [Self; 22] {
         ALL_ACTIONS
     }
 
@@ -222,6 +231,8 @@ impl Action {
     pub const fn defaults(self) -> &'static [&'static str] {
         match self {
             Self::ToggleToolOutput => &["ctrl+o"],
+            Self::ToggleThinking => &["ctrl+e"],
+            Self::ModelPicker => &["ctrl+p"],
             Self::ToggleSplitPane => &["ctrl+shift+s"],
             Self::CyclePermissionMode => &["shift+tab"],
             Self::ImagePaste => &["ctrl+v"],
@@ -252,8 +263,10 @@ impl Action {
     }
 }
 
-const ALL_ACTIONS: [Action; 20] = [
+const ALL_ACTIONS: [Action; 22] = [
     Action::ToggleToolOutput,
+    Action::ToggleThinking,
+    Action::ModelPicker,
     Action::ToggleSplitPane,
     Action::CyclePermissionMode,
     Action::ImagePaste,

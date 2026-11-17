@@ -653,9 +653,17 @@ Codape handles the block on both response paths:
   the pending block is dropped. Blocks are never synthesized for providers that
   did not return one.
 
-Thinking is provider state, not visible output: export, insights, compaction
-summaries, and the brief tool skip it as display text. It is still counted in
-token estimates because it is sent back to the provider.
+Thinking is provider state: compaction summaries, the brief tool and every export
+skip it as display text, and it is still counted in token estimates because it
+is sent back to the provider. The transcript is the one place it *is* shown —
+`EngineEvent::ThinkingDelta` carries the same deltas, as a folded row above the
+answer that `Ctrl+E` unfolds — because reasoning nobody can read is reasoning
+nobody can check. It stays out of the answer text itself: a separate row rather
+than interleaved output, so a copy of the response is the response.
+
+The display path and the round-trip path both read every delta. A retried
+request can replay a prefix the reader already has, so `ThinkingDelta` goes
+through the same `StreamTextMerger` as text and only the growth is emitted.
 
 ### 14.7 Tool Execution Orchestration
 

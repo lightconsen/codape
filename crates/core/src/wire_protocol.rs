@@ -32,6 +32,14 @@ pub enum WireEvent {
         /// The text chunk.
         delta: String,
     },
+    /// A thinking delta from the assistant.
+    ///
+    /// Distinct from [`TextDelta`](Self::TextDelta) so a wire client can hide
+    /// or fold reasoning without having to parse it out of the answer.
+    ThinkingDelta {
+        /// The reasoning chunk.
+        delta: String,
+    },
     /// A tool call has started executing.
     ToolCallStart {
         /// Unique call identifier.

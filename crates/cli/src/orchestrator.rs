@@ -2973,6 +2973,10 @@ impl StartupOrchestrator {
         repl.with_hook_layers(hook_layers);
         repl.with_max_turns(self.ctx.max_turns);
         repl.with_time_budget(self.ctx.time_budget);
+        // The engine carries the effort itself from here, so an in-session
+        // change reaches the next request without rebuilding the client. It
+        // is seeded from the same flag the client wrapper was given.
+        repl.with_reasoning_effort(self.ctx.effort.as_deref());
         repl.with_fallback_model(self.ctx.fallback_model.clone());
         repl.with_telemetry_handle(self.ctx.telemetry_handle.clone());
         // `/vim` and `/statusline-setup` persist these; apply them at startup.

@@ -55,6 +55,124 @@ pub enum Overlay {
         /// Confirmation prompt.
         message: String,
     },
+    /// Model and reasoning-effort chooser.
+    ///
+    /// A modal list rather than a `/model <name>` argument because the two
+    /// settings are one decision — a model with no effort level and an effort
+    /// level the model does not have are both mistakes — and because the set
+    /// of choices is small enough to show.
+    ModelPicker(ModelPicker),
+}
+
+/// The choices in an open [`Overlay::ModelPicker`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPicker {
+    /// Model ids, current one included.
+    pub models: Vec<String>,
+    /// Index into [`Self::models`] of the model in use.
+    pub model_index: usize,
+    /// The session's effort, as its wire spelling.
+    pub effort: Option<String>,
+    /// Whether the person is adjusting the model or the effort.
+    pub focus: PickerFocus,
+}
+
+/// Which half of the model picker keys move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerFocus {
+    /// Left and right change the model.
+    Model,
+    /// Left and right change the reasoning effort.
+    Effort,
+}
+
+impl ModelPicker {
+    /// The effort levels, cheapest first, including "off".
+    ///
+    /// `None` is listed first because a session that never set an effort is
+    /// the common case and has to stay reachable.
+    pub const EFFORTS: [Option<&'static str>; 6] = [
+        None,
+        Some("low"),
+        Some("medium"),
+        Some("high"),
+        Some("xhigh"),
+        Some("max"),
+    ];
+
+    /// Build a picker with `current` selected.
+    #[must_use]
+    pub fn new(models: Vec<String>, current: &str, effort: Option<String>) -> Self {
+        let model_index = models.iter().position(|m| m == current).unwrap_or(0);
+        Self {
+            models,
+            model_index,
+            effort,
+            focus: PickerFocus::Model,
+        }
+    }
+
+    /// The model the picker is pointing at.
+    #[must_use]
+    pub fn selected_model(&self) -> Option<&str> {
+        self.models.get(self.model_index).map(String::as_str)
+    }
+
+    /// Move the model selection by `delta`, clamping at both ends.
+    pub fn move_model(&mut self, delta: isize) {
+        if self.models.is_empty() {
+            return;
+        }
+        let len = isize::try_from(self.models.len()).unwrap_or(isize::MAX);
+        let pos = isize::try_from(self.model_index).unwrap_or(0);
+        self.model_index = usize::try_from((pos + delta).clamp(0, len - 1)).unwrap_or(0);
+    }
+
+    /// Move the effort by `delta`, clamping at both ends.
+    ///
+    /// Clamping rather than wrapping: "max" and "off" are far apart in meaning
+    /// and a keypress at the end of the list should not jump between them.
+    pub fn move_effort(&mut self, delta: isize) {
+        let levels = Self::EFFORTS;
+        let position = levels
+            .iter()
+            .position(|level| *level == self.effort.as_deref())
+            .unwrap_or(0);
+        let pos = isize::try_from(position).unwrap_or(0);
+        let len = isize::try_from(levels.len()).unwrap_or(isize::MAX);
+        let next = usize::try_from((pos + delta).clamp(0, len - 1)).unwrap_or(0);
+        self.effort = levels[next].map(str::to_string);
+    }
+
+    /// The one-line rendering shown in the dialog.
+    #[must_use]
+    pub fn render(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::from("Model\n");
+        for (index, model) in self.models.iter().enumerate() {
+            let marker = if index == self.model_index {
+                "▸"
+            } else {
+                " "
+            };
+            let focus = if self.focus == PickerFocus::Model && index == self.model_index {
+                " ◂"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "{marker} {model}{focus}");
+        }
+        let effort = self.effort.as_deref().unwrap_or("off");
+        let focus = if self.focus == PickerFocus::Effort {
+            " ◂"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "\nEffort: {effort}{focus}");
+        out.push_str("\n[tab] model/effort  [←/→] change  [enter] apply  [esc] cancel");
+        out
+    }
 }
 
 /// Notification severity.
@@ -258,5 +376,47 @@ mod tests {
             selected: 0,
         });
         stack.move_palette_selection(1); // should not panic
+    }
+
+    fn picker() -> ModelPicker {
+        ModelPicker::new(
+            vec!["opus".into(), "sonnet".into(), "haiku".into()],
+            "sonnet",
+            Some("high".into()),
+        )
+    }
+
+    #[test]
+    fn the_picker_opens_on_the_model_in_use() {
+        let picker = picker();
+        assert_eq!(picker.selected_model(), Some("sonnet"));
+    }
+
+    /// Both ends clamp: "max" and "off" are not neighbours in meaning, so a
+    /// keypress at either end must not wrap into the other.
+    #[test]
+    fn picker_ends_clamp_instead_of_wrapping() {
+        let mut picker = picker();
+        picker.move_model(10);
+        assert_eq!(picker.selected_model(), Some("haiku"));
+        picker.move_model(-10);
+        assert_eq!(picker.selected_model(), Some("opus"));
+
+        assert_eq!(picker.effort.as_deref(), Some("high"));
+        picker.move_effort(10);
+        assert_eq!(picker.effort.as_deref(), Some("max"));
+        picker.move_effort(-10);
+        assert_eq!(picker.effort, None, "the first entry is off");
+        picker.move_effort(-1);
+        assert_eq!(picker.effort, None, "off is the floor");
+    }
+
+    #[test]
+    fn the_picker_body_names_the_current_choices() {
+        let rendered = picker().render();
+        assert!(rendered.contains("opus"), "{rendered}");
+        assert!(rendered.contains("haiku"), "{rendered}");
+        assert!(rendered.contains("Effort: high"), "{rendered}");
+        assert!(rendered.contains("[tab]"), "no key hint: {rendered}");
     }
 }

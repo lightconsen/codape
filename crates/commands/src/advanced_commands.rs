@@ -59,6 +59,26 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
+    // /effort — handled directly by the REPL (built-in command).
+    //
+    // The effort lives on the session's engine, which this crate cannot
+    // reach: it is the engine that stamps it on each request. The registry
+    // entry exists so `/help` lists it and a remote consumer learns where it
+    // applies instead of "Unknown command".
+    registry.register(SlashCommand::local(
+        "effort",
+        "Set how hard the model thinks (off|low|medium|high|xhigh|max)",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "Reasoning effort is set on the running session by the REPL \
+                 (bare `/effort`, `/model`, or Ctrl+P all reach it).",
+            )
+        }),
+    ));
+
     // /agents — handled directly by the REPL (built-in command).
     //
     // The listing reads the live agent manager, which only the session holds.

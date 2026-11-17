@@ -15,7 +15,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use crate::api_client::{ApiClient, ApiError, ApiResponse, RequestContext, StreamEvent};
+use crate::api_client::{
+    ApiClient, ApiError, ApiResponse, ReasoningEffort, RequestContext, StreamEvent,
+};
 use crate::budget::TokenBudget;
 use crate::compact::{self, CompactResult, CompactStrategy};
 use crate::confirmation_bus::{ConfirmationBus, ConfirmationRequest, ConfirmationResponse};
@@ -2084,6 +2086,12 @@ pub struct QueryEngine {
     /// After a successful fallback retry the engine keeps using this model for
     /// the rest of the turn and session.
     fallback_model: Option<ModelId>,
+    /// Reasoning effort for later requests.
+    ///
+    /// The engine builds a fresh request context per turn, so a value set
+    /// here reaches the wire without rebuilding the client. `None` means the
+    /// session chose no level and the provider's default applies.
+    reasoning_effort: Option<ReasoningEffort>,
     /// Session state for the current conversation.
     session: SessionState,
     /// Cost tracker for billing.
@@ -2543,14 +2551,23 @@ impl QueryEngine {
     }
 
     fn build_request_context(&self, turn_number: u32, options: &SubmitOptions) -> RequestContext {
-        RequestContext {
+        let mut context = RequestContext {
             session_id: Some(self.session.session_id.to_string()),
             device_id: std::env::var("CODAPE_DEVICE_ID").ok(),
             turn_id: Some(turn_number.to_string()),
             agent_id: options.agent_id.clone(),
             request_id: None,
             provider_hints: options.provider_hints.clone().into_iter().collect(),
+        };
+        // The session's effort is a default, not an override: a level the
+        // caller set on this turn's options wins, which is also what lets a
+        // future per-turn control land without touching this.
+        if context.reasoning_effort().is_none()
+            && let Some(effort) = self.reasoning_effort
+        {
+            context.set_reasoning_effort(effort);
         }
+        context
     }
 
     /// Create a new QueryEngine.
@@ -2567,6 +2584,7 @@ impl QueryEngine {
             api_client,
             model,
             fallback_model: None,
+            reasoning_effort: None,
             session,
             cost_tracker: CostTracker::new(),
             interrupt: InterruptHandle::default(),
@@ -2649,6 +2667,25 @@ impl QueryEngine {
     #[must_use]
     pub const fn model(&self) -> &ModelId {
         &self.model
+    }
+
+    /// Replace the reasoning effort stamped on every later request.
+    ///
+    /// `None` clears it, which is what an unset `--effort` means: the request
+    /// carries no thinking configuration and the provider's default applies.
+    ///
+    /// The effort travels on [`RequestContext`] rather than the client, so this
+    /// takes effect on the next request even when the client was built before
+    /// it — which is exactly the case for a session that started without
+    /// `--effort`.
+    pub const fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
+        self.reasoning_effort = effort;
+    }
+
+    /// The reasoning effort later requests will carry.
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
     }
 
     /// Configure the one-retry fallback model (`--fallback-model`).
@@ -6779,6 +6816,10 @@ impl QueryEngine {
         // interruption costs the reader nothing that had already arrived.
         // `StreamTextMerger` emits only the growth, once per delta.
         let mut stream_text = StreamTextMerger::new();
+        // Thinking needs the same de-duplication, for the same reason: a retry
+        // regenerates it from the top, and a UI that appended every delta
+        // would show the reasoning twice.
+        let mut stream_thinking = StreamTextMerger::new();
 
         // The stream's usage report describes the request below, so the anchor
         // has to be taken before the first byte arrives.
@@ -6790,6 +6831,7 @@ impl QueryEngine {
             // A retry regenerates the answer from the top; start comparing
             // again from the first character.
             stream_text.begin_attempt();
+            stream_thinking.begin_attempt();
             let request_client = self
                 .api_client
                 .with_request_context(self.build_request_context(
@@ -6835,15 +6877,23 @@ impl QueryEngine {
                             let _ = self.event_tx.send(EngineEvent::TextDelta(new_text));
                         }
                     }
+                    StreamEvent::ThinkingDelta(ref delta) => {
+                        // The assembler accumulates thinking for the
+                        // round-trip below; this branch is what puts it on
+                        // screen. Both see every delta: one keeps the block
+                        // that goes back to the provider, the other emits
+                        // the growth the reader has not had yet.
+                        if let Some(new_text) = stream_thinking.push_delta(delta) {
+                            let _ = self.event_tx.send(EngineEvent::ThinkingDelta(new_text));
+                        }
+                    }
                     // Tool-call blocks are assembled elsewhere: the start is
                     // ignored and completion is handled below via
                     // assembler.process_event. Pending tool calls are
                     // finalized after the loop.
-                    // Thinking deltas are accumulated by the assembler below.
                     StreamEvent::ToolCallBlockStart { .. }
                     | StreamEvent::ToolCallBlockEnd { .. }
                     | StreamEvent::StreamEnd
-                    | StreamEvent::ThinkingDelta(_)
                     | StreamEvent::SignatureDelta(_) => {}
                     StreamEvent::ToolCallInputDelta { ref id, ref delta } => {
                         tracing::trace!("tool call input delta for {id}: {} bytes", delta.len());
@@ -10738,6 +10788,150 @@ mod tests {
         assembler.process_event(StreamEvent::TextDelta("Hello".into()));
         assembler.process_event(StreamEvent::TextDelta(" world".into()));
         assert_eq!(assembler.text(), "Hello world");
+    }
+
+    /// Reasoning reaches the reader, not just the assembler.
+    ///
+    /// The assembler kept the block for the round trip, but the delta never
+    /// left the engine, so the transcript had no way to show it. This drives
+    /// the real streaming path and reads the events it emits.
+    #[tokio::test]
+    async fn thinking_deltas_are_emitted_to_the_reader() {
+        /// Streams reasoning, then an answer.
+        struct ThinkingMock;
+
+        #[async_trait::async_trait]
+        impl ApiClient for ThinkingMock {
+            fn clone_box(&self) -> Box<dyn ApiClient> {
+                Box::new(Self)
+            }
+
+            async fn create_message(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> Result<ApiResponse, crate::api_client::ApiError> {
+                Ok(ApiResponse {
+                    content: "Answer.".into(),
+                    tool_calls: Vec::new(),
+                    usage: UsageSummary {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                    },
+                    stop_reason: "end_turn".into(),
+                    thinking: None,
+                })
+            }
+
+            async fn create_message_streaming(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> std::pin::Pin<
+                Box<dyn futures::Stream<Item = crate::api_client::StreamEvent> + Send + 'static>,
+            > {
+                Box::pin(futures::stream::iter(vec![
+                    StreamEvent::ThinkingDelta("Let me ".into()),
+                    StreamEvent::ThinkingDelta("look.".into()),
+                    StreamEvent::TextDelta("Answer.".into()),
+                    StreamEvent::StopReason("end_turn".into()),
+                    StreamEvent::StreamEnd,
+                ]))
+            }
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+        let mut engine = QueryEngine::new(
+            Box::new(ThinkingMock),
+            ModelId::sonnet(),
+            SessionState::new(std::path::PathBuf::from("/tmp/test")),
+            PermissionEngine::new(checker),
+            tx,
+        );
+        engine.set_tool_executor(Box::new(StubOkToolExecutor));
+        engine
+            .submit_streaming("hi".into(), SubmitOptions::default())
+            .await
+            .expect("streaming turn");
+
+        // The response still carries the block for the round trip…
+        let stored = engine.session.messages.iter().find_map(|msg| {
+            if let crate::types::MessageContent::Thinking(block) = &msg.content {
+                Some(block.thinking.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(stored.as_deref(), Some("Let me look."));
+
+        // …and the reader saw it as its own event, ahead of the answer.
+        let mut thinking = String::new();
+        let mut answer = String::new();
+        let mut order = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineEvent::ThinkingDelta(text) => {
+                    thinking.push_str(&text);
+                    order.push("thinking");
+                }
+                EngineEvent::TextDelta(text) => {
+                    answer.push_str(&text);
+                    order.push("answer");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(thinking, "Let me look.");
+        assert_eq!(answer, "Answer.");
+        assert_eq!(&order[..3], ["thinking", "thinking", "answer"]);
+    }
+
+    /// A session-level effort reaches the request the engine actually sends.
+    ///
+    /// The engine builds a fresh [`RequestContext`] per turn, so an effort set
+    /// on it after construction must appear on the next request without the
+    /// client being rebuilt. That is the whole point of an in-session control:
+    /// the client was made at startup, before anyone could choose a level.
+    #[tokio::test]
+    async fn a_session_effort_is_stamped_on_the_next_request() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let checker = PermissionChecker::new(PermissionMode::BypassPermissions);
+        let mut engine = QueryEngine::new(
+            Box::new(MockApiClient),
+            ModelId::sonnet(),
+            SessionState::new(std::path::PathBuf::from("/tmp/test")),
+            PermissionEngine::new(checker),
+            tx,
+        );
+
+        let before = engine.build_request_context(1, &SubmitOptions::default());
+        assert!(before.reasoning_effort().is_none());
+
+        engine.set_reasoning_effort(Some(ReasoningEffort::High));
+        let after = engine.build_request_context(1, &SubmitOptions::default());
+        assert_eq!(after.reasoning_effort(), Some(ReasoningEffort::High));
+
+        // A per-turn choice still wins over the session default.
+        let mut options = SubmitOptions::default();
+        options
+            .provider_hints
+            .insert("reasoning_effort".to_string(), "low".to_string());
+        let per_turn = engine.build_request_context(1, &options);
+        assert_eq!(per_turn.reasoning_effort(), Some(ReasoningEffort::Low));
+
+        // Clearing it goes back to the provider default.
+        engine.set_reasoning_effort(None);
+        let cleared = engine.build_request_context(1, &SubmitOptions::default());
+        assert!(cleared.reasoning_effort().is_none());
     }
 
     #[test]

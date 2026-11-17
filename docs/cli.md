@@ -159,6 +159,32 @@ hint, and a per-turn value on the context wins over a client-level default. An
 unknown level (`--effort maximum`) is rejected at startup with the accepted
 values.
 
+`--effort` is only the startup value. Inside a session the same level can be
+changed without restarting, because the engine rebuilds its request context
+every turn and holds the session's effort itself
+(`QueryEngine::set_reasoning_effort`):
+
+- `/effort` alone reports the current level; `/effort high` sets it and
+  `/effort off` clears it. The headless path accepts the same arguments.
+- `Ctrl+P` opens the model picker, which holds both choices: `Tab` switches
+  focus between the model list and the effort level, `←`/`→` move within the
+  focused one, `Enter` applies both, `Esc` cancels. `←`/`→` clamp at the ends
+  rather than wrapping — `max` and `off` are not neighbours in meaning.
+- Bare `/model` opens the same picker.
+
+A per-turn reasoning hint on the context still wins over the session effort, so
+a caller that knows this turn needs a different level is not overridden.
+
+### Showing the reasoning
+
+With reasoning on, the model's thinking is drawn in the transcript above its
+answer, as its own row with the `✻` marker, folded to a one-line preview and
+`[+N lines]`. `Ctrl+E` unfolds every reasoning row; it folds them back. Reasoning
+is never interleaved into the answer text — it is a separate transcript entry —
+and it is left out of `/copy` and any other export, because handing the model's
+notes to a recipient as if they were the answer is wrong. A provider that does
+not stream reasoning simply produces no such rows.
+
 ### Output ceiling
 
 The per-request `max_tokens` starts at
