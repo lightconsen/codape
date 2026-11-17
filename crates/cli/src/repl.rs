@@ -7224,8 +7224,8 @@ impl ReplLoop {
         };
 
         // A fresh session leaves the transcript empty; the TUI then paints its
-        // welcome page (name, version, model, mascot) instead of a banner
-        // message that would scroll away with the first turn.
+        // welcome page (wordmark, title, provider, model, directory) instead
+        // of a banner message that would scroll away with the first turn.
         if let Some(ref engine) = self.session.engine
             && !engine.session().messages.is_empty()
         {
