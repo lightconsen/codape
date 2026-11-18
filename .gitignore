@@ -47,3 +47,7 @@ crates/cli/1
 # the environment; `.env` is only a developer convenience and must never be
 # committed.
 .env
+
+# macOS Finder's per-directory metadata. Written whenever a folder is opened in
+# Finder, so it appears without anyone meaning to add it.
+.DS_Store
