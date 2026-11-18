@@ -12713,13 +12713,19 @@ impl ReplLoop {
     /// Apply `/rewind <n>`: truncate the conversation and undo the file edits
     /// the removed tool calls made.
     ///
+    /// `n` is how many messages to keep, so `n == message_count` is a no-op
+    /// rather than an error — the registry's `/rewind` has always said so, and
+    /// the rewind list offers the newest message as its first row, which is
+    /// exactly that number. Rejecting it made the row the highlight starts on
+    /// fail every time.
+    ///
     /// Returns `(messages_removed, files_restored, created_files_removed)`.
     fn perform_rewind(&mut self, n: usize) -> Result<(usize, usize, usize), String> {
         let Some(engine) = self.session.engine.as_mut() else {
             return Err("No engine configured.".to_string());
         };
         let mut session = engine.session().clone();
-        if n >= session.messages.len() {
+        if n > session.messages.len() {
             return Err(format!(
                 "Message {n} not found. Session has {} messages.",
                 session.messages.len()
@@ -12742,7 +12748,13 @@ impl ReplLoop {
             .collect();
         session.messages.truncate(n);
         engine.set_session(session);
-        self.history.truncate(n);
+        // Only a rewind that removed something touches the prompt history. A
+        // no-op rewind (`n == message_count`) must not: history holds one entry
+        // per prompt, not per message, so truncating it by a message count
+        // would cut prompts the rewrite never asked to remove.
+        if removed > 0 {
+            self.history.truncate(n);
+        }
 
         let (restored, removed_files) = self.checkpoint_store.as_ref().map_or((0, 0), |store| {
             let report = store.restore(&undone_call_ids);
@@ -18415,6 +18427,62 @@ mod tests {
         assert!(ui_state.overlays.top().is_none(), "the list stayed open");
         let engine = repl.session.engine.as_ref().expect("engine");
         assert_eq!(engine.session().messages.len(), 2);
+    }
+
+    /// The newest row is the one the highlight starts on, and its number is the
+    /// message count — so the list's default choice is a rewind to where the
+    /// session already is. That has to succeed and remove nothing; it used to
+    /// be rejected as "message not found", which made pressing Enter on the
+    /// opening row always fail.
+    #[tokio::test]
+    async fn accepting_the_newest_rewind_row_removes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        {
+            let engine = repl.session.engine.as_mut().expect("engine");
+            let mut session = engine.session().clone();
+            session.messages = vec![
+                codape_core::types::Message::user("first prompt"),
+                codape_core::types::Message::assistant("first answer"),
+            ];
+            engine.set_session(session);
+        }
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+
+        press_key!(&mut repl, &mut ui_state, &mut live, &mut vim, alt('r'));
+        let picker = match ui_state.overlays.top() {
+            Some(codape_ui::overlay::Overlay::List(picker)) => picker,
+            other => panic!("expected the rewind list, got {other:?}"),
+        };
+        assert_eq!(picker.items[0].key, "2", "the newest row is the count");
+
+        // Enter on the opening row: no error, no truncation.
+        press_key!(
+            &mut repl,
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            press(KeyCode::Enter)
+        );
+        assert!(ui_state.overlays.top().is_none(), "the list stayed open");
+        let engine = repl.session.engine.as_ref().expect("engine");
+        assert_eq!(
+            engine.session().messages.len(),
+            2,
+            "a rewind to the current message changed the session"
+        );
+        let last = ui_state
+            .messages
+            .messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        assert!(
+            last.contains("Rewound to message 2") && last.contains("0 messages removed"),
+            "the newest row reported something other than a no-op: {last}"
+        );
     }
 
     #[tokio::test]
