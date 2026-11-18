@@ -24,9 +24,7 @@ use codape_core::query_profiles::{ModelProfile, PromptProfile, QueryKind, QueryR
 use codape_core::state::SessionState;
 use codape_core::tool_executor::ToolExecutor as _;
 use codape_core::types::ModelId;
-use codape_core::types::{
-    AgentLifecycleEvent, EngineEvent, Message, ToolCall, running_status,
-};
+use codape_core::types::{AgentLifecycleEvent, EngineEvent, Message, ToolCall, running_status};
 use codape_memory::{
     DreamCheckResult, ai_workflow,
     auto_dream::{AutoDream, DreamConfig},
@@ -5454,9 +5452,11 @@ impl ReplLoop {
         kind: &str,
         ui_state: &mut codape_ui::state::UiState,
     ) {
-        ui_state.overlays.push(codape_ui::overlay::Overlay::TextInput(
-            codape_ui::overlay::TextInput::new(prompt, initial, format!("{kind}:{id}")),
-        ));
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::TextInput(
+                codape_ui::overlay::TextInput::new(prompt, initial, format!("{kind}:{id}")),
+            ));
     }
 
     /// Record what a roster field was answered with.
@@ -6447,9 +6447,20 @@ impl ReplLoop {
     /// one could only arrive from a race. Refusing keeps the top of the stack
     /// the one the key handler is looking at.
     fn open_list(ui_state: &mut codape_ui::state::UiState, picker: codape_ui::picker::Picker) {
-        if ui_state.overlays.is_active() {
+        // `has_modal`, not `is_active`: this is the same question every caller
+        // asks before it builds the list. The `/` completion palette for the
+        // command being typed is up by definition when a command runs, and it
+        // does not own the keyboard, so counting it here would make the caller's
+        // check pass and this one silently drop the list — the screen kept the
+        // command's echo and drew nothing under it.
+        if ui_state.overlays.has_modal() {
             return;
         }
+        // The palette is stale the moment the command runs: it still lists the
+        // command being typed as a completion, and left underneath it would
+        // come back when the list closes. Dropped here rather than at each
+        // caller so every opener gets the same stack.
+        ui_state.overlays.pop_palette();
         ui_state
             .overlays
             .push(codape_ui::overlay::Overlay::List(picker));
@@ -6470,7 +6481,11 @@ impl ReplLoop {
                 status: format!("{:?}", agent.status()).to_lowercase(),
                 prompt: agent.prompt.lines().next().unwrap_or("").trim().to_string(),
                 resumable: !agent.transcript().is_empty(),
-                pinned: self.agents.pinned_agents.iter().any(|pinned| pinned == &agent.task_handle.id),
+                pinned: self
+                    .agents
+                    .pinned_agents
+                    .iter()
+                    .any(|pinned| pinned == &agent.task_handle.id),
                 name: self.agents.agent_names.get(&agent.task_handle.id).cloned(),
                 group: self.agents.agent_groups.get(&agent.task_handle.id).cloned(),
             })
@@ -6636,9 +6651,9 @@ impl ReplLoop {
             AttachmentChoice::RemoveAll => {
                 let count = pending.len();
                 pending.clear();
-                ui_state
-                    .notifications
-                    .info(format!("Removed {count} image(s); the next turn sends none."));
+                ui_state.notifications.info(format!(
+                    "Removed {count} image(s); the next turn sends none."
+                ));
             }
         }
     }
@@ -7369,8 +7384,7 @@ impl ReplLoop {
         ) {
             let mut accepted = false;
             let mut cancel = false;
-            if let Some(codape_ui::overlay::Overlay::TextInput(field)) =
-                ui_state.overlays.top_mut()
+            if let Some(codape_ui::overlay::Overlay::TextInput(field)) = ui_state.overlays.top_mut()
             {
                 match key.code {
                     KeyCode::Char(character) => field.push(character),
@@ -11300,16 +11314,14 @@ impl ReplLoop {
         match choice {
             PluginChoice::Inspect(name) => {
                 let body = self.plugin_detail(&name);
-                ui_state
-                    .messages
-                    .push(codape_ui::message_list::Message {
-                        role: codape_ui::message_list::MessageRole::Assistant,
-                        content: body.into(),
-                        tool_name: None,
-                        streaming: false,
-                        folded: false,
-                        image: None,
-                    });
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::Assistant,
+                    content: body.into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                    image: None,
+                });
             }
             PluginChoice::Toggle(name) => {
                 let enabled = !crate::plugin_prefs::PluginPrefs::load(&path).is_enabled(&name);
@@ -11320,9 +11332,9 @@ impl ReplLoop {
                     Ok(()) => ui_state
                         .notifications
                         .info(format!("Plugin {name} is off for new sessions.")),
-                    Err(error) => ui_state.notifications.err(format!(
-                        "Could not save the plugin preference: {error}"
-                    )),
+                    Err(error) => ui_state
+                        .notifications
+                        .err(format!("Could not save the plugin preference: {error}")),
                 }
             }
             PluginChoice::Favorite(name) => {
@@ -11332,9 +11344,9 @@ impl ReplLoop {
                         ui_state.notifications.success(format!("Pinned {name}."));
                     }
                     Ok(()) => ui_state.notifications.info(format!("Unpinned {name}.")),
-                    Err(error) => ui_state.notifications.err(format!(
-                        "Could not save the plugin preference: {error}"
-                    )),
+                    Err(error) => ui_state
+                        .notifications
+                        .err(format!("Could not save the plugin preference: {error}")),
                 }
             }
             PluginChoice::InstallFrom => {
@@ -12324,13 +12336,12 @@ impl ReplLoop {
         // a machine that must not listen says so, and a key that bypassed it
         // would make the flag advisory.
         if !self.options.feature_flags.voice_mode {
-            ui_state.notifications.warn(
-                "Voice mode is off. Enable the voice_mode feature flag.",
-            );
+            ui_state
+                .notifications
+                .warn("Voice mode is off. Enable the voice_mode feature flag.");
             return;
         }
-        let Some(command) =
-            crate::voice_input::command_from_file(&Self::user_settings_path())
+        let Some(command) = crate::voice_input::command_from_file(&Self::user_settings_path())
         else {
             ui_state.notifications.warn(
                 "No voice command. Set voice.command in settings.json to a \
@@ -12380,9 +12391,7 @@ impl ReplLoop {
                         .notifications
                         .success("Transcribed onto the prompt.");
                 } else {
-                    ui_state
-                        .notifications
-                        .warn("Nothing was transcribed.");
+                    ui_state.notifications.warn("Nothing was transcribed.");
                 }
             }
             Err(error) => {
@@ -12751,10 +12760,6 @@ impl ReplLoop {
                         // definition, and asking whether *any* overlay existed
                         // made this branch unreachable from the command line.
                         if args.is_empty() && !ui_state.overlays.has_modal() {
-                            // The palette is stale the moment the command
-                            // runs — it lists `/resume` as a completion and
-                            // would sit over the list it just opened.
-                            ui_state.overlays.pop_palette();
                             let picker = self.session_choices();
                             Self::open_list(ui_state, picker);
                             return;
@@ -14785,10 +14790,8 @@ impl ReplLoop {
                     .iter()
                     .any(|pinned| pinned == target);
                 if want != currently {
-                    let _ = crate::session_lists::toggle_pin(
-                        &mut self.agents.pinned_agents,
-                        target,
-                    );
+                    let _ =
+                        crate::session_lists::toggle_pin(&mut self.agents.pinned_agents, target);
                 }
                 if want {
                     format!("Pinned agent {target} to the top of the roster.")
@@ -16648,6 +16651,70 @@ mod tests {
         assert_eq!(statusline.cwd, "/tmp");
     }
 
+    /// The completion palette must not swallow the list a command opens.
+    ///
+    /// Every slash command runs while its own `/` palette is up — it is what
+    /// the person typed the name into. A guard of `is_active` counted that
+    /// palette as a dialog and dropped the list, so `/plugin` echoed its name
+    /// and drew nothing beneath it. The callers ask `has_modal`, and this
+    /// pins the two questions to the same answer so the inner check cannot
+    /// disagree with the outer one again.
+    #[test]
+    fn a_list_opens_under_a_completion_palette() {
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::CommandPalette {
+                query: "/plu".into(),
+                commands: vec!["/plugin - View or manage plugins".into()],
+                selected: 0,
+            });
+
+        ReplLoop::open_list(
+            &mut ui_state,
+            codape_ui::picker::Picker::new("Plugins", vec![]),
+        );
+
+        assert!(
+            matches!(
+                ui_state.overlays.top(),
+                Some(codape_ui::overlay::Overlay::List(_))
+            ),
+            "the list was dropped while a palette was up"
+        );
+        // The palette is gone rather than buried: it would come back on Esc
+        // still listing the command that has already run.
+        assert_eq!(
+            ui_state.overlays.len(),
+            1,
+            "the stale palette is still under the list"
+        );
+    }
+
+    /// A real dialog still refuses the list, so the fix did not remove the guard.
+    #[test]
+    fn a_list_does_not_stack_on_a_dialog() {
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::Confirm {
+                message: "Run it?".into(),
+            });
+
+        ReplLoop::open_list(
+            &mut ui_state,
+            codape_ui::picker::Picker::new("Plugins", vec![]),
+        );
+
+        assert!(
+            matches!(
+                ui_state.overlays.top(),
+                Some(codape_ui::overlay::Overlay::Confirm { .. })
+            ),
+            "a list was stacked over a dialog"
+        );
+    }
+
     #[test]
     fn interactive_phase_labels_track_activity() {
         let mut phase = InteractivePhase::Planning;
@@ -17393,10 +17460,7 @@ mod tests {
             )),
             "Waiting for permission: Running cargo test -p codape-cli..."
         );
-        assert_eq!(
-            permission_activity_label(""),
-            "Waiting for permission..."
-        );
+        assert_eq!(permission_activity_label(""), "Waiting for permission...");
     }
 
     /// Every sub-agent lifecycle event that means something to a person shows

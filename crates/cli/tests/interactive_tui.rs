@@ -2378,7 +2378,8 @@ fn the_agent_roster_renames_an_agent() {
 /// A tool call made of several events still reaches the transcript once, in
 /// order, and leaves the prompt usable.
 #[test]
-fn mixed_prompt_tool_sequence_matrix_stays_usable() {    let dir = setup_project_dir();
+fn mixed_prompt_tool_sequence_matrix_stays_usable() {
+    let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
     session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
 
@@ -2690,7 +2691,15 @@ fn extension_slash_sequence_matrix_stays_usable() {
         &[
             InteractionStep::slash("/tasks", &["Tasks:", "Task files"]),
             InteractionStep::slash("/mcp", &["MCP:"]),
-            InteractionStep::slash("/plugin", &["plugins", "Installed plugins"]),
+            // `/plugin list`, not bare `/plugin`: the bare form opens the
+            // browser, and a picker owns the keyboard, so the step after it
+            // would type `/skills` into the browser's filter instead of into
+            // the prompt. The browser itself is covered by
+            // `the_plugin_browser_can_start_an_install`.
+            InteractionStep::slash(
+                "/plugin list",
+                &["Installed plugins", "No plugins installed"],
+            ),
             InteractionStep::slash("/skills", &["Skills:", "skills loaded"]),
             InteractionStep::slash("/hooks", &["Active hooks", "No hooks"]),
             InteractionStep::slash("/memory", &["Memory:"]),
@@ -3581,8 +3590,11 @@ fn a_multi_file_diff_lists_its_files_above_the_patch() {
         "pub fn add(a: i32, b: i32) -> i32 {\n    a + b + 1\n}\n",
     )
     .expect("modify src/lib.rs");
-    std::fs::write(dir.path().join("src/extra.rs"), "pub fn extra() -> u8 {\n    7\n}\n")
-        .expect("write src/extra.rs");
+    std::fs::write(
+        dir.path().join("src/extra.rs"),
+        "pub fn extra() -> u8 {\n    7\n}\n",
+    )
+    .expect("write src/extra.rs");
     // An untracked file is not in `git diff` at all, so the intent-to-add bit
     // has to be set before the pane is asked for the patch. Done here rather
     // than with `!git add -N` because a `!` line goes through the tool
@@ -3799,7 +3811,10 @@ fn alt_m_transcribes_onto_the_prompt() {
     // silent unless someone opted in. `alt+m` and `/voice` read the same flag.
     let mut session = PtySession::launch_with_home(
         dir.path(),
-        &[("CODAPE_FEATURE_FLAGS".to_string(), "+voice_mode".to_string())],
+        &[(
+            "CODAPE_FEATURE_FLAGS".to_string(),
+            "+voice_mode".to_string(),
+        )],
         "claude-sonnet-4-6",
         home.path(),
     );
@@ -3830,7 +3845,10 @@ fn alt_m_without_a_configured_command_says_how_to_set_one() {
     .expect("settings");
     let mut session = PtySession::launch_with_home(
         dir.path(),
-        &[("CODAPE_FEATURE_FLAGS".to_string(), "+voice_mode".to_string())],
+        &[(
+            "CODAPE_FEATURE_FLAGS".to_string(),
+            "+voice_mode".to_string(),
+        )],
         "claude-sonnet-4-6",
         home.path(),
     );
@@ -3851,8 +3869,11 @@ fn alt_m_without_a_configured_command_says_how_to_set_one() {
 #[test]
 fn the_pane_keeps_opened_files_as_tabs() {
     let dir = setup_project_dir();
-    std::fs::write(dir.path().join("a.rs"), "pub fn alpha() -> u8 {\n    1\n}\n")
-        .expect("write a.rs");
+    std::fs::write(
+        dir.path().join("a.rs"),
+        "pub fn alpha() -> u8 {\n    1\n}\n",
+    )
+    .expect("write a.rs");
     std::fs::write(dir.path().join("b.rs"), "pub fn beta() -> u8 {\n    2\n}\n")
         .expect("write b.rs");
     let mut session = session_without_engine(dir.path());
