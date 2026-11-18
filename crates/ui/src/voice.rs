@@ -1,7 +1,10 @@
-//! Voice STT — speech-to-text input state machine.
+//! Voice input — the state machine behind `alt+m`.
 //!
-//! Manages the lifecycle of voice recording → transcription → result.
-//! Feature-gated behind `voice`.
+//! Manages the lifecycle of one transcription run: idle → listening →
+//! transcribing → back to idle. There is no audio device here and no
+//! recogniser: the REPL runs the command configured as `voice.command` and
+//! this only tracks whether one is already running, so a second press is
+//! refused rather than starting a second recorder on one microphone.
 
 /// Voice recording state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,18 +39,11 @@ impl VoiceState {
         }
     }
 
-    /// Receive a transcription result.
-    pub fn receive_transcription(&mut self, text: String) {
-        if *self == Self::Transcribing {
-            if text.is_empty() {
-                *self = Self::Listening;
-            } else {
-                *self = Self::Idle;
-            }
-        }
-    }
-
     /// Record a transcription result (consumes Transcribing state).
+    ///
+    /// A recogniser that heard nothing returns the machine to `Listening`
+    /// rather than `Idle`: the run is not an outcome, so the next press is
+    /// still the retry.
     pub fn finish_transcribing(&mut self, text: String) -> Option<String> {
         if *self == Self::Transcribing {
             if text.is_empty() {
@@ -87,17 +83,6 @@ impl VoiceState {
     pub const fn is_active(&self) -> bool {
         !matches!(self, Self::Idle)
     }
-
-    /// Human-readable status label for the UI.
-    #[must_use]
-    pub const fn status_label(&self) -> &'static str {
-        match self {
-            Self::Idle => "Voice",
-            Self::Listening => "Listening...",
-            Self::Transcribing => "Transcribing...",
-            Self::Error(_) => "Voice Error",
-        }
-    }
 }
 
 impl Default for VoiceState {
@@ -119,11 +104,9 @@ mod tests {
         state.start_listening();
         assert_eq!(state, VoiceState::Listening);
         assert!(state.is_active());
-        assert_eq!(state.status_label(), "Listening...");
 
         state.begin_transcribing();
         assert_eq!(state, VoiceState::Transcribing);
-        assert_eq!(state.status_label(), "Transcribing...");
 
         let result = state.finish_transcribing("hello world".into());
         assert_eq!(result, Some("hello world".into()));
@@ -138,7 +121,6 @@ mod tests {
         state.begin_transcribing();
         state.fail("microphone unavailable".into());
         assert!(matches!(state, VoiceState::Error(_)));
-        assert_eq!(state.status_label(), "Voice Error");
         assert!(state.is_active());
 
         state.retry();
@@ -158,7 +140,8 @@ mod tests {
     #[test]
     fn start_listening_does_not_swallow_an_error() {
         // An error is recovered from with `retry`, never by starting over:
-        // clearing it here hid the failure's reason from the status line.
+        // clearing it here hid the failure's reason from the notice the user
+        // needs to read.
         let mut state = VoiceState::new();
         state.fail("microphone unavailable".into());
         state.start_listening();
