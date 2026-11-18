@@ -19,6 +19,7 @@ pub const KNOWN_FLAGS: &[&str] = &[
     "voice_mode",
     "workflow_scripts",
     "web_browser_tool",
+    "server_tools",
     "team_collaboration",
     "auto_dream",
     // Commands whose availability is decided by a flag. They are separate
@@ -124,7 +125,25 @@ pub struct FeatureFlags {
     /// Enable workflow scripts.
     pub workflow_scripts: bool,
     /// Enable web browser tool.
+    ///
+    /// Gates the local `WebFetch` tool, which fetches and reduces a page
+    /// itself. Distinct from [`Self::server_tools`]: this one runs here.
     pub web_browser_tool: bool,
+    /// Declare web search, web fetch and code execution as tools the
+    /// *provider* runs.
+    ///
+    /// When on, the request declares `web_search`, `web_fetch` and
+    /// `code_execution` as provider-side tools, so the provider runs them
+    /// inside its own turn: the model does not spend a round trip asking for
+    /// a search, and a bad query can be re-run before the result ever reaches
+    /// the context window. The local `WebSearch`/`WebFetch` tools are hidden
+    /// on the same request, because a model offered both will pick the worse
+    /// one about half the time.
+    ///
+    /// Off by default: the provider must support these tools, and a gateway
+    /// that silently ignores an unknown tool type would otherwise turn a
+    /// working session into one that never searches.
+    pub server_tools: bool,
     /// Enable team collaboration.
     ///
     /// When on, the CLI installs a `TeamContext` on the session engine, which
@@ -175,6 +194,8 @@ bitflags! {
         const TEAM = 1 << 5;
         /// Dream mode capability.
         const DREAM = 1 << 6;
+        /// Provider-side web/code tools capability.
+        const SERVER_TOOLS = 1 << 7;
     }
 }
 
@@ -279,6 +300,9 @@ impl FeatureFlags {
         if self.web_browser_tool {
             caps.insert(CapabilitySet::WEB_BROWSER);
         }
+        if self.server_tools {
+            caps.insert(CapabilitySet::SERVER_TOOLS);
+        }
         if self.team_collaboration {
             caps.insert(CapabilitySet::TEAM);
         }
@@ -333,6 +357,7 @@ impl FeatureFlags {
             "voice_mode" => self.voice_mode,
             "workflow_scripts" => self.workflow_scripts,
             "web_browser_tool" => self.web_browser_tool,
+            "server_tools" => self.server_tools,
             "team_collaboration" => self.team_collaboration,
             "auto_dream" => self.auto_dream,
             "ultraplan" => self.ultraplan,
@@ -462,6 +487,7 @@ impl FeatureFlags {
             "voice_mode" => self.voice_mode = enable,
             "workflow_scripts" => self.workflow_scripts = enable,
             "web_browser_tool" => self.web_browser_tool = enable,
+            "server_tools" => self.server_tools = enable,
             "team_collaboration" => self.team_collaboration = enable,
             "auto_dream" => self.auto_dream = enable,
             "ultraplan" => self.ultraplan = enable,
@@ -678,9 +704,9 @@ mod tests {
         let parsed = FeatureFlags::parse_checked(&KNOWN_FLAGS.join(","))
             .expect("the documented names must all be accepted");
         assert!(parsed.capabilities().bits() > 0);
-        // 17 flags: 11 runtime capabilities/experiments plus the six
+        // 18 flags: 12 runtime capabilities/experiments plus the six
         // command-availability gates.
-        assert_eq!(KNOWN_FLAGS.len(), 17);
+        assert_eq!(KNOWN_FLAGS.len(), 18);
     }
 
     #[test]

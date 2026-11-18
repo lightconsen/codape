@@ -128,7 +128,7 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 ## Architecture Patterns
 
 - **Real `QueryEngine` execution** — Spawned agents run a full `QueryEngine` from `codape-core` with tool whitelisting and read-only enforcement.
-- **Channel-based messaging** — Parent and child agents communicate via `mpsc::UnboundedChannel`; messages are drained and appended to the prompt before each engine submission.
+- **Channel-based messaging** — Parent and child agents communicate via `mpsc::UnboundedChannel`; messages are drained and appended to the prompt before each engine submission. A message to an agent whose turn has already finished does not go down that channel at all: see *Resuming an agent* below.
 - **Context forking** — Parent snapshots its state (session ID, cwd, tool list, env vars) for the child to work from.
 - **Cache-aware forking** — When the caller supplies `parent_prefix`, the fork reuses the parent's conversation messages *verbatim* (cloned, not re-derived, so the bytes match what the parent sent) and appends its own task after `fork_point`. `prefix_fingerprint()` gives a stable hash of the prefix for drift detection, and `is_cache_safe()` reports whether a given model/system-prompt/tool set would still hit the parent's prefix cache. A fork with no prefix starts a fresh one. Codape messages carry no stable uuid, so the fork point is an index, not an id.
 - **Tool executor factory** — Since `codape-agents` cannot depend on `codape-tools`, the caller provides a factory closure that creates concrete `ToolExecutor` implementations.
@@ -152,6 +152,37 @@ Sub-agent system for spawning autonomous worker agents, dream agents (background
 - **Parent prefix wiring** — The REPL refreshes a [`ParentContextSnapshot`] immediately before each turn and the Agent tool's parent-context provider reads it when spawning. When the snapshot has messages, the tool sets `SpawnOptions::parent_prefix` and `parent_cache_safe_params` (derived from the same model/system-prompt/tool list) and reports `message_count = prefix.len()`, so `ForkedContext` knows where the parent prefix ends. Without a provider (managers used directly, tests) a spawn still works but starts a fresh prefix.
 - **Lifecycle producers** — `run_agent_task()` emits `AgentLifecycleEvent::Started`, `TextDelta` for each streamed text delta, `ToolCall { name, args }` for each tool invocation (the engine exposes the call summary, so `args` currently carries `{"summary": ...}` rather than the parsed arguments), `Idle { reason: "turn complete" }` after the event stream drains, and finally `Completed` or `Failed`. They travel as `EngineEvent::AgentEvent`, which the TUI already renders.
 - **External subscriptions** — `subscribe_to_agent(id)` returns an `AgentSubscription`, a wrapper over the manager-wide `tokio::sync::broadcast` channel that yields only events tagged with that agent id; `subscribe_all()` (and the `"all"` alias) keeps the unfiltered view. The REPL creates an unfiltered subscription in `with_engine` and drains it on the TUI tick and in headless event draining (debug logs); `/agents follow <id|all>` installs either a filtered or an unfiltered subscription as the session's observable, so per-agent filtering is a production path rather than a test-only capability. The UI itself uses `EngineEvent::AgentEvent`, so the broadcast is the external-observer surface, not a second rendering path. `register_agent()` was removed: there is no transport for an externally managed agent in Codape (sub-agents are in-process `tokio` tasks), so it could only ever record a dangling id.
+
+## Resuming an agent
+
+A sub-agent's conversation is not thrown away when its task ends. The child's
+`SessionState.messages` are copied into `AgentInstance::transcript` after every
+attempt (`run_agent_task`), and that slot is the manager's, not the spawned
+task's, so it is already populated by the time the task settles.
+
+`AgentManager::send_message` uses it:
+
+- **Running agent** — the message goes down the agent's channel as before, and
+  the child appends it to the prompt of the turn already underway. A send that
+  fails (the turn ended between the status read and the send) is reported, not
+  swallowed.
+- **Finished agent** — the task is reopened under its existing id
+  (`TaskHandle::reopen` / `TaskManager::reopen_task`, the one transition the
+  state machine otherwise forbids), a fresh message channel is installed, and
+  another turn runs through the same `spawn_run` path the first one used. The
+  transcript becomes that turn's seed; the parent fork is cleared, because
+  re-seeding the parent's prefix would overwrite the conversation being
+  continued. The resumed turn runs as background work, the same way an
+  unwatched turn does.
+
+What this is *not*: nothing reaches the disk. An agent lives exactly as long as
+its `AgentManager`, so `SendMessage` continues an agent this session started. A
+new session has no transcript to continue — the job record a background agent
+leaves behind says the work is over, it does not carry the conversation.
+
+`AgentResult::messages` returns the same transcript to the caller that waited on
+the run, so the `Agent` tool's result already carries the context the child
+built. `docs/capability_matrix.md` records the item.
 
 ## Permission inheritance
 
@@ -178,7 +209,7 @@ custom agent definitions (`agents`), which the REPL registers at startup.
 - **AgentManager** — Full lifecycle: spawn (built-in or named custom), send_message, complete, stop, list, running_count.
 - **Real engine execution** — `spawn_agent()` creates a `tokio::spawn` task running `run_agent_task()` with a full `QueryEngine`.
 - **Context forking** — `ForkedContext` with session ID, cwd, message count, tool whitelist, environment snapshot, and — for cache-aware forks — the parent conversation prefix, fork point and cache-safe params.
-- **Messaging** — `send_message()` via `mpsc::UnboundedChannel`; messages drained and appended to prompt before each engine submission.
+- **Messaging and resume** — `send_message()` delivers through `mpsc::UnboundedChannel` to a running agent; a finished agent is reopened under the same task id and continued from the transcript it built (see *Resuming an agent*).
 - **Resource limits** — `max_tokens`, `max_duration_seconds`, `max_turns` enforced per attempt.
 - **Retry policy** — Configurable retries with escalation prompt and error context.
 - **Output validation** — JSON schema validation via `StructuredOutputValidator` with automatic retry.

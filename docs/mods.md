@@ -104,7 +104,8 @@ may register at most 256 hooks.
   longer a constant in the mod runtime.
 - `e.surfaceCapabilities` says what that surface can present:
   `{ interactive, mouse, images }`. The terminal reports
-  `{ interactive: true, mouse: true, images: false }`. Use it instead of
+  `{ interactive: true, mouse: true, images: <can it draw a picture> }` — true
+  on a truecolor terminal, false otherwise. Use it instead of
   assuming a product: a button is pointless on a surface with
   `interactive: false`.
 - Every context entry is copied onto `e` as a string. `tool_input` is the

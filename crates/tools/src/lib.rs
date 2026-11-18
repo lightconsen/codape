@@ -62,3 +62,14 @@ pub fn required_feature_flag(tool_name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Whether a tool is superseded when the provider runs web search and fetch.
+///
+/// The provider's version arrives as a block inside the assistant turn, not as
+/// a tool call, so there is nothing for the dispatcher to execute. Advertising
+/// the local one beside it would give the model two descriptions of one job and
+/// ask it to guess which the session wants.
+#[must_use]
+pub fn superseded_by_provider_web_tools(tool_name: &str) -> bool {
+    matches!(tool_name, "WebSearch" | "WebFetch")
+}

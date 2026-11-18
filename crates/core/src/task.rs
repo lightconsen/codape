@@ -220,6 +220,30 @@ impl TaskHandle {
         Ok(())
     }
 
+    /// Put a finished task back to work under the same id.
+    ///
+    /// This is the one transition the state machine otherwise forbids, and it
+    /// is deliberately narrow: a task whose work can be continued after it
+    /// ended — a sub-agent that kept its conversation — reopens the same
+    /// handle so `TaskList`, `TaskOutput` and any watcher keep addressing the
+    /// id they already have. A shell task cannot use this: nothing in its
+    /// record survives the process that ran it.
+    ///
+    /// The previous turn's error and exit code are cleared, because they
+    /// describe work that is no longer the task's current state.
+    pub fn reopen(&mut self) -> Result<(), TaskError> {
+        if matches!(self.state, TaskState::Running) {
+            return Err(TaskError::InvalidTransition {
+                from: self.state,
+                to: TaskState::Running,
+            });
+        }
+        self.state = TaskState::Running;
+        self.error = None;
+        self.exit_code = None;
+        Ok(())
+    }
+
     /// Get the current task status.
     #[must_use]
     pub const fn get_status(&self) -> TaskState {
@@ -431,6 +455,21 @@ impl TaskManager {
             .get_mut(id)
             .ok_or_else(|| TaskError::NotFound(id.to_string()))?;
         handle.start()?;
+        handle.touch(now_ms());
+        Ok(())
+    }
+
+    /// Put a finished task back to running under the same id.
+    ///
+    /// See [`TaskHandle::reopen`] for which tasks may do this. A running task
+    /// is refused rather than silently accepted, so a caller that thinks it is
+    /// resuming something already alive learns otherwise.
+    pub fn reopen_task(&mut self, id: &str) -> Result<(), TaskError> {
+        let handle = self
+            .tasks
+            .get_mut(id)
+            .ok_or_else(|| TaskError::NotFound(id.to_string()))?;
+        handle.reopen()?;
         handle.touch(now_ms());
         Ok(())
     }

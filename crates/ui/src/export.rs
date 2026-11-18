@@ -68,6 +68,10 @@ fn content_text(content: &codape_core::types::MessageContent) -> String {
         // useless in a transcript anyway, so the placeholder carries what a
         // reader needs: that an image was there, and what kind.
         MessageContent::Image(image) => format!("[image: {}]", image.media_type),
+        // A provider-run tool block is part of the assistant turn but is not
+        // prose. The label says what happened; the JSON it carries is for the
+        // provider, not for a reader of the transcript.
+        MessageContent::ServerBlock(server) => format!("[{}]", server.summary()),
         _ => "[unknown content]".into(),
     }
 }

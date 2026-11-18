@@ -77,30 +77,38 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
-    // /init — initialize project (generate CLAUDE.md etc)
+    // /init — initialize project (generate the instruction file)
+    //
+    // It writes `AGENTS.md`, not `CLAUDE.md`: that is the name Codex, Cursor
+    // and Jules read, so a repository set up here is readable by every agent
+    // its team uses. Both names are loaded by the prompt compiler, and an
+    // existing file of either name means the project is already initialised.
     registry.register(SlashCommand::local(
         "init",
-        "Initialize project with CLAUDE.md",
+        "Initialize project with an AGENTS.md",
         true,
         true,
         true,
         Arc::new(|ctx: &CommandContext, _args: &[String]| {
             let cwd = std::path::Path::new(&ctx.cwd);
-            let claude_md = cwd.join("CLAUDE.md");
+            let agents_md = cwd.join("AGENTS.md");
             let settings_local = cwd.join(".codape/settings.local.json");
 
-            if claude_md.exists() {
-                return CommandResult::success(format!(
-                    "Project already initialized.\nCLAUDE.md exists at: {}",
-                    claude_md.display()
-                ));
+            for existing in codape_core::prompts::INSTRUCTION_FILE_NAMES {
+                let path = cwd.join(existing);
+                if path.exists() {
+                    return CommandResult::success(format!(
+                        "Project already initialized.\n{existing} exists at: {}",
+                        path.display()
+                    ));
+                }
             }
 
-            // Write CLAUDE.md template
+            // Write the instructions template
             let template = "# Project Instructions\n\n## Architecture\n<!-- Describe your project architecture here -->\n\n## Key Directories\n<!-- Document important directories -->\n\n## Coding Standards\n<!-- List coding standards and conventions -->\n\n## Commands\n<!-- Document common commands and workflows -->\n";
 
-            if let Err(e) = std::fs::write(&claude_md, template) {
-                return CommandResult::error(format!("Failed to create CLAUDE.md: {e}"));
+            if let Err(e) = std::fs::write(&agents_md, template) {
+                return CommandResult::error(format!("Failed to create AGENTS.md: {e}"));
             }
 
             // Write an empty local settings file if it doesn't exist. The
@@ -118,7 +126,7 @@ pub fn register(registry: &mut CommandRegistry) {
             }
 
             CommandResult::success(format!(
-                "Project initialized in {}\nCreated: CLAUDE.md (project instructions template)\nCreated: .codape/settings.local.json (local settings)",
+                "Project initialized in {}\nCreated: AGENTS.md (project instructions template)\nCreated: .codape/settings.local.json (local settings)",
                 ctx.cwd
             ))
             .with_state_change(true)
@@ -350,11 +358,15 @@ mod tests {
             r
         };
         let result = reg.execute("init", &c, &[]);
-        assert!(result.output.contains("CLAUDE.md"));
+        assert!(result.output.contains("AGENTS.md"));
         assert!(result.output.contains(".codape/settings.local.json"));
         assert!(result.state_changed);
-        assert!(tmp.path().join("CLAUDE.md").exists());
+        assert!(tmp.path().join("AGENTS.md").exists());
         assert!(tmp.path().join(".codape/settings.local.json").exists());
+        // `CLAUDE.md` is still *read*, but `/init` writes the interoperable
+        // name: a repository set up here is readable by the other agents its
+        // team uses.
+        assert!(!tmp.path().join("CLAUDE.md").exists());
         // The legacy path was never read by `ConfigService`; `/init` must not
         // keep writing a settings file nobody loads.
         assert!(!tmp.path().join("CLAUDE.local.json").exists());
@@ -373,8 +385,12 @@ mod tests {
             register(&mut r);
             r
         };
+        // An existing file of *either* name means the project has already been
+        // initialised; writing a second template beside it would leave two
+        // instruction files disagreeing with each other.
         let result = reg.execute("init", &c, &[]);
         assert!(result.output.contains("already initialized"));
+        assert!(!tmp.path().join("AGENTS.md").exists());
     }
 
     #[test]

@@ -719,8 +719,127 @@ pub fn register(registry: &mut CommandRegistry) {
                         }
                         CommandResult::success(output)
                     }
+                    "marketplace" => match args.get(1).map(String::as_str) {
+                        None | Some("list") => {
+                            let settings =
+                                read_user_settings_at(&ctx.config_dir).unwrap_or_default();
+                            let entries =
+                                settings.get("marketplaces").and_then(|v| v.as_array());
+                            match entries {
+                                Some(entries) if !entries.is_empty() => {
+                                    let mut output = String::from("Configured marketplaces:");
+                                    for entry in entries {
+                                        let name = entry
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(unnamed)");
+                                        let url = entry
+                                            .get("url")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("(no url)");
+                                        let _ = write!(output, "\n  {name}  {url}");
+                                    }
+                                    CommandResult::success(output)
+                                }
+                                _ => CommandResult::success(
+                                    "No marketplaces configured.\n\
+                                     Add one with /plugin marketplace add <name> <https-url>.",
+                                ),
+                            }
+                        }
+                        Some("add") => {
+                            let (Some(name), Some(url)) = (args.get(2), args.get(3)) else {
+                                return CommandResult::error(
+                                    "Usage: /plugin marketplace add <name> <https-url>",
+                                );
+                            };
+                            let setting = match codape_config::MarketplaceSetting::validated(
+                                name, url,
+                            ) {
+                                Ok(setting) => setting,
+                                Err(error) => return CommandResult::error(error.to_string()),
+                            };
+                            let mut settings =
+                                read_user_settings_at(&ctx.config_dir).unwrap_or_default();
+                            let mut entries = settings
+                                .get("marketplaces")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            // Replacing by name rather than appending: adding
+                            // the same name twice used to leave two entries,
+                            // and which URL an install resolved against then
+                            // depended on registration order.
+                            entries.retain(|entry| {
+                                entry.get("name").and_then(|v| v.as_str())
+                                    != Some(setting.name.as_str())
+                            });
+                            entries.push(serde_json::json!({
+                                "name": setting.name,
+                                "url": setting.url,
+                            }));
+                            settings.insert(
+                                "marketplaces".to_string(),
+                                serde_json::Value::Array(entries),
+                            );
+                            match write_user_settings_at(&ctx.config_dir, &settings) {
+                                Ok(()) => CommandResult::success(format!(
+                                    "Marketplace '{}' saved to settings.json.\n\
+                                     New sessions resolve plugin names against it.",
+                                    setting.name
+                                ))
+                                .with_state_change(true),
+                                Err(error) => CommandResult::error(format!(
+                                    "Could not write settings.json: {error}"
+                                )),
+                            }
+                        }
+                        Some("remove") => {
+                            let Some(name) = args.get(2) else {
+                                return CommandResult::error(
+                                    "Usage: /plugin marketplace remove <name>",
+                                );
+                            };
+                            let mut settings =
+                                read_user_settings_at(&ctx.config_dir).unwrap_or_default();
+                            let before = settings
+                                .get("marketplaces")
+                                .and_then(|v| v.as_array())
+                                .map_or(0, Vec::len);
+                            let mut entries = settings
+                                .get("marketplaces")
+                                .and_then(|v| v.as_array())
+                                .cloned()
+                                .unwrap_or_default();
+                            entries.retain(|entry| {
+                                entry.get("name").and_then(|v| v.as_str()) != Some(name.as_str())
+                            });
+                            if entries.len() == before {
+                                return CommandResult::error(format!(
+                                    "No marketplace named '{name}'."
+                                ));
+                            }
+                            settings.insert(
+                                "marketplaces".to_string(),
+                                serde_json::Value::Array(entries),
+                            );
+                            match write_user_settings_at(&ctx.config_dir, &settings) {
+                                Ok(()) => CommandResult::success(format!(
+                                    "Marketplace '{name}' removed from settings.json."
+                                ))
+                                .with_state_change(true),
+                                Err(error) => CommandResult::error(format!(
+                                    "Could not write settings.json: {error}"
+                                )),
+                            }
+                        }
+                        Some(other) => CommandResult::error(format!(
+                            "Unknown marketplace action '{other}'.\n\
+                             Usage: /plugin marketplace [list|add <name> <https-url>|remove <name>]"
+                        )),
+                    },
                     _ => CommandResult::error(
-                        "Usage: /plugin [list|components|types [name]|install <source>]",
+                        "Usage: /plugin [list|components|types [name]|install <source>|marketplace [list|add <name> <url>|remove <name>]]",
                     ),
                 }
             }
@@ -1109,6 +1228,150 @@ mod tests {
         };
         let result = reg.execute("plugin", &ctx(), &["list".into()]);
         assert!(result.output.contains("plugin") || result.output.contains("No plugins"));
+    }
+
+    /// Adding a marketplace is the gesture that was missing: the setting
+    /// existed and nothing in the CLI or the session could write it.
+    #[test]
+    fn plugin_marketplace_add_writes_the_setting() {
+        let home = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            config_dir: home.path().to_path_buf(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+
+        let result = reg.execute(
+            "plugin",
+            &c,
+            &[
+                "marketplace".into(),
+                "add".into(),
+                "internal".into(),
+                "https://plugins.example".into(),
+            ],
+        );
+        assert!(result.output.contains("internal"), "{}", result.output);
+        assert!(result.state_changed);
+
+        // The file is the contract: startup reads `marketplaces` from it, so
+        // the assertion has to be against what was written, not the message.
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["marketplaces"][0]["name"], "internal");
+        assert_eq!(written["marketplaces"][0]["url"], "https://plugins.example");
+
+        let listed = reg.execute("plugin", &c, &["marketplace".into(), "list".into()]);
+        assert!(
+            listed.output.contains("plugins.example"),
+            "{}",
+            listed.output
+        );
+    }
+
+    #[test]
+    fn plugin_marketplace_add_replaces_an_entry_of_the_same_name() {
+        let home = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            config_dir: home.path().to_path_buf(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        for url in ["https://one.example", "https://two.example"] {
+            let result = reg.execute(
+                "plugin",
+                &c,
+                &[
+                    "marketplace".into(),
+                    "add".into(),
+                    "internal".into(),
+                    url.into(),
+                ],
+            );
+            assert!(result.output.contains("internal"), "{}", result.output);
+        }
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        let entries = written["marketplaces"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "the name should be registered once");
+        assert_eq!(entries[0]["url"], "https://two.example");
+    }
+
+    /// A marketplace registration refuses `http://`, so accepting one into
+    /// settings would write a value whose only effect is a startup warning.
+    #[test]
+    fn plugin_marketplace_add_refuses_a_url_registration_would_refuse() {
+        let home = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            config_dir: home.path().to_path_buf(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute(
+            "plugin",
+            &c,
+            &[
+                "marketplace".into(),
+                "add".into(),
+                "insecure".into(),
+                "http://plugins.example".into(),
+            ],
+        );
+        assert!(result.output.contains("https"), "{}", result.output);
+        assert!(!home.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn plugin_marketplace_remove_names_what_was_not_there() {
+        let home = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            config_dir: home.path().to_path_buf(),
+            ..ctx()
+        };
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        reg.execute(
+            "plugin",
+            &c,
+            &[
+                "marketplace".into(),
+                "add".into(),
+                "internal".into(),
+                "https://plugins.example".into(),
+            ],
+        );
+        let removed = reg.execute(
+            "plugin",
+            &c,
+            &["marketplace".into(), "remove".into(), "internal".into()],
+        );
+        assert!(removed.output.contains("removed"), "{}", removed.output);
+        let again = reg.execute(
+            "plugin",
+            &c,
+            &["marketplace".into(), "remove".into(), "internal".into()],
+        );
+        assert!(again.output.contains("No marketplace"), "{}", again.output);
     }
 
     /// `/hooks` names the hooks the session installed.

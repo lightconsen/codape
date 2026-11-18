@@ -132,6 +132,13 @@ pub struct AgentResult {
     pub status: AgentStatus,
     /// Token usage, if available.
     pub token_usage: Option<u64>,
+    /// The child's full conversation at the end of the run.
+    ///
+    /// Returned rather than only stored on the instance so a caller that
+    /// holds the result — the `Agent` tool, for one — can keep or report the
+    /// context the sub-agent built. [`AgentManager::send_message`] seeds the
+    /// next turn from the same messages.
+    pub messages: Vec<Message>,
 }
 
 // ─── Spawn Options ──────────────────────────────────────────────────────────
@@ -552,6 +559,20 @@ pub struct AgentInstance {
     /// Durable record for a background agent, when one was written. The
     /// manager settles it on completion, cancellation and drop.
     pub job_record: Option<(JobStore, String)>,
+    /// The child session's conversation as of the end of its last turn.
+    ///
+    /// The engine owns its `SessionState` and drops it when the turn returns,
+    /// so without this copy an agent's context would die with its task and
+    /// there would be nothing to continue. The value is replaced at every
+    /// turn end (and at the end of the run); a `SendMessage` to a finished
+    /// agent seeds its next engine from it, which is what makes the
+    /// conversation resumable.
+    pub transcript: Option<Arc<std::sync::Mutex<Vec<Message>>>>,
+    /// How to run a turn for this agent, resolved at spawn.
+    ///
+    /// Absent for an agent that never reached the engine (test mode, or a
+    /// manager with no API client); such an agent has nothing to resume.
+    pub spec: Option<AgentRunSpec>,
 }
 
 impl AgentInstance {
@@ -576,6 +597,8 @@ impl AgentInstance {
             working_directory,
             worktree_path: None,
             job_record: None,
+            transcript: None,
+            spec: None,
         }
     }
 
@@ -583,6 +606,29 @@ impl AgentInstance {
     #[must_use]
     pub fn status(&self) -> AgentStatus {
         *self.status_rx.borrow()
+    }
+
+    /// The child's conversation as of the end of its last turn, if any.
+    ///
+    /// Empty when the agent never got as far as running a turn, and empty for
+    /// the test-mode placeholder, which never had a session.
+    #[must_use]
+    pub fn transcript(&self) -> Vec<Message> {
+        self.transcript
+            .as_ref()
+            .map(|messages| messages.lock().unwrap().clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether this agent's conversation is there to continue.
+    ///
+    /// Only a run that reached the engine at all records a transcript; an agent
+    /// refused before it started has nothing to resume.
+    #[must_use]
+    pub fn is_resumable(&self) -> bool {
+        self.transcript
+            .as_ref()
+            .is_some_and(|messages| !messages.lock().unwrap().is_empty())
     }
 }
 
@@ -620,6 +666,80 @@ pub type TeammateEventCallback = Arc<dyn Fn(TeammateEvent) + Send + Sync + 'stat
 type ToolExecutorFactory =
     dyn Fn(PathBuf, Option<SandboxConfig>) -> Box<dyn ToolExecutor + Send + Sync> + Send + Sync;
 
+/// Everything one child turn needs, resolved at spawn time.
+///
+/// A sub-agent runs one or more turns against the same settings. Before a
+/// finished agent could be continued, the settings only existed as locals
+/// inside `spawn_agent`'s single spawn call, so a second turn had nothing to
+/// start from. This is that set of settings, kept on the
+/// [`AgentInstance`] so [`AgentManager::send_message`] can run another turn
+/// without re-deriving them.
+#[derive(Clone)]
+pub struct AgentRunSpec {
+    /// Model for the child's requests.
+    pub model: ModelId,
+    /// The child's system prompt.
+    pub system_prompt: String,
+    /// Directory the engine runs in (a worktree, when isolated).
+    pub working_directory: PathBuf,
+    /// Permission mode, inherited from the parent at spawn.
+    pub permission_mode: PermissionMode,
+    /// Parent rules recompiled against the child's directory.
+    pub permission_rules: Vec<PermissionRuleSpec>,
+    /// Interactive channel shared with the parent frontend.
+    pub confirmation_bus: Option<ConfirmationBus>,
+    /// Per-turn token budget.
+    pub max_tokens: u32,
+    /// Per-turn wall-clock limit, in seconds.
+    pub max_duration: u64,
+    /// Turn cap for the engine.
+    pub max_turns: u32,
+    /// Tool whitelist, when one was requested.
+    pub allowed_tools: Option<Vec<String>>,
+    /// Whether the agent may write.
+    pub writable: bool,
+    /// Sandbox override, or the default.
+    pub sandbox_config: Option<SandboxConfig>,
+    /// Where the final output lands.
+    pub output_file: PathBuf,
+    /// The agent id the engine tags its requests with.
+    pub agent_id: String,
+    /// The parent's engine event stream.
+    pub parent_event_tx: Option<mpsc::UnboundedSender<EngineEvent>>,
+    /// Builds the child's tool executor.
+    pub tool_factory: Option<Arc<ToolExecutorFactory>>,
+    /// Observable-event broadcast.
+    pub broadcast_tx: Option<broadcast::Sender<AgentObservableEvent>>,
+    /// Retry policy; `None` escalates on the first failure.
+    pub retry_policy: Option<RetryPolicy>,
+    /// Output schema, when the caller wants structured output.
+    pub output_schema: Option<serde_json::Value>,
+    /// Whether this is an unwatched run (it then tags requests with `agent_id`).
+    pub run_in_background: bool,
+    /// The parent fork, for the first turn only.
+    ///
+    /// A resumed turn already has the child's own history, so it clears this:
+    /// re-seeding the parent prefix would replace the conversation the agent
+    /// built.
+    pub forked_context: Option<ForkedContext>,
+    /// Teammate-event callback.
+    pub event_callback: Option<TeammateEventCallback>,
+    /// Lifecycle hooks.
+    pub hooks: Option<Arc<dyn HookExecutor>>,
+    /// Short description used in teammate events.
+    pub agent_subject: String,
+}
+
+impl std::fmt::Debug for AgentRunSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentRunSpec")
+            .field("agent_id", &self.agent_id)
+            .field("working_directory", &self.working_directory)
+            .field("model", &self.model.0)
+            .finish_non_exhaustive()
+    }
+}
+
 // ─── AgentManager ───────────────────────────────────────────────────────────
 
 /// Manages the lifecycle of sub-agents.
@@ -627,7 +747,7 @@ type ToolExecutorFactory =
 /// Handles:
 /// - Spawning agents with context fork and tool whitelist
 /// - Tracking agent state and messaging
-/// - Registering externally managed agents (no execution is resumed)
+/// - Continuing a finished agent from the transcript it built
 /// - Broadcasting teammate events
 /// - Running forked agents and background features via AI
 pub struct AgentManager {
@@ -825,12 +945,16 @@ impl AgentManager {
 
     /// Wait for an agent to complete (synchronous execution).
     pub async fn wait_for_completion(&self, agent_id: &str) -> Result<AgentResult, AgentError> {
-        let (mut status_rx, output_file) = {
+        let (mut status_rx, output_file, transcript) = {
             let agent = self
                 .agents
                 .get(agent_id)
                 .ok_or_else(|| AgentError::NotFound(agent_id.to_string()))?;
-            (agent.status_rx.clone(), agent.output_file.clone())
+            (
+                agent.status_rx.clone(),
+                agent.output_file.clone(),
+                agent.transcript.clone(),
+            )
         };
 
         loop {
@@ -845,10 +969,15 @@ impl AgentManager {
                     String::new()
                 };
                 let token_usage = Self::read_token_usage(output_file.as_ref()).await;
+                let messages = transcript
+                    .as_ref()
+                    .map(|messages| messages.lock().unwrap().clone())
+                    .unwrap_or_default();
                 return Ok(AgentResult {
                     output,
                     status,
                     token_usage,
+                    messages,
                 });
             }
 
@@ -935,7 +1064,7 @@ impl AgentManager {
         drop(task_manager);
 
         // Set up message channel
-        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<AgentMessage>();
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<AgentMessage>();
 
         // Resolve where the agent actually runs. A `worktree` isolation
         // request creates a real git worktree and runs the agent there; the
@@ -1053,6 +1182,7 @@ impl AgentManager {
         instance.working_directory = working_directory.clone();
         instance.worktree_path = worktree_path.clone();
         instance.job_record = background_job.clone();
+        instance.transcript = Some(Arc::new(std::sync::Mutex::new(Vec::new())));
         let _ = instance.status_tx.send(AgentStatus::Running);
         instance.prompt = system_prompt.clone();
 
@@ -1066,120 +1196,56 @@ impl AgentManager {
         );
 
         if let Some(ref api_client) = self.api_client {
-            let client = api_client.clone_box();
-            let model = options
-                .model_override
-                .as_ref()
-                .map_or_else(|| self.model.clone(), |m| ModelId(m.clone()));
-            let max_tokens = options.max_tokens.unwrap_or(4096);
-            let max_duration = options.max_duration_seconds.unwrap_or(600);
-            let max_turns = options.max_turns.unwrap_or(50);
-            let allowed_tools = options.allowed_tools.clone();
-            let writable = options.writable;
-            let sandbox_config = options.sandbox.clone();
-            let retry_policy = options.retry_policy.clone();
-            let output_schema = options.output_schema.clone();
-            let run_in_background = options.run_in_background;
-            let user_prompt = prompt.to_string();
-            let agent_subject = job_description("", prompt);
-            let output_file_path = output_file.clone();
-            let agent_id_for_task = agent_id.clone();
-            let event_tx = self.event_tx.clone();
-            let tool_factory = self.tool_executor_factory.clone();
-            let broadcast_tx = self.agent_event_broadcast.clone();
-            let confirmation_bus = self.confirmation_bus.clone();
-            let status_tx = instance.status_tx.clone();
-            let task_manager_for_task = Arc::clone(&self.task_manager);
-            let task_id_for_completion = agent_id.clone();
-            let job_record = background_job.clone();
-            // The forked context and the teammate callback both belong to the
-            // manager, but completion happens in the spawned task. Clone them
-            // now: the task must be able to seed the child session and report
-            // its real completion without borrowing the manager.
-            let forked_context = instance.context.clone();
-            let event_callback = self.event_callback.clone();
-            // Same reason as the teammate callback: the hook executor belongs
-            // to the manager, but the idle/stop events fire from inside the
-            // spawned task, so clone the handle into it.
-            let hooks = self.hooks.clone();
-
-            let handle = tokio::spawn(async move {
-                let result = run_agent_task(
-                    client,
-                    model,
-                    system_prompt,
-                    user_prompt,
-                    working_directory,
-                    permission_mode,
-                    permission_rules,
-                    confirmation_bus,
-                    max_tokens,
-                    max_duration,
-                    max_turns,
-                    allowed_tools,
-                    writable,
-                    sandbox_config,
-                    output_file_path,
-                    agent_id_for_task,
-                    event_tx,
-                    tool_factory,
-                    broadcast_tx,
-                    retry_policy,
-                    output_schema,
-                    run_in_background,
-                    forked_context,
-                    event_callback,
-                    hooks,
-                    agent_subject,
-                    &mut msg_rx,
-                )
-                .await;
-
-                match &result {
-                    Ok(agent_result) => {
-                        let _ = status_tx.send(agent_result.status);
-                        let mut task_manager = task_manager_for_task.lock().await;
-                        if agent_result.status == AgentStatus::Completed {
-                            let _ = task_manager.mark_completed(&task_id_for_completion, Some(0));
-                        } else {
-                            let _ = task_manager.mark_failed(
-                                &task_id_for_completion,
-                                "agent execution failed".to_string(),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let _ = status_tx.send(AgentStatus::Failed);
-                        let mut task_manager = task_manager_for_task.lock().await;
-                        let _ =
-                            task_manager.mark_failed(&task_id_for_completion, error.to_string());
-                    }
-                }
-
-                // The record must never be left claiming `Running` once the
-                // task is over. `settle` refuses to overwrite an already
-                // terminal record, so a cancellation that raced completion
-                // keeps its `Interrupted` state.
-                if let Some((store, id)) = &job_record {
-                    let (state, error) = match &result {
-                        Ok(agent_result) if agent_result.status == AgentStatus::Completed => {
-                            (JobState::Done, None)
-                        }
-                        Ok(_) => (JobState::Failed, Some("agent execution failed".to_string())),
-                        Err(error) => (JobState::Failed, Some(error.to_string())),
-                    };
-                    if let Err(write_error) = store.settle(id, state, now_ms(), None, error) {
-                        tracing::warn!(
-                            job = %id,
-                            path = %store.root().display(),
-                            error = %write_error,
-                            "could not settle the background agent job record"
-                        );
-                    }
-                }
-            });
-
-            instance.task_join_handle = Some(handle);
+            // Everything a child turn needs, resolved once. Kept on the
+            // instance so a `SendMessage` after completion can start another
+            // turn with exactly these settings instead of guessing them.
+            let spec = AgentRunSpec {
+                model: options
+                    .model_override
+                    .as_ref()
+                    .map_or_else(|| self.model.clone(), |m| ModelId(m.clone())),
+                system_prompt,
+                working_directory,
+                permission_mode,
+                permission_rules,
+                confirmation_bus: self.confirmation_bus.clone(),
+                max_tokens: options.max_tokens.unwrap_or(4096),
+                max_duration: options.max_duration_seconds.unwrap_or(600),
+                max_turns: options.max_turns.unwrap_or(50),
+                allowed_tools: options.allowed_tools.clone(),
+                writable: options.writable,
+                sandbox_config: options.sandbox.clone(),
+                output_file,
+                agent_id: agent_id.clone(),
+                parent_event_tx: self.event_tx.clone(),
+                tool_factory: self.tool_executor_factory.clone(),
+                broadcast_tx: self.agent_event_broadcast.clone(),
+                retry_policy: options.retry_policy.clone(),
+                output_schema: options.output_schema.clone(),
+                run_in_background: options.run_in_background,
+                // The fork is the first turn's: it seeds the child with the
+                // parent's prefix. A resumed turn starts from the child's own
+                // transcript instead and must not re-fork the parent.
+                forked_context: instance.context.clone(),
+                event_callback: self.event_callback.clone(),
+                hooks: self.hooks.clone(),
+                agent_subject: job_description("", prompt),
+            };
+            instance.spec = Some(spec.clone());
+            let transcript = instance
+                .transcript
+                .clone()
+                .expect("the transcript slot is created with the instance");
+            instance.task_join_handle = Some(self.spawn_run(
+                api_client.clone_box(),
+                spec,
+                prompt.to_string(),
+                Vec::new(),
+                transcript,
+                msg_rx,
+                instance.status_tx.clone(),
+                background_job.clone(),
+            ));
         } else if cfg!(test) || self.test_mode {
             // Test convenience: write placeholder and complete immediately
             let placeholder = format!("agent completed (test mode)\n\nAgent task: {prompt}");
@@ -1243,33 +1309,183 @@ impl AgentManager {
         self.agents.get(id)
     }
 
-    /// Send a message to a running agent.
-    //
-    // Kept `async` so callers have one manager surface; delivery is a
-    // best-effort channel send today.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
-    pub async fn send_message(&self, agent_id: &str, content: &str) -> Result<(), AgentError> {
+    /// Spawn one turn of an agent and wire its bookkeeping.
+    ///
+    /// Both the first turn (`spawn_agent`) and every continuation
+    /// (`send_message`) go through here, so a resumed turn reports status,
+    /// task state, the job record and the transcript exactly as the first one
+    /// did. `seed` is the conversation the engine starts from: empty for the
+    /// first turn (the fork seeds it instead), the child's transcript for a
+    /// continuation.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_run(
+        &self,
+        api_client: Box<dyn ApiClient>,
+        spec: AgentRunSpec,
+        prompt: String,
+        seed: Vec<Message>,
+        transcript: Arc<std::sync::Mutex<Vec<Message>>>,
+        mut msg_rx: mpsc::UnboundedReceiver<AgentMessage>,
+        status_tx: watch::Sender<AgentStatus>,
+        job_record: Option<(JobStore, String)>,
+    ) -> tokio::task::JoinHandle<()> {
+        let task_manager = Arc::clone(&self.task_manager);
+        let task_id = spec.agent_id.clone();
+        let transcript_for_task = Arc::clone(&transcript);
+
+        tokio::spawn(async move {
+            let result = run_agent_task(
+                api_client,
+                spec,
+                prompt,
+                seed,
+                transcript_for_task,
+                &mut msg_rx,
+            )
+            .await;
+
+            match &result {
+                Ok(agent_result) => {
+                    let _ = status_tx.send(agent_result.status);
+                    let mut task_manager = task_manager.lock().await;
+                    if agent_result.status == AgentStatus::Completed {
+                        let _ = task_manager.mark_completed(&task_id, Some(0));
+                    } else {
+                        let _ = task_manager.mark_failed(&task_id, "agent execution failed".into());
+                    }
+                }
+                Err(error) => {
+                    let _ = status_tx.send(AgentStatus::Failed);
+                    let mut task_manager = task_manager.lock().await;
+                    let _ = task_manager.mark_failed(&task_id, error.to_string());
+                }
+            }
+
+            // The record must never be left claiming `Running` once the
+            // task is over. `settle` refuses to overwrite an already
+            // terminal record, so a cancellation that raced completion
+            // keeps its `Interrupted` state.
+            if let Some((store, id)) = &job_record {
+                let (state, error) = match &result {
+                    Ok(agent_result) if agent_result.status == AgentStatus::Completed => {
+                        (JobState::Done, None)
+                    }
+                    Ok(_) => (JobState::Failed, Some("agent execution failed".to_string())),
+                    Err(error) => (JobState::Failed, Some(error.to_string())),
+                };
+                if let Err(write_error) = store.settle(id, state, now_ms(), None, error) {
+                    tracing::warn!(
+                        job = %id,
+                        path = %store.root().display(),
+                        error = %write_error,
+                        "could not settle the background agent job record"
+                    );
+                }
+            }
+        })
+    }
+
+    /// Send a message to an agent, continuing its conversation.
+    ///
+    /// A running agent receives the message on its channel, which appends it
+    /// to the turn already underway. A finished agent is *resumed* instead:
+    /// its task is reopened under the same id and another turn runs with the
+    /// conversation it built as the seed. That is what makes a sub-agent
+    /// followable-up, matching what `SendMessage` promises the model.
+    ///
+    /// # Errors
+    /// [`AgentError::NotFound`] when the manager never spawned the id, and
+    /// [`AgentError::NotRunning`] when the agent cannot be continued —
+    /// test mode, or a spawn that never reached the engine.
+    pub async fn send_message(&mut self, agent_id: &str, content: &str) -> Result<(), AgentError> {
         let agent = self
             .agents
-            .get(agent_id)
+            .get_mut(agent_id)
             .ok_or_else(|| AgentError::NotFound(agent_id.to_string()))?;
 
-        if agent.status() != AgentStatus::Running {
-            return Err(AgentError::NotRunning(agent_id.to_string()));
-        }
-
-        let Some(tx) = agent.message_tx.as_ref() else {
-            return Err(AgentError::NotRunning(agent_id.to_string()));
-        };
         let msg = AgentMessage {
             agent_id: agent_id.to_string(),
             content: content.to_string(),
             message_id: None,
         };
-        // Best-effort send — in a real implementation the receiver would be
-        // held by the agent process. For now, we ignore closed-channel errors
-        // (the receiver may not yet be connected).
-        let _ = tx.send(msg);
+
+        if agent.status() == AgentStatus::Running {
+            // A running agent owns a live receiver. The send can still fail
+            // if the turn ended between the status read and this call, and
+            // reporting success then would tell the model a message landed
+            // that nobody read — so the error is propagated.
+            let tx = agent
+                .message_tx
+                .as_ref()
+                .ok_or_else(|| AgentError::NotRunning(agent_id.to_string()))?;
+            return tx.send(msg).map_err(|error| {
+                AgentError::ChannelClosed(format!("agent {agent_id} did not accept it: {error}"))
+            });
+        }
+
+        // Finished. Continue it if there is anything to continue from.
+        let (Some(spec), Some(transcript)) = (agent.spec.clone(), agent.transcript.clone()) else {
+            return Err(AgentError::NotRunning(agent_id.to_string()));
+        };
+        let seed = transcript.lock().unwrap().clone();
+        if seed.is_empty() {
+            return Err(AgentError::NotRunning(agent_id.to_string()));
+        }
+        let Some(api_client) = self.api_client.as_ref() else {
+            return Err(AgentError::Configuration(
+                "AgentManager has no API client, so a finished agent cannot be resumed".into(),
+            ));
+        };
+        let client = api_client.clone_box();
+
+        // A resumed turn starts from the child's own history: re-seeding the
+        // parent's fork would overwrite the conversation being continued.
+        let mut spec = spec;
+        spec.forked_context = None;
+        // The resumed turn is unwatched in exactly the way a background turn
+        // is — nobody is sitting in front of it — so its permission requests
+        // take the background path the first turn already used.
+        spec.run_in_background = true;
+        let task_id = spec.agent_id.clone();
+
+        // The turn gets a fresh pair of channels; the old ones died with
+        // their task.
+        let (msg_tx, msg_rx) = mpsc::unbounded_channel::<AgentMessage>();
+        agent.message_tx = Some(msg_tx);
+        agent.options.run_in_background = true;
+
+        let mut task_manager = self.task_manager.lock().await;
+        // Reopening keeps the id, so `TaskOutput` and any watcher still
+        // address the agent they have been following.
+        if let Err(error) = task_manager.reopen_task(&task_id) {
+            return Err(AgentError::NotRunning(format!(
+                "{agent_id}: the task could not be reopened ({error})"
+            )));
+        }
+        drop(task_manager);
+        let _ = agent.task_handle.reopen();
+        let status_tx = agent.status_tx.clone();
+        let _ = status_tx.send(AgentStatus::Running);
+
+        // The previous run's durable record, if any, was settled when that run
+        // ended and `settle` refuses to overwrite a terminal record, so the
+        // resumed turn writes none. Its bookkeeping is the reopened task and
+        // the status channel, which the same `spawn_run` updates.
+        let handle = self.spawn_run(
+            client,
+            spec,
+            content.to_string(),
+            seed,
+            transcript,
+            msg_rx,
+            status_tx,
+            None,
+        );
+        if let Some(instance) = self.agents.get_mut(agent_id) {
+            instance.task_join_handle = Some(handle);
+        }
+
+        tracing::info!("agent resumed: task_id={task_id}");
         Ok(())
     }
 
@@ -1745,38 +1961,44 @@ fn system_prompt_for(
 ///
 /// Creates a [`QueryEngine`], runs the submission, collects text output,
 /// and forwards lifecycle events to the parent.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn run_agent_task(
     api_client: Box<dyn ApiClient>,
-    model: ModelId,
-    system_prompt: String,
+    spec: AgentRunSpec,
     user_prompt: String,
-    working_directory: PathBuf,
-    permission_mode: PermissionMode,
-    permission_rules: Vec<PermissionRuleSpec>,
-    confirmation_bus: Option<ConfirmationBus>,
-    max_tokens: u32,
-    max_duration: u64,
-    max_turns: u32,
-    allowed_tools: Option<Vec<String>>,
-    writable: bool,
-    sandbox_config: Option<SandboxConfig>,
-    output_file: PathBuf,
-    agent_id: String,
-    parent_event_tx: Option<mpsc::UnboundedSender<EngineEvent>>,
-    tool_factory: Option<Arc<ToolExecutorFactory>>,
-    broadcast_tx: Option<broadcast::Sender<AgentObservableEvent>>,
-    retry_policy: Option<RetryPolicy>,
-    output_schema: Option<serde_json::Value>,
-    run_in_background: bool,
-    forked_context: Option<ForkedContext>,
-    event_callback: Option<TeammateEventCallback>,
-    hooks: Option<Arc<dyn HookExecutor>>,
-    agent_subject: String,
+    seed: Vec<Message>,
+    transcript: Arc<std::sync::Mutex<Vec<Message>>>,
     msg_rx: &mut mpsc::UnboundedReceiver<AgentMessage>,
 ) -> Result<AgentResult, AgentError> {
     use std::fmt::Write as _;
     use tokio::io::AsyncWriteExt as _;
+
+    let AgentRunSpec {
+        model,
+        system_prompt,
+        working_directory,
+        permission_mode,
+        permission_rules,
+        confirmation_bus,
+        max_tokens,
+        max_duration,
+        max_turns,
+        allowed_tools,
+        writable,
+        sandbox_config,
+        output_file,
+        agent_id,
+        parent_event_tx,
+        tool_factory,
+        broadcast_tx,
+        retry_policy,
+        output_schema,
+        run_in_background,
+        forked_context,
+        event_callback,
+        hooks,
+        agent_subject,
+    } = spec;
 
     // Notify parent that the agent started
     emit_lifecycle(
@@ -1808,6 +2030,10 @@ async fn run_agent_task(
 
     let fork_task = user_prompt.clone();
     let mut attempt_prompt = user_prompt;
+    // A continuation starts from the conversation the child already built.
+    // The fork never applies there: it would replace that conversation with
+    // the parent's prefix.
+    let base_seed = seed;
     let mut final_output = String::new();
     let mut final_status = AgentStatus::Completed;
     let mut final_error: Option<String> = None;
@@ -1823,11 +2049,13 @@ async fn run_agent_task(
             let _ = write!(attempt_prompt, "\n\n[Message from parent]: {}", msg.content);
         }
 
-        // Seed the child session with the parent's conversation prefix. The
-        // engine appends the task itself in `submit`, so this is exactly
+        // Seed the child session. A continuation carries its own history; the
+        // first turn carries the parent's prefix. The engine appends the task
+        // itself in `submit`, so for a fork this is exactly
         // `ForkedContext::fork_messages(task)` at the provider layer.
         let mut session = SessionState::new(working_directory.clone());
-        let mut seeded_prefix_messages = 0usize;
+        session.messages.clone_from(&base_seed);
+        let mut seeded_prefix_messages = base_seed.len();
         if let Some(ref fork) = forked_context {
             match seed_session_from_fork(&mut session, fork, &fork_task) {
                 Ok(seeded) => seeded_prefix_messages = seeded,
@@ -1922,6 +2150,13 @@ async fn run_agent_task(
         let usage = engine.total_usage();
         let attempt_tokens = usage.input_tokens + usage.output_tokens;
         total_token_usage = Some(total_token_usage.unwrap_or(0) + attempt_tokens as u64);
+
+        // Keep the conversation the child just built. This is the only copy:
+        // `drop(engine)` below takes the session with it, and the transcript
+        // is what a later `SendMessage` continues from.
+        if let Ok(mut messages) = transcript.lock() {
+            messages.clone_from(&engine.session().messages);
+        }
 
         // Drop engine to release event_tx so recv drains reliably
         drop(engine);
@@ -2156,10 +2391,15 @@ async fn run_agent_task(
     });
     let _ = tokio::fs::write(&meta_path, meta.to_string()).await;
 
+    let messages = transcript
+        .lock()
+        .map(|messages| messages.clone())
+        .unwrap_or_default();
     Ok(AgentResult {
         output: final_output,
         status,
         token_usage: total_token_usage,
+        messages,
     })
 }
 
@@ -2772,7 +3012,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_to_nonexistent_agent_errors() {
-        let mgr = make_manager();
+        let mut mgr = make_manager();
         let result = mgr.send_message("nope", "hi").await;
         assert!(matches!(result, Err(AgentError::NotFound(_))));
     }
@@ -2837,6 +3077,100 @@ mod tests {
         mgr.mark_idle(&agent_id, "no more work").await.unwrap();
 
         assert!(event_received.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A finished agent's conversation survives its task.
+    ///
+    /// The transcript is the only copy — the engine's session is dropped when
+    /// the turn returns — so this is what `send_message` continues from.
+    #[tokio::test]
+    async fn a_completed_agent_keeps_its_transcript() {
+        let mut mgr = make_manager();
+        mgr.set_api_client(Box::new(CapturingApi {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }));
+        let (agent_id, result, _cwd) =
+            spawn_and_wait(&mut mgr, "do the thing", SpawnOptions::default()).await;
+
+        assert!(!result.messages.is_empty(), "{result:?}");
+        let agent = mgr.get_agent(&agent_id).unwrap();
+        assert!(agent.is_resumable());
+        assert_eq!(agent.transcript().len(), result.messages.len());
+    }
+
+    /// A finished agent is continued, not refused: the second turn starts from
+    /// the conversation the first one built and keeps the same id.
+    #[tokio::test]
+    async fn a_finished_agent_is_resumed_with_its_own_history() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut mgr = make_manager();
+        mgr.set_api_client(Box::new(CapturingApi {
+            requests: Arc::clone(&requests),
+        }));
+        let (agent_id, first, _cwd) =
+            spawn_and_wait(&mut mgr, "do the thing", SpawnOptions::default()).await;
+        let first_len = first.messages.len();
+        assert!(first_len > 0);
+
+        mgr.send_message(&agent_id, "now do the next thing")
+            .await
+            .expect("a finished agent can be continued");
+
+        // The resumed turn reports Running until it finishes, and the handle
+        // keeps the id it already had.
+        assert_eq!(
+            mgr.get_agent(&agent_id).unwrap().status(),
+            AgentStatus::Running
+        );
+        assert_eq!(mgr.get_agent(&agent_id).unwrap().task_handle.id, agent_id);
+
+        let resumed = mgr.wait_for_completion(&agent_id).await.unwrap();
+        assert_eq!(resumed.status, AgentStatus::Completed);
+        assert!(
+            resumed.messages.len() >= first_len,
+            "the resumed turn must build on the first: {} < {first_len}",
+            resumed.messages.len()
+        );
+
+        // The second request carried the first turn's conversation as its
+        // prefix — that is what makes this a resume rather than a new agent.
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "one request per turn");
+        let second = &sent[1];
+        assert!(
+            second.len() > first_len,
+            "the resumed request must include the earlier turn: {} <= {first_len}",
+            second.len()
+        );
+    }
+
+    /// An agent that never reached the engine has nothing to continue, and the
+    /// manager says so instead of starting a turn from an empty history.
+    #[tokio::test]
+    async fn a_test_mode_agent_cannot_be_resumed() {
+        let mut mgr = make_manager();
+        mgr.enable_test_mode();
+        let tmp = tempfile::tempdir().unwrap();
+        mgr.spawn_agent(
+            AgentType::GeneralPurpose,
+            "hello",
+            SpawnOptions {
+                cwd: Some(tmp.path().to_path_buf()),
+                ..SpawnOptions::default()
+            },
+            "sess_1",
+            tmp.path().to_str().unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+        let agent_id = mgr.list_agents()[0].task_handle.id.clone();
+
+        let error = mgr
+            .send_message(&agent_id, "follow up")
+            .await
+            .expect_err("there is no transcript to resume");
+        assert!(matches!(error, AgentError::NotRunning(_)), "{error}");
     }
 
     #[tokio::test]
@@ -3418,6 +3752,7 @@ mod tests {
                     thinking: None,
                     usage,
                     stop_reason: "tool_use".into(),
+                    server_blocks: Vec::new(),
                 })
             } else {
                 Ok(ApiResponse {
@@ -3426,6 +3761,7 @@ mod tests {
                     thinking: None,
                     usage,
                     stop_reason: "end_turn".into(),
+                    server_blocks: Vec::new(),
                 })
             }
         }
@@ -3480,6 +3816,7 @@ mod tests {
                     cache_creation_tokens: 0,
                 },
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 

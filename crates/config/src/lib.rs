@@ -31,8 +31,9 @@ pub use remote_settings::{
 };
 pub use settings::{
     CURRENT_SCHEMA_VERSION, ConfigDiff, ConfigDiffEntry, ConfigError, ConfigService, HookLayers,
-    MarketplaceSetting, PermissionsSettings, PluginHostSettings, ProviderSettings,
-    RuntimeOverrides, SessionOverrides, Settings, config_home, migrate_settings, resolve_api_key,
+    MarketplaceSetting, MarketplaceSettingError, PermissionsSettings, PluginHostSettings,
+    ProviderSettings, RuntimeOverrides, SessionOverrides, Settings, config_home, migrate_settings,
+    resolve_api_key,
 };
 #[cfg(feature = "enterprise")]
 pub use trusted_device::{

@@ -192,7 +192,7 @@ async fn agent_background_spawn_returns_immediately() {
 
 #[tokio::test]
 async fn agent_send_message_to_unknown_agent_fails() {
-    let mgr = test_manager();
+    let mut mgr = test_manager();
 
     // There is no external-agent transport in this product: an id that was
     // not spawned by this manager has no receiver, so the message is refused
@@ -602,6 +602,7 @@ impl ApiClient for BlockingApiClient {
                 cache_creation_tokens: 0,
             },
             stop_reason: "end_turn".into(),
+            server_blocks: Vec::new(),
         })
     }
 

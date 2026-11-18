@@ -38,6 +38,7 @@ impl codape_core::api_client::ApiClient for ScriptedModel {
                 cache_creation_tokens: 0,
             },
             stop_reason: "end_turn".into(),
+            server_blocks: Vec::new(),
         })
     }
 
@@ -152,6 +153,7 @@ impl codape_core::api_client::ApiClient for SlowScriptedModel {
                 cache_creation_tokens: 0,
             },
             stop_reason: "end_turn".into(),
+            server_blocks: Vec::new(),
         })
     }
 
@@ -509,6 +511,7 @@ async fn a_session_reuses_its_history_and_a_new_session_starts_clean() {
                 thinking: None,
                 usage: codape_core::types::UsageSummary::default(),
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 
@@ -1221,6 +1224,7 @@ impl codape_core::api_client::ApiClient for ToolThenAnswerModel {
                 usage: codape_core::types::UsageSummary::default(),
                 stop_reason: "tool_use".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         } else {
             Ok(codape_core::api_client::ApiResponse {
@@ -1229,6 +1233,7 @@ impl codape_core::api_client::ApiClient for ToolThenAnswerModel {
                 usage: codape_core::types::UsageSummary::default(),
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
     }

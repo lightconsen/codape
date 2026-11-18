@@ -85,8 +85,10 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
   drives the STT state machine, and the terminal host does not. It used to answer
   "Toggled" while nothing listened.
 - `/desktop` and `/mobile` report the truth about surfaces and remote clients instead of
-  reading `CODAPE_DESKTOP`/`CODAPE_MOBILE` as if they were connections: there is no
-  desktop host, and remote clients attach through `codape bridge`.
+  reading `CODAPE_DESKTOP`/`CODAPE_MOBILE` as if they were connections: both name the
+  surface actually presenting the session and what it can do, `/desktop` says "active"
+  only for a registered `desktop` surface, and `/mobile` names `codape bridge` as the
+  path in because there is no mobile host here.
 - `/stickers` says it is not implemented — no Codape surface renders image messages.
 - `/heapdump` writes a process snapshot (version, OS, pid, RSS/VSZ/threads, open file
   descriptors) to `/tmp/codape-heap.prof` and reports the byte count. It is a process

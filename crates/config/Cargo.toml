@@ -39,6 +39,7 @@ once_cell.workspace = true
 bitflags.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+url.workspace = true
 keyring = { version = "4", optional = true }
 plist = "1.10"
 

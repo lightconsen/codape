@@ -339,6 +339,14 @@ pub struct CommandContext {
     pub cost_summary: String,
     /// Pipe input from a previous command in a chain (e.g., `/diff | /commit`).
     pub pipe_input: Option<String>,
+    /// The surface this session is actually presented in, with what it can do.
+    ///
+    /// `/desktop` and `/mobile` used to answer "none" no matter what was
+    /// rendering the session, because no command could see the presenter.
+    /// Carrying the descriptor makes the answer a fact rather than a constant:
+    /// a host that presents a session in a desktop window registers that
+    /// surface, and these commands report it.
+    pub surface: codape_core::surface::SurfaceDescriptor,
     /// Recent command lines, oldest first, for `/history`.
     ///
     /// A snapshot rather than a handle: the REPL owns the history file and a
@@ -395,6 +403,7 @@ impl CommandContext {
             version: String::new(),
             cost_summary: String::new(),
             pipe_input: None,
+            surface: codape_core::surface::SurfaceDescriptor::terminal(),
             recent_commands: Vec::new(),
         }
     }

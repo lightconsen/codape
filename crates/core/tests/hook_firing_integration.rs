@@ -128,6 +128,7 @@ fn text_response(content: &str) -> ApiResponse {
         usage: usage(),
         stop_reason: "end_turn".into(),
         thinking: None,
+        server_blocks: Vec::new(),
     }
 }
 
@@ -178,6 +179,7 @@ impl ApiClient for ToolThenTextMock {
                 usage: usage(),
                 stop_reason: "tool_use".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         } else {
             Ok(text_response("done"))

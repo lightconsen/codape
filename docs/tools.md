@@ -33,7 +33,7 @@ Implements the tool trait system, registers built-in tools, and provides executi
 |------|----------|--------|
 | Read, Write, Edit, Glob, Grep, NotebookEdit | File I/O | Functional |
 | Bash, PowerShell | Shell execution | Functional (sandbox + allowlist + metacharacter rejection). **One of the two is registered, chosen by platform**: PowerShell on Windows, Bash everywhere else — see below. |
-| WebSearch | Web | Functional (rate limiting, domain whitelist, redirect validation) |
+| WebSearch | Web | Functional (rate limiting, domain whitelist, redirect validation) — retired while `server_tools` is on, when the provider runs the search itself |
 | Skill | Skill loading | Functional (bundled skills compiled into the binary, plus `.md` files on disk) |
 | Brief | Session summary | Functional |
 | TaskCreate, TaskGet, TaskList, TaskUpdate, TaskStop, TaskOutput | Task management | Functional (JSONL persistence via `TaskStore`) |
@@ -41,7 +41,7 @@ Implements the tool trait system, registers built-in tools, and provides executi
 | CronCreate, CronDelete, CronList | Cron scheduling | Functional (background runner via `CronScheduler::spawn_runner`) |
 | TodoWrite | Todo tracking | Functional |
 | AskUserQuestion | Interactive | Functional |
-| SendMessage, EnterPlanMode, ExitPlanMode | Agent flow | Functional (Enter/Exit switch the session's permission mode through the dispatcher's shared plan-mode switch; Enter refuses while a plan is not underway, Exit hands the plan back for approval) |
+| SendMessage, EnterPlanMode, ExitPlanMode | Agent flow | Functional (SendMessage is manager-backed: it delivers to a running sub-agent or resumes a finished one from its transcript, and reports the manager's error when the id is unknown; Enter/Exit switch the session's permission mode through the dispatcher's shared plan-mode switch; Enter refuses while a plan is not underway, Exit hands the plan back for approval) |
 | LspTool | LSP integration | Functional (spawns language server, JSON-RPC stdio) |
 | McpAuthTool | MCP auth | Functional (OAuth flow: browser open, localhost callback, token exchange, persistence to `~/.codape/mcp_tokens.json`) |
 | ListMcpResourcesTool, ReadMcpResourceTool | MCP resources | Functional |
@@ -69,6 +69,49 @@ Tungsten) were removed: they were permanently `is_enabled: false`, no feature
 flag could turn them on, the dispatcher filtered them out of every listing, and
 their only behavior was a refusal string. `register_builtin_tools` now registers 44 baseline tools, 5 Chrome tools and
 `WebFetch` (gated).
+
+### Provider-run tools (`server_tools`)
+
+`server_tools` (`--betas server_tools`) moves web search and web fetch to the
+provider. The request declares two versioned types — `web_search_20260209` and
+`web_fetch_20260209` — instead of the local pair, and the provider runs them
+inside its own turn. Both versions carry dynamic filtering: the model writes and
+runs the code that filters results before they reach the context window, which
+is the difference between one round trip on good sources and one round trip plus
+a pile of discarded HTML. The standalone `code_execution` tool is deliberately
+not declared with them; it opens a second execution environment and the model
+then has to work out which one it is in.
+
+Three rules decide whether the declaration goes out:
+
+- **Only where it runs.** `ApiClient::supports_server_tools` is off by default;
+  `AnthropicApiClient` turns it on only for `https://api.anthropic.com` with no
+  cloud deployment. A gateway may accept the JSON and never run the tool,
+  Vertex has only the older `web_search_20250305` and no web fetch, and an
+  OpenAI-compatible endpoint has no encoding for a server tool at all. A session
+  that asked for the flag on an endpoint that cannot carry it is told so once,
+  at startup, rather than searching locally in silence.
+- **Only once.** A registry tool with the same name is not declared twice; the
+  local one wins, because it is the one this session can actually run.
+- **Only one of the pair.** `superseded_by_provider_web_tools` covers
+  `WebSearch` and `WebFetch`, and the dispatcher takes them out of both the
+  listing and the execute path while `provider_web_tools()` is set. That bit is
+  not the flag: the session sets it from `QueryEngine::declares_server_tools()`,
+  which is the flag *and* a transport that can carry the declaration. A
+  session that asked for the flag on an endpoint that cannot run a server tool
+  keeps its local search — the flag warns at startup and the tools stay. Two
+  descriptions of a search ask the model to guess which the session wants, and
+  a call to a superseded tool is refused with the reason rather than run twice.
+  `mcp serve` never sets the bit: it publishes tools to another agent and has
+  no provider of its own.
+
+The round trip is verbatim. The provider's blocks (`server_tool_use`,
+`web_search_tool_result`, `bash_code_execution_tool_result`, …) are stored as
+the JSON it produced, in the order it produced them — a result precedes the text
+that cites it — and replayed unchanged in the next request. A `pause_turn` stop
+reason (`classify_stop_reason` → `StopDisposition::Resume`) is the provider
+saying it hit its own sampling limit mid-search; the engine re-sends the turn
+and the search continues, bounded by `MAX_PROVIDER_RESUMES`.
 
 ### The result-size ladder
 

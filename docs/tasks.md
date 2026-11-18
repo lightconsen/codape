@@ -741,7 +741,7 @@
 
 ### 12.9 内容与上下文命令 (crate: `commands`)
 - [x] 实现 `/copy`：复制消息内容到剪贴板
-- [x] 实现 `/init`：初始化项目（生成 CLAUDE.md 等）
+- [x] 实现 `/init`：初始化项目（生成 `AGENTS.md`，`CLAUDE.md` 同样被读取）
 - [x] 实现 `/summary`：生成当前会话摘要
 - [x] 实现 `/files`：列出项目文件结构
 - [x] 实现 `/context`：查看当前上下文装配内容

@@ -62,7 +62,7 @@ pub struct PromptCompiler {
 1. Register static blocks (base settings, tool guidelines, output style)
 2. Register dynamic renderers (session guidance, memory, denied tools, git status)
 3. `assemble()` produces `AssembledContext { system_prompt, context_messages, estimated_tokens }`
-4. `CLAUDE.md` from cwd/parent dirs is loaded and wrapped as a `<system-reminder>` user message; the user-level file at `<config home>/CLAUDE.md` is appended after it, so a personal preference applies in every repository and outlives a project's own file
+4. Instruction files are loaded and wrapped as a `<system-reminder>` user message: `AGENTS.md` and `CLAUDE.md` from cwd and its parents (`AGENTS.md` first, so a project file overrides the generic one), then the user-level file at `<config home>/CLAUDE.md` — and its `AGENTS.md` sibling — appended after them, so a personal preference applies in every repository and outlives a project's own file
 5. Git branch + status are injected as system context
 
 ### 2.2 Feature Prompts (`crates/core/src/prompts/features/`)
@@ -288,7 +288,7 @@ pub enum ToolTier {
 **Built-in tools** (`crates/tools/src/builtins/`):
 - File: `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`
 - Shell: `BashTool`, `PowerShellTool`
-- Web: `WebFetchTool`, `WebSearchTool`
+- Web: `WebFetchTool`, `WebSearchTool` (both retired when the `server_tools` flag hands search to the provider)
 - Project: `TaskCreateTool`, `TaskUpdateTool`, `CronCreateTool`, `TodoWriteTool`
 - Dev: `LspTool`, `NotebookEditTool`
 - Browser: `ChromeListTabsTool`, `ChromeNavigateTool`, `ChromeExecuteJsTool`, `ChromeScreenshotTool`, `ChromeGetContentTool`

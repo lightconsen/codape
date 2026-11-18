@@ -210,6 +210,7 @@ impl Provider for MockProvider {
             },
             stop_reason: "end_turn".into(),
             thinking: None,
+            server_blocks: Vec::new(),
         })
     }
 
@@ -872,6 +873,7 @@ async fn anthropic_compatible_profile_forwards_structured_tools() {
             "properties": { "file_path": { "type": "string" } },
             "required": ["file_path"]
         }),
+        kind: codape_core::tool_executor::ToolKind::Client,
     };
 
     let mut config = ApiConfig::new("test-key".into()).with_provider_profile("kimi");
@@ -999,6 +1001,7 @@ async fn openai_provider_streaming_emits_text_tool_and_usage_events() {
             },
             "required": ["file"]
         }),
+        kind: codape_core::tool_executor::ToolKind::Client,
     };
     let provider = OpenAiCompatibleProvider::new("openai", base_url, "test-key")
         .with_session_context("sess-stream", "dev-stream");
@@ -1110,6 +1113,7 @@ async fn openai_responses_provider_uses_responses_payload_shape() {
             "properties": { "file": { "type": "string" } },
             "required": ["file"]
         }),
+        kind: codape_core::tool_executor::ToolKind::Client,
     };
     let provider = OpenAiCompatibleProvider::new("openai", base_url, "test-key")
         .with_provider_profile("openai-responses")

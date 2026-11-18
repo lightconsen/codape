@@ -1016,6 +1016,7 @@ Feature flags 不能只是本地 bool map，必须支持：
 - voice_mode
 - workflow_scripts
 - web_browser_tool
+- server_tools（已接线：请求声明 provider 侧的 `web_search_20260209` / `web_fetch_20260209`，同时下线本地 `WebSearch`/`WebFetch`；仅在 Anthropic 自家端点上实际声明，其余端点启动时告警）
 - ~~context_collapse~~（已移除：工作区里没有任何产物面）
 - ~~terminal_panel~~（已移除：工作区里没有任何产物面）
 - ~~kairos / proactive~~（已移除：工作区里没有任何产物面）

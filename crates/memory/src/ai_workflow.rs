@@ -67,6 +67,7 @@ pub(crate) mod tests {
                     cache_creation_tokens: 0,
                 },
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 

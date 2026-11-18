@@ -269,6 +269,60 @@ pub struct MarketplaceSetting {
     pub url: String,
 }
 
+/// Why a marketplace cannot be added to settings.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MarketplaceSettingError {
+    /// The name was empty.
+    #[error("a marketplace needs a name")]
+    EmptyName,
+    /// The name contains a character that makes it hard to type or address.
+    #[error("a marketplace name may not contain whitespace or '/'")]
+    InvalidName,
+    /// The URL did not parse.
+    #[error("'{0}' is not a URL")]
+    InvalidUrl(String),
+    /// The URL is not HTTPS.
+    ///
+    /// Registration refuses a non-HTTPS marketplace anyway
+    /// (`PluginManager::register_marketplace`), so accepting one into settings
+    /// would write a file whose only effect is a warning at every startup.
+    #[error("'{0}' must be an https URL")]
+    InsecureUrl(String),
+}
+
+impl MarketplaceSetting {
+    /// Validate and normalize an entry before it is written to settings.
+    ///
+    /// This is the write-side counterpart of
+    /// `PluginManager::register_marketplace`: the same rules, applied before
+    /// anything is persisted, so an unusable marketplace is refused with a
+    /// message instead of being saved and skipped later.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MarketplaceSettingError`] when the name is empty or contains
+    /// whitespace or `/`, when the URL does not parse, or when it is not HTTPS.
+    pub fn validated(name: &str, url: &str) -> Result<Self, MarketplaceSettingError> {
+        let name = name.trim();
+        let url = url.trim();
+        if name.is_empty() {
+            return Err(MarketplaceSettingError::EmptyName);
+        }
+        if name.chars().any(|c| c.is_whitespace() || c == '/') {
+            return Err(MarketplaceSettingError::InvalidName);
+        }
+        let parsed = url::Url::parse(url)
+            .map_err(|_| MarketplaceSettingError::InvalidUrl(url.to_string()))?;
+        if parsed.scheme() != "https" {
+            return Err(MarketplaceSettingError::InsecureUrl(url.to_string()));
+        }
+        Ok(Self {
+            name: name.to_string(),
+            url: url.to_string(),
+        })
+    }
+}
+
 /// Hook documents grouped by the trust tier of the source they came from.
 ///
 /// [`Settings::hooks`] stays the merged view for compatibility: it is what a
@@ -1842,6 +1896,46 @@ mod tests {
         std::fs::write(&user_path, r#"{"marketplaces": [{"name": "missing-url"}]}"#).unwrap();
         let service = ConfigService::new(user_path, None);
         assert!(service.load_plugin_host_config().marketplaces.is_empty());
+    }
+
+    #[test]
+    fn a_marketplace_is_validated_the_way_registration_would() {
+        let ok = MarketplaceSetting::validated("internal", "https://plugins.example")
+            .expect("an https marketplace is accepted");
+        assert_eq!(ok.name, "internal");
+        assert_eq!(ok.url, "https://plugins.example");
+
+        // Trimming happens before validation, so a pasted value with stray
+        // whitespace is not rejected for a reason the user cannot see.
+        let trimmed = MarketplaceSetting::validated("  internal  ", " https://x.example ")
+            .expect("surrounding whitespace is trimmed");
+        assert_eq!(trimmed.name, "internal");
+        assert_eq!(trimmed.url, "https://x.example");
+    }
+
+    #[test]
+    fn an_unusable_marketplace_is_refused_with_a_reason() {
+        assert_eq!(
+            MarketplaceSetting::validated("", "https://x.example").unwrap_err(),
+            MarketplaceSettingError::EmptyName
+        );
+        for name in ["two words", "a/b"] {
+            assert_eq!(
+                MarketplaceSetting::validated(name, "https://x.example").unwrap_err(),
+                MarketplaceSettingError::InvalidName,
+                "{name:?} was accepted"
+            );
+        }
+        assert_eq!(
+            MarketplaceSetting::validated("x", "not a url").unwrap_err(),
+            MarketplaceSettingError::InvalidUrl("not a url".into())
+        );
+        // Registration refuses a non-HTTPS marketplace, so saving one would
+        // only produce a warning at every startup.
+        assert_eq!(
+            MarketplaceSetting::validated("x", "http://x.example").unwrap_err(),
+            MarketplaceSettingError::InsecureUrl("http://x.example".into())
+        );
     }
 
     #[test]

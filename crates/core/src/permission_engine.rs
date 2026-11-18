@@ -1145,6 +1145,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -1214,6 +1215,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -1270,6 +1272,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -1814,6 +1817,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 

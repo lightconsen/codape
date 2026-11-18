@@ -34,7 +34,8 @@ use codape_memory::{
 };
 use codape_tools::{
     AgentTool, ChromeClient, CronScheduler, ExecutionContext, RateLimiter, RegistryToolDispatcher,
-    TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry, register_builtin_tools,
+    SendMessageTool, TaskStore, ToolExecutor as ToolsExecutor, ToolRegistry,
+    register_builtin_tools,
 };
 use std::collections::HashMap;
 use std::io::Write;
@@ -1628,6 +1629,20 @@ fn core_message_to_ui_message(
                 Some(state),
             )
         }
+        // A block from a tool the provider ran. It carries its own JSON —
+        // search results, a container id — which belongs to the next request,
+        // not to the reader; the summary is what the turn looked like live.
+        (_, codape_core::types::MessageContent::ServerBlock(server)) => (
+            codape_ui::message_list::MessageRole::ToolResult,
+            server.summary(),
+            server
+                .block
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            true,
+            None,
+        ),
         // A thinking block belongs to the assistant turn it preceded, and it
         // is shown folded like it was live. Dropping it here made a resumed
         // session look like the model had never reasoned at all.
@@ -3111,6 +3126,10 @@ pub(crate) fn apply_engine_flag_behaviours(
     // the first, and the tool path consults the second.
     engine.set_streaming_tool_execution(flags.streaming_tool_execution);
     engine.set_tool_use_summaries(flags.tool_use_summaries);
+    // Provider-run tools are advertised on the request rather than executed
+    // here; the engine checks the transport before declaring any, and says so
+    // when the endpoint cannot carry them.
+    engine.set_server_tools(flags.server_tools);
 
     if flags.team_collaboration {
         // The team id names the collaboration; shared notes come from the
@@ -3511,6 +3530,13 @@ impl ReplLoop {
                 .with_parent_context_provider(move || {
                     snapshot_for_agent_tool.lock().unwrap().clone()
                 }),
+        ));
+        // SendMessage is the other half of spawning an agent: it continues the
+        // conversation an agent built instead of paying for a fresh one. It
+        // needs the same manager, which is why the registered default (no
+        // manager) is replaced here rather than used as-is.
+        registry.register(Arc::new(
+            SendMessageTool::new().with_manager(Arc::clone(&agent_manager)),
         ));
         // Workflow scripts spawn agents, so they are opt-in: the flag is what
         // turns the tool from "not enabled" into callable. `--betas` is
@@ -4771,6 +4797,17 @@ impl ReplLoop {
         );
         if let Some(dispatcher) = &self.agents.dispatcher {
             dispatcher.set_feature_flags(self.options.feature_flags.clone());
+            // Whether the provider takes over web search depends on more than
+            // the flag — the endpoint has to be able to run a server tool — so
+            // the dispatcher is told what the engine will actually send.
+            // Retiring the local pair for a declaration that never goes out
+            // would leave the session with no search at all.
+            let declares = self
+                .session
+                .engine
+                .as_ref()
+                .is_some_and(codape_core::QueryEngine::declares_server_tools);
+            dispatcher.set_provider_web_tools(declares);
         }
 
         // 9b. Context-window overrides. The engine already honors the
@@ -13563,6 +13600,17 @@ impl ReplLoop {
             })
             .collect();
         ctx.api_key_set = self.session.api_client.is_some();
+        // The surface commands report what is presenting the session, and the
+        // built-in presenter is the terminal. Its descriptor is built the way
+        // the mod session builds it, so `/desktop` and `/mobile` cannot
+        // disagree with what a mod sees as `e.surface` — including whether
+        // this terminal can draw images.
+        ctx.surface = {
+            use codape_core::surface::UiSurface as _;
+            codape_ui::surface::TerminalSurface::new()
+                .descriptor()
+                .clone()
+        };
         ctx.elapsed_secs = self
             .ui
             .query_start_time
@@ -14713,6 +14761,7 @@ mod tests {
                     thinking: None,
                     usage,
                     stop_reason: "tool_use".into(),
+                    server_blocks: Vec::new(),
                 });
             }
 
@@ -14730,6 +14779,7 @@ mod tests {
                 thinking: None,
                 usage,
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 
@@ -14830,6 +14880,7 @@ mod tests {
                     cache_creation_tokens: 0,
                 },
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 
@@ -14892,6 +14943,7 @@ mod tests {
                     cache_creation_tokens: 0,
                 },
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             })
         }
 
@@ -14965,6 +15017,7 @@ mod tests {
             name: "Read".into(),
             description: "read".into(),
             input_schema: serde_json::json!({"type":"object"}),
+            kind: codape_core::tool_executor::ToolKind::Client,
         };
         let inner: Arc<dyn CoreToolExecutor + Send + Sync> =
             Arc::new(StubToolExecutor { tools: vec![tool] });
@@ -14980,6 +15033,7 @@ mod tests {
             name: "Read".into(),
             description: "read".into(),
             input_schema: serde_json::json!({"type":"object"}),
+            kind: codape_core::tool_executor::ToolKind::Client,
         };
         let inner: Arc<dyn CoreToolExecutor + Send + Sync> =
             Arc::new(StubToolExecutor { tools: vec![tool] });
@@ -16739,6 +16793,7 @@ mod tests {
                     thinking: None,
                     usage: UsageSummary::default(),
                     stop_reason: "end_turn".into(),
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -16782,17 +16837,20 @@ mod tests {
         assert!(off.team_context().is_none(), "off must install nothing");
         assert!(!off.streaming_tool_execution());
         assert!(!off.tool_use_summaries());
+        assert!(!off.server_tools());
 
         let mut on = engine();
         let flags = FeatureFlags {
             team_collaboration: true,
             streaming_tool_execution: true,
             tool_use_summaries: true,
+            server_tools: true,
             ..FeatureFlags::default()
         };
         apply_engine_flag_behaviours(&mut on, &flags, Some(&memory_base));
         assert!(on.streaming_tool_execution());
         assert!(on.tool_use_summaries());
+        assert!(on.server_tools());
         let context = on
             .team_context()
             .expect("the flag installs a team context")

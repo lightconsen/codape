@@ -34,6 +34,55 @@ pub struct ThinkingBlock {
     pub signature: String,
 }
 
+/// A provider-side tool block, kept exactly as the provider wrote it.
+///
+/// A server tool call (`server_tool_use`) and its result
+/// (`web_search_tool_result`, `bash_code_execution_tool_result`, …) are one
+/// unit the provider validates on the way back in: the result carries the
+/// sources, the container id or the exit code that the next request is checked
+/// against. Re-modelling each shape would mean the round-trip is only as
+/// faithful as our struct, and a field we did not know about would be silently
+/// dropped. The block is stored verbatim and sent back verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerBlock {
+    /// The provider's own JSON for the block.
+    pub block: serde_json::Value,
+}
+
+impl ServerBlock {
+    /// Wrap a provider block.
+    #[must_use]
+    pub const fn new(block: serde_json::Value) -> Self {
+        Self { block }
+    }
+
+    /// The block's `type` field, when it has one.
+    #[must_use]
+    pub fn block_type(&self) -> Option<&str> {
+        self.block.get("type").and_then(serde_json::Value::as_str)
+    }
+
+    /// A one-line label for a UI that has to show the block happened.
+    ///
+    /// Server tool work is invisible by nature — the user sees the answer it
+    /// produced and none of the calls — so this is what lets a transcript say
+    /// a search ran rather than leave a silent gap.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self.block_type().unwrap_or("server block") {
+            "server_tool_use" => {
+                let name = self
+                    .block
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("a provider tool");
+                format!("provider ran {name}")
+            }
+            other => other.replace('_', " "),
+        }
+    }
+}
+
 /// Content of a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -54,6 +103,13 @@ pub enum MessageContent {
     /// message as an image block. A provider that cannot take images is
     /// handled where the request is built, not here.
     Image(ImageBlock),
+    /// A block produced by a tool the provider ran itself.
+    ///
+    /// The engine never executes these: [`ToolCall`] blocks come back for
+    /// local dispatch, and these are the provider's own work — a search it
+    /// performed, code it ran in its sandbox. They belong to the assistant
+    /// turn that produced them and go back to the provider unchanged.
+    ServerBlock(ServerBlock),
 }
 
 /// A single message in a conversation.

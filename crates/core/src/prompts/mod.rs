@@ -9,6 +9,8 @@
 
 pub mod base;
 
+pub use base::INSTRUCTION_FILE_NAMES;
+
 /// Feature-specific prompt templates — single-purpose AI tasks.
 pub mod features {
     pub mod agent_generation;

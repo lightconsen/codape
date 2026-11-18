@@ -54,6 +54,7 @@ fn text_response(content: &str) -> ApiResponse {
         usage: usage(content.len()),
         stop_reason: "end_turn".into(),
         thinking: None,
+        server_blocks: Vec::new(),
     }
 }
 
@@ -64,6 +65,7 @@ fn tool_response(tool_calls: Vec<ToolCall>) -> ApiResponse {
         usage: usage(20),
         stop_reason: "end_turn".into(),
         thinking: None,
+        server_blocks: Vec::new(),
     }
 }
 
@@ -251,6 +253,7 @@ impl ApiClient for ThinkingToolMock {
                     thinking: "I should read the file first.".into(),
                     signature: "sig-abc".into(),
                 }),
+                server_blocks: Vec::new(),
             })
         } else {
             Ok(text_response("done"))
@@ -797,6 +800,7 @@ impl ApiClient for BothPathsMock {
                 usage: usage(10),
                 stop_reason: "tool_use".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             }
         } else {
             ApiResponse {
@@ -805,6 +809,7 @@ impl ApiClient for BothPathsMock {
                 usage: usage(10),
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             }
         })
     }
@@ -1101,6 +1106,7 @@ async fn termination_budget_exhausted() {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
         async fn create_message_streaming(
@@ -1168,6 +1174,7 @@ impl ApiClient for CountingMock {
             },
             stop_reason: "end_turn".into(),
             thinking: None,
+            server_blocks: Vec::new(),
         })
     }
     async fn create_message_streaming(
@@ -1537,6 +1544,7 @@ fn budget_trigger_response() -> ApiResponse {
         },
         stop_reason: "end_turn".into(),
         thinking: None,
+        server_blocks: Vec::new(),
     }
 }
 

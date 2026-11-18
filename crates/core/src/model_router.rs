@@ -210,8 +210,25 @@ impl ModelRouter {
                 events.push(StreamEvent::SignatureDelta(block.signature));
             }
         }
-        if !resp.content.is_empty() {
-            events.push(StreamEvent::TextDelta(resp.content));
+        // Text and provider-run tool blocks go out in the order the provider
+        // produced them: a search result precedes the text that cites it, and
+        // replaying it afterwards would be a turn the provider never emitted.
+        let mut cursor = 0usize;
+        for (offset, block) in resp.server_blocks {
+            let mut offset = offset.min(resp.content.len());
+            while offset > cursor && !resp.content.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            if offset > cursor {
+                events.push(StreamEvent::TextDelta(
+                    resp.content[cursor..offset].to_string(),
+                ));
+                cursor = offset;
+            }
+            events.push(StreamEvent::ServerBlock(block));
+        }
+        if cursor < resp.content.len() {
+            events.push(StreamEvent::TextDelta(resp.content[cursor..].to_string()));
         }
         for tc in resp.tool_calls {
             events.push(StreamEvent::ToolCallBlockStart {
@@ -308,6 +325,21 @@ impl ApiClient for ModelRouter {
 
     fn with_request_context(&self, context: RequestContext) -> Box<dyn ApiClient> {
         Box::new(self.clone_with_request_context(context))
+    }
+
+    /// Whether every route can run a provider-side tool.
+    ///
+    /// A declaration is sent with the request, not with a route, so the whole
+    /// chain has to understand it: a fallback provider that would reject a
+    /// versioned type turns a working request into a failed one the moment the
+    /// primary is unavailable. An empty chain says no — there is nothing that
+    /// could run it.
+    fn supports_server_tools(&self) -> bool {
+        !self.routes.is_empty()
+            && self
+                .routes
+                .iter()
+                .all(|route| route.provider.can_run_server_tools())
     }
 
     async fn create_message(
@@ -495,6 +527,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
         async fn create_message_streaming(

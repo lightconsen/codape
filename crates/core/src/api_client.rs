@@ -806,6 +806,16 @@ pub struct ApiResponse {
     pub stop_reason: String,
     /// A thinking block the provider requires to be passed back, if any.
     pub thinking: Option<ThinkingBlock>,
+    /// Blocks the provider produced by running its own tools, each paired
+    /// with the number of text bytes that preceded it.
+    ///
+    /// Empty for a provider that runs nothing, and for a request that
+    /// declared no server tools. They are carried separately from `content`
+    /// because they are not text: each one goes back into the assistant turn
+    /// verbatim, in the position the provider emitted it. The offset is what
+    /// reconstructs that position — `content` is one flat string, and a block
+    /// written after all of it is a different turn.
+    pub server_blocks: Vec<(usize, serde_json::Value)>,
 }
 
 /// Result from a streaming API call.
@@ -838,6 +848,14 @@ pub enum StreamEvent {
         /// Complete JSON input.
         input: serde_json::Value,
     },
+    /// A complete block from a tool the provider ran itself.
+    ///
+    /// Server-tool blocks are not streamed as deltas the way a client tool's
+    /// input is: the provider runs the call and emits the finished
+    /// `server_tool_use` / `web_search_tool_result` / `…_tool_result` block in
+    /// one piece. Nothing local executes it — it is carried so the assistant
+    /// turn can be sent back whole, which is what the next request requires.
+    ServerBlock(serde_json::Value),
     /// Token usage summary (emitted at end of stream).
     UsageSummary(UsageSummary),
     /// Provider stop reason observed at end of stream
@@ -884,6 +902,18 @@ pub trait ApiClient: Send + Sync {
         max_tokens: u32,
         tools: &[ToolInfo],
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + 'static>>;
+
+    /// Whether this transport can carry provider-run tool declarations.
+    ///
+    /// A `server_tool_use` block only exists on the provider's own Messages
+    /// API: a gateway that merely speaks the same JSON would either reject the
+    /// versioned type or accept it and never run the tool, and an
+    /// OpenAI-compatible endpoint has no encoding for it at all. Off by
+    /// default, so a transport that says nothing keeps the request it always
+    /// sent.
+    fn supports_server_tools(&self) -> bool {
+        false
+    }
 }
 
 /// An [`ApiClient`] that stamps a reasoning effort onto every request context.
@@ -949,6 +979,11 @@ impl ApiClient for EffortClient {
                 .with_request_context(self.context_with_effort(context)),
             effort: self.effort,
         })
+    }
+
+    /// Whatever the wrapped client can carry: this one only stamps effort.
+    fn supports_server_tools(&self) -> bool {
+        self.inner.supports_server_tools()
     }
 
     async fn create_message(
@@ -1518,6 +1553,19 @@ impl ApiClient for AnthropicApiClient {
         Box::new(self.cloned_with_request_context(context))
     }
 
+    /// Only Anthropic's own endpoint.
+    ///
+    /// The versioned server-tool types are Anthropic's, and support for them
+    /// varies by deployment: on Vertex only the older `web_search_20250305`
+    /// exists and web fetch is absent, and a gateway that answers the same
+    /// JSON may accept the declaration and never run the tool. Declaring one
+    /// where it is not run turns a session that searched into one that
+    /// silently stopped, so the declaration goes only where it is known to
+    /// work — and the flag that asked for it says so when it is elsewhere.
+    fn supports_server_tools(&self) -> bool {
+        self.config.cloud.is_none() && self.is_anthropic_api()
+    }
+
     async fn create_message(
         &self,
         system: &str,
@@ -1561,16 +1609,11 @@ impl ApiClient for AnthropicApiClient {
         );
 
         if !tools.is_empty() && capabilities.tool_use {
-            let tools_json: Vec<serde_json::Value> = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.input_schema,
-                    })
-                })
-                .collect();
+            // Each tool declares itself: a client tool carries its schema,
+            // a provider-run tool carries the versioned type the provider
+            // dispatches on.
+            let tools_json: Vec<serde_json::Value> =
+                tools.iter().map(ToolInfo::request_declaration).collect();
             body.as_object_mut()
                 .unwrap()
                 .insert("tools".to_string(), serde_json::Value::Array(tools_json));
@@ -1631,14 +1674,17 @@ impl ApiClient for AnthropicApiClient {
 
                 let content_blocks = json["content"].as_array();
                 let mut text_parts = Vec::new();
+                let mut text_len = 0usize;
                 let mut tool_calls = Vec::new();
                 let mut thinking = None;
+                let mut server_blocks = Vec::new();
                 if let Some(blocks) = content_blocks {
                     for block in blocks {
                         match block.get("type").and_then(|v| v.as_str()) {
                             Some("text") => {
                                 if let Some(t) = block["text"].as_str() {
                                     text_parts.push(t);
+                                    text_len += t.len();
                                 }
                             }
                             Some("tool_use") => {
@@ -1666,6 +1712,13 @@ impl ApiClient for AnthropicApiClient {
                                         .unwrap_or_default()
                                         .to_string(),
                                 });
+                            }
+                            Some(block_type) if is_server_block_type(block_type) => {
+                                // The provider ran this one itself. Keep the
+                                // block whole — the next request is validated
+                                // against exactly the shape that came out —
+                                // and remember where in the text it sat.
+                                server_blocks.push((text_len, block.clone()));
                             }
                             _ => {}
                         }
@@ -1715,6 +1768,7 @@ impl ApiClient for AnthropicApiClient {
                     usage,
                     stop_reason,
                     thinking,
+                    server_blocks,
                 })
             })
             .await?;
@@ -1769,16 +1823,11 @@ impl ApiClient for AnthropicApiClient {
         );
 
         if !tools.is_empty() && capabilities.tool_use {
-            let tools_json: Vec<serde_json::Value> = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.input_schema,
-                    })
-                })
-                .collect();
+            // Each tool declares itself: a client tool carries its schema,
+            // a provider-run tool carries the versioned type the provider
+            // dispatches on.
+            let tools_json: Vec<serde_json::Value> =
+                tools.iter().map(ToolInfo::request_declaration).collect();
             body.as_object_mut()
                 .unwrap()
                 .insert("tools".to_string(), serde_json::Value::Array(tools_json));
@@ -1914,6 +1963,20 @@ struct SseParserState {
     /// Input-JSON deltas that arrived before their `content_block_start`.
     /// Buffered and flushed once the mapping is known.
     deferred_deltas: Vec<(usize, String)>,
+}
+
+/// Whether a content-block type belongs to a tool the provider ran itself.
+///
+/// `server_tool_use` is the provider saying it is about to run one of its
+/// tools; every `*_tool_result` is that tool's answer (`web_search_tool_result`,
+/// `web_fetch_tool_result`, `code_execution_tool_result`, the code-execution
+/// variants, and any result type a future version adds). A plain `tool_result`
+/// is the *client's* answer to a local call and must keep its existing path,
+/// which is why the suffix test excludes it.
+#[must_use]
+fn is_server_block_type(block_type: &str) -> bool {
+    block_type == "server_tool_use"
+        || (block_type.ends_with("_tool_result") && block_type != "tool_result")
 }
 
 /// The value of a provider header, read from the environment.
@@ -2225,6 +2288,13 @@ fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEve
                         }
                     }
                     out
+                }
+                // A block the provider produced by running a tool itself.
+                // There is nothing to assemble and nothing to execute: the
+                // block arrives finished, and the only thing that matters is
+                // that it goes back into the assistant turn unchanged.
+                Some(block_type) if is_server_block_type(block_type) => {
+                    vec![StreamEvent::ServerBlock(block.clone())]
                 }
                 _ => Vec::new(),
             }
@@ -3406,6 +3476,70 @@ mod tests {
             matches!(events.as_slice(), [StreamEvent::ToolCallBlockStart { id, name }] if id == "toolu_01ABC" && name == "read")
         );
         assert_eq!(state.index_to_id.get(&1), Some(&"toolu_01ABC".to_string()));
+    }
+
+    /// `server_tool_use` and its result are kept whole and never enter the
+    /// local tool-call path: nothing here runs them, and a result routed
+    /// through `tool_result` would be sent back as the client's own answer.
+    #[test]
+    fn parse_sse_message_server_tool_blocks_are_kept_verbatim() {
+        let mut state = SseParserState::default();
+        let started = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_01\",\"name\":\"web_search\",\"input\":{\"query\":\"rust\"}}}\n\n";
+        let events = parse_sse_message(started, &mut state);
+        let [StreamEvent::ServerBlock(block)] = events.as_slice() else {
+            panic!("expected one server block, got {events:?}");
+        };
+        assert_eq!(block["type"], "server_tool_use");
+        assert_eq!(block["name"], "web_search");
+        assert!(
+            state.index_to_id.is_empty(),
+            "a server call is not a local call"
+        );
+
+        let result = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_01\",\"content\":[]}}\n\n";
+        let events = parse_sse_message(result, &mut state);
+        assert!(
+            matches!(events.as_slice(), [StreamEvent::ServerBlock(block)] if block["type"] == "web_search_tool_result"),
+            "{events:?}"
+        );
+    }
+
+    /// The client's own `tool_result` is not a server block, and neither is a
+    /// block type that merely ends in `_tool_result`-like text elsewhere.
+    #[test]
+    fn server_block_types_are_recognised_precisely() {
+        assert!(is_server_block_type("server_tool_use"));
+        assert!(is_server_block_type("web_search_tool_result"));
+        assert!(is_server_block_type("bash_code_execution_tool_result"));
+        assert!(!is_server_block_type("tool_result"));
+        assert!(!is_server_block_type("text"));
+        assert!(!is_server_block_type("tool_use"));
+    }
+
+    /// The declaration is what the provider dispatches on: a server tool
+    /// carries a versioned type and no schema, and adding a schema is the
+    /// mistake this test exists to catch.
+    #[test]
+    fn server_tools_declare_a_versioned_type_and_no_schema() {
+        let server = ToolInfo::server("web_search", "web_search_20260209");
+        assert_eq!(
+            server.request_declaration(),
+            serde_json::json!({"type": "web_search_20260209", "name": "web_search"})
+        );
+
+        let client = ToolInfo {
+            name: "Read".to_string(),
+            description: "reads a file".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            kind: crate::tool_executor::ToolKind::Client,
+        };
+        let declared = client.request_declaration();
+        assert_eq!(declared["name"], "Read");
+        assert_eq!(declared["input_schema"]["type"], "object");
+        assert!(
+            declared.get("type").is_none(),
+            "a client tool has no server type"
+        );
     }
 
     #[test]

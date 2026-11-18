@@ -25,6 +25,7 @@
 | Capability | Status | Notes |
 |------------|--------|-------|
 | Base prompt compiler | ✅ | `PromptCompiler` |
+| Instruction files | ✅ | `INSTRUCTION_FILE_NAMES`: `AGENTS.md` first, `CLAUDE.md` second, from every directory up to the FS root plus the config home (both names, same precedence) — see `docs/ai.md` |
 | Prompt profiles | ✅ | `PromptProfile` enum + registry |
 | Model profiles | ✅ | `ModelProfile::Main/Lightweight/Background` |
 | Mode prompt switching | ✅ | `/advisor`, `/bughunter`, `/reviewer` via commands |
@@ -48,6 +49,33 @@
 | Codebase overview | ✅ | Background | `/codebase-overview` |
 | README generation | ✅ | Background | `/generate-readme` |
 | Agent generation | ✅ | Side query | `/agent-generation <description>` |
+
+## Tools
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Local tool registry | ✅ | `ToolRegistry` + `RegistryToolDispatcher` |
+| Per-tool feature gate | ✅ | `required_feature_flag`, `superseded_by_provider_web_tools` + `set_provider_web_tools` |
+| Web search (local) | ✅ | `WebSearchTool` — configurable backend chain |
+| Web fetch (local) | ✅ | `WebFetchTool`, gated on `web_browser_tool` |
+| Provider-run web search/fetch | ✅ | `server_tools` declares `web_search_20260209` / `web_fetch_20260209`; Anthropic's own endpoint only |
+| Provider-run blocks round-trip | ✅ | `MessageContent::ServerBlock`, replayed verbatim in order |
+| `pause_turn` resume | ✅ | `StopDisposition::Resume`, bounded by `MAX_PROVIDER_RESUMES` |
+
+## Surfaces
+
+Codape ships **one** `UiSurface` implementation — the terminal. The abstraction
+(`codape-core::surface`) is host-facing, and these rows say what exists here as
+opposed to what a host can add.
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| Surface abstraction | ✅ | `SurfaceId`, `SurfaceCapabilities`, `SurfaceDescriptor`, `UiSurface`, `SurfaceRegistry` in `codape-core::surface` |
+| Terminal surface | ✅ | `codape-ui::surface::TerminalSurface`; the only registered `UiSurface` |
+| Picture capability | ✅ | `images` follows the live terminal's `ImageProtocol`, so the descriptor and the transcript renderer cannot disagree |
+| Reserved surface ids | ✅ | `KNOWN_SURFACE_IDS`: `terminal`, `ide`, `desktop`, `web` — names a host may register; no implementation here |
+| Desktop / mobile hosts | ❌ | No desktop app and no mobile host in this repository. `/desktop` reports "active" only for a registered `desktop` surface; `/mobile` names `codape bridge` as the remote path in |
+| Editor surface | ❌ | An editor drives a session through `codape ide bridge` (text tool calls over MCP), not `UiSurface`. See `docs/surfaces.md` → *What is implemented* |
 
 ## Command System
 
@@ -91,8 +119,18 @@
 | Message channel | ✅ | `mpsc::UnboundedSender` |
 | Lifecycle tracking | ✅ | `TaskManager` integration |
 | Teammate events | ✅ | `TeammateEvent` callback |
-| Resume support | — | Removed. Sub-agents are in-process tasks with no persisted transcript, so there is nothing to resume; `register_agent`/`resume_agent` no longer exist. |
+| Resume support | ✅ | `AgentManager::send_message` continues a finished agent: its task is reopened under the same id and the next turn is seeded from `AgentInstance::transcript`, the child's conversation captured after every attempt. In-process only — a new session has no transcript to continue — and `register_agent`/`resume_agent` do not exist. See `docs/agents.md` → *Resuming an agent*. |
 | Forked agent execution | ✅ | `orchestrator::run_forked_agent()` is reached through background features; the `AgentManager` wrapper was removed. |
+
+## Interoperability
+
+| Capability | Status | Notes |
+|------------|--------|-------|
+| MCP client (other servers → Codape) | ✅ | `mcp_servers` / `.mcp.json` / plugin-contributed servers; `codape mcp add|remove|test` |
+| MCP server (Codape → another agent) | ✅ | `codape mcp serve` over stdio — `initialize`/`ping`/`tools/list`/`tools/call`; publishes the file, search and shell tools, minus anything the permission rules would stop to ask about. See `docs/mcp.md` |
+| Marketplace registration (CLI) | ✅ | `codape plugin marketplace list|add <name> <url>|remove <name>`, sharing `MarketplaceSetting::validated` with the in-session command |
+| Marketplace registration (in session) | ✅ | `/plugin marketplace [list|add <name> <https-url>|remove <name>]`; writes `settings.json` under `marketplaces` |
+| Instruction files from other tools | ✅ | `AGENTS.md` read beside `CLAUDE.md` |
 
 ## REPL Commands
 

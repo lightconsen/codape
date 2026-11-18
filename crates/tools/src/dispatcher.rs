@@ -74,6 +74,14 @@ pub struct RegistryToolDispatcher {
     /// the agent manager each hold a dispatcher clone, and `--no-chrome`
     /// arrives after both were made, so a plain copy cannot be flipped.
     chrome_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the provider runs web search and fetch for this session.
+    ///
+    /// Shared across clones for the same reason as `chrome_enabled`: the
+    /// engine that knows whether its transport can carry the declarations is
+    /// built after the dispatcher (and the agent manager's clone of it), and
+    /// `--betas` is resolved after both. The engine sets it; a dispatcher that
+    /// hears nothing keeps offering the local tools.
+    provider_web_tools: Arc<std::sync::atomic::AtomicBool>,
     elicit_tx: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<crate::tool::ElicitRequest>>>>,
     /// Session that owns work started by these tools, when known. Tools that
     /// write durable job records use it to attribute the record.
@@ -303,6 +311,7 @@ impl RegistryToolDispatcher {
             rate_limiter: None,
             chrome_client: None,
             chrome_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            provider_web_tools: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             elicit_tx: Arc::new(std::sync::Mutex::new(None)),
             session_id: None,
             hooks: Arc::new(parking_lot::RwLock::new(None)),
@@ -435,6 +444,24 @@ impl RegistryToolDispatcher {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Tell the dispatcher the provider now runs web search and fetch.
+    ///
+    /// Set by the session from the engine's own answer, not from the raw flag:
+    /// on an endpoint whose transport cannot carry the declarations the
+    /// provider runs nothing, and taking the local search tools away there
+    /// would leave the session with no search at all.
+    pub fn set_provider_web_tools(&self, enabled: bool) {
+        self.provider_web_tools
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the provider runs web search and fetch for this session.
+    #[must_use]
+    pub fn provider_web_tools(&self) -> bool {
+        self.provider_web_tools
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Attach an elicitation channel for mid-execution user questions.
     pub fn set_elicit_tx(&self, tx: Option<tokio::sync::mpsc::Sender<crate::tool::ElicitRequest>>) {
         if let Ok(mut guard) = self.elicit_tx.lock() {
@@ -501,6 +528,12 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                 {
                     return false;
                 }
+                // A tool the provider has taken over is gone from the listing
+                // too: an advertised tool the execute path refuses would cost
+                // a turn to discover that.
+                if self.provider_web_tools() && crate::superseded_by_provider_web_tools(&d.name) {
+                    return false;
+                }
                 if d.name.starts_with("chrome_") {
                     return chrome_enabled && chrome_available.contains(&d.name);
                 }
@@ -532,6 +565,7 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                     name: d.name.clone(),
                     description,
                     input_schema: advertised_schema(d.input_schema, caps),
+                    kind: codape_core::tool_executor::ToolKind::Client,
                 }
             })
             .collect()
@@ -607,6 +641,23 @@ impl CoreToolExecutor for RegistryToolDispatcher {
                     output: format!(
                         "tool '{tool_name}' is not enabled: the '{flag}' feature flag is off \
                              (enable it with --betas {flag})"
+                    ),
+                    is_error: true,
+                    images: Vec::new(),
+                },
+            };
+        }
+
+        // The same agreement in the other direction: a superseded tool is not
+        // in the listing, and a call that names it anyway is told where the
+        // work now happens rather than being run twice.
+        if self.provider_web_tools() && crate::superseded_by_provider_web_tools(tool_name) {
+            return ToolDispatchOutcome {
+                result: ToolResult {
+                    tool_call_id: tool_call_id.to_string(),
+                    output: format!(
+                        "tool '{tool_name}' is superseded in this session: the provider runs \
+                             the search itself, and its results arrive inside the turn"
                     ),
                     is_error: true,
                     images: Vec::new(),
@@ -2176,6 +2227,66 @@ mod tests {
             "{}",
             outcome.result.output
         );
+    }
+
+    fn dispatcher_with_web_tools() -> RegistryToolDispatcher {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(crate::builtins::WebSearchTool::new()));
+        registry.register(Arc::new(crate::builtins::WebFetchTool::new()));
+        registry.register(Arc::new(EchoTool));
+        RegistryToolDispatcher::new(
+            Arc::new(registry),
+            Arc::new(InnerExecutor::new(ExecutionConfig::default())),
+            ExecutionContext::Normal,
+            PathBuf::from("/tmp"),
+        )
+    }
+
+    /// With the provider running the search, the local pair leaves both the
+    /// listing and the execute path. Offering two descriptions of a search
+    /// asks the model to guess which one the session wants.
+    #[tokio::test]
+    async fn provider_web_tools_supersede_the_local_pair() {
+        let dispatcher = dispatcher_with_web_tools();
+        dispatcher.set_provider_web_tools(true);
+
+        let listed = dispatcher.listed_names();
+        assert!(!listed.contains(&"WebSearch".into()), "{listed:?}");
+        assert!(!listed.contains(&"WebFetch".into()), "{listed:?}");
+        assert!(listed.contains(&"echo".into()), "{listed:?}");
+
+        let outcome = dispatcher
+            .execute("id-1", "WebSearch", &serde_json::json!({"query": "rust"}))
+            .await;
+        assert!(outcome.result.is_error, "{:?}", outcome.result);
+        assert!(
+            outcome.result.output.contains("superseded"),
+            "{}",
+            outcome.result.output
+        );
+    }
+
+    /// Nothing sets the bit by default, and the flag alone is not enough: the
+    /// session sets it from whether the request will actually carry the
+    /// declaration, so a dispatcher that hears nothing keeps its own tools.
+    #[test]
+    fn without_the_provider_bit_the_local_pair_survives() {
+        let dispatcher = dispatcher_with_web_tools();
+        dispatcher.set_feature_flags(FeatureFlags {
+            server_tools: true,
+            ..FeatureFlags::default()
+        });
+        let listed = dispatcher.listed_names();
+        assert!(!dispatcher.provider_web_tools());
+        assert!(listed.contains(&"WebSearch".into()), "{listed:?}");
+
+        dispatcher.set_feature_flags(FeatureFlags {
+            web_browser_tool: true,
+            ..FeatureFlags::default()
+        });
+        let listed = dispatcher.listed_names();
+        assert!(listed.contains(&"WebSearch".into()), "{listed:?}");
+        assert!(listed.contains(&"WebFetch".into()), "{listed:?}");
     }
 
     /// Turning a gated tool on or off leaves baseline tools alone.

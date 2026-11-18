@@ -96,6 +96,14 @@ fn message_token_estimate(msg: &Message) -> usize {
             // looking free to the compactor.
             PromptCompiler::estimate_tokens(&image.media_type) + IMAGE_TOKEN_ESTIMATE
         }
+        MessageContent::ServerBlock(server) => {
+            // Search results and code-execution output are round-tripped, so
+            // they occupy context even though nothing local reads them. The
+            // JSON is the closest estimate available: the payload is not a
+            // shape this crate models.
+            let json = serde_json::to_string(&server.block).unwrap_or_default();
+            PromptCompiler::estimate_tokens(&json)
+        }
     }
 }
 
@@ -1217,6 +1225,13 @@ fn render_message_for_summary(msg: &Message) -> String {
         // carries the fact that there was an image and of what kind.
         MessageContent::Image(image) => {
             format!("[{:?}] [image: {}]", msg.role, image.media_type)
+        }
+        // A provider-run tool block is the answer's evidence, not the
+        // answer: a summary that reproduced forty search results would spend
+        // the budget it exists to save. The label keeps the fact that a
+        // search or a sandbox run happened.
+        MessageContent::ServerBlock(server) => {
+            format!("[{:?}] [{}]", msg.role, server.summary())
         }
     }
 }

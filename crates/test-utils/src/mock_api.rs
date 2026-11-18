@@ -114,6 +114,7 @@ impl ApiClient for MockApiClient {
                     cache_creation_tokens: 0,
                 },
                 stop_reason: "end_turn".into(),
+                server_blocks: Vec::new(),
             }),
         }
     }
@@ -155,6 +156,7 @@ pub fn mock_response(content: impl Into<String>) -> ApiResponse {
             cache_creation_tokens: 0,
         },
         stop_reason: "end_turn".into(),
+        server_blocks: Vec::new(),
     }
 }
 
@@ -175,6 +177,7 @@ pub fn mock_response_with_tool_calls(
             cache_creation_tokens: 0,
         },
         stop_reason: "end_turn".into(),
+        server_blocks: Vec::new(),
     }
 }
 

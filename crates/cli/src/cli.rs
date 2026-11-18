@@ -552,6 +552,36 @@ pub enum McpAction {
         #[arg(long, value_name = "PATH")]
         file: Option<std::path::PathBuf>,
     },
+    /// Run Codape as an MCP server over stdio, for another agent to call.
+    ///
+    /// The same tools a session runs, published to whichever client launched
+    /// this process. Only tools the permission rules would allow without
+    /// asking are published, so the default mode offers reads and search but
+    /// no writes and no shell; see [`ServeArgs`].
+    Serve(ServeArgs),
+}
+
+/// Options for `codape mcp serve`.
+///
+/// The options that configure a *turn* — model, effort, plugins, output format
+/// — are absent on purpose: this process runs tools, and accepting a flag that
+/// changed nothing would make it look effective.
+#[derive(Args, Debug, Default)]
+pub struct ServeArgs {
+    /// Directory tool calls resolve relative paths against.
+    #[arg(long, value_name = "DIR")]
+    pub directory: Option<std::path::PathBuf>,
+
+    /// Permission mode the server runs under.
+    ///
+    /// Decides what is published as well as what runs: a tool the mode would
+    /// stop and ask about is not offered, because no one is there to answer.
+    #[arg(long, value_name = "MODE")]
+    pub permissions: Option<String>,
+
+    /// Publish every tool and run it without asking.
+    #[arg(long, alias = "allow-dangerously-skip-permissions")]
+    pub dangerously_skip_permissions: bool,
 }
 
 /// Plugin management subcommands.
@@ -565,6 +595,31 @@ pub enum PluginAction {
     Uninstall { name: String },
     /// Update all plugins.
     Update,
+    /// View or change the configured marketplaces.
+    #[command(subcommand)]
+    Marketplace(MarketplaceAction),
+}
+
+/// Marketplace management, from the command line.
+///
+/// The setting existed and had no gesture: `marketplaces` could only be
+/// written by hand into `settings.json`, so an install run from a script had
+/// to know the settings file's shape and its location. These are the same
+/// rules the in-session `/plugin marketplace` uses — one validator
+/// (`MarketplaceSetting::validated`), so the two cannot diverge.
+#[derive(Subcommand, Debug)]
+pub enum MarketplaceAction {
+    /// List the configured marketplaces.
+    List,
+    /// Register a marketplace. Replaces an entry of the same name.
+    Add {
+        /// Name to register the marketplace under.
+        name: String,
+        /// HTTPS base URL of the marketplace.
+        url: String,
+    },
+    /// Remove a marketplace by name.
+    Remove { name: String },
 }
 
 /// Parse CLI arguments from std::env::args.

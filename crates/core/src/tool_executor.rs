@@ -30,15 +30,100 @@ pub struct ToolDispatchOutcome {
     pub result: ToolResult,
 }
 
+/// Who runs a tool the request declares.
+///
+/// Both kinds appear in the request's `tools` array, but they are advertised
+/// differently and their calls come back differently: a client tool names an
+/// input schema and the engine executes what the model asks for, while a
+/// server tool names only a versioned provider type and the provider runs the
+/// call itself, streaming the result back inside the same assistant turn.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolKind {
+    /// Executed locally by the engine's tool executor.
+    #[default]
+    Client,
+    /// Executed by the provider. `tool_type` is the versioned declaration the
+    /// provider recognises (`web_search_20260209`, `code_execution_20260120`,
+    /// …); its *name* is what the model calls it by.
+    Server {
+        /// The versioned provider-side tool type.
+        tool_type: String,
+    },
+}
+
+impl ToolKind {
+    /// Whether the provider runs this tool.
+    #[must_use]
+    pub const fn is_server(&self) -> bool {
+        matches!(self, Self::Server { .. })
+    }
+}
+
 /// Metadata for a tool that can be advertised to the LLM.
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
     /// Unique tool name.
     pub name: String,
     /// Human-readable description of what the tool does.
+    ///
+    /// Empty for a server tool: its behaviour is the provider's, so a
+    /// description here would only describe a version we do not control.
     pub description: String,
     /// JSON schema describing the tool's input parameters.
+    ///
+    /// `Null` for a server tool, which takes no schema.
     pub input_schema: Value,
+    /// Who executes the tool.
+    pub kind: ToolKind,
+}
+
+/// The tools the provider runs itself, and the versioned type each declares.
+///
+/// These are the web tools and nothing else: `web_search_20260209` and
+/// `web_fetch_20260209` carry dynamic filtering, so the model writes and runs
+/// the filtering code inside the same turn rather than paying a round trip for
+/// results it will mostly discard. The standalone `code_execution` tool is
+/// deliberately absent — declaring it beside the `_20260209` web tools opens a
+/// second execution environment, and neither one is then sure which it is in.
+pub const PROVIDER_RUN_TOOLS: &[(&str, &str)] = &[
+    ("web_search", "web_search_20260209"),
+    ("web_fetch", "web_fetch_20260209"),
+];
+
+impl ToolInfo {
+    /// The request-side declaration of a provider-run tool.
+    #[must_use]
+    pub fn server(name: impl Into<String>, tool_type: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: String::new(),
+            input_schema: Value::Null,
+            kind: ToolKind::Server {
+                tool_type: tool_type.into(),
+            },
+        }
+    }
+
+    /// The Anthropic `tools` entry for this tool.
+    ///
+    /// A client tool carries its schema; a server tool carries the versioned
+    /// type the provider dispatches on and nothing else. Sending a schema for
+    /// a server tool is rejected, and sending a bare name for a client tool
+    /// leaves the model guessing at its arguments.
+    #[must_use]
+    pub fn request_declaration(&self) -> Value {
+        match &self.kind {
+            ToolKind::Client => serde_json::json!({
+                "name": self.name,
+                "description": self.description,
+                "input_schema": self.input_schema,
+            }),
+            ToolKind::Server { tool_type } => serde_json::json!({
+                "type": tool_type,
+                "name": self.name,
+            }),
+        }
+    }
 }
 
 /// Abstract tool dispatcher — implemented by `codape-tools::RegistryToolExecutor`.

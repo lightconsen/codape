@@ -58,14 +58,32 @@ pub enum SurfaceError {
 /// The stable name of a front-end surface.
 ///
 /// This is the value a mod sees as `e.surface`. Ids are lowercase so they are
-/// comparable across hosts; [`SurfaceId::TERMINAL`] is the one Codape ships.
+/// comparable across hosts; [`SurfaceId::TERMINAL`] is the one Codape ships
+/// and the only one this repository implements. The other constants are the
+/// names a host built on this crate is expected to register — they are listed
+/// in [`KNOWN_SURFACE_IDS`] so the spellings are checked against one table
+/// rather than invented per host.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SurfaceId(String);
 
+/// The surface ids this crate has spoken for.
+///
+/// Only `terminal` has an implementation here; the rest are reserved names for
+/// a host-side surface. A host choosing its own spelling before checking this
+/// list would produce a `/desktop` command that knows nothing about the
+/// `desktop-app` surface actually presenting the session.
+pub const KNOWN_SURFACE_IDS: [&str; 4] = ["terminal", "ide", "desktop", "web"];
+
 impl SurfaceId {
     /// The terminal surface's id.
     pub const TERMINAL: &'static str = "terminal";
+    /// An editor panel surface's id.
+    pub const IDE: &'static str = "ide";
+    /// A desktop window surface's id.
+    pub const DESKTOP: &'static str = "desktop";
+    /// A browser surface's id.
+    pub const WEB: &'static str = "web";
 
     /// Validate and wrap a surface id.
     ///
@@ -331,8 +349,26 @@ mod tests {
         assert_eq!(SurfaceId::terminal().as_str(), SurfaceId::TERMINAL);
     }
 
+    /// The reserved constants and the table a host reads must not drift.
     #[test]
-    fn the_terminal_descriptor_is_interactive_but_has_no_images() {
+    fn the_reserved_surface_ids_match_the_table() {
+        for id in [
+            SurfaceId::TERMINAL,
+            SurfaceId::IDE,
+            SurfaceId::DESKTOP,
+            SurfaceId::WEB,
+        ] {
+            assert!(KNOWN_SURFACE_IDS.contains(&id), "{id} is not in the table");
+            // Reserved names have to be valid ids, or registering one fails.
+            assert!(SurfaceId::new(id).is_ok(), "{id} is not a valid id");
+        }
+        assert_eq!(KNOWN_SURFACE_IDS.len(), 4);
+    }
+
+    /// The conservative constant says no pictures; that is the floor for a
+    /// surface nobody has probed, not a statement about every terminal.
+    #[test]
+    fn the_terminal_descriptor_is_interactive_and_assumes_no_images() {
         let descriptor = SurfaceDescriptor::terminal();
         assert_eq!(descriptor.id.as_str(), "terminal");
         assert!(descriptor.capabilities.interactive);

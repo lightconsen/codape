@@ -31,7 +31,7 @@ use crate::permissions::{PermissionChecker, PermissionMode, PermissionResult};
 use crate::prompt::{AssembledContext, CompactConfig, PromptCompiler, PromptContext};
 use crate::state::SessionState;
 use crate::stop_hook::{self, StopHookContext, StopHookDecision};
-use crate::tool_executor::{NoOpToolExecutor, ToolExecutor, ToolInfo};
+use crate::tool_executor::{NoOpToolExecutor, PROVIDER_RUN_TOOLS, ToolExecutor, ToolInfo};
 use crate::tool_scheduler;
 use crate::types::{
     CompactionEvent, ContextWindowResolver, EngineEvent, LearnedTokenRatio, Message, ModelId,
@@ -333,9 +333,12 @@ impl StreamingToolCallAssembler {
                 }
                 calls
             }
-            StreamEvent::UsageSummary(_) | StreamEvent::Error(_) | StreamEvent::StopReason(_) => {
-                Vec::new()
-            }
+            // Server-tool blocks are carried by the engine, not assembled
+            // into a call: there is nothing local to complete.
+            StreamEvent::ServerBlock(_)
+            | StreamEvent::UsageSummary(_)
+            | StreamEvent::Error(_)
+            | StreamEvent::StopReason(_) => Vec::new(),
         }
     }
 
@@ -1263,6 +1266,15 @@ struct StreamedResponse {
     stream_error: Option<String>,
     /// A thinking block the provider requires to be passed back, if any.
     thinking: Option<ThinkingBlock>,
+    /// Blocks the provider produced by running its own tools, in order, each
+    /// paired with how much text preceded it.
+    ///
+    /// Nothing local executes these and nothing local reads them; they exist
+    /// so the assistant turn that contains them can be sent back whole. The
+    /// offset is what keeps that turn whole: a search result sits *before* the
+    /// text it supports, and an assistant turn whose blocks arrive reordered
+    /// is not the turn the provider produced.
+    server_blocks: Vec<(usize, serde_json::Value)>,
 }
 
 /// The output ceiling a `max_tokens` turn that produced nothing should be
@@ -2209,6 +2221,16 @@ pub struct QueryEngine {
     /// [`EngineEvent::ToolUseSummary`] and uses that summary as the label,
     /// falling back to `activity_summary()` when summarization fails.
     tool_use_summaries: bool,
+    /// Declare web search and web fetch as tools the *provider* runs.
+    ///
+    /// Off (the default): the engine advertises only the registry's tools, and
+    /// a search is whatever the local `WebSearch` tool does. On: the request
+    /// also carries the provider's versioned declarations, and the provider
+    /// runs the search inside its own turn. The transport decides whether the
+    /// declarations actually go out — an OpenAI-compatible endpoint cannot
+    /// express one — so an engine built by an embedder that never calls the
+    /// setter stays on the old request shape.
+    server_tools: bool,
     /// Tool time executed inside the stream during the turn, in milliseconds.
     ///
     /// With early execution on, a tool call's wall clock overlaps the stream's
@@ -2468,6 +2490,18 @@ impl QueryEngine {
                 continue;
             }
 
+            // A block the provider produced by running its own tool is part
+            // of the assistant turn that contains it and is sent back
+            // verbatim. Thinking is not involved: a server call is not the
+            // model's reasoning, and putting it after a thinking block would
+            // be a turn the provider never produced.
+            if let crate::types::MessageContent::ServerBlock(server) = &m.content {
+                pending_thinking = None;
+                last_user_is_tool_results = false;
+                push_assistant_content(&mut out, server.block.clone());
+                continue;
+            }
+
             let Some(role_str) = (match (&m.role, &m.content) {
                 (crate::types::Role::User, _)
                 | (crate::types::Role::Tool, crate::types::MessageContent::ToolResult(_)) => {
@@ -2509,10 +2543,11 @@ impl QueryEngine {
                         {"type": "tool_result", "tool_use_id": &tr.tool_call_id, "content": blocks}
                     ])
                 }
-                // Thinking and images are handled above; kept so the match
-                // stays exhaustive.
+                // Thinking, images and server blocks are handled above; kept
+                // so the match stays exhaustive.
                 crate::types::MessageContent::Thinking(_)
-                | crate::types::MessageContent::Image(_) => unreachable!(),
+                | crate::types::MessageContent::Image(_)
+                | crate::types::MessageContent::ServerBlock(_) => unreachable!(),
             };
 
             if role_str == "assistant" {
@@ -2613,6 +2648,7 @@ impl QueryEngine {
             team_context: None,
             streaming_tool_execution: false,
             tool_use_summaries: false,
+            server_tools: false,
             early_tool_time: std::time::Duration::ZERO,
             turn_started_at: None,
             coordinator: None,
@@ -3229,10 +3265,67 @@ impl QueryEngine {
         self.tool_use_summaries = enabled;
     }
 
-    /// Whether the lightweight model summarizes each tool use.
+    /// Whether the light model summarizes each tool use.
     #[must_use]
     pub const fn tool_use_summaries(&self) -> bool {
         self.tool_use_summaries
+    }
+
+    /// Declare web search and web fetch as tools the provider runs itself.
+    ///
+    /// Set by the CLI from `server_tools`. Off (the default) keeps every tool
+    /// local; on adds the provider's versioned declarations to each request,
+    /// but only when the transport says it can carry them — see
+    /// [`ApiClient::supports_server_tools`]. A session that asked for them and
+    /// got a transport that cannot carry them is told so here, once, rather
+    /// than searching locally and never mentioning the flag did nothing.
+    pub fn set_server_tools(&mut self, enabled: bool) {
+        self.server_tools = enabled;
+        if enabled && !self.api_client.supports_server_tools() {
+            tracing::warn!(
+                "server_tools is on but this endpoint cannot run provider-side tools; \
+                 web search stays local"
+            );
+            eprintln!(
+                "warning: 'server_tools' is on, but this endpoint has no provider-side tools; \
+                 web search stays local"
+            );
+        }
+    }
+
+    /// Whether provider-run tools are declared when the transport allows it.
+    #[must_use]
+    pub const fn server_tools(&self) -> bool {
+        self.server_tools
+    }
+
+    /// Whether this session's requests actually carry provider-run tools.
+    ///
+    /// Both halves have to hold. It is what decides whether the local web
+    /// tools are superseded too: retiring them for a declaration that is
+    /// never sent would leave the session with no search at all.
+    #[must_use]
+    pub fn declares_server_tools(&self) -> bool {
+        self.server_tools && self.api_client.supports_server_tools()
+    }
+
+    /// The tools a request advertises.
+    ///
+    /// The registry's own list, plus the provider-run declarations when the
+    /// flag is on and the transport can express them. A name the registry
+    /// already advertises is never declared twice: a duplicate would be
+    /// rejected outright, and the local tool is the one the session can
+    /// actually run.
+    fn request_tools(&self) -> Vec<ToolInfo> {
+        let mut tools = self.tools.list_tools();
+        if self.declares_server_tools() {
+            for (name, tool_type) in PROVIDER_RUN_TOOLS {
+                if tools.iter().all(|tool| tool.name != *name) {
+                    tools.push(ToolInfo::server(*name, *tool_type));
+                }
+            }
+        }
+        tools
     }
 
     /// Get a formatted cost summary from the cost tracker.
@@ -4140,7 +4233,11 @@ impl QueryEngine {
         // Parse the response
         let content = self.validate_structured_output(api_response.content.clone());
         self.push_thinking_message(turn, api_response.thinking.clone());
-        self.push_visible_assistant_message(turn, content.clone());
+        self.push_assistant_content_with_server_blocks(
+            turn,
+            content.clone(),
+            &api_response.server_blocks,
+        );
 
         // Elicitation heuristic: if the assistant asks a short question, prompt the user
         let mut api_response = api_response;
@@ -4161,7 +4258,11 @@ impl QueryEngine {
                 self.last_usage = Some(api_response.usage);
                 let new_content = self.validate_structured_output(api_response.content.clone());
                 self.push_thinking_message(turn, api_response.thinking.clone());
-                self.push_visible_assistant_message(turn, new_content);
+                self.push_assistant_content_with_server_blocks(
+                    turn,
+                    new_content,
+                    &api_response.server_blocks,
+                );
             }
         }
 
@@ -4207,7 +4308,11 @@ impl QueryEngine {
                     self.last_usage = Some(api_response.usage);
                     let content = self.validate_structured_output(api_response.content.clone());
                     self.push_thinking_message(turn, api_response.thinking.clone());
-                    self.push_visible_assistant_message(turn, content);
+                    self.push_assistant_content_with_server_blocks(
+                        turn,
+                        content,
+                        &api_response.server_blocks,
+                    );
 
                     // After recovery retry, check if we still need to compact
                     if !turn.budget.should_continue() {
@@ -4490,6 +4595,7 @@ impl QueryEngine {
             mut stop_reason,
             mut stream_error,
             thinking,
+            mut server_blocks,
         } = streamed;
         turn.last_stop_reason = Some(stop_reason.clone());
         // How the provider says the answer ended decides whether the loop
@@ -4517,8 +4623,11 @@ impl QueryEngine {
         // Validate structured output if a schema is configured
         content = self.validate_structured_output(content);
 
-        // Save assistant message
-        self.push_visible_assistant_message(turn, content.clone());
+        // Save assistant message, with any server-tool block in the place it
+        // was produced. A search result is emitted before the text that cites
+        // it, so writing the text first and the blocks after would hand the
+        // provider a turn it never produced — and it validates the replay.
+        self.push_assistant_content_with_server_blocks(&mut *turn, content.clone(), &server_blocks);
 
         // Elicitation heuristic: if the assistant asks a short question, prompt the user
         if options.handle_elicitation && content.trim().ends_with('?') && content.len() < 200 {
@@ -4544,7 +4653,14 @@ impl QueryEngine {
                 stream_error = answered.stream_error;
                 self.push_thinking_message(turn, answered.thinking);
                 turn.last_stop_reason = Some(stop_reason.clone());
-                self.push_visible_assistant_message(turn, content.clone());
+                // The retried answer replaces the one it re-asks for, and so
+                // do its server blocks: both are that request's own turn.
+                server_blocks = answered.server_blocks;
+                self.push_assistant_content_with_server_blocks(
+                    &mut *turn,
+                    content.clone(),
+                    &server_blocks,
+                );
             }
         }
 
@@ -4911,6 +5027,58 @@ impl QueryEngine {
         self.session.messages.push(assistant_msg);
     }
 
+    /// Record an assistant answer with any provider-run tool block in place.
+    ///
+    /// The engine stores one message per block kind, but a provider turn is a
+    /// single assistant message whose blocks are ordered — a search result is
+    /// emitted *before* the text that cites it. Writing the text first and
+    /// the blocks after would replay a turn the provider never produced, and
+    /// it validates the replay. Each block arrives with the byte offset of
+    /// the text that preceded it, so the text is split there and the pieces
+    /// are written in order.
+    ///
+    /// Offsets are clamped to a character boundary: a provider that reports a
+    /// position inside a multi-byte character must not be able to panic the
+    /// turn, and losing a character's worth of ordering is a smaller harm
+    /// than losing the table.
+    fn push_assistant_content_with_server_blocks(
+        &mut self,
+        turn: &mut TurnRuntime,
+        content: String,
+        server_blocks: &[(usize, serde_json::Value)],
+    ) {
+        if server_blocks.is_empty() {
+            self.push_visible_assistant_message(turn, content);
+            return;
+        }
+
+        let mut cursor = 0usize;
+        for (offset, block) in server_blocks {
+            let mut offset = (*offset).min(content.len());
+            while offset > cursor && !content.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            if offset > cursor {
+                let segment = content[cursor..offset].to_string();
+                self.push_visible_assistant_message(turn, segment);
+                cursor = offset;
+            }
+            let msg = Message {
+                role: crate::types::Role::Assistant,
+                content: crate::types::MessageContent::ServerBlock(crate::types::ServerBlock::new(
+                    block.clone(),
+                )),
+            };
+            turn.messages.push(msg.clone());
+            self.session.messages.push(msg);
+        }
+
+        if cursor < content.len() {
+            let tail = content[cursor..].to_string();
+            self.push_visible_assistant_message(turn, tail);
+        }
+    }
+
     /// Format the installed team context for injection into the request.
     ///
     /// Returns `None` when no context is installed or it carries no notes,
@@ -5007,22 +5175,16 @@ impl QueryEngine {
         if tools.is_empty() {
             return 0;
         }
-        let schemas: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.input_schema,
-                })
-            })
-            .collect();
+        let schemas: Vec<serde_json::Value> =
+            tools.iter().map(ToolInfo::request_declaration).collect();
         PromptCompiler::estimate_tokens(&serde_json::Value::Array(schemas).to_string())
     }
 
     fn build_context(&mut self, turn: &mut TurnRuntime, options: &SubmitOptions) {
-        // Assemble context using PromptCompiler
-        let available_tools = self.tools.list_tools();
+        // Assemble context using PromptCompiler. The tool list is the request's
+        // own — provider-run declarations included when the session uses them —
+        // so the schema-token estimate covers what is actually sent.
+        let available_tools = self.request_tools();
         turn.tool_schema_tokens = Self::tool_schema_tokens(&available_tools);
         let ctx = PromptContext {
             cwd: self.session.cwd.as_path(),
@@ -6710,7 +6872,7 @@ impl QueryEngine {
 
         let messages = Self::provider_messages(&turn.messages);
 
-        let tools = self.tools.list_tools();
+        let tools = self.request_tools();
         let request_client = self
             .api_client
             .with_request_context(self.build_request_context(
@@ -6808,7 +6970,7 @@ impl QueryEngine {
             .join("\n\n");
 
         let messages = Self::provider_messages(&turn.messages);
-        let tools = self.tools.list_tools();
+        let tools = self.request_tools();
 
         // Text survives a retry. A stream cannot be resumed at an offset —
         // the retry re-requests the turn — but what the first attempt already
@@ -6857,6 +7019,12 @@ impl QueryEngine {
             let mut early_calls: Vec<ToolCall> = Vec::new();
             let mut early_results: Vec<ToolResult> = Vec::new();
             let mut deferred_calls: Vec<ToolCall> = Vec::new();
+            // Blocks the provider produced by running its own tools. They are
+            // kept in the order the provider emitted them: the assistant turn
+            // is replayed verbatim, and a `_tool_result` before the
+            // `server_tool_use` that asked for it is not a turn the provider
+            // will accept back.
+            let mut server_blocks: Vec<(usize, serde_json::Value)> = Vec::new();
             let mut stream_failed = false;
             // The message is what turns a failed stream into a reported error
             // instead of an empty, apparently successful turn.
@@ -6895,6 +7063,15 @@ impl QueryEngine {
                     | StreamEvent::ToolCallBlockEnd { .. }
                     | StreamEvent::StreamEnd
                     | StreamEvent::SignatureDelta(_) => {}
+                    // A server-tool block needs no local work: the provider
+                    // already ran the call. It is kept — with how much text
+                    // had arrived before it — so the assistant turn that
+                    // contains it can be sent back in the order it was
+                    // produced.
+                    StreamEvent::ServerBlock(ref block) => {
+                        let offset = stream_text.delivered().len();
+                        server_blocks.push((offset, block.clone()));
+                    }
                     StreamEvent::ToolCallInputDelta { ref id, ref delta } => {
                         tracing::trace!("tool call input delta for {id}: {} bytes", delta.len());
                     }
@@ -7076,6 +7253,10 @@ impl QueryEngine {
                         // about the answer is its own.
                         stream_error: None,
                         thinking: resp.thinking,
+                        // The blocking response carries its own server
+                        // blocks; the ones this attempt saw belong to a
+                        // stream that produced nothing usable.
+                        server_blocks: resp.server_blocks,
                     });
                 }
             }
@@ -7103,6 +7284,7 @@ impl QueryEngine {
                     // stop, and `UserInterrupted` is what reports that.
                     stream_error: None,
                     thinking: assembler.thinking(),
+                    server_blocks,
                 });
             }
 
@@ -7212,6 +7394,10 @@ impl QueryEngine {
                             stop_reason: retried.stop_reason,
                             stream_error: None,
                             thinking: retried.thinking,
+                            // The blocking retry answered, so the turn is
+                            // its own — the failed stream contributed
+                            // nothing but the request that led here.
+                            server_blocks: retried.server_blocks,
                         });
                     }
                     // Still nothing, at a ceiling this request could not have
@@ -7233,6 +7419,7 @@ impl QueryEngine {
                         stop_reason,
                         stream_error: None,
                         thinking: retried.thinking,
+                        server_blocks: retried.server_blocks,
                     });
                 }
                 if truncated {
@@ -7250,6 +7437,7 @@ impl QueryEngine {
                         // Empty: there is no answer to call incomplete.
                         stream_error: None,
                         thinking: assembler.thinking(),
+                        server_blocks,
                     });
                 }
                 tracing::warn!(
@@ -7266,6 +7454,7 @@ impl QueryEngine {
                         stop_reason: retried.stop_reason,
                         stream_error: None,
                         thinking: retried.thinking,
+                        server_blocks: retried.server_blocks,
                     });
                 }
                 return Err(TurnError::Fatal {
@@ -7287,6 +7476,7 @@ impl QueryEngine {
                 stop_reason: stop_reason.unwrap_or_else(|| "end_turn".to_string()),
                 stream_error,
                 thinking: assembler.thinking(),
+                server_blocks,
             });
         }
     }
@@ -8092,6 +8282,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -8168,6 +8359,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -8185,6 +8377,162 @@ mod tests {
                 rx.recv().await.map(|item| (item, rx))
             }))
         }
+    }
+
+    // ─── Provider-run tool declarations ──────────────────────────────
+
+    /// An engine whose transport can carry server tools.
+    #[tokio::test]
+    async fn server_tools_are_declared_when_the_flag_and_transport_allow() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        engine.set_server_tools(true);
+        // The mock transport says no, so nothing is declared and the flag
+        // costs the request nothing.
+        assert!(engine.request_tools().iter().all(|t| !t.kind.is_server()));
+    }
+
+    struct ServerToolTransport;
+
+    #[async_trait::async_trait]
+    impl ApiClient for ServerToolTransport {
+        fn clone_box(&self) -> Box<dyn ApiClient> {
+            Box::new(Self)
+        }
+
+        fn supports_server_tools(&self) -> bool {
+            true
+        }
+
+        async fn create_message(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> Result<ApiResponse, crate::api_client::ApiError> {
+            Ok(ApiResponse {
+                content: String::new(),
+                tool_calls: Vec::new(),
+                usage: UsageSummary {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+                stop_reason: "end_turn".into(),
+                thinking: None,
+                server_blocks: Vec::new(),
+            })
+        }
+
+        async fn create_message_streaming(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    struct RegisteredTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool_executor::ToolExecutor for RegisteredTool {
+        fn list_tools(&self) -> Vec<crate::tool_executor::ToolInfo> {
+            vec![crate::tool_executor::ToolInfo {
+                name: "web_search".to_string(),
+                description: "local search".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                kind: crate::tool_executor::ToolKind::Client,
+            }]
+        }
+
+        async fn execute(
+            &self,
+            tool_call_id: &str,
+            _tool_name: &str,
+            _input: &serde_json::Value,
+        ) -> crate::tool_executor::ToolDispatchOutcome {
+            crate::tool_executor::ToolDispatchOutcome {
+                result: ToolResult {
+                    tool_call_id: tool_call_id.to_string(),
+                    output: String::new(),
+                    is_error: false,
+                    images: Vec::new(),
+                },
+            }
+        }
+    }
+
+    /// On a transport that carries them, the provider's declarations follow
+    /// the registry's tools; a registry tool with the same name wins, because
+    /// declaring both is a request the provider rejects.
+    #[tokio::test]
+    async fn a_supported_transport_gets_the_provider_declarations() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = QueryEngine::new(
+            Box::new(ServerToolTransport),
+            ModelId::sonnet(),
+            SessionState::new(std::path::PathBuf::from("/tmp/test")),
+            PermissionEngine::new(PermissionChecker::new(PermissionMode::BypassPermissions)),
+            tx,
+        );
+        engine.set_server_tools(true);
+        let tools = engine.request_tools();
+        let declarations: Vec<serde_json::Value> =
+            tools.iter().map(ToolInfo::request_declaration).collect();
+        assert!(
+            declarations
+                .iter()
+                .any(|d| d["type"] == "web_search_20260209" && d["name"] == "web_search")
+        );
+        assert!(
+            declarations
+                .iter()
+                .any(|d| d["type"] == "web_fetch_20260209" && d["name"] == "web_fetch")
+        );
+        // Dynamic filtering is built into the `_20260209` web tools; a
+        // standalone code-execution declaration would open a second
+        // environment and is deliberately absent.
+        assert!(
+            declarations
+                .iter()
+                .all(|d| !d.to_string().contains("code_execution"))
+        );
+
+        engine.set_server_tools(false);
+        assert!(engine.request_tools().iter().all(|t| !t.kind.is_server()));
+    }
+
+    /// The local search tool and the provider's declaration are one job. When
+    /// the registry advertises a name the provider also declares, only the
+    /// local one goes out.
+    #[tokio::test]
+    async fn a_registry_tool_with_the_same_name_is_not_declared_twice() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut engine = QueryEngine::new(
+            Box::new(ServerToolTransport),
+            ModelId::sonnet(),
+            SessionState::new(std::path::PathBuf::from("/tmp/test")),
+            PermissionEngine::new(PermissionChecker::new(PermissionMode::BypassPermissions)),
+            tx,
+        );
+        engine.set_tool_executor(Box::new(RegisteredTool));
+        engine.set_server_tools(true);
+
+        let tools = engine.request_tools();
+        let web_search: Vec<&ToolInfo> = tools.iter().filter(|t| t.name == "web_search").collect();
+        assert_eq!(web_search.len(), 1);
+        assert!(!web_search[0].kind.is_server(), "the runnable one wins");
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.name == "web_fetch" && t.kind.is_server())
+        );
     }
 
     struct EmptyStreamingApiClient;
@@ -8214,6 +8562,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -8274,6 +8623,68 @@ mod tests {
         let mut turn = TurnRuntime::new(budget);
         turn.transition_to(TurnState::BuildContext);
         assert_eq!(turn.state, TurnState::BuildContext);
+    }
+
+    /// The provider emits a search result before the text that cites it, and
+    /// validates the replay. The turn must therefore hold segment, block,
+    /// segment in that order — not the text first.
+    #[test]
+    fn server_blocks_are_replayed_in_the_order_they_arrived() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        let result = serde_json::json!({"type": "web_search_tool_result", "tool_use_id": "s1"});
+        engine.push_assistant_content_with_server_blocks(
+            &mut turn,
+            "before after".to_string(),
+            &[(7, result)],
+        );
+
+        let kinds: Vec<String> = turn
+            .messages
+            .iter()
+            .map(|m| match &m.content {
+                crate::types::MessageContent::Text(t) => t.clone(),
+                crate::types::MessageContent::ServerBlock(b) => b.summary(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, vec!["before ", "web search tool result", "after"]);
+        assert_eq!(turn.messages.len(), engine.session().messages.len());
+    }
+
+    /// An offset inside a multi-byte character is clamped back to a boundary.
+    /// The provider is not obliged to report offsets in our terms, and a
+    /// panic here would lose the whole turn rather than a character of order.
+    #[test]
+    fn a_mid_character_offset_does_not_panic() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+
+        // The é is two bytes, so offset 5 and 6 fall inside it.
+        let content = "aébc".to_string();
+        let block = serde_json::json!({"type": "server_tool_use", "id": "s1"});
+        engine.push_assistant_content_with_server_blocks(&mut turn, content, &[(5, block)]);
+
+        let text: String = turn
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                crate::types::MessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "aébc", "no text is lost to the clamp");
+        assert_eq!(turn.messages.len(), 2);
+    }
+
+    /// No blocks is the ordinary path: one message, unchanged.
+    #[test]
+    fn without_server_blocks_the_turn_is_untouched() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        engine.push_assistant_content_with_server_blocks(&mut turn, "hello".into(), &[]);
+        assert_eq!(turn.messages.len(), 1);
     }
 
     #[test]
@@ -8413,6 +8824,7 @@ mod tests {
                         },
                         stop_reason: "end_turn".into(),
                         thinking: None,
+                        server_blocks: Vec::new(),
                     })
                 }
             }
@@ -8582,6 +8994,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -8641,6 +9054,7 @@ mod tests {
                     },
                     stop_reason: "max_tokens".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -9342,6 +9756,7 @@ mod tests {
                     },
                     stop_reason: if call == 0 { "tool_use" } else { "end_turn" }.into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -9768,6 +10183,7 @@ mod tests {
                     },
                     stop_reason: if call < 4 { "tool_use" } else { "end_turn" }.into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -9929,6 +10345,7 @@ mod tests {
                     },
                     stop_reason: if call == 0 { "tool_use" } else { "end_turn" }.into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -10825,6 +11242,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -11750,6 +12168,7 @@ mod tests {
                         },
                         stop_reason: "end_turn".into(),
                         thinking: None,
+                        server_blocks: Vec::new(),
                     })
                 } else {
                     Ok(ApiResponse {
@@ -11763,6 +12182,7 @@ mod tests {
                         },
                         stop_reason: "end_turn".into(),
                         thinking: None,
+                        server_blocks: Vec::new(),
                     })
                 }
             }
@@ -12103,6 +12523,7 @@ mod tests {
                 },
                 stop_reason: self.next_reason(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -12438,6 +12859,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -12561,6 +12983,7 @@ mod tests {
                     },
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 })
             }
 
@@ -13520,6 +13943,7 @@ mod tests {
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
             }),
+            kind: crate::tool_executor::ToolKind::Client,
         }];
         let tokens = QueryEngine::tool_schema_tokens(&tools);
         assert!(tokens > 0, "a serialized schema costs tokens");
@@ -14130,6 +14554,7 @@ mod tests {
                 },
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -14977,6 +15402,7 @@ mod tests {
                 },
                 stop_reason: "tool_use".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -15193,6 +15619,7 @@ mod tests {
                 usage: UsageSummary::default(),
                 stop_reason: "end_turn".into(),
                 thinking: None,
+                server_blocks: Vec::new(),
             })
         }
 
@@ -15301,6 +15728,7 @@ mod tests {
                     usage: UsageSummary::default(),
                     stop_reason: "end_turn".into(),
                     thinking: None,
+                    server_blocks: Vec::new(),
                 }),
                 None => Err(ApiError::Http("no lightweight client available".into())),
             }

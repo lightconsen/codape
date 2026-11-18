@@ -336,7 +336,7 @@ fn feature_flags_parse_all_runtime_flags() {
     let flags = FeatureFlags::parse(
         "streaming_tool_execution,tool_use_summaries,fast_mode,coordinator_mode,\
          history_snip,agent_triggers,voice_mode,\
-         workflow_scripts,web_browser_tool,team_collaboration,auto_dream",
+         workflow_scripts,web_browser_tool,server_tools,team_collaboration,auto_dream",
     );
     assert!(flags.streaming_tool_execution);
     assert!(flags.tool_use_summaries);
@@ -347,6 +347,7 @@ fn feature_flags_parse_all_runtime_flags() {
     assert!(flags.voice_mode);
     assert!(flags.workflow_scripts);
     assert!(flags.web_browser_tool);
+    assert!(flags.server_tools);
     assert!(flags.team_collaboration);
     assert!(flags.auto_dream);
 }

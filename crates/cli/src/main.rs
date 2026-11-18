@@ -28,6 +28,13 @@ async fn main() -> Result<()> {
         std::process::exit(codape_cli::ide_bridge::run_ide_bridge().await);
     }
 
+    // Another agent launches `codape mcp serve` for the same reason: stdout is
+    // the protocol, and a startup phase that printed a sentence would break
+    // the client's parser.
+    if codape_cli::mcp_serve::is_mcp_serve() {
+        std::process::exit(codape_cli::mcp_serve::run_mcp_serve().await);
+    }
+
     codape_cli::tracing_setup::init_tracing();
     codape_cli::tracing_setup::install_panic_hook();
 

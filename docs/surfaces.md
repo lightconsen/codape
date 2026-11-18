@@ -15,7 +15,7 @@ engine or the mod runtime.
 | Type | Meaning |
 | --- | --- |
 | `SurfaceId` | Validated stable name (`[a-z0-9_-]`, at most 32 characters). `SurfaceId::TERMINAL` is `"terminal"`. This is what a mod sees as `e.surface`. |
-| `SurfaceCapabilities` | `{ interactive, mouse, images }`. The terminal is `{ true, true, false }`; `TEXT_ONLY` is `{ false, false, false }`. Mods see it as `e.surfaceCapabilities`. |
+| `SurfaceCapabilities` | `{ interactive, mouse, images }`. The terminal constant is `{ true, true, false }` (the floor for a surface nobody probed); a terminal with truecolor reports `images: true`. `TEXT_ONLY` is `{ false, false, false }`. Mods see it as `e.surfaceCapabilities`. |
 | `SurfaceDescriptor` | `SurfaceId` + `SurfaceCapabilities`. The host passes it to the runtime; `SurfaceDescriptor::terminal()` is the default. |
 | `UiSurface` | The trait a host implements: `descriptor()` and `render_text(elements, width)`. |
 | `SurfaceRegistry` | The surfaces a host can present, plus the active one. Registering does not change the active surface; `set_active` does. The first registration becomes active. |
@@ -56,8 +56,12 @@ terminal.
 - `codape-core::surface` — the ids, capabilities, descriptor, trait and
   registry, with tests for validation, duplicate registration and selection.
 - `codape-ui::surface::TerminalSurface` — the terminal implementation. It
-  reports `interactive: true, mouse: true, images: false` and renders through
-  the same text renderer the headless transcript uses.
+  reports `interactive: true, mouse: true`, takes `images` from the live
+  terminal (`TerminalSurface::new` asks the same `ImageProtocol` detection the
+  transcript uses, so the capability and the renderer cannot disagree), and
+  renders through the same text renderer the headless transcript uses.
+  `TerminalSurface::with_images(bool)` is the pure seam for a caller that
+  already knows.
 - The CLI registers exactly that surface when it builds the mod session, and
   passes `active_descriptor()` into `ModSession`.
 - `core::wire_protocol` and the stream-json protocol both carry mod UI, so a
@@ -87,12 +91,13 @@ element tree is the shared contract; the surface decides how it looks.
 
 ## Boundaries
 
-- The terminal surface still reports `images: false`, and that stays true in the
-  sense the field means: the element tree has no image element, so a mod cannot
-  put a picture into a `UiElement`. The transcript *does* now draw an attached
-  picture — a person can send one (`--image`, `@shot.png`, Ctrl+V) and see it in
-  the conversation — but that is the message list's own renderer, not the
-  surface contract. See [ui.md](ui.md#pictures-in-the-transcript).
+- `images` means "this surface can put a picture in front of a person", and the
+  terminal answers it from what it can actually draw: truecolor gets `true`
+  (the transcript draws attachments as half-block cells — `--image`,
+  `@shot.png`, Ctrl+V), a terminal without it gets `false`. The *element tree*
+  still has no image element, so a mod cannot put a picture into a `UiElement`
+  on any surface; the flag describes the surface, not the mod API. See
+  [ui.md](ui.md#pictures-in-the-transcript).
 - A surface that reports `interactive: false` still receives hooks and UI; it is
   the host's job to hide affordances it cannot honour.
 - The registry is in-memory and per session. Persisting a preference for a

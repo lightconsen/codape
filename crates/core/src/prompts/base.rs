@@ -1,8 +1,8 @@
 //! Prompt assembly from static/dynamic blocks with token estimation.
 //!
 //! Builds the full system prompt and context messages for each turn,
-//! including CLAUDE.md loading, git status injection, and boundary markers
-//! for prompt cache optimization.
+//! including instruction-file loading (`CLAUDE.md` / `AGENTS.md`), git status
+//! injection, and boundary markers for prompt cache optimization.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,40 @@ use crate::budget::TokenBudget;
 use crate::engine::DeniedToolCall;
 use crate::tool_executor::ToolInfo;
 use crate::types::{Message, ModelId};
+
+// ─── Instruction Files ──────────────────────────────────────────────────────
+
+/// The instruction files read from every directory, in precedence order.
+///
+/// `AGENTS.md` is the name Codex, Cursor and Jules read, so a repository that
+/// documents its conventions there is writing them for every agent in the
+/// building. `CLAUDE.md` is this project's own name and comes second, so when
+/// both exist the more specific one is the final word in that directory.
+pub const INSTRUCTION_FILE_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+
+/// The instruction files to read beside a caller-supplied user file.
+///
+/// [`PromptCompiler::set_user_instructions_path`] names one file — normally
+/// `~/.codape/CLAUDE.md` — and the generic sibling in the same directory has
+/// to travel with it, or a person who wrote `~/.codape/AGENTS.md` would find
+/// their preferences ignored while their project's copy was honoured.
+///
+/// A path with an unusual file name is returned on its own: the caller named
+/// that file, and inventing siblings next to it would read documents nobody
+/// asked for.
+fn user_instruction_siblings(user_file: &Path) -> Vec<PathBuf> {
+    let Some(dir) = user_file.parent() else {
+        return vec![user_file.to_path_buf()];
+    };
+    let named = user_file.file_name().and_then(|name| name.to_str());
+    if !named.is_some_and(|name| INSTRUCTION_FILE_NAMES.contains(&name)) {
+        return vec![user_file.to_path_buf()];
+    }
+    INSTRUCTION_FILE_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .collect()
+}
 
 // ─── Block Types ────────────────────────────────────────────────────────────
 
@@ -490,26 +524,34 @@ impl PromptCompiler {
     /// Load the project and user instruction files.
     ///
     /// The walk starts at `cwd` and climbs to the filesystem root, so a
-    /// monorepo's root `CLAUDE.md` and the package's own both apply. The user
-    /// file at `~/.codape/CLAUDE.md` is loaded last so it is the final word —
-    /// it is the one the person wrote about how they want to be worked with,
-    /// and a repository should not be able to override it by checking in a file
-    /// of the same name. (`CLAUDE_CONFIG_DIR` redirects the config home, which
-    /// is how a test isolates this.)
+    /// monorepo's root instruction file and the package's own both apply. The
+    /// user file at `~/.codape/CLAUDE.md` is loaded last so it is the final
+    /// word — it is the one the person wrote about how they want to be worked
+    /// with, and a repository should not be able to override it by checking in
+    /// a file of the same name. (`CLAUDE_CONFIG_DIR` redirects the config
+    /// home, which is how a test isolates this.)
+    ///
+    /// Both [`INSTRUCTION_FILE_NAMES`] are read from every directory. A
+    /// repository that only has `AGENTS.md` — the name Codex, Cursor and Jules
+    /// read — used to contribute nothing to the prompt at all, which meant a
+    /// file written to instruct every other agent in the building was silently
+    /// invisible here.
     #[allow(clippy::unused_self)]
     fn load_claude_markdown(&self, cwd: &Path) -> String {
         let mut content = String::new();
         let mut current: Option<&Path> = Some(cwd);
 
         while let Some(dir) = current {
-            let claude_md = dir.join("CLAUDE.md");
-            if claude_md.is_file()
-                && let Ok(text) = std::fs::read_to_string(&claude_md)
-            {
-                if !content.is_empty() {
-                    content.push_str("\n\n---\n\n");
+            for name in INSTRUCTION_FILE_NAMES {
+                let file = dir.join(name);
+                if file.is_file()
+                    && let Ok(text) = std::fs::read_to_string(&file)
+                {
+                    if !content.is_empty() {
+                        content.push_str("\n\n---\n\n");
+                    }
+                    content.push_str(&text);
                 }
-                content.push_str(&text);
             }
             current = dir.parent();
         }
@@ -520,14 +562,17 @@ impl PromptCompiler {
             return content;
         };
         let already_read = user_file.parent().is_some_and(|home| cwd.starts_with(home));
-        if !already_read
-            && let Ok(text) = std::fs::read_to_string(user_file)
-            && !text.trim().is_empty()
-        {
-            if !content.is_empty() {
-                content.push_str("\n\n---\n\n");
+        if !already_read {
+            for file in user_instruction_siblings(user_file) {
+                if let Ok(text) = std::fs::read_to_string(&file)
+                    && !text.trim().is_empty()
+                {
+                    if !content.is_empty() {
+                        content.push_str("\n\n---\n\n");
+                    }
+                    content.push_str(&text);
+                }
             }
-            content.push_str(&text);
         }
 
         content
@@ -609,6 +654,12 @@ impl PromptCompiler {
             crate::types::MessageContent::Image(image) => {
                 Self::estimate_tokens(&image.media_type) + crate::types::IMAGE_TOKEN_ESTIMATE
             }
+            crate::types::MessageContent::ServerBlock(server) => {
+                // Round-tripped provider output; the JSON is the only size
+                // that tracks what actually travels.
+                let json = serde_json::to_string(&server.block).unwrap_or_default();
+                Self::estimate_tokens(&json)
+            }
         }
     }
 
@@ -673,11 +724,13 @@ mod tests {
                 name: "Read".into(),
                 description: "Read file contents".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: crate::tool_executor::ToolKind::Client,
             },
             ToolInfo {
                 name: "Write".into(),
                 description: "Write file contents".into(),
                 input_schema: serde_json::json!({"type": "object"}),
+                kind: crate::tool_executor::ToolKind::Client,
             },
         ];
         let model = ModelId::sonnet();
@@ -711,6 +764,7 @@ mod tests {
             name: "Read".into(),
             description: "Read file contents".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: crate::tool_executor::ToolKind::Client,
         }];
         let model = ModelId::sonnet();
         let budget = TokenBudget::with_defaults();
@@ -756,6 +810,83 @@ mod tests {
         compiler.set_user_instructions_path(None);
         let ctx = compiler.get_user_context(Path::new("/nonexistent/path"));
         assert!(ctx.is_none());
+    }
+
+    /// A repository that documents itself in `AGENTS.md` — the name Codex,
+    /// Cursor and Jules read — used to contribute nothing to the prompt.
+    #[test]
+    fn agents_md_is_loaded_like_claude_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# House Rules\n\nUse tabs, not spaces.",
+        )
+        .unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(None);
+        let text = user_context_text(&compiler, tmp.path());
+        assert!(text.contains("House Rules"), "{text}");
+        assert!(text.contains("Use tabs"), "{text}");
+    }
+
+    /// Both names in one directory are both read, `AGENTS.md` first: it is the
+    /// file written for every agent, and the project's own name overrides it.
+    #[test]
+    fn both_instruction_files_are_read_generic_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "GENERIC-RULE").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "PROJECT-NAME-RULE").unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(None);
+        let text = user_context_text(&compiler, tmp.path());
+        let generic = text.find("GENERIC-RULE").expect("AGENTS.md");
+        let specific = text.find("PROJECT-NAME-RULE").expect("CLAUDE.md");
+        assert!(generic < specific, "{text}");
+    }
+
+    /// The user-level file is named as `CLAUDE.md`, and its generic sibling in
+    /// the same directory has to travel with it — otherwise a preference
+    /// written in `~/.codape/AGENTS.md` was honoured nowhere.
+    #[test]
+    fn the_user_instruction_directory_honours_both_names() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("AGENTS.md"), "GLOBAL-GENERIC").unwrap();
+        std::fs::write(home.path().join("CLAUDE.md"), "GLOBAL-SPECIFIC").unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(Some(home.path().join("CLAUDE.md")));
+        let text = user_context_text(&compiler, project.path());
+        assert!(text.contains("GLOBAL-GENERIC"), "{text}");
+        assert!(text.contains("GLOBAL-SPECIFIC"), "{text}");
+    }
+
+    /// A caller that names an unusual file means that file. Reading an
+    /// `AGENTS.md` beside it would pull in a document nobody asked for.
+    #[test]
+    fn an_unusual_user_instruction_name_has_no_siblings() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("house-style.md"), "HOUSE-STYLE").unwrap();
+        std::fs::write(home.path().join("AGENTS.md"), "UNRELATED").unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        let mut compiler = PromptCompiler::new(CompactConfig::default());
+        compiler.set_user_instructions_path(Some(home.path().join("house-style.md")));
+        let text = user_context_text(&compiler, project.path());
+        assert!(text.contains("HOUSE-STYLE"), "{text}");
+        assert!(!text.contains("UNRELATED"), "{text}");
+    }
+
+    fn user_context_text(compiler: &PromptCompiler, cwd: &Path) -> String {
+        let message = compiler
+            .get_user_context(cwd)
+            .expect("an instruction file should supply context");
+        let crate::types::MessageContent::Text(text) = &message.content else {
+            panic!("expected text content");
+        };
+        text.clone()
     }
 
     /// A user-level instruction file applies in every repository.
@@ -822,6 +953,7 @@ mod tests {
             name: "Read".into(),
             description: "Read file contents".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: crate::tool_executor::ToolKind::Client,
         }];
         let model = ModelId::sonnet();
         let budget = TokenBudget::with_defaults();

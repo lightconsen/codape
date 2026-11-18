@@ -557,6 +557,7 @@ impl OpenAiCompatibleProvider {
             usage,
             stop_reason,
             thinking,
+            server_blocks: Vec::new(),
         }
     }
 
@@ -610,6 +611,7 @@ impl OpenAiCompatibleProvider {
             usage,
             stop_reason: json["status"].as_str().unwrap_or("completed").to_string(),
             thinking: None,
+            server_blocks: Vec::new(),
         }
     }
 
@@ -1588,6 +1590,7 @@ mod tests {
             name: "Read".into(),
             description: "read".into(),
             input_schema: serde_json::json!({}),
+            kind: crate::tool_executor::ToolKind::Client,
         }];
         let messages = vec![
             serde_json::json!({"role": "user", "content": "earlier"}),

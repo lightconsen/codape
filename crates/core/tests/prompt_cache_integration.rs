@@ -106,11 +106,13 @@ fn tools() -> Vec<ToolInfo> {
             name: "Read".into(),
             description: "read".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: codape_core::tool_executor::ToolKind::Client,
         },
         ToolInfo {
             name: "Bash".into(),
             description: "run".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            kind: codape_core::tool_executor::ToolKind::Client,
         },
     ]
 }

@@ -380,6 +380,43 @@ arrives, so an editor may launch it before `codape serve` is running. A prompt
 sent with no daemon, or against a recorded PID that is no longer alive, is
 refused with that reason rather than hanging.
 
+### Codape as an MCP server (`codape mcp serve`)
+
+The bridge above is an adapter onto a *daemon*: its tools are a prompt and
+permission protocol, not this machine's capabilities. `codape mcp serve`
+(`crates/cli/src/mcp_serve.rs`) is the other direction — this binary publishing
+its own tools over stdio, for any MCP client to call.
+
+```json
+{
+  "mcpServers": {
+    "codape": { "command": "/absolute/path/to/codape", "args": ["mcp", "serve"] }
+  }
+}
+```
+
+It implements `initialize`, `ping`, `tools/list` and `tools/call` for the
+`2024-11-05` / `2025-03-26` / `2025-06-18` framing (newline-delimited JSON-RPC;
+the client's requested revision is echoed when it is one of those, otherwise
+`2024-11-05`). It is intercepted in `main` before `init_tracing` and
+`parse_args`, because a startup phase that printed a sentence would land in the
+middle of the stream; for the same reason it must be the first arguments, and
+the orchestrator refuses the subcommand if anything preceded it.
+
+| Aspect | Behaviour |
+|---|---|
+| Published tools | `#[must_use] pub fn exposed_tools()` — `Read`, `Write`, `Edit`, `NotebookEdit`, `ListDir`, `CurrentDir`, `Glob`, `Grep`, `WebSearch`, `WebFetch`, `LSP`, `TodoWrite`, the six task tools, `JobList`/`JobOutput`/`JobKill`, `Skill`, and the platform shell (`Bash` or `PowerShell`) |
+| Not published | `Agent`, `SendMessage`, the team/worktree tools, the MCP resource/prompt tools, `EnterPlanMode`/`ExitPlanMode`, `AskUserQuestion`, `Brief`, `Config`, the cron family, and the engine-internal `REPL`/`RemoteTrigger`/`StructuredOutput`/`SyntheticOutput`/`Echo`/`NoOp`/`ToolSearch` — each needs a session, a model, a person, or the client's own node tree |
+| Permission mode | `--permissions MODE` or the `permission_mode` in settings; `--dangerously-skip-permissions` bypasses. The mode decides **what is published as well as what runs**: a tool the checker would answer `Ask` about is omitted, because there is nobody to ask |
+| Default surface | reads and search only. Writes need `--permissions accept-edits`; the shell needs `--dangerously-skip-permissions` or an allow rule |
+| Settings | user + project + local, resolved with workspace trust **refused**: a repository's `permissions.allow` is a document a stranger wrote and no one is watching this server. A rule that fails to compile is a startup failure rather than a silently narrower surface |
+| Execution | the same `ToolRegistry` + `RegistryToolDispatcher` a session builds, so sandboxing, output caps and deny rules are not re-implemented. The task store is the same `~/.codape/tasks.jsonl` a session uses, so a task made over MCP is one `codape` can list |
+| stdout | protocol only. Diagnostics go to `tracing` (stderr) or `eprintln` |
+
+A refusal is a tool result with `isError: true` naming the tool, the rule's
+reason, and the flag that would allow it — not a protocol error, so the calling
+model can read it and act.
+
 ## Remaining Considerations
 
 - **OAuth authorization flow**: the browser-based authorization-code flow exists in the `McpAuth` tool, with PKCE and a local callback server. A headless run uses the RFC 8628 device flow when the server advertises `device_authorization_endpoint` (user code returned immediately, token persisted by a background poll), or otherwise completes through the persisted hand-off — paste the full redirect URL (state is verified) or supply `code` + `code_verifier` — rather than waiting out the callback timeout, which is only entered when a browser was actually opened.

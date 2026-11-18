@@ -3862,6 +3862,11 @@ impl StartupOrchestrator {
                 permission_engine,
                 tx,
             );
+            // A clone kept out of the engine: the dispatcher's shared bits
+            // (feature flags, the Chrome switch, the provider-web-tools bit)
+            // are what the engine's copy reads, and the engine owns its own
+            // box after `set_tool_executor`.
+            let tool_dispatcher = dispatcher.clone();
             engine.set_tool_executor(Box::new(dispatcher));
             engine.set_context_window_resolver(context_window.clone());
             engine.set_persist_learned_context_window(true);
@@ -3871,6 +3876,11 @@ impl StartupOrchestrator {
                 .join(".codape")
                 .join("memory");
             crate::repl::apply_engine_flag_behaviours(&mut engine, &flags, Some(&memory_base));
+            // The dispatcher's clone of the bit has to match what the engine
+            // will actually send: retiring the local web tools for a
+            // declaration the endpoint cannot run would leave a served
+            // session with no search at all.
+            tool_dispatcher.set_provider_web_tools(engine.declares_server_tools());
 
             // Where the session's permission prompts wait for the client's
             // answer. Without one every `Ask` is reported to the model as an
@@ -4248,8 +4258,24 @@ impl StartupOrchestrator {
                     Err(error) => println!("Error: {error}"),
                 }
             }
+            Some(crate::cli::McpAction::Serve(_)) => {
+                // `codape mcp serve` is opened in `main`, before startup, so
+                // that nothing has printed to stdout ahead of the JSON-RPC
+                // stream. Reaching this arm means something was placed before
+                // the subcommand (`codape --directory DIR mcp serve`), so the
+                // hand-written check did not recognise it and the stream would
+                // carry this process's startup output. Refuse rather than open
+                // a server whose first frame is not a frame.
+                bail!(
+                    "`codape mcp serve` must be the first arguments: an MCP client reads \
+                     stdout as protocol, so no other option or startup output may precede \
+                     it. Run `codape mcp serve --directory <DIR> --permissions <MODE>` instead."
+                );
+            }
             None => {
-                println!("Usage: codape mcp <list|add|remove|test|export-token|import-token>");
+                println!(
+                    "Usage: codape mcp <list|add|remove|test|export-token|import-token|serve>"
+                );
             }
         }
         Ok(())
@@ -4368,10 +4394,129 @@ impl StartupOrchestrator {
                     Err(e) => println!("Update failed: {e}"),
                 }
             }
+            Some(crate::cli::PluginAction::Marketplace(action)) => {
+                return Self::run_plugin_marketplace(action);
+            }
             None => {
-                println!("Usage: codape plugin <list|install|uninstall|update>");
+                println!("Usage: codape plugin <list|install|uninstall|update|marketplace>");
             }
         }
+        Ok(())
+    }
+
+    /// `codape plugin marketplace` — the command-line half of the
+    /// in-session `/plugin marketplace`.
+    ///
+    /// Both go through [`MarketplaceSetting::validated`], so the rules for
+    /// what may be written to `settings.json` are decided once. The file is
+    /// edited as raw JSON rather than through [`Settings`]: `marketplaces` is
+    /// not a field of that struct (it configures the plugin host), and
+    /// round-tripping the whole file through it would drop every key the
+    /// struct does not carry.
+    fn run_plugin_marketplace(action: crate::cli::MarketplaceAction) -> Result<()> {
+        let dir = codape_config::config_home();
+        match action {
+            crate::cli::MarketplaceAction::List => {
+                let entries = Self::read_marketplace_entries(&dir)?;
+                if entries.is_empty() {
+                    println!(
+                        "No marketplaces configured.\nAdd one with: codape plugin marketplace add <name> <https-url>"
+                    );
+                } else {
+                    println!("Configured marketplaces:");
+                    for (name, url) in entries {
+                        println!("  {name}  {url}");
+                    }
+                }
+            }
+            crate::cli::MarketplaceAction::Add { name, url } => {
+                let setting = codape_config::MarketplaceSetting::validated(&name, &url)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                let mut entries = Self::read_marketplace_entries(&dir)?;
+                entries.retain(|(existing, _)| *existing != setting.name);
+                entries.push((setting.name.clone(), setting.url.clone()));
+                Self::write_marketplace_entries(&dir, &entries)?;
+                println!(
+                    "Marketplace '{}' saved to {}.",
+                    setting.name,
+                    dir.join("settings.json").display()
+                );
+            }
+            crate::cli::MarketplaceAction::Remove { name } => {
+                let mut entries = Self::read_marketplace_entries(&dir)?;
+                let before = entries.len();
+                entries.retain(|(existing, _)| *existing != name);
+                if entries.len() == before {
+                    return Err(anyhow::anyhow!("no marketplace named '{name}'"));
+                }
+                Self::write_marketplace_entries(&dir, &entries)?;
+                println!("Marketplace '{name}' removed.");
+            }
+        }
+        Ok(())
+    }
+
+    /// The `marketplaces` array from the user settings file, as name/url pairs.
+    ///
+    /// A malformed file is an error here rather than an empty list: `add` and
+    /// `remove` rewrite the file wholesale, and starting from an empty reading
+    /// of an unparseable file would delete every other key in it.
+    fn read_marketplace_entries(dir: &std::path::Path) -> Result<Vec<(String, String)>> {
+        let path = dir.join("settings.json");
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return Ok(Vec::new());
+        };
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?;
+        let entries = value
+            .get("marketplaces")
+            .and_then(|value| value.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let name = entry.get("name")?.as_str()?.to_string();
+                        let url = entry.get("url")?.as_str()?.to_string();
+                        Some((name, url))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(entries)
+    }
+
+    /// Replace the `marketplaces` array, leaving every other key untouched.
+    fn write_marketplace_entries(
+        dir: &std::path::Path,
+        entries: &[(String, String)],
+    ) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("settings.json");
+        let mut value: serde_json::Value = match std::fs::read_to_string(&path) {
+            Ok(content) => serde_json::from_str(&content)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::json!({})
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let array: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(name, url)| serde_json::json!({ "name": name, "url": url }))
+            .collect();
+        let Some(object) = value.as_object_mut() else {
+            return Err(anyhow::anyhow!(
+                "{} does not hold a JSON object",
+                path.display()
+            ));
+        };
+        object.insert("marketplaces".to_string(), serde_json::Value::Array(array));
+        // Written through a temporary file and renamed, so a crash mid-write
+        // cannot leave a half-written settings.json that the next startup
+        // parses as empty.
+        let temporary = path.with_extension("json.tmp");
+        std::fs::write(&temporary, serde_json::to_string_pretty(&value)?)?;
+        std::fs::rename(&temporary, &path)?;
         Ok(())
     }
 
@@ -6207,6 +6352,73 @@ mod tests {
             "internal".to_string(),
             "https://plugins.example".to_string()
         )));
+    }
+
+    #[test]
+    fn marketplace_entries_round_trip_and_leave_other_keys_alone() {
+        let home = tempfile::tempdir().unwrap();
+        // A settings file with a key the marketplace editor does not model.
+        std::fs::write(
+            home.path().join("settings.json"),
+            r#"{"model": "claude-sonnet-5-5", "marketplaces": [{"name": "old", "url": "https://old.example"}]}"#,
+        )
+        .unwrap();
+
+        let mut entries = StartupOrchestrator::read_marketplace_entries(home.path()).unwrap();
+        assert_eq!(
+            entries,
+            vec![("old".to_string(), "https://old.example".to_string())]
+        );
+        entries.push(("new".to_string(), "https://new.example".to_string()));
+        StartupOrchestrator::write_marketplace_entries(home.path(), &entries).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["model"], "claude-sonnet-5-5");
+        assert_eq!(written["marketplaces"][0]["name"], "old");
+        assert_eq!(written["marketplaces"][1]["url"], "https://new.example");
+        // The write goes through a temporary file; none may survive.
+        assert!(!home.path().join("settings.json.tmp").exists());
+    }
+
+    /// Rewriting the file from an empty reading of an unparseable one would
+    /// delete every other setting in it, so a malformed file is an error.
+    #[test]
+    fn a_malformed_settings_file_is_not_rewritten() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("settings.json"), "{not json").unwrap();
+        assert!(StartupOrchestrator::read_marketplace_entries(home.path()).is_err());
+        assert!(
+            StartupOrchestrator::write_marketplace_entries(home.path(), &[]).is_err(),
+            "an unparseable file must not be replaced with an empty one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+            "{not json"
+        );
+    }
+
+    /// A file that does not exist yet is the normal first-install case.
+    #[test]
+    fn a_missing_settings_file_reads_as_no_marketplaces() {
+        let home = tempfile::tempdir().unwrap();
+        let entries = StartupOrchestrator::read_marketplace_entries(home.path()).unwrap();
+        assert!(entries.is_empty());
+        StartupOrchestrator::write_marketplace_entries(
+            home.path(),
+            &[(
+                "internal".to_string(),
+                "https://plugins.example".to_string(),
+            )],
+        )
+        .unwrap();
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(written["marketplaces"][0]["name"], "internal");
     }
 
     #[test]

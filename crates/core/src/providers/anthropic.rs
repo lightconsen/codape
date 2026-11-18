@@ -44,6 +44,10 @@ impl Provider for AnthropicProvider {
         self.client.resolved_profile().capabilities
     }
 
+    fn can_run_server_tools(&self) -> bool {
+        self.client.supports_server_tools()
+    }
+
     fn with_request_context(&self, context: RequestContext) -> Box<dyn Provider> {
         Box::new(Self::from_client(
             self.client.cloned_with_request_context(context),

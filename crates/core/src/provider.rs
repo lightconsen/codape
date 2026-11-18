@@ -245,6 +245,16 @@ pub trait Provider: Send + Sync {
     /// Provider capabilities.
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// Whether this provider can run a tool the request declares for it.
+    ///
+    /// Off by default: only the provider's own Messages API produces
+    /// `server_tool_use` blocks and the results that come with them. A
+    /// provider that says no is never sent a versioned server-tool
+    /// declaration.
+    fn can_run_server_tools(&self) -> bool {
+        false
+    }
+
     /// Clone the provider with per-request context.
     fn with_request_context(&self, _context: RequestContext) -> Box<dyn Provider> {
         self.clone_box()

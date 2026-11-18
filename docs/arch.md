@@ -115,6 +115,7 @@ InitMemory -> InitRemoteServices -> Ready
 
 - **Baseline** — always on (Read, Write, Bash, Glob, Grep, etc.)
 - **FeatureGated** — the five Chrome DevTools tools (session capability, `--no-chrome`) and `WebFetch` (the `web_browser_tool` flag)
+- **Provider-run** — `web_search_20260209` / `web_fetch_20260209`, declared on the request (not in the registry) when `server_tools` is on *and* the transport can run them; while on, `WebSearch`/`WebFetch` are retired from both the listing and the execute path
 - **DynamicMcp** — runtime-discovered from MCP servers
 
 Commands have an availability matrix (non-interactive / remote-safe / bridge-safe).

@@ -615,6 +615,16 @@ with a 20-second ceiling; it reads the exported files and writes nothing.
 
 ## Install Sources
 
+Marketplaces are configured in `settings.json` under `marketplaces` (`[{"name": …, "url": …}]`). Writing that key by hand used to be the only way to add one, so an install run from a script had to know both the key's shape and the file's location. Both surfaces now exist and share one validator (`MarketplaceSetting::validated`, `crates/config/src/settings.rs`):
+
+```
+codape plugin marketplace list
+codape plugin marketplace add <name> <https-url>
+codape plugin marketplace remove <name>
+```
+
+and, in a session, `/plugin marketplace [list|add <name> <https-url>|remove <name>]`. The validator applies the same rules `PluginManager::register_marketplace` does — HTTPS only, no whitespace or `/` in the name — before anything is persisted, so a marketplace that would be skipped at startup is refused with a reason instead of saved. Adding a name that already exists replaces its URL rather than appending a second entry, because which URL an install resolved against otherwise depended on registration order. The CLI rewrites the file through a temporary file and a rename, keeps every other key, and refuses to touch a `settings.json` it could not parse.
+
 `PluginSource` has seven kinds, and `PluginSource::detect()` classifies a CLI argument into one of them (a `github:`/`git-subdir:` prefix → that kind; an existing directory → `LocalDir`; a git remote → `Git`; an HTTPS `.tar.gz`/`.tgz` → `Archive`; anything else → a marketplace listing name, which is what `codape plugin install <name>` has always meant). `install_plugin` routes a listing whose url is not a marketplace URL to `install_from_source`, so `codape plugin install ./my-plugin` and `codape plugin install https://github.com/acme/plugin.git` work without the CLI changing its argument shape.
 
 The in-session `/plugin install <source>` takes the same sources. The command handler cannot call the installer — `codape-commands` does not depend on `codape-plugins` — so it returns a `CommandResult` carrying `CommandDeferred::PluginInstall { source }`. The REPL records that in `pending_deferred` and drains it at the two async entry points: `execute_command` (headless, report appended to the command's own output) and `spawn_deferred_work` after `process_tui_input` (the install runs in a `tokio::spawn` and reports through the `ShellCommandResult` channel `!` commands use, so the frame keeps drawing). A bare name that is not a marketplace plugin, with no marketplace configured, is refused with the source kinds that would work rather than a silent no-op.

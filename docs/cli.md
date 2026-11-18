@@ -125,10 +125,16 @@ main() → parse_args() → StartupOrchestrator::run()
 | `mcp add NAME COMMAND` | Add an MCP server |
 | `mcp remove NAME` | Remove an MCP server |
 | `mcp test NAME` | Test an MCP server connection |
+| `mcp export-token SERVER [--output PATH]` | Export one server's stored OAuth token (a credential). |
+| `mcp import-token SERVER [--file PATH]` | Merge an exported token into this machine's secret store. |
+| `mcp serve [--directory DIR] [--permissions MODE] [--dangerously-skip-permissions]` | Run Codape **as** an MCP server over stdio. Publishes the file, shell and search tools a session has, minus whatever the permission rules would stop to ask about. Runs before startup, so it must be the first arguments. See `docs/mcp.md`. |
 | `plugin list` | List installed plugins |
 | `plugin install SOURCE` | Install a plugin |
 | `plugin uninstall NAME` | Uninstall a plugin |
 | `plugin update` | Update all plugins |
+| `plugin marketplace list` | List the marketplaces in `settings.json` |
+| `plugin marketplace add NAME URL` | Register an HTTPS marketplace; replaces an entry of the same name |
+| `plugin marketplace remove NAME` | Remove a marketplace by name |
 | `auto-mode` | Show auto-mode settings (reads `dream_config.json`) |
 | `telemetry preview-crash [FILE]` | Print the JSON that would be uploaded for a pending crash (never uploads) |
 
@@ -232,7 +238,8 @@ A comma-separated list applied on top of `CODAPE_FEATURE_FLAGS`:
 - Every name must be one this build knows: `streaming_tool_execution`,
   `tool_use_summaries`, `fast_mode`, `coordinator_mode`, `history_snip`,
   `agent_triggers`, `voice_mode`, `workflow_scripts`, `web_browser_tool`,
-  `team_collaboration`, `auto_dream`, and the six command-availability flags
+  `server_tools`, `team_collaboration`, `auto_dream`, and the six
+  command-availability flags
   (`ultraplan`, `thinkback`, `heapdump`, `mock_limits`, `ctx_viz`, `stickers`).
 - An unknown name is a startup error listing the unknown names and the known
   set; it is never dropped silently.
@@ -248,7 +255,11 @@ A comma-separated list applied on top of `CODAPE_FEATURE_FLAGS`:
   gate, and the companion lives behind the compile-time `buddy` cargo feature,
   which a runtime flag cannot reach. All six are rejected as unknown flags.
 - These names do have consumers: `web_browser_tool` (gates the `WebFetch`
-  tool), `agent_triggers` (gates the agent-kind hook path — with it off a
+  tool), `server_tools` (declares the provider's `web_search`/`web_fetch` tools
+  on each request and retires the local pair — only on Anthropic's own
+  endpoint, since the versioned types are not run elsewhere; the session warns
+  at startup when the flag is on and the endpoint cannot carry it, and the
+  local tools stay in that case), `agent_triggers` (gates the agent-kind hook path — with it off a
   configured `agent` hook is dropped at startup with a warning), `auto_dream`
   (gates the auto-dream manager — with it off `/auto-dream` reports as
   uninitialized), `fast_mode` (resolves the session model through the

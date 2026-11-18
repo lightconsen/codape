@@ -21,6 +21,31 @@ fn config_home() -> std::path::PathBuf {
     })
 }
 
+/// What a surface can do, in prose, for the commands that report one.
+///
+/// Spelled from the descriptor rather than from a table per surface id: the
+/// capabilities are the fact, and a host that registers `desktop` with no
+/// mouse would otherwise be described as the terminal is.
+fn describe_capabilities(capabilities: codape_core::surface::SurfaceCapabilities) -> String {
+    let mut parts = Vec::new();
+    parts.push(if capabilities.interactive {
+        "interactive"
+    } else {
+        "not interactive"
+    });
+    parts.push(if capabilities.mouse {
+        "mouse"
+    } else {
+        "no mouse"
+    });
+    parts.push(if capabilities.images {
+        "renders images"
+    } else {
+        "no images"
+    });
+    parts.join(", ")
+}
+
 /// Read the user settings.json as a JSON object.
 fn read_user_settings_at(
     dir: &std::path::Path,
@@ -128,58 +153,73 @@ chrome_get_content    — Extract page HTML as markdown"
 
     // /desktop — desktop app integration
     //
-    // Codape ships no desktop host; the surface abstraction has one
+    // Codape ships no desktop host of its own: the surface abstraction has one
     // implementation, the terminal (`crates/ui/src/surface.rs`). This used to
-    // report "Connected" whenever `CODAPE_DESKTOP` was set, and nothing sets
-    // it, so the only honest answer is that there is no desktop app.
+    // report "Connected" whenever `CODAPE_DESKTOP` was set, and then, once
+    // that was called out, "none" no matter what was actually presenting the
+    // session. The honest answer is the surface the context was built from: a
+    // host that really presents sessions in a desktop window registers that
+    // surface and this command reports it.
     registry.register(SlashCommand::local(
         "desktop",
         "Desktop app integration status",
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let detected = std::env::var("CODAPE_DESKTOP").is_ok_and(|s| !s.is_empty());
-            if detected {
-                // An environment marker is not a connection: say what was
-                // seen rather than claiming an integration exists.
-                CommandResult::success(
-                    "Desktop integration: CODAPE_DESKTOP is set, but this build has no desktop \
-                     host. The session is presented in the terminal surface.",
-                )
-            } else {
-                CommandResult::success(
-                    "Desktop integration: none. Codape ships the terminal surface only.",
-                )
+        Arc::new(|ctx: &CommandContext, _args: &[String]| {
+            let surface = &ctx.surface;
+            if surface.id.as_str() == codape_core::surface::SurfaceId::DESKTOP {
+                return CommandResult::success(format!(
+                    "Desktop integration: active. This session is presented in the '{}' \
+                     surface ({}).",
+                    surface.id,
+                    describe_capabilities(surface.capabilities)
+                ));
             }
+            CommandResult::success(format!(
+                "Desktop integration: none. This session is presented in the '{}' surface \
+                 ({}), not a desktop window.",
+                surface.id,
+                describe_capabilities(surface.capabilities)
+            ))
         }),
     ));
 
     // /mobile — mobile remote connection
     //
-    // The same problem as `/desktop`: `CODAPE_MOBILE` was the only evidence
-    // ever consulted, and nothing sets it. Remote clients reach a session
-    // through the bridge's own launcher (`codape bridge`), not through this
-    // command, so the honest answer names that and the gateway that is not in
-    // this repository.
+    // A phone is not a surface Codape presents a session in; it reaches one
+    // through `codape bridge`. So the answer has two halves, and only the
+    // first is the same question `/desktop` asks: which surface is this, and
+    // can a remote client attach to it at all.
     registry.register(SlashCommand::local(
         "mobile",
         "Mobile remote connection status",
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
-            let detected = std::env::var("CODAPE_MOBILE").is_ok_and(|s| !s.is_empty());
-            if detected {
-                CommandResult::success(
-                    "Mobile: CODAPE_MOBILE is set, but this command cannot observe a client. \
-                     Remote clients attach through `codape bridge` and are approved by the \
-                     gateway, which is not part of this binary.",
-                )
+        Arc::new(|ctx: &CommandContext, _args: &[String]| {
+            let surface = &ctx.surface;
+            // Whether this is a terminal is the id's question, not the
+            // picture capability's: a truecolor terminal draws images and is
+            // still a terminal, and a desktop host that draws none is not.
+            let local_only = surface.id.as_str() == codape_core::surface::SurfaceId::TERMINAL;
+            let surface_line = format!(
+                "This session is presented in the '{}' surface ({}).",
+                surface.id,
+                describe_capabilities(surface.capabilities)
+            );
+            if local_only {
+                CommandResult::success(format!(
+                    "Mobile: no client attached. {surface_line}\n\
+                     A remote client attaches through `codape bridge`, which is served by this \
+                     host; nothing here can observe whether one has."
+                ))
             } else {
-                CommandResult::success(
-                    "Mobile: none. Remote clients attach through `codape bridge`.",
-                )
+                CommandResult::success(format!(
+                    "Mobile: no client attached. {surface_line}\n\
+                     A non-terminal surface is presenting this session, so a remote client may \
+                     already be reaching it through that host rather than through `codape bridge`."
+                ))
             }
         }),
     ));
@@ -404,15 +444,47 @@ mod tests {
     }
 
     #[test]
-    fn desktop_not_detected() {
+    fn desktop_reports_the_surface_that_is_actually_presenting() {
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
+        // The default context is the terminal, so the answer is "none" — but
+        // it now says which surface it *is* rather than asserting there is
+        // only ever one.
         let result = reg.execute("desktop", &ctx(), &[]);
         assert!(
-            result.output.contains("terminal surface only"),
+            result.output.contains("'terminal' surface"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.starts_with("Desktop integration: none"),
+            "{}",
+            result.output
+        );
+
+        // A host that presents sessions in a desktop window registers that
+        // surface; the command follows the descriptor instead of a constant.
+        let mut desktop = ctx();
+        desktop.surface = codape_core::surface::SurfaceDescriptor::new(
+            codape_core::surface::SurfaceId::DESKTOP,
+            codape_core::surface::SurfaceCapabilities {
+                interactive: true,
+                mouse: true,
+                images: true,
+            },
+        )
+        .expect("desktop is a valid surface id");
+        let result = reg.execute("desktop", &desktop, &[]);
+        assert!(
+            result.output.contains("Desktop integration: active"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("renders images"),
             "{}",
             result.output
         );
@@ -427,6 +499,29 @@ mod tests {
         };
         let result = reg.execute("mobile", &ctx(), &[]);
         assert!(result.output.contains("codape bridge"), "{}", result.output);
+    }
+
+    /// A truecolor terminal draws pictures and is still a terminal.
+    ///
+    /// The command used to infer "some other surface is presenting this" from
+    /// `images: true`, so turning the picture capability on would have had it
+    /// announce a non-terminal host that does not exist.
+    #[test]
+    fn mobile_does_not_mistake_a_picture_capable_terminal_for_another_surface() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let mut c = ctx();
+        c.surface.capabilities.images = true;
+        let result = reg.execute("mobile", &c, &[]);
+        assert!(result.output.contains("codape bridge"), "{}", result.output);
+        assert!(
+            !result.output.contains("non-terminal surface"),
+            "a terminal that draws images was called another surface: {}",
+            result.output
+        );
     }
 
     #[test]

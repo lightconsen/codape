@@ -757,6 +757,11 @@ impl PermissionChecker {
                 "edit".into(),
                 "multi_edit".into(),
                 "notebook_edit".into(),
+                // The tools are registered under CamelCase names, and this list
+                // is compared lowercased: `NotebookEdit` reduces to
+                // `notebookedit`, so the snake_case spelling above never
+                // matched it and the notebook writer counted as a safe tool.
+                "notebookedit".into(),
             ],
             tool_exemptions: HashMap::new(),
         }
@@ -1147,7 +1152,7 @@ impl PermissionChecker {
     pub fn is_edit_tool(&self, tool_name: &str) -> bool {
         matches!(
             tool_name.to_lowercase().as_str(),
-            "write" | "edit" | "multi_edit" | "notebook_edit"
+            "write" | "edit" | "multi_edit" | "notebook_edit" | "notebookedit"
         )
     }
 
@@ -1485,6 +1490,18 @@ mod tests {
             ),
             "PowerShell is the Windows shell tool and must be gated like Bash"
         );
+        // The tools are registered under CamelCase names and every lookup here
+        // lowercases first, so `NotebookEdit` arrives as `notebookedit`. The
+        // snake_case spelling that used to be listed never matched it, and the
+        // notebook writer was treated as a safe tool in the default mode.
+        assert!(
+            matches!(
+                checker.check("NotebookEdit", None),
+                PermissionResult::Ask { .. }
+            ),
+            "NotebookEdit writes files and must require approval"
+        );
+        assert!(checker.is_edit_tool("NotebookEdit"));
     }
 
     #[test]

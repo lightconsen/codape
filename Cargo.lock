@@ -1091,6 +1091,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
  "windows-sys 0.59.0",
  "winreg 0.55.0",
  "wiremock",
