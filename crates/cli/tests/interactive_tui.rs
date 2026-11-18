@@ -935,8 +935,13 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
         session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
         session.send_line("/resume");
-        let resumed = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
-        assert!(resumed.contains("Loaded"));
+        // Wait for the second line rather than asserting on the snapshot taken
+        // the instant the first appears: the snapshot is one frame, and the two
+        // lines are only guaranteed present once the frame that drew them is
+        // complete. Waiting is also the stronger assertion — a line that never
+        // renders times out here instead of passing on a lucky capture.
+        let resumed = session.wait_for_text("Loaded", SCREEN_TIMEOUT);
+        assert!(resumed.contains("Resumed session:"), "{resumed}");
         session.send_line(prompt);
         wait_for_gate_hits(&hits, after_first + 1, SCREEN_TIMEOUT);
         session.ctrl_d();
@@ -2786,8 +2791,10 @@ fn resume_restores_persisted_plan_and_activity() {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
         session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
         session.send_line("/resume");
-        let resumed = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
-        assert!(resumed.contains("Loaded"));
+        // Same reason as the other `/resume` assertion: wait for the line that
+        // arrives second instead of asserting both against one frame.
+        let resumed = session.wait_for_text("Loaded", SCREEN_TIMEOUT);
+        assert!(resumed.contains("Resumed session:"), "{resumed}");
 
         session.send_line("/activity");
         let activity = session.wait_for_any_text(
