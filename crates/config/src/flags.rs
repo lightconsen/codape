@@ -129,16 +129,19 @@ pub struct FeatureFlags {
     /// Gates the local `WebFetch` tool, which fetches and reduces a page
     /// itself. Distinct from [`Self::server_tools`]: this one runs here.
     pub web_browser_tool: bool,
-    /// Declare web search, web fetch and code execution as tools the
-    /// *provider* runs.
+    /// Declare web search and web fetch as tools the *provider* runs.
     ///
-    /// When on, the request declares `web_search`, `web_fetch` and
-    /// `code_execution` as provider-side tools, so the provider runs them
+    /// When on, the request declares `web_search_20260209` and
+    /// `web_fetch_20260209` as provider-side tools, so the provider runs them
     /// inside its own turn: the model does not spend a round trip asking for
     /// a search, and a bad query can be re-run before the result ever reaches
     /// the context window. The local `WebSearch`/`WebFetch` tools are hidden
     /// on the same request, because a model offered both will pick the worse
     /// one about half the time.
+    ///
+    /// The standalone `code_execution` tool is deliberately not part of this:
+    /// declaring it beside the `_20260209` web tools opens a second execution
+    /// environment, and this session already has a shell on the workspace.
     ///
     /// Off by default: the provider must support these tools, and a gateway
     /// that silently ignores an unknown tool type would otherwise turn a

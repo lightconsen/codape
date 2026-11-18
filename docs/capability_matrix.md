@@ -59,7 +59,8 @@
 | Web search (local) | ✅ | `WebSearchTool` — configurable backend chain |
 | Web fetch (local) | ✅ | `WebFetchTool`, gated on `web_browser_tool` |
 | Provider-run web search/fetch | ✅ | `server_tools` declares `web_search_20260209` / `web_fetch_20260209`; Anthropic's own endpoint only |
-| Provider-run blocks round-trip | ✅ | `MessageContent::ServerBlock`, replayed verbatim in order |
+| Provider-run code execution | ❌ | Deliberate. `code_execution_20260120` is a real standalone tool, but it runs in the provider's sandbox, which cannot see the repository being edited, and declaring it beside the `_20260209` web tools opens a second execution environment. Codape's work happens in this working directory, over `Bash` |
+| Provider-run blocks round-trip | ✅ | `MessageContent::ServerBlock`, replayed verbatim in order — the check is a `*_tool_result` suffix match, so a code-execution result would round-trip unchanged if one were ever declared |
 | `pause_turn` resume | ✅ | `StopDisposition::Resume`, bounded by `MAX_PROVIDER_RESUMES` |
 
 ## Surfaces
