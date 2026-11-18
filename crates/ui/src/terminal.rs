@@ -2140,7 +2140,10 @@ fn render_pane_tabs(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
         }
         used += width;
         if !separator.is_empty() {
-            spans.push(Span::styled(separator, Style::default().fg(state.theme.dim)));
+            spans.push(Span::styled(
+                separator,
+                Style::default().fg(state.theme.dim),
+            ));
         }
         let selected = index == state.pane_tab_index;
         // `1:` rather than a mark alone, because the number is what the
@@ -2284,8 +2287,8 @@ fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
             frame.render_widget(list, list_area);
         }
 
-        let paragraph = Paragraph::new(lines)
-            .scroll((left_pane_scroll(state, patch_area.height), 0));
+        let paragraph =
+            Paragraph::new(lines).scroll((left_pane_scroll(state, patch_area.height), 0));
         frame.render_widget(paragraph, patch_area);
         return;
     }
@@ -3396,8 +3399,14 @@ mod layout_tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("1:a.rs"), "first tab is not on the bar:\n{text}");
-        assert!(text.contains("2:b.rs"), "second tab is not on the bar:\n{text}");
+        assert!(
+            text.contains("1:a.rs"),
+            "first tab is not on the bar:\n{text}"
+        );
+        assert!(
+            text.contains("2:b.rs"),
+            "second tab is not on the bar:\n{text}"
+        );
         // The body is the selected tab's, and it is below the bar rather than
         // under it.
         assert!(
@@ -3428,7 +3437,10 @@ mod layout_tests {
             .map(|y| row_text(&buffer, y))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains('…'), "no ellipsis on a bar that overflowed:\n{text}");
+        assert!(
+            text.contains('…'),
+            "no ellipsis on a bar that overflowed:\n{text}"
+        );
         assert!(
             text.contains("1:first.rs"),
             "the first tab did not fit and was dropped:\n{text}"
@@ -3447,7 +3459,10 @@ mod layout_tests {
             .map(|y| row_text(&buffer, y))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!text.contains("1:a.rs"), "a bar of one tab was drawn:\n{text}");
+        assert!(
+            !text.contains("1:a.rs"),
+            "a bar of one tab was drawn:\n{text}"
+        );
         assert!(text.contains("fn alpha()"), "{text}");
     }
 

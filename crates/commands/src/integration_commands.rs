@@ -564,11 +564,7 @@ mod tests {
         let mut c = ctx_in(tmp.path());
         c.feature_flags.insert("voice_mode".to_string(), true);
         let result = reg.execute("voice", &c, &[]);
-        assert!(
-            result.output.contains("voice.command"),
-            "{}",
-            result.output
-        );
+        assert!(result.output.contains("voice.command"), "{}", result.output);
         assert!(
             !result.output.contains("Toggled"),
             "the command still claims to toggle: {}",

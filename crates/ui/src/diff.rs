@@ -173,9 +173,10 @@ pub fn files(lines: &[DiffLine]) -> Vec<DiffFile> {
 /// space — which git does not quote in this header unless it is truly
 /// ambiguous — stays whole.
 fn path_from_header(header: &str) -> String {
-    header
-        .rsplit_once(" b/")
-        .map_or_else(|| header.trim_start_matches("diff --git ").to_string(), |(_, path)| path.to_string())
+    header.rsplit_once(" b/").map_or_else(
+        || header.trim_start_matches("diff --git ").to_string(),
+        |(_, path)| path.to_string(),
+    )
 }
 
 /// The line index of each file's `diff --git` header, in order.

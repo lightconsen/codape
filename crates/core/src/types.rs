@@ -1953,9 +1953,7 @@ mod tests {
 
     #[test]
     fn a_shell_command_is_classified_by_its_program_and_first_argument() {
-        let phase = |command: &str| {
-            call("Bash", serde_json::json!({ "command": command })).phase()
-        };
+        let phase = |command: &str| call("Bash", serde_json::json!({ "command": command })).phase();
         assert_eq!(phase("cargo test -p codape-cli"), ToolPhase::Testing);
         assert_eq!(phase("cargo nextest run"), ToolPhase::Testing);
         assert_eq!(phase("cargo clippy --workspace"), ToolPhase::Building);
@@ -1977,9 +1975,7 @@ mod tests {
 
     #[test]
     fn a_wrapper_does_not_hide_the_program() {
-        let phase = |command: &str| {
-            call("Bash", serde_json::json!({ "command": command })).phase()
-        };
+        let phase = |command: &str| call("Bash", serde_json::json!({ "command": command })).phase();
         assert_eq!(phase("sudo cargo test"), ToolPhase::Testing);
         assert_eq!(phase("RUST_LOG=debug cargo test"), ToolPhase::Testing);
         assert_eq!(phase("time cargo build"), ToolPhase::Building);
@@ -2022,12 +2018,20 @@ mod tests {
     #[test]
     fn an_unknown_tool_keeps_its_summary_verbatim() {
         assert_eq!(
-            running_status("mcp__jira__search", Some(&serde_json::json!({})), "Running mcp__jira__search..."),
+            running_status(
+                "mcp__jira__search",
+                Some(&serde_json::json!({})),
+                "Running mcp__jira__search..."
+            ),
             "Running mcp__jira__search..."
         );
         // Known tool, but the input names nothing: same fallback.
         assert_eq!(
-            running_status("Bash", Some(&serde_json::json!({})), "Running shell command..."),
+            running_status(
+                "Bash",
+                Some(&serde_json::json!({})),
+                "Running shell command..."
+            ),
             "Running a command · Running shell command..."
         );
         // No input at all (a start event that did not carry one).

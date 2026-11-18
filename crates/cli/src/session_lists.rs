@@ -144,12 +144,10 @@ pub fn agent_rows(agents: &[AgentRow]) -> Picker {
         // named an agent did so to recognise it, and the id is still one row
         // away on every row that names it explicitly.
         let shown = agent.name.as_deref().unwrap_or(&agent.id);
-        let group = agent
-            .group
-            .as_deref()
-            .map_or_else(|| format!("{id} · group", id = agent.id), |group| {
-                format!("{id} · group: {group}", id = agent.id)
-            });
+        let group = agent.group.as_deref().map_or_else(
+            || format!("{id} · group", id = agent.id),
+            |group| format!("{id} · group: {group}", id = agent.id),
+        );
         items.push(
             PickerItem::new(
                 AgentChoice::Follow(agent.id.clone()).key(),
@@ -509,7 +507,11 @@ pub fn plugin_rows(plugins: &[PluginRow], marketplaces: &[(String, String)]) -> 
                 format!(
                     "{} · {}",
                     plugin.name,
-                    if plugin.enabled { "turn off" } else { "turn on" }
+                    if plugin.enabled {
+                        "turn off"
+                    } else {
+                        "turn on"
+                    }
                 ),
             )
             .with_detail(off_note()),
@@ -619,7 +621,8 @@ pub fn attachment_rows(images: &[AttachmentRow]) -> Picker {
         return Picker::new(
             "Attached images",
             vec![
-                PickerItem::new("", "No images attached").disabled("paste one with Ctrl+V or @path")
+                PickerItem::new("", "No images attached")
+                    .disabled("paste one with Ctrl+V or @path"),
             ],
         );
     }
@@ -701,8 +704,16 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "follow:a1", "logs:a1", "pin:a1", "rename:a1", "group:a1", "follow:a2",
-                "logs:a2", "pin:a2", "rename:a2", "group:a2",
+                "follow:a1",
+                "logs:a1",
+                "pin:a1",
+                "rename:a1",
+                "group:a1",
+                "follow:a2",
+                "logs:a2",
+                "pin:a2",
+                "rename:a2",
+                "group:a2",
             ]
         );
         assert_eq!(picker.accept(), Some("follow:a1"));
@@ -749,12 +760,23 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "follow:a2", "logs:a2", "pin:a2", "rename:a2", "group:a2", "follow:a1",
-                "logs:a1", "pin:a1", "rename:a1", "group:a1",
+                "follow:a2",
+                "logs:a2",
+                "pin:a2",
+                "rename:a2",
+                "group:a2",
+                "follow:a1",
+                "logs:a1",
+                "pin:a1",
+                "rename:a1",
+                "group:a1",
             ],
             "the pinned agent is first and still has all five rows"
         );
-        assert!(picker.items[0].label.contains('★'), "no pin mark on the row");
+        assert!(
+            picker.items[0].label.contains('★'),
+            "no pin mark on the row"
+        );
         assert!(
             picker.items.iter().any(|item| item.label == "a1 · pin"),
             "the unpinned agent lost its pin row"
@@ -972,7 +994,10 @@ mod tests {
             "the row does not say what a source can be: {:?}",
             picker.items[0].detail
         );
-        assert_eq!(PluginChoice::parse(PLUGIN_INSTALL_KEY), Some(PluginChoice::InstallFrom));
+        assert_eq!(
+            PluginChoice::parse(PLUGIN_INSTALL_KEY),
+            Some(PluginChoice::InstallFrom)
+        );
     }
 
     #[test]

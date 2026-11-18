@@ -128,7 +128,11 @@ pub struct TextInput {
 impl TextInput {
     /// Open a field asking `prompt`, pre-filled with `initial`.
     #[must_use]
-    pub fn new(prompt: impl Into<String>, initial: impl Into<String>, key: impl Into<String>) -> Self {
+    pub fn new(
+        prompt: impl Into<String>,
+        initial: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
         Self {
             prompt: prompt.into(),
             text: initial.into(),
@@ -509,14 +513,20 @@ mod tests {
         assert!(stack.is_active(), "it is still an overlay");
         assert!(!stack.has_modal(), "but it does not own the keyboard");
 
-        stack.push(Overlay::List(crate::picker::Picker::new("Sessions", vec![])));
+        stack.push(Overlay::List(crate::picker::Picker::new(
+            "Sessions",
+            vec![],
+        )));
         assert!(stack.has_modal());
     }
 
     #[test]
     fn popping_the_palette_leaves_a_dialog_underneath() {
         let mut stack = OverlayStack::new();
-        stack.push(Overlay::List(crate::picker::Picker::new("Sessions", vec![])));
+        stack.push(Overlay::List(crate::picker::Picker::new(
+            "Sessions",
+            vec![],
+        )));
         // Nothing to pop: the top is not a palette, and a command must not be
         // able to dismiss a dialog it did not open.
         stack.pop_palette();

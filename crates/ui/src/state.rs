@@ -536,7 +536,10 @@ mod tests {
     use super::*;
 
     fn shown(state: &UiState) -> (String, &str) {
-        (state.left_pane_title.clone(), state.left_pane_content.as_str())
+        (
+            state.left_pane_title.clone(),
+            state.left_pane_content.as_str(),
+        )
     }
 
     #[test]
@@ -567,9 +570,15 @@ mod tests {
         state.pane_show("a.rs".into(), "one".into(), false);
         state.pane_show("b.rs".into(), "two".into(), false);
         state.pane_cycle(true);
-        assert_eq!(state.left_pane_title, "a.rs", "the last tab wraps to the first");
+        assert_eq!(
+            state.left_pane_title, "a.rs",
+            "the last tab wraps to the first"
+        );
         state.pane_cycle(false);
-        assert_eq!(state.left_pane_title, "b.rs", "and the first back to the last");
+        assert_eq!(
+            state.left_pane_title, "b.rs",
+            "and the first back to the last"
+        );
     }
 
     #[test]

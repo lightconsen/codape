@@ -39,7 +39,10 @@ impl PluginPrefs {
     #[must_use]
     pub fn from_settings(settings: &serde_json::Value) -> Self {
         let mut prefs = Self::default();
-        let Some(plugins) = settings.get("plugins").and_then(serde_json::Value::as_object) else {
+        let Some(plugins) = settings
+            .get("plugins")
+            .and_then(serde_json::Value::as_object)
+        else {
             return prefs;
         };
         for (name, entry) in plugins {
