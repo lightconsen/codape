@@ -222,7 +222,15 @@ fn the_skills_command_lists_the_bundled_tree() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
-    for name in ["code-review", "security-review", "test-failure-triage"] {
+    for name in [
+        "code-review",
+        "commit",
+        "debug",
+        "explain",
+        "security-review",
+        "simplify",
+        "test-failure-triage",
+    ] {
         assert!(
             stdout.contains(name),
             "{name} is missing from /skills:\n{stdout}"

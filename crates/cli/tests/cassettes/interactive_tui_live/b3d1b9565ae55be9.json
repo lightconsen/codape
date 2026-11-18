@@ -1462,6 +1462,6 @@
     "recorded_at": "2026-10-26T00:00:00Z",
     "suite": "interactive_tui_live",
     "backfilled": true,
-    "system_sha256": "30dc186f501d917ea87cee629d55d57acab80d323e6771bb003e247d1687a182"
+    "system_sha256": "d445f1d28e390ac8989e52245f162fde29093f3d32a18a6258a8fa522189c639"
   }
 }

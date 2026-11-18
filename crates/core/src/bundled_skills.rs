@@ -27,8 +27,24 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         content: include_str!("../bundled-skills/code-review/SKILL.md"),
     },
     BundledSkill {
+        name: "commit",
+        content: include_str!("../bundled-skills/commit/SKILL.md"),
+    },
+    BundledSkill {
+        name: "debug",
+        content: include_str!("../bundled-skills/debug/SKILL.md"),
+    },
+    BundledSkill {
+        name: "explain",
+        content: include_str!("../bundled-skills/explain/SKILL.md"),
+    },
+    BundledSkill {
         name: "security-review",
         content: include_str!("../bundled-skills/security-review/SKILL.md"),
+    },
+    BundledSkill {
+        name: "simplify",
+        content: include_str!("../bundled-skills/simplify/SKILL.md"),
     },
     BundledSkill {
         name: "test-failure-triage",
