@@ -1813,7 +1813,13 @@ impl StartupOrchestrator {
             }
         }
 
-        // Discover and load each plugin
+        // Discover and load each plugin. A plugin switched off in the browser
+        // is skipped here rather than after loading: "off" has to mean its
+        // commands, skills and hooks never reach the session, and unloading
+        // afterwards would already have registered them.
+        let prefs = crate::plugin_prefs::PluginPrefs::load(
+            &codape_config::config_home().join("settings.json"),
+        );
         let mut loaded = 0;
         for dir in &plugin_dirs {
             if !dir.exists() {
@@ -1829,6 +1835,17 @@ impl StartupOrchestrator {
                             >(&content)
                             {
                                 Ok(manifest) => {
+                                    // The manifest's name, not the directory's:
+                                    // that is the key the manager lists and the
+                                    // one the browser writes, and the two
+                                    // differ whenever a directory is renamed.
+                                    if !prefs.is_enabled(&manifest.name) {
+                                        tracing::info!(
+                                            plugin = %manifest.name,
+                                            "skipping plugin: switched off in settings"
+                                        );
+                                        continue;
+                                    }
                                     manager.load_plugin(manifest, entry.path());
                                     loaded += 1;
                                 }

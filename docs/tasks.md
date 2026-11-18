@@ -754,7 +754,7 @@
 - [x] 实现 `/chrome`：Chrome DevTools 集成
 - [x] 实现 `/desktop`：桌面应用集成
 - [x] 实现 `/mobile`：移动端远程连接
-- [x] 实现 `/voice`：语音模式开关
+- [x] 实现 `/voice`：报告语音状态；麦克风由 `voice.command` 配置的外部命令拥有，`alt+m` 运行它并把最后一行插到输入框
 - [x] 实现 `/vim`：Vim 模式开关
 - [x] 实现 `/remote-env`：查看/设置远程环境变量
 - [x] 实现 `/remote-setup`：远程环境初始化
@@ -855,7 +855,7 @@
 - [x] 键绑定可配置 — `ui::keybindings` 持有动作表、键位解析和合并逻辑;`keybindings.json`(配置目录,然后 `.codape/`)可以移动绑定,`null` 解除绑定,保留键、未知动作/上下文、拼错的修饰键逐个报错但不影响启动。`repl.rs` 只通过 `KeyBindings::resolve` 查表,不再散落字面量按键比较;`/keybindings` 打印当前表、来源文件与问题列表。(更早的一份 `ui::keybindings` 是无人使用的死表,已删除;现在的这份由 REPL 真正读取。)
 - [x] 实现搜索高亮（终端内文本搜索、匹配结果高亮显示）
 - [x] 实现消息选择器（多消息选择、用于 copy/export）
-- [x] 补齐可交互的面板 — 一个 `Picker`(`ui::picker`)承担五种「可按类型筛选的列表」:agents 名册(`ctrl+g`)、rewind 选点(`alt+r`)、主题(`ctrl+y`)、插件与 marketplace(`alt+p`);帮助页(`alt+h`,`ui::help`)由按键表生成而不是手写;transcript 全屏(`ctrl+t`)是布局开关而不是视图模式,footer 文本由 session 按当前键表写入;diff 面板用 `alt+up`/`alt+down` 在 `diff --git` 文件头之间跳转。`/rewind`、`/theme`、`/plugin` 的无参数形式打开同一个列表,命令与按键不再各有一套界面。
+- [x] 补齐可交互的面板 — 一个 `Picker`(`ui::picker`)承担六种「可按类型筛选的列表」:agents 名册(`ctrl+g`)、rewind 选点(`alt+r`)、主题(`ctrl+y`)、插件与 marketplace(`alt+p`)、本工作区的历史会话(`alt+s`);帮助页(`alt+h`,`ui::help`)由按键表生成而不是手写;transcript 全屏(`ctrl+t`)是布局开关而不是视图模式,footer 文本由 session 按当前键表写入;diff 面板用 `alt+up`/`alt+down` 在 `diff --git` 文件头之间跳转。`/rewind`、`/theme`、`/plugin`、`/resume` 的无参数形式打开同一个列表,命令与按键不再各有一套界面。
 - **测试**：
   - 可配置键位的集成测试(`crates/cli/tests/e2e_keybindings.rs`:默认表、用户绑定生效、坏文件被报告且会话仍启动;`repl.rs` 单测断言重绑的键真的要到达对应分支)
   - 搜索高亮匹配位置正确的集成测试

@@ -14,7 +14,6 @@ workspace = true
 
 [features]
 default = []
-voice = []
 buddy = []
 
 [dependencies]

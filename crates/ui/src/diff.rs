@@ -118,11 +118,72 @@ pub fn stat(lines: &[DiffLine]) -> DiffStat {
     out
 }
 
+/// One file in a parsed diff, as the pane's file list draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile {
+    /// The path, without the `a/` and `b/` prefixes git writes.
+    pub path: String,
+    /// The line index of this file's `diff --git` header.
+    pub start: usize,
+    /// Added lines in this file.
+    pub added: usize,
+    /// Removed lines in this file.
+    pub removed: usize,
+}
+
+/// Every file in a parsed diff, in the order the patch lists them.
+///
+/// The list exists because a diff pane is one scrolled column: a patch of ten
+/// files makes the second one a page and a half down, and the answer to "which
+/// files are in here" was previously "scroll and look". This is the same walk
+/// [`file_starts`] does, but it keeps what a list row needs.
+#[must_use]
+pub fn files(lines: &[DiffLine]) -> Vec<DiffFile> {
+    let mut out: Vec<DiffFile> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        match line.kind {
+            DiffLineKind::FileHeader if line.text.starts_with("diff --git") => {
+                out.push(DiffFile {
+                    path: path_from_header(&line.text),
+                    start: index,
+                    added: 0,
+                    removed: 0,
+                });
+            }
+            DiffLineKind::Added => {
+                if let Some(file) = out.last_mut() {
+                    file.added += 1;
+                }
+            }
+            DiffLineKind::Removed => {
+                if let Some(file) = out.last_mut() {
+                    file.removed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The `b/` side of a `diff --git a/x b/x` header.
+///
+/// The `b` side because it is the name the file has now; a rename's first line
+/// names the old path. Split from the right on ` b/` so a path containing a
+/// space — which git does not quote in this header unless it is truly
+/// ambiguous — stays whole.
+fn path_from_header(header: &str) -> String {
+    header
+        .rsplit_once(" b/")
+        .map_or_else(|| header.trim_start_matches("diff --git ").to_string(), |(_, path)| path.to_string())
+}
+
 /// The line index of each file's `diff --git` header, in order.
 ///
 /// A diff is a scrollable column of several files, and the headers are the
 /// only landmarks in it. Counting them once is what lets the pane jump between
-/// files instead of paging through them a screen at a time.
+/// files instead of paging through them a screen at a time. [`files`] is the
+/// same walk carrying what a file-list row needs.
 #[must_use]
 pub fn file_starts(lines: &[DiffLine]) -> Vec<usize> {
     lines
@@ -253,6 +314,38 @@ index 3..4 100644\n\
     fn the_file_starts_are_the_diff_git_lines() {
         let lines = parse_unified(TWO_FILES);
         assert_eq!(file_starts(&lines), vec![0, 7]);
+    }
+
+    #[test]
+    fn the_file_list_names_each_path_with_its_own_counts() {
+        let files = files(&parse_unified(TWO_FILES));
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "one.rs");
+        assert_eq!(files[0].start, 0);
+        assert_eq!((files[0].added, files[0].removed), (1, 1));
+        assert_eq!(files[1].path, "two.rs");
+        assert_eq!(files[1].start, 7);
+        assert_eq!((files[1].added, files[1].removed), (1, 1));
+    }
+
+    #[test]
+    fn a_path_with_a_space_stays_one_path() {
+        // Splitting on the first space would name the file `a/my`, and a row
+        // nobody can match to the file they are looking for is worse than the
+        // long line it came from.
+        let lines = parse_unified(
+            "diff --git a/my file.rs b/my file.rs\n--- a/my file.rs\n+++ b/my file.rs\n@@ -1 +1 @@\n-a\n+b\n",
+        );
+        let files = files(&lines);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "my file.rs");
+    }
+
+    #[test]
+    fn a_header_that_is_not_a_git_header_is_kept_whole() {
+        // `Not a git repository` is not a diff at all; it yields no files, and
+        // nothing tries to invent one.
+        assert!(files(&parse_unified("Not a git repository\n")).is_empty());
     }
 
     #[test]

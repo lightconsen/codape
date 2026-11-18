@@ -19,7 +19,7 @@ pub enum VoiceState {
 impl VoiceState {
     /// Create a new idle voice state.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self::Idle
     }
 
@@ -84,13 +84,13 @@ impl VoiceState {
 
     /// Check if voice input is currently active (not idle).
     #[must_use]
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         !matches!(self, Self::Idle)
     }
 
     /// Human-readable status label for the UI.
     #[must_use]
-    pub fn status_label(&self) -> &'static str {
+    pub const fn status_label(&self) -> &'static str {
         match self {
             Self::Idle => "Voice",
             Self::Listening => "Listening...",

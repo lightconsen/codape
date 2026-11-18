@@ -88,13 +88,18 @@ are built in `crates/cli/src/session_lists.rs` and drawn by one
 | Surface | Key | Also | Notes |
 |---------|-----|------|-------|
 | Model + effort picker | `ctrl+p` (`chat:modelPicker`) | `/model` | Both halves in one dialog: `Tab` moves between the model list and the effort level, `←`/`→` clamp at the ends |
-| Agent roster | `ctrl+g` | `/agents` | Lists spawned and defined agents; a row follows or replays that agent's log |
+| Effort slider | `alt+e` (`chat:effortSlider`) | `/effort` | The effort level alone, with a six-stop track: `←`/`→` move it, `Enter` applies, `Esc` leaves the session as it was |
+| Voice input | `alt+m` (`chat:voiceInput`) | `/voice` | With `voice_mode` on, runs `voice.command` from `settings.json` and puts the last non-empty line of its stdout on the prompt at the cursor. The microphone belongs to that command: no audio stack or STT client is built in. No command configured is a notice naming the setting, not a key that does nothing |
+| Agent roster | `ctrl+g` | `/agents` | Lists spawned and defined agents; each has a row to follow it, one for its log, one to pin it to the top of the roster for the session (`/agents pin|unpin <id>` is the idempotent command form), and one each to rename it and put it in a group — agents sharing a group sort together (ungrouped first, then groups by name; pins still outrank groups), and the group is shown beside the name |
 | Rewind selector | `alt+r` | `/rewind` | Rows are numbered from the engine session, the same numbering `perform_rewind` takes |
+| Session picker | `alt+s` (`app:sessionPicker`) | `/resume` (no argument) | Every session this workspace has a transcript for, newest first, with its title, age and id; typing filters, Enter resumes. It reads the same merged index-plus-transcripts view `/resume <fragment>` searches, and a row takes the same path `/resume <id>` does, including the "a turn is running" guard |
 | Theme picker | `ctrl+y` | `/theme` | Installed themes with the current one marked; picking applies it |
-| Plugin browser | `alt+p` | `/plugin` | Installed plugins with version, state and path, then configured marketplaces with their URL |
+| Plugin browser | `alt+p` | `/plugin` | An install row first (it opens a field for a directory, git remote, archive URL or marketplace name and queues the same `PluginInstall` work `/plugin install <source>` does), then three rows per installed plugin — open, switch on/off, pin — then configured marketplaces with their URL. A switched-off plugin keeps its rows |
+| Attachment browser | `alt+v` | — | The images waiting on the next turn: a row shows one in the transcript, another takes it off the turn |
 | Help page | `alt+h` | `/keybindings` (the diagnostic) | Generated from the binding table, grouped by intent, and it names where the bindings came from |
 | Full-screen transcript | `ctrl+t` | — | Layout flag: the message area takes every row and one footer row says how to leave |
-| Diff file jump | `alt+up` / `alt+down` | — | Lands on the next/previous `diff --git` header; does not wrap |
+| Diff file jump | `alt+up` / `alt+down` | — | Lands on the next/previous `diff --git` header; does not wrap. A patch of several files also lists them above the patch, marked with the one the pane is showing and each file's own `+N -M` |
+| Pane tabs | `alt+left` / `alt+right` (`app:panePreviousTab` / `app:paneNextTab`) | — | Every `/diff` and `/open` is a view the pane remembers, with its own scroll. The bar appears only from the second view on, numbers each one (`1:diff 2:src/lib.rs`), cuts the overflow with an ellipsis, and wraps at both ends. Re-running the same command refreshes its tab rather than adding one |
 
 There is no settings menu. Settings live in files — `settings.json`,
 `keybindings.json`, `.codape/` — and the commands that write them are how they

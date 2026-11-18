@@ -935,6 +935,12 @@ fn a_pretooluse_hook_still_blocks_after_resume() {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
         session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
         session.send_line("/resume");
+        // Bare `/resume` offers the sessions instead of silently taking the
+        // newest, so the test chooses the row the old behaviour auto-picked.
+        // `Filter:` is drawn only by the modal picker, which makes it the
+        // signal that the list is up rather than a guess at how long it took.
+        session.wait_for_text("Filter: ", SCREEN_TIMEOUT);
+        session.enter();
         // Wait for the second line rather than asserting on the snapshot taken
         // the instant the first appears: the snapshot is one frame, and the two
         // lines are only guaranteed present once the frame that drew them is
@@ -2307,9 +2313,72 @@ fn delegating_shows_the_sub_agent_in_the_transcript() {
     session.wait_for_text("Completed in", SCREEN_TIMEOUT);
 }
 
+/// The roster can pin an agent without leaving the list.
+///
+/// A long session's roster is mostly finished agents, and the two being
+/// watched are found by scrolling past them each time. The pin row moves the
+/// agent to the top for the rest of the session — and the mark on its row is
+/// what says the row did something, since the open list is a snapshot.
 #[test]
-fn mixed_prompt_tool_sequence_matrix_stays_usable() {
+fn the_agent_roster_pins_an_agent_to_the_top() {
     let dir = setup_project_dir();
+    let (server, mut session) = session_with_static_server(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("delegate a simple agent");
+    session.wait_for_text("Completed in", SCREEN_TIMEOUT);
+
+    session.send_bytes(&[0x07]); // Ctrl+G
+    session.wait_for_text("Agents", SCREEN_TIMEOUT);
+    // The roster has a pin row per agent; filtering to it is how a person
+    // reaches it too.
+    session.send_line("· pin");
+    session.wait_for_text("pin", SCREEN_TIMEOUT);
+    session.send_bytes(b"\r");
+    let screen = session.wait_for_text("Pinned agent", SCREEN_TIMEOUT);
+    drop(session);
+    drop(server);
+    assert!(
+        screen.contains("Pinned agent"),
+        "the pin row did nothing:\n{screen}"
+    );
+}
+
+/// The roster can name an agent, and the name is a label the roster reads back.
+///
+/// The engine, the logs and every `/agents` subcommand address an agent by its
+/// id, so a rename that replaced the id would quietly cut the agent off from
+/// all of them. The name shows on the row; the row still carries the id.
+#[test]
+fn the_agent_roster_renames_an_agent() {
+    let dir = setup_project_dir();
+    let (server, mut session) = session_with_static_server(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("delegate a simple agent");
+    session.wait_for_text("Completed in", SCREEN_TIMEOUT);
+
+    session.send_bytes(&[0x07]); // Ctrl+G
+    session.wait_for_text("Agents", SCREEN_TIMEOUT);
+    session.send_line("· rename");
+    session.wait_for_text("Rename this agent", SCREEN_TIMEOUT);
+    session.send_text("auth scout");
+    session.send_bytes(b"\r");
+    session.wait_for_text("is now called auth scout", SCREEN_TIMEOUT);
+
+    // Re-opening the roster shows the name on the follow row.
+    session.send_bytes(&[0x07]);
+    let screen = session.wait_for_text("auth scout", SCREEN_TIMEOUT);
+    drop(session);
+    drop(server);
+    assert!(
+        screen.contains("auth scout"),
+        "the roster does not show the name it was given:\n{screen}"
+    );
+}
+
+/// A tool call made of several events still reaches the transcript once, in
+/// order, and leaves the prompt usable.
+#[test]
+fn mixed_prompt_tool_sequence_matrix_stays_usable() {    let dir = setup_project_dir();
     let (_server, mut session) = session_with_static_server(dir.path());
     session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
 
@@ -2791,6 +2860,10 @@ fn resume_restores_persisted_plan_and_activity() {
         let (_server, mut session) = session_with_static_server_persistent(dir.path());
         session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
         session.send_line("/resume");
+        // The picker opens first now; Enter takes the newest row, which is the
+        // one the old bare `/resume` used to load without asking.
+        session.wait_for_text("Filter: ", SCREEN_TIMEOUT);
+        session.enter();
         // Same reason as the other `/resume` assertion: wait for the line that
         // arrives second instead of asserting both against one frame.
         let resumed = session.wait_for_text("Loaded", SCREEN_TIMEOUT);
@@ -3081,6 +3154,147 @@ fn resume_finds_a_session_by_a_fragment() {
     assert!(screen.contains("Resumed session:"), "{screen}");
 }
 
+/// Bare `/resume` opens a picker of this workspace's earlier sessions, and the
+/// highlighted row — the newest, which is what the old bare command loaded
+/// without asking — resumes on Enter.
+#[test]
+fn bare_resume_offers_the_sessions_and_takes_a_choice() {
+    let dir = setup_project_dir();
+    let home = tempfile::tempdir().expect("shared home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    {
+        let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+        session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+        session.send_line("hello there");
+        session.wait_for_text("Completed in", SCREEN_TIMEOUT);
+        session.ctrl_d();
+        session.wait_for_exit(SCREEN_TIMEOUT);
+    }
+
+    let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("/resume");
+
+    // The list, not a resume: the title taken from the first prompt is the
+    // row, and the box is titled `Sessions`. Waiting for both means a bare
+    // `/resume` that silently loaded the newest would fail here rather than
+    // pass.
+    let listing = session.wait_for_any_text(&["Sessions", "hello there"], SCREEN_TIMEOUT);
+    assert!(
+        listing.contains("Filter: "),
+        "the picker did not open: {listing}"
+    );
+    assert!(
+        listing.contains("hello there"),
+        "the picker did not list the prior session: {listing}"
+    );
+    assert!(
+        !listing.contains("Resumed session:"),
+        "bare /resume must not resume before a row is accepted: {listing}"
+    );
+
+    session.enter();
+    let resumed = session.wait_for_text("Loaded", SCREEN_TIMEOUT);
+    assert!(resumed.contains("Resumed session:"), "{resumed}");
+}
+
+/// Alt+S opens the same session picker bare `/resume` does.
+///
+/// The list had no key while every other multi-choice surface did — the
+/// themes, the rewind points, the roster, the plugins — so the one list a
+/// person reaches for most often was the one reachable only by typing a
+/// command. The key must land on the same picker, listing the same rows: a
+/// key that opened a differently-built list would be a second place to look.
+#[test]
+fn the_session_picker_opens_from_its_key() {
+    let dir = setup_project_dir();
+    let home = tempfile::tempdir().expect("shared home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    {
+        let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+        session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+        session.send_line("remember this one");
+        session.wait_for_text("Completed in", SCREEN_TIMEOUT);
+        session.ctrl_d();
+        session.wait_for_exit(SCREEN_TIMEOUT);
+    }
+
+    let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    // Alt+S is ESC followed by `s`.
+    session.send_bytes(b"\x1bs");
+
+    let listing = session.wait_for_any_text(&["Sessions", "remember this one"], SCREEN_TIMEOUT);
+    assert!(
+        listing.contains("Filter: "),
+        "Alt+S did not open the session picker:\n{listing}"
+    );
+    assert!(
+        listing.contains("remember this one"),
+        "the picker listed no prior session:\n{listing}"
+    );
+    assert!(
+        !listing.contains("Resumed session:"),
+        "the key resumed before a row was chosen:\n{listing}"
+    );
+
+    session.enter();
+    let resumed = session.wait_for_text("Resumed session:", SCREEN_TIMEOUT);
+    assert!(resumed.contains("Resumed session:"), "{resumed}");
+}
+
+/// Esc on the session picker leaves the session where it was.
+#[test]
+fn dismissing_the_session_picker_resumes_nothing() {
+    let dir = setup_project_dir();
+    let home = tempfile::tempdir().expect("shared home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 4, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+
+    {
+        let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+        session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+        session.send_line("hello there");
+        session.wait_for_text("Completed in", SCREEN_TIMEOUT);
+        session.ctrl_d();
+        session.wait_for_exit(SCREEN_TIMEOUT);
+    }
+
+    let (_server, mut session) = session_with_static_server_home(dir.path(), home.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("/resume");
+    session.wait_for_text("Filter: ", SCREEN_TIMEOUT);
+    session.esc();
+    // Wait for the dialog to be gone before typing the next line: a bare ESC
+    // and the byte after it are parsed together, so `/` arriving in the same
+    // read as ESC becomes `Alt+/` and the dialog never closes.
+    session.wait_for_text_absent("Filter: ", SCREEN_TIMEOUT);
+
+    // A slash command that ran is echoed without its leading `/`; one typed
+    // and never dispatched is not. Echoing `/version` proves the loop is
+    // taking input again *and* that it came back from the picker rather than
+    // having resumed something.
+    session.send_line("/version");
+    let after = session.wait_for_text("Codape", SCREEN_TIMEOUT);
+    assert!(
+        !after.contains("Resumed session:"),
+        "the dismissed picker resumed a session anyway: {after}"
+    );
+}
+
 /// Interrupts a slow turn before its tool call is emitted, then runs a new
 /// prompt. The old turn's tool must not run, and no unanswered `tool_use` may
 /// stay in the transcript.
@@ -3352,6 +3566,55 @@ fn reasoning_is_shown_folded_and_ctrl_e_unfolds_it() {
     assert!(screen.contains("✻"), "no reasoning marker on screen");
 }
 
+/// A diff of several files lists them above the patch.
+///
+/// The pane was one scrolled column, so "which files are in this change" was
+/// answered by paging through it. The list makes that a glance, and it marks
+/// the file the pane is currently showing so the two stay in step.
+#[test]
+fn a_multi_file_diff_lists_its_files_above_the_patch() {
+    let dir = setup_git_project_dir();
+    // Different from the committed fixture — an identical rewrite is no diff
+    // at all, and the point here is a patch of two files.
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b + 1\n}\n",
+    )
+    .expect("modify src/lib.rs");
+    std::fs::write(dir.path().join("src/extra.rs"), "pub fn extra() -> u8 {\n    7\n}\n")
+        .expect("write src/extra.rs");
+    // An untracked file is not in `git diff` at all, so the intent-to-add bit
+    // has to be set before the pane is asked for the patch. Done here rather
+    // than with `!git add -N` because a `!` line goes through the tool
+    // dispatcher, and this session deliberately has no engine behind it.
+    let status = Command::new("git")
+        .args(["add", "-N", "src/extra.rs"])
+        .current_dir(dir.path())
+        .status()
+        .expect("run git add -N");
+    assert!(status.success(), "git add -N failed");
+
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("/diff");
+
+    // Two files, so the list is drawn: both paths appear, each with its own
+    // counts, and the patch keeps its gutter marks below the list. `+1 -1`
+    // is the one-line change to `src/lib.rs` and only a list row carries a
+    // per-file pair — the title counts the whole patch.
+    session.wait_for_text("diff  2 file(s)", SCREEN_TIMEOUT);
+    let screen = session.wait_for_text("src/extra.rs", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("src/lib.rs"),
+        "the list is missing one of the changed files:\n{screen}"
+    );
+    assert!(
+        screen.contains("+1 -1"),
+        "the list rows carry no per-file counts:\n{screen}"
+    );
+    session.wait_for_text("+pub fn extra", SCREEN_TIMEOUT);
+}
+
 /// `/diff` puts the patch beside the transcript, and `/open` takes the pane back.
 ///
 /// Before this the only way to see a diff was to let the model run `git diff`
@@ -3384,15 +3647,17 @@ fn diff_command_draws_the_patch_beside_the_transcript() {
 
     session.send_line("/open src/lib.rs");
     session.wait_for_text("Opened src/lib.rs", SCREEN_TIMEOUT);
-    // The pane title is what distinguishes the two views: the diff's summary
-    // is drawn on its border. Waiting for it to go is the same wait as the
-    // redraw, so the check below cannot read a frame from before the switch.
-    session.wait_for_text_absent("diff  1 file(s)", SCREEN_TIMEOUT);
+    // The pane draws one view at a time, so opening a file replaces what is
+    // under the border. Waiting for the patch's own `+` line to go is the
+    // same wait as the redraw, so the check below cannot read a frame from
+    // before the switch — and the diff is still the first tab on the bar,
+    // which is what keeps it one key away instead of one command away.
+    session.wait_for_text_absent("+pub fn multiply", SCREEN_TIMEOUT);
     let screen = session.screen_text();
     drop(session);
     assert!(
-        !screen.contains("+pub fn multiply"),
-        "the diff stayed in the pane after a file was opened over it:\n{screen}"
+        screen.contains("1:diff  1 file(s)"),
+        "the diff was not kept as a tab:\n{screen}"
     );
     assert!(
         screen.contains("pub fn multiply"),
@@ -3460,6 +3725,167 @@ fn ctrl_p_changes_the_model_and_effort_in_session() {
 /// environment at draw time instead could name Anthropic while requests went to
 /// a local mock. The mock server is on `127.0.0.1`, so seeing that host on the
 /// page proves the label follows the endpoint rather than the protocol.
+/// `Alt+E` changes the reasoning effort alone, and the change reaches the
+/// session.
+///
+/// The model picker changes both halves, which means Tab and a model list to
+/// walk past when the only question is "how hard should this one think". The
+/// slider asks that one question, and the notification afterwards is how a
+/// person confirms the file was applied rather than only shown.
+#[test]
+fn alt_e_changes_only_the_effort() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_bytes(b"\x1be"); // Alt+E
+    session.wait_for_text("Reasoning effort", SCREEN_TIMEOUT);
+    session.wait_for_text("◆off", SCREEN_TIMEOUT);
+
+    // Two steps up from off is `medium`, and Enter applies it.
+    session.right();
+    session.right();
+    session.wait_for_text("◆medium", SCREEN_TIMEOUT);
+    session.send_bytes(b"\r");
+    session.wait_for_text("Reasoning effort: medium", SCREEN_TIMEOUT);
+
+    // Re-opening lands on what was applied, and Esc leaves it alone: a slider
+    // whose handle moved the session as it moved would make cancelling
+    // impossible.
+    session.send_bytes(b"\x1be");
+    session.wait_for_text("◆medium", SCREEN_TIMEOUT);
+    session.right();
+    session.send_bytes(b"\x1b");
+    // The box, not the word: the notification from the apply is still on the
+    // notification row and it says "Reasoning effort" too.
+    session.wait_for_text_absent("[esc] cancel", SCREEN_TIMEOUT);
+
+    // The dialog closed and the effort is the session's, not just the box's.
+    session.send_line("/effort");
+    let screen = session.wait_for_text("Reasoning effort: medium", SCREEN_TIMEOUT);
+    drop(session);
+    assert!(
+        screen.contains("Reasoning effort: medium"),
+        "the slider applied a level the session does not have:\n{screen}"
+    );
+}
+
+/// `alt+m` runs the configured command and puts its stdout on the prompt.
+///
+/// The microphone is the command's; what this proves is the half Codape owns:
+/// the setting is read from the session's own config home, the command runs in
+/// the session's working directory, and the last line it prints lands at the
+/// cursor rather than replacing what was typed.
+#[test]
+fn alt_m_transcribes_onto_the_prompt() {
+    let dir = setup_project_dir();
+    // A stand-in for a recogniser: prints a banner, then the words. The
+    // banner is what makes "last non-empty line" the rule worth testing —
+    // a script that logs before it answers is the normal case.
+    std::fs::write(
+        dir.path().join("stt.sh"),
+        "#!/bin/sh\necho 'listening...' >&2\necho \"fix the failing test\"\n",
+    )
+    .expect("write stt.sh");
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 3, "telemetry_enabled": false,
+            "voice": {"command": "sh stt.sh"}}"#,
+    )
+    .expect("settings");
+
+    // The flag is off by default, so a machine that must not listen is
+    // silent unless someone opted in. `alt+m` and `/voice` read the same flag.
+    let mut session = PtySession::launch_with_home(
+        dir.path(),
+        &[("CODAPE_FEATURE_FLAGS".to_string(), "+voice_mode".to_string())],
+        "claude-sonnet-4-6",
+        home.path(),
+    );
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    // Something already typed, so "inserted at the cursor" is distinguishable
+    // from "replaced the line".
+    session.send_text("Please ");
+    session.send_bytes(b"\x1bm"); // Alt+M
+    let screen = session.wait_for_text("Transcribed onto the prompt", SCREEN_TIMEOUT);
+    drop(session);
+
+    assert!(
+        screen.contains("Please fix the failing test"),
+        "the transcript did not land after what was typed:\n{screen}"
+    );
+}
+
+/// With no command configured, the key says so rather than doing nothing.
+#[test]
+fn alt_m_without_a_configured_command_says_how_to_set_one() {
+    let dir = setup_project_dir();
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        r#"{"config_version": 3, "telemetry_enabled": false}"#,
+    )
+    .expect("settings");
+    let mut session = PtySession::launch_with_home(
+        dir.path(),
+        &[("CODAPE_FEATURE_FLAGS".to_string(), "+voice_mode".to_string())],
+        "claude-sonnet-4-6",
+        home.path(),
+    );
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_bytes(b"\x1bm"); // Alt+M
+    let screen = session.wait_for_text("voice.command", SCREEN_TIMEOUT);
+    drop(session);
+    assert!(
+        screen.contains("settings.json"),
+        "the notice does not say where to put the command:\n{screen}"
+    );
+}
+
+/// Two views, a bar that names them, and a key that walks between them.
+///
+/// `/open` then `/open` has to leave both on the shelf: the second file is
+/// what is drawn, and `a` is one key away rather than one command away.
+#[test]
+fn the_pane_keeps_opened_files_as_tabs() {
+    let dir = setup_project_dir();
+    std::fs::write(dir.path().join("a.rs"), "pub fn alpha() -> u8 {\n    1\n}\n")
+        .expect("write a.rs");
+    std::fs::write(dir.path().join("b.rs"), "pub fn beta() -> u8 {\n    2\n}\n")
+        .expect("write b.rs");
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_line("/open a.rs");
+    session.wait_for_text("Opened a.rs", SCREEN_TIMEOUT);
+    session.send_line("/open b.rs");
+    // One tab is not a bar; the second is what makes it appear.
+    let screen = session.wait_for_text("1:a.rs", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("2:b.rs"),
+        "the bar does not name both views:\n{screen}"
+    );
+    assert!(
+        screen.contains("pub fn beta"),
+        "the second view is not the one drawn:\n{screen}"
+    );
+
+    // Alt+Left is what a terminal sends as ESC [ 1 ; 3 D. Coming back to `a`
+    // is the tab's own content, not a re-reading of the file.
+    session.send_bytes(b"\x1b[1;3D");
+    let screen = session.wait_for_text("pub fn alpha", SCREEN_TIMEOUT);
+    assert!(
+        !screen.contains("pub fn beta"),
+        "both views were on screen at once:\n{screen}"
+    );
+
+    // And forward again, wrapping past the end to the one just left.
+    session.send_bytes(b"\x1b[1;3C");
+    session.wait_for_text("pub fn beta", SCREEN_TIMEOUT);
+}
+
 #[test]
 fn the_welcome_page_names_the_configured_provider_and_directory() {
     let dir = setup_project_dir();
@@ -3519,9 +3945,17 @@ fn the_list_surfaces_open_from_their_keys() {
     session.send_bytes(b"\x1bh");
     let screen = session.wait_for_text("Keybindings", SCREEN_TIMEOUT);
     assert!(
-        screen.contains("Give the transcript the whole screen"),
-        "the help page is missing the new actions:\n{screen}"
+        screen.contains("Keybindings"),
+        "the help page did not open:\n{screen}"
     );
+    session.wait_for_text("alt+v", SCREEN_TIMEOUT);
+    // The page is taller than its box, so the last section is reached by
+    // scrolling rather than by being on the first screenful. Two pages to be
+    // sure it gets there; the second is clamped at the bottom, so it cannot
+    // scroll past.
+    session.page_down();
+    session.page_down();
+    session.wait_for_text("Give the transcript the whole screen", SCREEN_TIMEOUT);
     session.esc();
     session.wait_for_text_absent("Keybindings", SCREEN_TIMEOUT);
 
@@ -3535,6 +3969,59 @@ fn the_list_surfaces_open_from_their_keys() {
     );
     session.send_bytes(&[0x14]);
     session.wait_for_text("❯", SCREEN_TIMEOUT);
+}
+
+/// Images attached to the next turn can be seen and taken back.
+///
+/// The pending list was write-only: `--image`, `@path` and Ctrl+V all filled
+/// it, and nothing on screen ever said what was in it or offered a way to drop
+/// one. The browser is that surface, so this drives it through the key rather
+/// than through a builder, and checks both halves of the promise — the picture
+/// can be looked at, and removing it means the next turn sends nothing.
+#[test]
+fn the_attachment_browser_shows_and_drops_a_pending_image() {
+    let dir = setup_project_dir();
+    // A PNG header is enough: nothing here decodes one, and the caption is
+    // drawn from the media type.
+    let shot = dir.path().join("shot.png");
+    std::fs::write(&shot, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).expect("write png");
+
+    let mut session = PtySession::launch_with_args(
+        dir.path(),
+        &[],
+        "claude-sonnet-4-6",
+        false,
+        &["--image", shot.to_str().expect("path")],
+    );
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_bytes(b"\x1bv"); // Alt+V
+    let screen = session.wait_for_text("Attached images", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("image/png"),
+        "the attached picture is not listed:\n{screen}"
+    );
+
+    // Narrow to the remove row and take it. Typing is the filter, so the word
+    // is what narrows, and the highlight lands on the only row left.
+    session.send_text("remove");
+    session.enter();
+    session.wait_for_text("the next turn sends no images", SCREEN_TIMEOUT);
+
+    // With nothing left, the browser says so instead of showing an empty box.
+    session.wait_for_text_absent("Attached images", SCREEN_TIMEOUT);
+    session.send_bytes(b"\x1bv");
+    let empty = session.wait_for_text("No images attached", SCREEN_TIMEOUT);
+    assert!(
+        empty.contains("No images attached"),
+        "the empty list does not say it is empty:\n{empty}"
+    );
+    session.esc();
+    session.wait_for_text_absent("No images attached", SCREEN_TIMEOUT);
+
+    // The session is still usable after closing the list.
+    session.send_line("/status");
+    session.wait_for_text("System Status", SCREEN_TIMEOUT);
 }
 
 /// The rewind list is drawn from the engine's messages, so it needs a turn.
@@ -3560,4 +4047,58 @@ fn the_rewind_list_lists_the_turns_messages() {
     drop(session);
     drop(server);
     assert!(screen.contains("System Status"));
+}
+
+/// The plugin browser's first row starts an install.
+///
+/// The browser used to be able to switch and pin a plugin and nothing else:
+/// the one verb that adds to the list was reachable only by typing
+/// `/plugin install <source>`, which is the command this row is supposed to be
+/// a front for. It opens a field rather than installing a highlighted row,
+/// because a source is a path, a remote or a marketplace name and a row has
+/// nothing to put in it.
+#[test]
+fn the_plugin_browser_can_start_an_install() {
+    let dir = setup_project_dir();
+    let plugin = dir.path().join("plugin-under-test");
+    std::fs::create_dir_all(&plugin).expect("create plugin dir");
+    std::fs::write(
+        plugin.join("plugin.json"),
+        r#"{"name":"under-test","version":"0.1.0","description":"a fixture"}"#,
+    )
+    .expect("write manifest");
+
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_bytes(b"\x1bp"); // Alt+P
+    let screen = session.wait_for_text("Plugins", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("install a plugin"),
+        "the browser has no install row:\n{screen}"
+    );
+
+    // The install row is first, so Enter with no filter takes it.
+    session.enter();
+    let screen = session.wait_for_text("Install a plugin from", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("marketplace name"),
+        "the field does not say what a source can be:\n{screen}"
+    );
+
+    session.send_text(plugin.to_str().expect("utf-8 path"));
+    session.enter();
+    // Wait for where the install *lands*, not for the "Installing..." line it
+    // passes through: a directory source installs in milliseconds, and a
+    // needle that is already gone by the next frame is a race, not a check.
+    let screen = session.wait_for_text("Installed to", SCREEN_TIMEOUT);
+    drop(session);
+    assert!(
+        screen.contains(".codape/plugins/under-test"),
+        "the install went somewhere else:\n{screen}"
+    );
+    assert!(
+        std::fs::metadata(plugin.join("plugin.json")).is_ok(),
+        "the fixture was consumed rather than read"
+    );
 }

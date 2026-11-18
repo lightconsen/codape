@@ -69,7 +69,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/agents [list|logs <id> [count]|follow <id|all>]` is a REPL built-in: `list` names the agent definitions the session can spawn and the agents it has spawned, `logs` replays one agent's log, and `follow` subscribes to its events. A registry entry mirrors it so `/help` lists it.
 - `/ide` prints the same thing `codape ide` prints: the MCP snippet an editor needs to launch `codape ide bridge`, and the state of the daemon that bridge would reach. It is the in-session way to discover the editor integration without leaving the REPL.
 - `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins.
-- `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing.
+- `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing. With no argument it opens the same picker `alt+s` does (`app:sessionPicker`) — the sessions listed newest first, narrowed by typing, resumed on Enter.
 - Feature-gated commands (`/ultraplan`, `/thinkback`, `/thinkback-play`, `/voice`, `/ctx_viz`, `/heapdump`, `/mock-limits`, `/stickers`) check `CommandContext.feature_flags`, which the REPL now fills from the resolved `FeatureFlags` (env + `--betas`).
 - `/bridge` and `/bridge-kick` check `CODAPE_BRIDGE_URL` env var.
 - `/insights` aggregates project file counts, git info, and session token usage.
@@ -82,9 +82,10 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/backfill-sessions` writes the session index for transcripts that predate it. The
   registry reports the request and the REPL performs the write (it owns the workspace
   index), so the output says how many rows were written, not just how many files exist.
-- `/voice` reports that this build has no microphone: voice input needs a host that
-  drives the STT state machine, and the terminal host does not. It used to answer
-  "Toggled" while nothing listened.
+- `/voice` needs `voice_mode` and reports whether a transcription command is configured, naming it, because
+  that command is what owns the microphone. `alt+m` runs it and puts its last output
+  line on the prompt at the cursor; the built-in state machine only tracks
+  idle → transcribing → done. It used to answer "Toggled" while nothing listened.
 - `/desktop` and `/mobile` report the truth about surfaces and remote clients instead of
   reading `CODAPE_DESKTOP`/`CODAPE_MOBILE` as if they were connections: both name the
   surface actually presenting the session and what it can do, `/desktop` says "active"

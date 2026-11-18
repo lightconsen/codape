@@ -11,6 +11,7 @@ use crate::selector::MessageSelector;
 use crate::statusline::Statusline;
 use crate::statusline_setup::StatuslineSetup;
 use crate::themes::Theme;
+use crate::voice::VoiceState;
 
 /// The active view mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +29,6 @@ pub enum ViewMode {
     /// Search mode.
     Search,
     /// Voice recording mode.
-    #[cfg(feature = "voice")]
     VoiceRecording,
     /// Buddy companion panel.
     #[cfg(feature = "buddy")]
@@ -78,24 +78,11 @@ impl InteractivePlan {
         self.current_label = None;
     }
 
-    /// Render a short statusline label like "Step 2/4: Running tests".
-    #[must_use]
-    pub fn status_label(&self) -> Option<String> {
-        let total = self.steps.len();
-        let label = self.current_label.as_ref()?;
-        if total == 0 {
-            Some(label.clone())
-        } else {
-            Some(format!(
-                "Step {}/{}: {}",
-                self.current_step.saturating_add(1).min(total),
-                total,
-                label
-            ))
-        }
-    }
-
     /// Render the full plan for an overlay.
+    ///
+    /// This is what `/plan` prints. The statusline used to have a shorter
+    /// form of it (`Step 2/4: ...`) as a fallback label; the semantic phase
+    /// took that slot, so the long form is the only reader left.
     #[must_use]
     pub fn render_detail(&self) -> String {
         if self.steps.is_empty() {
@@ -282,6 +269,24 @@ impl TextSelection {
     }
 }
 
+/// One view the left pane remembers.
+///
+/// A whole pane's content rather than a handle to it: the pane draws strings
+/// it already holds, so a tab is the four fields it takes to redraw one. The
+/// scroll offset comes with it, which is the point — switching away and back
+/// should return you to the line you were on, not to the top.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneTab {
+    /// The border title, as the pane shows it.
+    pub title: String,
+    /// The body.
+    pub content: String,
+    /// Whether the body is a diff, so its lines are coloured by kind.
+    pub is_diff: bool,
+    /// Lines the tab is scrolled down.
+    pub scroll: usize,
+}
+
 /// UI state, owned exclusively by the rendering thread.
 #[derive(Debug)]
 pub struct UiState {
@@ -342,6 +347,16 @@ pub struct UiState {
     /// a frame that shrank since the key was pressed cannot scroll past the
     /// end.
     pub left_pane_scroll: usize,
+    /// The pane's open views, oldest first, when more than one is open.
+    ///
+    /// A tab is a view the pane remembers: `/diff`, then `/open src/lib.rs`,
+    /// then the next file, leaves three, and switching back to the diff is a
+    /// key rather than a command that has to rebuild it. Empty means the pane
+    /// has a single view and no tab bar — the common case, and the one where
+    /// a bar of one tab is pure cost.
+    pub pane_tabs: Vec<PaneTab>,
+    /// Which of [`Self::pane_tabs`] is showing.
+    pub pane_tab_index: usize,
     /// Whether the transcript is filling the screen.
     ///
     /// Not a [`ViewMode`]: the view is the same view, drawn into more rows. A
@@ -362,6 +377,12 @@ pub struct UiState {
     /// interactive terminal sets it from the detected terminal before the
     /// first draw.
     pub image_protocol: crate::transcript_image::ImageProtocol,
+    /// The voice input state machine.
+    ///
+    /// Carried on the state even when no transcription command is configured:
+    /// the machine is what says "idle", and a field that appeared and
+    /// disappeared would make every reader ask whether voice was on.
+    pub voice: VoiceState,
 }
 
 impl UiState {
@@ -392,15 +413,217 @@ impl UiState {
             left_pane_title: String::new(),
             left_pane_is_diff: false,
             left_pane_scroll: 0,
+            pane_tabs: Vec::new(),
+            pane_tab_index: 0,
+            voice: VoiceState::new(),
             transcript_fullscreen: false,
             transcript_footer: String::new(),
             image_protocol: crate::transcript_image::ImageProtocol::None,
         }
+    }
+
+    /// Give the pane a new view, remembering the one it was showing.
+    ///
+    /// The live fields stay the source of truth for what is drawn and which
+    /// tab is current; `pane_tabs` is the shelf behind them. Storing the
+    /// outgoing view before replacing it is what makes "open something else"
+    /// non-destructive, and a tab bar of one is never drawn, so a pane with a
+    /// single view looks exactly as it did before tabs existed.
+    pub fn pane_show(&mut self, title: String, content: String, is_diff: bool) {
+        self.remember_pane_view();
+        // Opening what is already open is not a second view: `/diff` after
+        // `/diff` is a refresh of the same patch, and two tabs with the same
+        // title would differ only by when they were taken. The existing tab
+        // is reused, in place, so the bar does not grow on a repeated command.
+        if let Some(index) = self
+            .pane_tabs
+            .iter()
+            .position(|tab| tab.is_diff == is_diff && tab.title == title)
+        {
+            self.pane_tabs[index] = PaneTab {
+                title,
+                content,
+                is_diff,
+                scroll: 0,
+            };
+            self.pane_show_tab(index);
+            return;
+        }
+        self.left_pane_title = title;
+        self.left_pane_content = content;
+        self.left_pane_is_diff = is_diff;
+        self.left_pane_scroll = 0;
+        self.pane_tab_index = self.pane_tabs.len();
+        self.pane_tabs.push(PaneTab {
+            title: self.left_pane_title.clone(),
+            content: self.left_pane_content.clone(),
+            is_diff,
+            scroll: 0,
+        });
+    }
+
+    /// Put the view on screen back on the shelf.
+    ///
+    /// Called before a new view replaces it and before switching away. A pane
+    /// with nothing in it and a pane that is scrolled to the top are both
+    /// "nothing worth remembering": pushing them would fill the shelf with
+    /// empty tabs and make the bar appear for no reason.
+    pub fn remember_pane_view(&mut self) {
+        if self.left_pane_content.is_empty() {
+            return;
+        }
+        let snapshot = PaneTab {
+            title: self.left_pane_title.clone(),
+            content: self.left_pane_content.clone(),
+            is_diff: self.left_pane_is_diff,
+            scroll: self.left_pane_scroll,
+        };
+        if let Some(existing) = self.pane_tabs.get_mut(self.pane_tab_index) {
+            *existing = snapshot;
+        } else {
+            self.pane_tabs.push(snapshot);
+            self.pane_tab_index = self.pane_tab_count().saturating_sub(1);
+        }
+    }
+
+    /// How many views the pane remembers, the one on screen included.
+    #[must_use]
+    pub fn pane_tab_count(&self) -> usize {
+        self.pane_tabs.len().max(1)
+    }
+
+    /// Switch to the next tab, or the previous one.
+    ///
+    /// Wraps: with two or three tabs there is no meaningful "end" to stop at,
+    /// and a key that does nothing at the edge reads as broken. Does nothing
+    /// at all with one view, because there is nothing to switch to.
+    pub fn pane_cycle(&mut self, forward: bool) {
+        let count = self.pane_tabs.len();
+        if count < 2 {
+            return;
+        }
+        self.remember_pane_view();
+        let current = self.pane_tab_index.min(count - 1);
+        let next = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        self.pane_show_tab(next);
+    }
+
+    /// Draw the tab at `index`, leaving the live fields pointed at it.
+    fn pane_show_tab(&mut self, index: usize) {
+        let Some(tab) = self.pane_tabs.get(index).cloned() else {
+            return;
+        };
+        self.left_pane_title = tab.title;
+        self.left_pane_content = tab.content;
+        self.left_pane_is_diff = tab.is_diff;
+        self.left_pane_scroll = tab.scroll;
+        self.pane_tab_index = index;
     }
 }
 
 impl Default for UiState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(state: &UiState) -> (String, &str) {
+        (state.left_pane_title.clone(), state.left_pane_content.as_str())
+    }
+
+    #[test]
+    fn one_view_draws_no_tab_bar() {
+        let mut state = UiState::new();
+        assert_eq!(state.pane_tab_count(), 1);
+        state.pane_show("a.rs".into(), "one".into(), false);
+        // One view is one tab, and a bar of one costs a line to say nothing.
+        assert_eq!(state.pane_tabs.len(), 1);
+        assert_eq!(state.pane_tab_index, 0);
+    }
+
+    #[test]
+    fn a_second_view_keeps_the_first_on_the_shelf() {
+        let mut state = UiState::new();
+        state.pane_show("a.rs".into(), "one".into(), false);
+        state.pane_show("b.rs".into(), "two".into(), false);
+        assert_eq!(state.pane_tabs.len(), 2);
+        assert_eq!(state.pane_tab_index, 1);
+        assert_eq!(shown(&state), ("b.rs".to_string(), "two"));
+        state.pane_cycle(false);
+        assert_eq!(shown(&state), ("a.rs".to_string(), "one"));
+    }
+
+    #[test]
+    fn cycling_wraps_in_both_directions() {
+        let mut state = UiState::new();
+        state.pane_show("a.rs".into(), "one".into(), false);
+        state.pane_show("b.rs".into(), "two".into(), false);
+        state.pane_cycle(true);
+        assert_eq!(state.left_pane_title, "a.rs", "the last tab wraps to the first");
+        state.pane_cycle(false);
+        assert_eq!(state.left_pane_title, "b.rs", "and the first back to the last");
+    }
+
+    #[test]
+    fn switching_away_and_back_returns_to_the_same_line() {
+        let mut state = UiState::new();
+        state.pane_show("diff".into(), "one\ntwo\nthree".into(), true);
+        state.left_pane_scroll = 2;
+        state.pane_show("b.rs".into(), "two".into(), false);
+        state.pane_cycle(false);
+        // The point of a tab is not just the content but where you were in
+        // it: coming back to the top would lose the place you were reading.
+        assert_eq!(state.left_pane_scroll, 2);
+    }
+
+    #[test]
+    fn switching_saves_the_scroll_of_the_view_being_left() {
+        let mut state = UiState::new();
+        state.pane_show("a.rs".into(), "one\ntwo\nthree".into(), false);
+        state.pane_show("b.rs".into(), "two\ntwo\nthree".into(), false);
+        state.pane_cycle(false);
+        state.left_pane_scroll = 2;
+        state.pane_cycle(true);
+        state.pane_cycle(false);
+        assert_eq!(state.left_pane_scroll, 2);
+    }
+
+    #[test]
+    fn reopening_the_same_title_refreshes_it_in_place() {
+        let mut state = UiState::new();
+        state.pane_show("diff  1 file(s)".into(), "old".into(), true);
+        state.pane_show("b.rs".into(), "two".into(), false);
+        state.pane_show("diff  1 file(s)".into(), "new".into(), true);
+        // `/diff` twice is a refresh, not a third view: two tabs with one
+        // title would differ only by when they were taken.
+        assert_eq!(state.pane_tabs.len(), 2);
+        assert_eq!(state.pane_tab_index, 0);
+        assert_eq!(state.left_pane_content, "new");
+    }
+
+    #[test]
+    fn cycling_with_one_view_does_nothing() {
+        let mut state = UiState::new();
+        state.pane_show("a.rs".into(), "one".into(), false);
+        state.pane_cycle(true);
+        state.pane_cycle(false);
+        assert_eq!(shown(&state), ("a.rs".to_string(), "one"));
+    }
+
+    #[test]
+    fn a_pane_with_nothing_in_it_is_not_a_tab() {
+        let mut state = UiState::new();
+        // The session shows the pane before anything is opened in it, so an
+        // empty view must not take a slot and make the bar appear.
+        state.remember_pane_view();
+        assert!(state.pane_tabs.is_empty());
     }
 }

@@ -27,7 +27,6 @@ pub mod themes;
 pub mod transcript_image;
 pub mod vim;
 
-#[cfg(feature = "voice")]
 pub mod voice;
 
 #[cfg(feature = "buddy")]

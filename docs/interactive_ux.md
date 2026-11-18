@@ -108,18 +108,19 @@ Current TUI already has foundational pieces:
 - `overlay stack`
 - `thinking spinner`
 - live elapsed timer while `thinking = true`
-- a modal `Picker` list (`crates/ui/src/picker.rs`), which the agent roster, the rewind points, the theme list and the plugin browser all open. One overlay, one `Context::List`, one key handler: the rows are the session's and the row keys carry what the row means (`follow:<id>`, `plugin:<name>`, a bare number for a rewind point, a bare name for a theme), so no parallel enum crosses the crate boundary
+- an effort slider (`alt+e`), reached from the notification-free path that only asks "how hard should this think"
+- a modal `Picker` list (`crates/ui/src/picker.rs`), which the agent roster, the rewind points, the theme list, the plugin browser, the session picker and the attachment browser all open. One overlay, one `Context::List`, one key handler: the rows are the session's and the row keys carry what the row means (`follow:<id>`, `plugin:<name>`, `session:<id>`, `image-show:<n>`, a bare number for a rewind point, a bare name for a theme), so no parallel enum crosses the crate boundary
 - a help page generated from the keybinding table (`crates/ui/src/help.rs`), opened by `alt+h` and grouped by what a person is trying to do rather than by action name
 - a full-screen transcript (`Ctrl+T`), a layout flag rather than a view mode: every pane but the message area collapses to zero height and one footer row replaces the input box
+- voice input (`alt+m`, with `voice_mode` on): a command configured as `voice.command` in `settings.json` is run and the last line it prints is inserted at the cursor. The microphone and the recogniser are that command's; the UI carries the `VoiceState` machine and never opens an audio device
+- left-pane tabs: the pane holds a shelf of views (`crates/ui/src/state.rs` `PaneTab`), each with its own content and scroll, and `Alt+Left`/`Alt+Right` cycle them. A bar of one tab is never drawn
 
 Current limitations:
 
-- runtime mostly only displays `Thinking`
-- no full phase model (`Planning`, `Running tests`, `Applying patch`, etc.)
+- the phase is one label for the whole turn, not one per call: `InteractivePhase` is set to `Planning` when a turn starts, `Thinking` on the first text delta, `RunningTool(label)` on each tool start and `WaitingForPermission(label)` while a dialog is up, and the label comes from `ToolPhase::of(name, input)` — so the footer reads `Running tests · cargo test -p codape-cli` rather than `Thinking`. Two calls that start at once (parallel tools, a sub-agent's own turns) still share the one slot, so the footer names the most recent one; the transcript's activity rows are what carries the per-call view
 - plan state is populated and persisted by the REPL, though the UI still renders a coarse view
-- the effort level is adjustable inside the model picker but has no slider of its own
-- no tabs, no attachment browser, no diff file list panel: `Alt+Up`/`Alt+Down` jump between the files of the open diff, which is navigation over the pane rather than a separate list
-- the agent roster lists, follows and replays agents; it does not pin, rename or jump between groups
+- the diff pane lists the files of the patch above it and `Alt+Up`/`Alt+Down` jump between them, so "which files are in this change" is a glance rather than a scroll; each `/diff` and `/open` also becomes a tab (`Alt+Left`/`Alt+Right`), and a tab keeps its own scroll offset
+- the agent roster lists, follows and pins agents, and renames and groups them through its rows (`Rename this agent`, `Group`); a group sorts its members together (ungrouped agents first, then groups by name, with pins still on top)
 - a portable-PTY E2E harness exists at `crates/cli/tests/interactive_tui.rs`
 - coverage is split between that PTY suite and headless `-p` flows
 
@@ -275,27 +276,17 @@ This layer should:
 
 ## Plan Model
 
-To feel closer to Claude Code, planning should be more than a single label.
+The plan is a record of what a turn did, not the footer's label. It carries
+`steps: Vec<PlanStep>`, `current_step`, `total_steps` and `current_label`, and
+`/plan` prints it as `Current step: N/M` plus each step with its completion.
 
-Introduce a lightweight plan object:
-
-- `steps: Vec<PlanStep>`
-- `current_step: usize`
-- `total_steps: usize`
-- `current_label: String`
-- `completed_steps: usize`
-
-Possible displays:
-
-- statusline: current step only
-- message area: plan events or plan summary
-- overlay: full plan viewer
-
-Example statusline:
-
-```text
-◐ Step 2/5: Running tests  (14s)
-```
+It used to share the footer with the phase: the statusline showed
+`Step 2/5: Running tests` — a label guessed from the text stream — as a fallback
+under the semantic phase. That fallback never rendered, because the session set
+the phase label in every frame where it set the plan label, so the plan's short
+form was removed along with the `Statusline` field that carried it. What the
+footer shows is `Running tests · cargo test -p codape-cli`, from
+`ToolPhase::of`; the plan panel is where step progress lives.
 
 ## UI Workstreams
 
@@ -313,7 +304,7 @@ Examples:
 
 - `◐ Thinking...  (2s)`
 - `◓ Planning...  (4s)`
-- `◑ Step 2/5: Running tests  (21s)`
+- `◑ Running tests · cargo test -p codape-cli  (21s)`
 - `Waiting for permission: Write  (8s)`
 - `Completed in 27s`
 

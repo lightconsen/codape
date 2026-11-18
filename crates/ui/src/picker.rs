@@ -1,4 +1,5 @@
-//! A filterable modal list — the one interaction five surfaces were missing.
+//! A filterable modal list — the one interaction the TUI's surfaces were
+//! missing.
 //!
 //! The TUI could already *show* things: a plan, a diff, a notification, a
 //! permission dialog. What it could not do was offer a list and take a choice

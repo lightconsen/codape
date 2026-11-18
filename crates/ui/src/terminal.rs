@@ -2113,6 +2113,52 @@ fn render_notification_bar(
     }
 }
 
+/// One view the left pane remembers.
+fn render_pane_tabs(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
+    if area.height == 0 {
+        return;
+    }
+    // Only the title is drawn: the content is what the pane below already
+    // shows for the current tab, and a bar that repeated it would be a second
+    // place to read.
+    let mut spans: Vec<Span> = Vec::new();
+    // The pane is half a narrow terminal, so the bar has to fit in what it
+    // has: labels are cut to the row and an ellipsis says a tab is there. A
+    // hard clip at the edge would leave half a name and no sign there is more.
+    let mut used = 0usize;
+    let budget = usize::from(area.width);
+    for (index, tab) in state.pane_tabs.iter().enumerate() {
+        let separator = if index > 0 { " │ " } else { "" };
+        let label = format!(" {}:{} ", index + 1, tab.title);
+        let width = separator.chars().count() + label.chars().count();
+        if used + width > budget {
+            let left = budget.saturating_sub(used);
+            if left > 3 {
+                spans.push(Span::styled(" …", Style::default().fg(state.theme.dim)));
+            }
+            break;
+        }
+        used += width;
+        if !separator.is_empty() {
+            spans.push(Span::styled(separator, Style::default().fg(state.theme.dim)));
+        }
+        let selected = index == state.pane_tab_index;
+        // `1:` rather than a mark alone, because the number is what the
+        // tab-switch keys walk and a bar without it would not say so.
+        spans.push(Span::styled(
+            label,
+            if selected {
+                Style::default()
+                    .fg(state.theme.selection_fg)
+                    .bg(state.theme.selection_bg)
+            } else {
+                Style::default().fg(state.theme.foreground)
+            },
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
     let content = if state.left_pane_content.is_empty() {
         "No file open.\nUse /open <path> to view a file, or /diff to review changes."
@@ -2131,12 +2177,58 @@ fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
         .title(title)
         .style(Style::default().fg(state.theme.border));
 
+    // The border belongs to the whole pane, so it is drawn once here and both
+    // branches below work inside it. A tab bar, when there is one, is the
+    // pane's first row inside that border.
+    frame.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+    let body = if state.pane_tabs.len() > 1 {
+        // More than one view open gets a tab bar: one line, the open views in
+        // the order they were opened, the current one marked. A single view
+        // does not, because a bar of one tab costs a line of the file to say
+        // nothing.
+        let chunks = ratatui::layout::Layout::vertical([
+            ratatui::layout::Constraint::Length(1),
+            ratatui::layout::Constraint::Min(1),
+        ])
+        .split(inner);
+        render_pane_tabs(frame, chunks[0], state);
+        chunks[1]
+    } else {
+        inner
+    };
+
     // A diff is drawn line by line with its kind's colour and no wrapping: a
     // wrapped diff line is not the line the file has, and the gutter mark has
     // to stay next to the text it marks. Everything else keeps the file
     // viewer's wrapped plain-text rendering.
     if state.left_pane_is_diff {
         let parsed = crate::diff::parse_unified(content);
+        // The list and the patch sit inside the border the tab bar was drawn
+        // in, so the title still says what the pane is showing.
+        let inner = body;
+        // A patch of several files gets a file list above the patch. One file
+        // does not: the row would repeat the header already on screen and take
+        // a line the patch needs.
+        let files = crate::diff::files(&parsed);
+        let list_height = if files.len() > 1 {
+            u16::try_from(files.len() + 1)
+                .unwrap_or(u16::MAX)
+                .min(inner.height / 2)
+        } else {
+            0
+        };
+        let (list_area, patch_area) = if list_height > 0 {
+            let chunks = ratatui::layout::Layout::vertical([
+                ratatui::layout::Constraint::Length(list_height),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .split(inner);
+            (Some(chunks[0]), chunks[1])
+        } else {
+            (None, inner)
+        };
+
         let lines: Vec<Line> = parsed
             .into_iter()
             .map(|line| {
@@ -2153,10 +2245,48 @@ fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
                 Line::from(Span::styled(line.text, Style::default().fg(colour)))
             })
             .collect();
+
+        if let Some(list_area) = list_area {
+            // The file the pane is currently showing is the one highlighted,
+            // because the list is a map of the patch: the row that says where
+            // you are is worth more than a row that says where you started.
+            let current = files
+                .iter()
+                .rev()
+                .find(|file| file.start <= state.left_pane_scroll)
+                .map_or(0, |file| file.start);
+            let rows: Vec<Line> = files
+                .iter()
+                .map(|file| {
+                    let selected = file.start == current;
+                    let marker = if selected { "▸ " } else { "  " };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{marker}{}", file.path),
+                            Style::default().fg(if selected {
+                                state.theme.accent
+                            } else {
+                                state.theme.foreground
+                            }),
+                        ),
+                        Span::styled(
+                            format!("  +{} -{}", file.added, file.removed),
+                            Style::default().fg(state.theme.dim),
+                        ),
+                    ])
+                })
+                .collect();
+            let list = Paragraph::new(rows).block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .style(Style::default().fg(state.theme.border)),
+            );
+            frame.render_widget(list, list_area);
+        }
+
         let paragraph = Paragraph::new(lines)
-            .block(block)
-            .scroll((left_pane_scroll(state, area.height), 0));
-        frame.render_widget(paragraph, area);
+            .scroll((left_pane_scroll(state, patch_area.height), 0));
+        frame.render_widget(paragraph, patch_area);
         return;
     }
 
@@ -2166,8 +2296,8 @@ fn render_left_pane(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiSt
         .map(|s| Line::from(Span::styled(s, Style::default().fg(state.theme.foreground))))
         .collect();
 
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(lines);
+    frame.render_widget(paragraph, body);
 }
 
 /// How many lines the left pane is scrolled down.
@@ -2558,6 +2688,8 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
             format!("{message}\n[y/n]")
         }
         Overlay::ModelPicker(picker) => picker.render(),
+        Overlay::EffortSlider(slider) => slider.render(),
+        Overlay::TextInput(field) => field.render(),
         Overlay::List(picker) => picker.render(14),
     };
 
@@ -2569,6 +2701,8 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::FileMention { .. } => "Files",
         Overlay::Confirm { .. } => "Confirm",
         Overlay::ModelPicker { .. } => "Model",
+        Overlay::EffortSlider { .. } => "Effort",
+        Overlay::TextInput { .. } => "Rename",
         Overlay::List(picker) => picker.title.as_str(),
     };
     let block = Block::default()
@@ -2580,7 +2714,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
     // one. `scroll` counts *drawn* rows after wrapping, which is what a reader
     // means by a page.
     let detail_scroll = match overlay {
-        Overlay::Detail { scroll, .. } => Some((*scroll, 0)),
+        Overlay::Detail { scroll, .. } => Some(*scroll),
         _ => None,
     };
     let mut paragraph = Paragraph::new(content.clone())
@@ -2595,18 +2729,26 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
     // clipping like a fixed-layout dialog.
     let is_detail = matches!(
         overlay,
-        Overlay::Detail { .. } | Overlay::ModelPicker(_) | Overlay::List(_)
+        Overlay::Detail { .. }
+            | Overlay::ModelPicker(_)
+            | Overlay::EffortSlider(_)
+            | Overlay::TextInput(_)
+            | Overlay::List(_)
     );
     if is_detail {
         paragraph = paragraph.wrap(Wrap { trim: false });
-    }
-    if let Some(offset) = detail_scroll {
-        paragraph = paragraph.scroll(offset);
     }
     let w = if is_detail {
         area.width.saturating_sub(4).min(100)
     } else {
         50.min(area.width.saturating_sub(4))
+    };
+    // Body rows after wrapping, which is also the unit `scroll` counts in.
+    let inner_w = usize::from(w.saturating_sub(2)).max(1);
+    let body_rows = if is_detail {
+        u16::try_from(wrapped_rows_with_blanks(&content, inner_w)).unwrap_or(u16::MAX)
+    } else {
+        0
     };
     // A detail body gets the box it needs, up to the screen. The old fixed
     // twenty rows was right when every detail was a provider error; the help
@@ -2616,12 +2758,19 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
     // reachable a screenful at a time.
     let max_h = area.height.saturating_sub(4);
     let h = if is_detail {
-        let inner = usize::from(w.saturating_sub(2)).max(1);
-        let rows = u16::try_from(wrapped_rows_with_blanks(&content, inner)).unwrap_or(u16::MAX);
-        rows.saturating_add(2).max(8).min(max_h)
+        body_rows.saturating_add(2).max(8).min(max_h)
     } else {
         10.min(max_h)
     };
+    // Now that the box height is known, clamp the scroll: `h - 2` is how many
+    // rows it shows, so the last of those bounds where the top may sit. A
+    // page-down at the bottom of a body keeps its last line on screen instead
+    // of scrolling into the paragraph's blank tail, which read as an overlay
+    // that had lost its contents.
+    if let Some(rows) = detail_scroll {
+        let hold = h.saturating_sub(2);
+        paragraph = paragraph.scroll((rows.min(body_rows.saturating_sub(hold)), 0));
+    }
     let x = (area.width - w) / 2;
     let y = (area.height - h) / 2;
     let overlay_area = ratatui::layout::Rect {
@@ -2739,7 +2888,6 @@ mod tests {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -3220,6 +3368,87 @@ mod layout_tests {
             Some(theme.success),
             "added line is not success-green"
         );
+    }
+
+    /// A second view puts a tab bar above the patch, and the patch is still
+    /// drawn below it.
+    ///
+    /// The bar and the body share one border, so the test that matters is
+    /// that the tab row did not paint over the patch and the patch did not
+    /// paint over the tab row: both have to be on screen at once.
+    #[test]
+    fn a_second_view_is_a_tab_beside_the_first() {
+        let mut state = UiState::default();
+        state.layout_mode = crate::state::LayoutMode::HorizontalSplit { left_percent: 50 };
+        state.pane_show(
+            "a.rs".into(),
+            "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n".into(),
+            false,
+        );
+        state.pane_show(
+            "b.rs".into(),
+            "fn delta() {}\nfn epsilon() {}\n".into(),
+            false,
+        );
+        let buffer = render_to_buffer(100, 30, &mut state);
+        let text = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("1:a.rs"), "first tab is not on the bar:\n{text}");
+        assert!(text.contains("2:b.rs"), "second tab is not on the bar:\n{text}");
+        // The body is the selected tab's, and it is below the bar rather than
+        // under it.
+        assert!(
+            text.contains("fn epsilon()"),
+            "the selected view is missing from the pane:\n{text}"
+        );
+        assert!(
+            !text.contains("fn alpha()"),
+            "the tab that is not selected was drawn too:\n{text}"
+        );
+    }
+
+    /// A bar too wide for the pane is cut with a mark, not clipped mid-name.
+    ///
+    /// The pane is half of an 80-column terminal in the split view, so three
+    /// views with real paths overrun it. A hard clip at the edge would leave
+    /// half a filename and no sign there is another tab.
+    #[test]
+    fn a_tab_bar_wider_than_the_pane_ends_in_an_ellipsis() {
+        let mut state = UiState::default();
+        state.layout_mode = crate::state::LayoutMode::HorizontalSplit { left_percent: 50 };
+        state.pane_show("first.rs".into(), "one".into(), false);
+        state.pane_show("a-rather-long-second-name.rs".into(), "two".into(), false);
+        state.pane_show("third.rs".into(), "three".into(), false);
+        let buffer = render_to_buffer(40, 20, &mut state);
+        let bar = row_text(&buffer, 0);
+        let text = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains('…'), "no ellipsis on a bar that overflowed:\n{text}");
+        assert!(
+            text.contains("1:first.rs"),
+            "the first tab did not fit and was dropped:\n{text}"
+        );
+        assert!(bar.ends_with('…') || text.contains('…'), "{bar}");
+    }
+
+    /// A single view keeps the line the bar would have taken.
+    #[test]
+    fn one_view_draws_no_tab_bar() {
+        let mut state = UiState::default();
+        state.layout_mode = crate::state::LayoutMode::HorizontalSplit { left_percent: 50 };
+        state.pane_show("a.rs".into(), "fn alpha() {}\n".into(), false);
+        let buffer = render_to_buffer(100, 30, &mut state);
+        let text = (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("1:a.rs"), "a bar of one tab was drawn:\n{text}");
+        assert!(text.contains("fn alpha()"), "{text}");
     }
 
     /// The foreground colour of the cell that starts `needle`, if the text is
@@ -4120,8 +4349,38 @@ mod layout_tests {
         );
     }
 
-    /// A body's blank lines are layout, so the box has to be big enough for
-    /// them. The model picker's last row is its key hints, below two blank
+    /// Scrolling past the end of a body must not scroll it out of the box.
+    ///
+    /// Page-down is bounded by the reader's patience, not the body's length:
+    /// pressing it once more at the bottom used to move the paragraph into its
+    /// own blank tail, and the box drew empty. The last go-to keypress has to
+    /// leave the last line on screen.
+    #[test]
+    fn scrolling_past_the_end_leaves_the_last_line_on_screen() {
+        use crate::overlay::Overlay;
+
+        let body = (0..60)
+            .map(|row| format!("row{row:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = UiState::default();
+        state.overlays.push(Overlay::Detail {
+            title: "Help".into(),
+            body,
+            scroll: 500,
+        });
+        let buffer = render_to_buffer(120, 40, &mut state);
+        let screen: String = (0..40)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("row59"),
+            "the end of the body scrolled off the top:\n{screen}"
+        );
+    }
+
+    /// A body's blank lines are layout, so the box has to be big enough for    /// them. The model picker's last row is its key hints, below two blank
     /// lines; a count that drops the blanks clips exactly that row.
     #[test]
     fn a_body_with_blank_lines_gets_a_box_that_holds_all_of_them() {

@@ -24,7 +24,9 @@ use codape_core::query_profiles::{ModelProfile, PromptProfile, QueryKind, QueryR
 use codape_core::state::SessionState;
 use codape_core::tool_executor::ToolExecutor as _;
 use codape_core::types::ModelId;
-use codape_core::types::{AgentLifecycleEvent, EngineEvent, Message, ToolCall};
+use codape_core::types::{
+    AgentLifecycleEvent, EngineEvent, Message, ToolCall, running_status,
+};
 use codape_memory::{
     DreamCheckResult, ai_workflow,
     auto_dream::{AutoDream, DreamConfig},
@@ -920,8 +922,17 @@ impl InteractivePhase {
         }
     }
 
-    fn note_tool_start(&mut self, summary: &str) {
-        *self = Self::RunningTool(summary.to_string());
+    /// Note that a tool call started, with the label to show for it.
+    ///
+    /// The label is the phase plus the subject (`Running tests · cargo test -p
+    /// codape-cli`) rather than the call's summary verbatim. The summary is a
+    /// sentence about the call — `Running cargo test -p codape-cli...` — and a
+    /// footer made of prose does not tell a person whether the agent is still
+    /// reading or has started the suite, which is the one thing they want from
+    /// it during a long turn. Built by the caller so the plan panel can show
+    /// the same words the footer does.
+    fn note_tool_start(&mut self, label: &str) {
+        *self = Self::RunningTool(label.to_string());
     }
 
     fn note_tool_end(&mut self) {
@@ -981,6 +992,33 @@ struct InteractiveLive {
     file_list: Option<Arc<Vec<String>>>,
 }
 
+/// What a voice transcription run produced.
+#[derive(Debug)]
+struct VoiceResult {
+    /// The transcribed text, or the reason there is none.
+    outcome: Result<String, String>,
+}
+
+/// The channel a voice transcription reports on.
+///
+/// A transcription can take seconds — a person talks, then a recogniser
+/// answers — so it runs off the loop's critical path like a `!` command. The
+/// frame keeps drawing while the microphone is open.
+struct VoiceRuns {
+    /// Cloned into each spawned run.
+    tx: mpsc::UnboundedSender<VoiceResult>,
+    /// Taken out once before the TUI loop's `select!`.
+    rx: Option<mpsc::UnboundedReceiver<VoiceResult>>,
+}
+
+impl VoiceRuns {
+    /// A channel pair, with the receiving half held for the TUI loop to take.
+    fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx: Some(rx) }
+    }
+}
+
 /// What a `!` command produced, for the row it appends.
 #[derive(Debug)]
 struct ShellCommandResult {
@@ -1020,6 +1058,39 @@ enum TuiKeyFlow {
     Handled,
     /// Ctrl+D: leave the session.
     Quit,
+}
+
+/// Run the configured transcription command and return what it heard.
+///
+/// Blocking work on the runtime's blocking pool: `Command::output` waits for
+/// the process, and a recogniser can take seconds, so it must not sit on a
+/// future the loop is polling.
+async fn run_voice_command(cwd: &str, command: &str) -> Result<String, String> {
+    use std::process::Stdio;
+
+    let mut process = tokio::process::Command::new(crate::voice_input::shell_program());
+    for argument in crate::voice_input::shell_args(command) {
+        process.arg(argument);
+    }
+    let output = process
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("could not run the voice command: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(if stderr.is_empty() {
+            format!("the voice command exited with {}", output.status)
+        } else {
+            stderr.to_string()
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    crate::voice_input::transcript_from_stdout(&stdout)
+        .ok_or_else(|| "the voice command printed nothing to transcribe".to_string())
 }
 
 fn permission_activity_label(summary: &str) -> String {
@@ -1118,6 +1189,23 @@ fn jump_diff_file(ui_state: &mut codape_ui::state::UiState, forward: bool) {
             "Already at the first file"
         }),
     }
+}
+
+/// How many bytes a base64 payload stands for.
+///
+/// The browser shows a size because that is how a person tells a thumbnail
+/// from a screenshot, and the payload's own length is a third larger than the
+/// thing it encodes. Counted rather than decoded: the padding is what makes
+/// the plain `len * 3 / 4` wrong, and this runs over every pending image each
+/// time the list opens.
+fn decoded_size(base64: &str) -> usize {
+    let padding = base64
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count();
+    (base64.len() / 4 * 3).saturating_sub(padding)
 }
 
 /// Give the transcript the whole screen, or give the prompt its room back.
@@ -2700,6 +2788,8 @@ pub struct ReplLoop {
     /// drawing the spinner, so the command runs in a task and its row is
     /// appended when the result reaches the loop.
     shell_results: ShellResults,
+    /// Voice transcription runs, off the loop's critical path.
+    voice_runs: VoiceRuns,
 }
 
 /// The channel a `!` command's task reports on.
@@ -2709,6 +2799,14 @@ struct ShellResults {
     /// Taken out once before the TUI loop's `select!`, because poll it through
     /// `self` would fight the other branches for a borrow.
     rx: Option<mpsc::UnboundedReceiver<ShellCommandResult>>,
+}
+
+impl ShellResults {
+    /// A channel pair, with the receiving half held for the TUI loop to take.
+    fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Self { tx, rx: Some(rx) }
+    }
 }
 
 /// In-flight tool calls, so the activity rows can report duration and labels.
@@ -2754,6 +2852,21 @@ struct AgentRuntime {
     /// directly (as opposed to lifecycle events forwarded through the parent
     /// engine bus).
     observable_rx: Option<AgentSubscription>,
+    /// The agents a person pinned to the top of the roster, in pin order.
+    ///
+    /// Held here rather than in the manager because it is a display
+    /// preference about this session's list, not a fact about the agent's
+    /// life: the manager would have to grow a field it does not use, and a
+    /// pinned agent that ends is still the one being watched.
+    pinned_agents: Vec<String>,
+    /// Names given to agents for the rest of the session, by task id.
+    ///
+    /// The roster's label only: the id is what the engine, the logs and every
+    /// `/agents` subcommand address the agent by, and a rename that replaced
+    /// it would rename the agent out of reach of them all.
+    agent_names: std::collections::HashMap<String, String>,
+    /// Groups agents were filed under, by task id.
+    agent_groups: std::collections::HashMap<String, String>,
 }
 
 /// The artifact server, kept alive for the session, and where it writes.
@@ -3243,7 +3356,6 @@ impl ReplLoop {
     pub fn new(cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
         codape_commands::registry::register_all_commands(&mut commands);
-        let (shell_results_tx, shell_results_rx) = mpsc::unbounded_channel();
         let mut this = Self {
             commands,
             model: ModelSettings {
@@ -3336,6 +3448,9 @@ impl ReplLoop {
                 manager: None,
                 parent_snapshot: Arc::new(std::sync::Mutex::new(None)),
                 observable_rx: None,
+                pinned_agents: Vec::new(),
+                agent_names: std::collections::HashMap::new(),
+                agent_groups: std::collections::HashMap::new(),
             },
             mcp: McpState {
                 manager: Arc::new(std::sync::RwLock::new(None)),
@@ -3401,10 +3516,8 @@ impl ReplLoop {
                 keybinding_notes: Vec::new(),
                 keybinding_sources: Vec::new(),
             },
-            shell_results: ShellResults {
-                tx: shell_results_tx,
-                rx: Some(shell_results_rx),
-            },
+            shell_results: ShellResults::new(),
+            voice_runs: VoiceRuns::new(),
         };
         this.init_command_persistence();
         this
@@ -3763,7 +3876,6 @@ impl ReplLoop {
 
         #[cfg(feature = "hot-reload")]
         let (config_watcher, config_changed_rx) = Self::init_config_watcher(&cwd);
-        let (shell_results_tx, shell_results_rx) = mpsc::unbounded_channel();
 
         let mut this = Self {
             commands,
@@ -3855,6 +3967,9 @@ impl ReplLoop {
                 manager: Some(agent_manager),
                 parent_snapshot: Arc::clone(&parent_context_snapshot),
                 observable_rx: agent_observable_rx,
+                pinned_agents: Vec::new(),
+                agent_names: std::collections::HashMap::new(),
+                agent_groups: std::collections::HashMap::new(),
             },
             mcp: McpState {
                 manager: mcp_slot,
@@ -3920,10 +4035,8 @@ impl ReplLoop {
                 keybinding_notes: Vec::new(),
                 keybinding_sources: Vec::new(),
             },
-            shell_results: ShellResults {
-                tx: shell_results_tx,
-                rx: Some(shell_results_rx),
-            },
+            shell_results: ShellResults::new(),
+            voice_runs: VoiceRuns::new(),
         };
         this.init_command_persistence();
         this
@@ -5328,6 +5441,90 @@ impl ReplLoop {
             .push(codape_ui::overlay::Overlay::ModelPicker(picker));
     }
 
+    /// Open a one-line field whose answer is a roster name.
+    ///
+    /// `initial` is what the field starts with — the current name for a rename,
+    /// nothing for a group. Clearing it to empty and pressing Enter is how the
+    /// name is taken off, which is why the field's emptiness has to mean "none"
+    /// rather than "a name of zero characters".
+    fn open_agent_name_field(
+        id: &str,
+        prompt: &str,
+        initial: &str,
+        kind: &str,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        ui_state.overlays.push(codape_ui::overlay::Overlay::TextInput(
+            codape_ui::overlay::TextInput::new(prompt, initial, format!("{kind}:{id}")),
+        ));
+    }
+
+    /// Record what a roster field was answered with.
+    ///
+    /// The key is `<rename|group>:<agent-id>` — the same split the rows use —
+    /// so the dialog does not need its own overlay variant for each question.
+    /// An empty answer removes the name or group rather than storing one, and
+    /// a removal that removes nothing still says so: silence after Enter reads
+    /// as a keypress the session did not receive.
+    fn save_roster_name(
+        &mut self,
+        key: &str,
+        text: &str,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        let Some((kind, id)) = key.split_once(':') else {
+            return;
+        };
+        let id = id.to_string();
+        let value = crate::session_lists::clean_name(text);
+        match kind {
+            "rename" => {
+                if let Some(name) = &value {
+                    self.agents.agent_names.insert(id.clone(), name.clone());
+                    ui_state
+                        .notifications
+                        .success(format!("Agent {id} is now called {name}."));
+                } else {
+                    self.agents.agent_names.remove(&id);
+                    ui_state
+                        .notifications
+                        .info(format!("Agent {id} goes by its id again."));
+                }
+            }
+            "group" => {
+                if let Some(group) = &value {
+                    self.agents.agent_groups.insert(id.clone(), group.clone());
+                    ui_state
+                        .notifications
+                        .success(format!("Agent {id} is in group {group}."));
+                } else {
+                    self.agents.agent_groups.remove(&id);
+                    ui_state
+                        .notifications
+                        .info(format!("Agent {id} is in no group."));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the reasoning-effort slider on the session's current level.
+    ///
+    /// The model picker can change this too, but that dialog asks a question
+    /// with two answers. The slider is the one-answer version: the moment a
+    /// turn is slower than the person wants, or a problem looks harder than
+    /// the level they are on.
+    fn open_effort_slider(&self, ui_state: &mut codape_ui::state::UiState) {
+        let slider = codape_ui::overlay::EffortSlider::new(
+            self.model
+                .reasoning_effort
+                .map(|effort| effort.as_str().to_string()),
+        );
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::EffortSlider(slider));
+    }
+
     /// Set the session's reasoning effort, on the REPL and on the engine.
     ///
     /// The engine is where it takes effect: it builds a fresh request context
@@ -5729,6 +5926,11 @@ impl ReplLoop {
         ui_state.left_pane_title.clear();
         ui_state.left_pane_is_diff = false;
         ui_state.left_pane_scroll = 0;
+        // A reset session has nothing open, so the shelf goes with the view
+        // it was holding; a bar of dead tabs would outlive the conversation
+        // they belonged to.
+        ui_state.pane_tabs.clear();
+        ui_state.pane_tab_index = 0;
         ui_state.statusline.last_duration = None;
         ui_state.statusline.thinking = false;
         ui_state.statusline.thinking_label = None;
@@ -6018,12 +6220,20 @@ impl ReplLoop {
                 self.tools.use_summaries.insert(id, summary);
             }
             EngineEvent::ToolCallStart {
-                id, name, summary, ..
+                id,
+                name,
+                summary,
+                input,
             } => {
                 let summary = self.tools.use_summaries.remove(&id).unwrap_or(summary);
                 self.tools.names.insert(id.clone(), name.clone());
-                live.phase.note_tool_start(&summary);
-                set_plan_step(ui_state, &summary);
+                // The footer and the plan panel say what kind of work this
+                // is; the transcript and the activity log keep the sentence,
+                // which is where the detail belongs. `summary` is still the
+                // fallback for a tool the phase model does not know.
+                let label = running_status(&name, input.as_ref(), &summary);
+                live.phase.note_tool_start(&label);
+                set_plan_step(ui_state, &label);
                 // The log feeds `/activity`; the transcript row is
                 // the ToolCall message below, so this must not add
                 // a second visible row.
@@ -6102,6 +6312,10 @@ impl ReplLoop {
                 self.persist_interactive_snapshot(ui_state);
             }
             EngineEvent::PermissionRequest { tool, args, .. } => {
+                // `Waiting for permission` names the state and the sentence
+                // names the call — deliberately the same words as before the
+                // phase model, because a permission prompt is the one surface
+                // where the summary *is* the thing being asked about.
                 let label = permission_activity_label(&ToolCall::summarize_activity(&tool, &args));
                 live.phase.note_permission_request(&tool, &args);
                 set_plan_step(ui_state, &label);
@@ -6256,6 +6470,9 @@ impl ReplLoop {
                 status: format!("{:?}", agent.status()).to_lowercase(),
                 prompt: agent.prompt.lines().next().unwrap_or("").trim().to_string(),
                 resumable: !agent.transcript().is_empty(),
+                pinned: self.agents.pinned_agents.iter().any(|pinned| pinned == &agent.task_handle.id),
+                name: self.agents.agent_names.get(&agent.task_handle.id).cloned(),
+                group: self.agents.agent_groups.get(&agent.task_handle.id).cloned(),
             })
             .collect();
         drop(manager);
@@ -6314,8 +6531,12 @@ impl ReplLoop {
     ///
     /// Marketplaces are read from settings rather than from a startup
     /// snapshot: `/plugin marketplace add` writes the settings file mid-session
-    /// and the next open of this list should see it.
+    /// and the next open of this list should see it. The on/off and pinned
+    /// bits are read the same way for the same reason — the browser itself
+    /// writes them, and a list that showed a switch's old state after being
+    /// toggled would make the switch look broken.
     fn plugin_choices(&self) -> codape_ui::picker::Picker {
+        let prefs = crate::plugin_prefs::PluginPrefs::load(&Self::user_settings_path());
         let plugins: Vec<crate::session_lists::PluginRow> = self
             .plugins
             .manager
@@ -6338,13 +6559,110 @@ impl ReplLoop {
                                     path = handle.path.display()
                                 )
                             });
-                        crate::session_lists::PluginRow { name, detail }
+                        crate::session_lists::PluginRow {
+                            enabled: prefs.is_enabled(&name),
+                            favorite: prefs.is_favorite(&name),
+                            name,
+                            detail,
+                        }
                     })
                     .collect()
             })
             .unwrap_or_default();
         let marketplaces = self.configured_marketplace_names();
         crate::session_lists::plugin_rows(&plugins, &marketplaces)
+    }
+
+    /// The images waiting to ride on the next turn, as the browser shows them.
+    ///
+    /// Built from the pending list rather than from the transcript: the
+    /// transcript keeps every picture a turn has already sent, and this list
+    /// is only about the ones still owed to a turn that has not started.
+    fn attachment_choices(&self) -> codape_ui::picker::Picker {
+        let rows: Vec<crate::session_lists::AttachmentRow> = self
+            .session
+            .effects
+            .pending_images
+            .iter()
+            .map(|image| crate::session_lists::AttachmentRow {
+                media_type: image.media_type.clone(),
+                bytes: decoded_size(&image.data),
+            })
+            .collect();
+        crate::session_lists::attachment_rows(&rows)
+    }
+
+    /// Do what an accepted attachment row means.
+    ///
+    /// `Show` pushes the picture into the transcript — the same row a turn
+    /// draws — so the person can recognise it. `Remove` and `RemoveAll` drop
+    /// it from the pending list, which is the only thing that stops it being
+    /// sent: the transcript row it may already have is a record of what a past
+    /// mention attached, and deleting that would edit history rather than the
+    /// request.
+    fn act_on_attachment_choice(
+        &mut self,
+        choice: crate::session_lists::AttachmentChoice,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        use crate::session_lists::AttachmentChoice;
+
+        let pending = &mut self.session.effects.pending_images;
+        match choice {
+            AttachmentChoice::Show(index) => {
+                let Some(image) = pending.get(index) else {
+                    ui_state
+                        .notifications
+                        .warn("That image is no longer attached.");
+                    return;
+                };
+                Self::push_attached_images(ui_state, std::slice::from_ref(image));
+            }
+            AttachmentChoice::Remove(index) => {
+                if index >= pending.len() {
+                    ui_state
+                        .notifications
+                        .warn("That image is no longer attached.");
+                    return;
+                }
+                let media_type = pending.remove(index).media_type;
+                let left = pending.len();
+                ui_state.notifications.info(match left {
+                    0 => format!("Removed {media_type}; the next turn sends no images."),
+                    1 => format!("Removed {media_type}; 1 image still attached."),
+                    other => format!("Removed {media_type}; {other} images still attached."),
+                });
+            }
+            AttachmentChoice::RemoveAll => {
+                let count = pending.len();
+                pending.clear();
+                ui_state
+                    .notifications
+                    .info(format!("Removed {count} image(s); the next turn sends none."));
+            }
+        }
+    }
+
+    /// The user's settings file — where a preference that belongs to this
+    /// machine, rather than to the repository, is kept.
+    fn user_settings_path() -> std::path::PathBuf {
+        codape_config::config_home().join("settings.json")
+    }
+
+    /// Every session this workspace has a transcript for, newest first.
+    ///
+    /// The list the session picker draws. It reads the same merged view
+    /// `/resume <fragment>` searches — the index when it has rows, the
+    /// transcripts when it does not — because a picker that disagreed with
+    /// the command would offer rows the command could not resolve.
+    ///
+    /// The bound is generous rather than small: the picker filters as you
+    /// type, so a list cut short at ten would hide the session someone is
+    /// looking for while costing nothing to include.
+    fn session_choices(&self) -> codape_ui::picker::Picker {
+        let metas = crate::session_resume::list_recent_sessions(&self.cwd, 50);
+        let rows = crate::session_resume::session_rows_from(&metas, chrono::Utc::now());
+        crate::session_lists::session_rows(&rows)
     }
 
     /// The marketplaces the settings files name, as `(name, url)`.
@@ -6480,6 +6798,54 @@ impl ReplLoop {
                             .warn(format!("Agent {id} has no event channel to subscribe to.")),
                     }
                 }
+                AgentChoice::TogglePin(id) => {
+                    // Flip the preference and say which way it went. Pinning
+                    // orders the *next* roster — the open list is a snapshot
+                    // taken when the key was pressed — so the notice is what
+                    // confirms the row did something.
+                    let pinned =
+                        crate::session_lists::toggle_pin(&mut self.agents.pinned_agents, &id);
+                    ui_state.notifications.info(if pinned {
+                        format!("Pinned agent {id} to the top of the roster.")
+                    } else {
+                        format!("Unpinned agent {id}.")
+                    });
+                }
+                AgentChoice::Rename(id) => {
+                    // The list closes and a field opens over the transcript:
+                    // the answer is a string the roster cannot enumerate, so
+                    // there is no row to pick.
+                    let current = self
+                        .agents
+                        .agent_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default();
+                    ui_state.overlays.clear();
+                    Self::open_agent_name_field(
+                        &id,
+                        "Rename this agent",
+                        &current,
+                        "rename",
+                        ui_state,
+                    );
+                }
+                AgentChoice::Group(id) => {
+                    let current = self
+                        .agents
+                        .agent_groups
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default();
+                    ui_state.overlays.clear();
+                    Self::open_agent_name_field(
+                        &id,
+                        "Move this agent into a group (empty to remove)",
+                        &current,
+                        "group",
+                        ui_state,
+                    );
+                }
             }
             return true;
         }
@@ -6502,10 +6868,40 @@ impl ReplLoop {
             });
             return true;
         }
-        if let Some(name) = key.strip_prefix("plugin:") {
-            ui_state
-                .notifications
-                .info(format!("Installed plugin: {name}"));
+        if let Some(choice) = crate::session_lists::PluginChoice::parse(key) {
+            self.act_on_plugin_choice(choice, ui_state);
+            return true;
+        }
+        if let Some(choice) = crate::session_lists::AttachmentChoice::parse(key) {
+            self.act_on_attachment_choice(choice, ui_state);
+            return true;
+        }
+        if let Some(session_id) = crate::session_lists::session_id_from_key(key) {
+            // The same path `/resume <id>` takes, including the "a turn is
+            // running" guard. That check lives on the slash-command arm, but
+            // the engine is moved into the running task and `resume_tui_session`
+            // would find nothing to load it back into — so the guard has to be
+            // here too, not only where the command is typed.
+            if self.running_query.is_some() {
+                ui_state
+                    .notifications
+                    .warn("Finish or cancel the active turn before resuming another session.");
+                return true;
+            }
+            // `resume_tui_session` pushes the transcript row itself when it
+            // succeeds; a failure has no row and would otherwise be visible
+            // only as a notification beside a picker that just closed.
+            if let Err(error) = self.resume_tui_session(Some(session_id), ui_state) {
+                ui_state.notifications.err(&error);
+                ui_state.messages.push(codape_ui::message_list::Message {
+                    role: codape_ui::message_list::MessageRole::System,
+                    content: format!("Error: {error}").into(),
+                    tool_name: None,
+                    streaming: false,
+                    folded: false,
+                    image: None,
+                });
+            }
             return true;
         }
         if let Some(name) = key.strip_prefix("marketplace:") {
@@ -6776,6 +7172,26 @@ impl ReplLoop {
                     self.open_model_picker(ui_state);
                     return TuiKeyFlow::Handled;
                 }
+                Shortcut::EffortSlider
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none() =>
+                {
+                    self.open_effort_slider(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
+                // The microphone. Guarded like the image keys: it starts a
+                // process and writes to the line, so a modal that owns the
+                // keyboard must not be interrupted by it.
+                Shortcut::VoiceInput
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none()
+                        && self.mcp.pending_elicitation.is_none() =>
+                {
+                    self.start_voice_transcription(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
                 // The five list openers. They share one guard because they
                 // share one reason for it: each reads the session (the roster,
                 // the messages, the themes) at the moment it opens, and a
@@ -6786,6 +7202,8 @@ impl ReplLoop {
                 | Shortcut::Rewind
                 | Shortcut::ThemePicker
                 | Shortcut::PluginBrowser
+                | Shortcut::SessionPicker
+                | Shortcut::AttachmentBrowser
                     if !ui_state.overlays.is_active()
                         && live.pending_confirmation.is_none()
                         && self.mcp.pending_form.is_none()
@@ -6806,6 +7224,14 @@ impl ReplLoop {
                         }
                         Shortcut::PluginBrowser => {
                             let picker = self.plugin_choices();
+                            Self::open_list(ui_state, picker);
+                        }
+                        Shortcut::SessionPicker => {
+                            let picker = self.session_choices();
+                            Self::open_list(ui_state, picker);
+                        }
+                        Shortcut::AttachmentBrowser => {
+                            let picker = self.attachment_choices();
                             Self::open_list(ui_state, picker);
                         }
                         // The help page is not a picker: nothing is chosen, so
@@ -6892,6 +7318,17 @@ impl ReplLoop {
                     jump_diff_file(ui_state, matches!(shortcut, Shortcut::DiffNextFile));
                     return TuiKeyFlow::Handled;
                 }
+                // The pane's tabs. Guarded on an open overlay for the usual
+                // reason — the keys belong to whatever has the keyboard — but
+                // not on the pane being open: switching does nothing with a
+                // single view, and a guard that had to ask would only restate
+                // what the switch already knows.
+                Shortcut::PanePreviousTab | Shortcut::PaneNextTab
+                    if !ui_state.overlays.is_active() =>
+                {
+                    ui_state.pane_cycle(matches!(shortcut, Shortcut::PaneNextTab));
+                    return TuiKeyFlow::Handled;
+                }
                 Shortcut::TranscriptFullscreen
                     if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
                 {
@@ -6922,6 +7359,81 @@ impl ReplLoop {
                 }
                 _ => {}
             }
+        }
+
+        // The rename field owns the keyboard while it is open: every letter
+        // typed is the name, so none of it may reach the input line behind it.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::TextInput(_))
+        ) {
+            let mut accepted = false;
+            let mut cancel = false;
+            if let Some(codape_ui::overlay::Overlay::TextInput(field)) =
+                ui_state.overlays.top_mut()
+            {
+                match key.code {
+                    KeyCode::Char(character) => field.push(character),
+                    KeyCode::Backspace => field.backspace(),
+                    KeyCode::Enter => accepted = true,
+                    KeyCode::Esc => cancel = true,
+                    _ => {}
+                }
+            }
+            if accepted {
+                let (key, text) = match ui_state.overlays.pop() {
+                    Some(codape_ui::overlay::Overlay::TextInput(field)) => (field.key, field.text),
+                    _ => (String::new(), String::new()),
+                };
+                // One field, more than one question. The key says which:
+                // `<rename|group>:<agent-id>` is a roster label, and the bare
+                // install key is a plugin source. Deciding here rather than
+                // giving each question its own overlay variant keeps the
+                // field's key handling in one place.
+                if key == crate::session_lists::PLUGIN_INSTALL_KEY {
+                    self.start_plugin_install(&text, ui_state);
+                } else {
+                    self.save_roster_name(&key, &text, ui_state);
+                }
+            } else if cancel {
+                ui_state.overlays.pop();
+            }
+            return TuiKeyFlow::Handled;
+        }
+
+        // The effort slider owns the keyboard while it is open, for the same
+        // reason the model picker does: the arrows change a setting.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::EffortSlider(_))
+        ) {
+            let mut apply = false;
+            let mut cancel = false;
+            if let Some(codape_ui::overlay::Overlay::EffortSlider(slider)) =
+                ui_state.overlays.top_mut()
+            {
+                match key.code {
+                    KeyCode::Left => slider.move_by(-1),
+                    KeyCode::Right => slider.move_by(1),
+                    KeyCode::Enter => apply = true,
+                    KeyCode::Esc => cancel = true,
+                    _ => {}
+                }
+            }
+            if apply {
+                let effort = match ui_state.overlays.pop() {
+                    Some(codape_ui::overlay::Overlay::EffortSlider(slider)) => slider.effort,
+                    _ => None,
+                };
+                self.apply_reasoning_effort(effort.as_deref());
+                let shown = effort.as_deref().unwrap_or("off").to_string();
+                ui_state
+                    .notifications
+                    .success(format!("Reasoning effort: {shown}"));
+            } else if cancel {
+                ui_state.overlays.pop();
+            }
+            return TuiKeyFlow::Handled;
         }
 
         // The model picker owns the keyboard while it is open: the arrows
@@ -7857,6 +8369,7 @@ impl ReplLoop {
         // of `self` for the loop: polling it through `self` would fight the
         // other `select!` branches for the borrow.
         let mut shell_results_rx = self.shell_results.rx.take();
+        let mut voice_rx = self.voice_runs.rx.take();
 
         // A signalled TUI must not leave the terminal in the alternate screen
         // with raw mode on. Exit through the same cleanup path as Ctrl+D and
@@ -8054,11 +8567,9 @@ impl ReplLoop {
             // Sync statusline from REPL state
             self.sync_statusline(&mut ui_state.statusline);
             ui_state.statusline.thinking = thinking;
-            ui_state.statusline.plan_status = if thinking {
-                ui_state.plan.status_label()
-            } else {
-                None
-            };
+            // The footer's label is the phase, set below. The plan panel's own
+            // `Step 2/5: ...` used to be copied in too; it was overwritten in
+            // every frame where it was set, so it is gone from `Statusline`.
             if thinking {
                 ui_state.statusline.spinner_frame =
                     ui_state.statusline.spinner_frame.wrapping_add(1);
@@ -8284,6 +8795,12 @@ impl ReplLoop {
                     shell_results_rx.as_mut().unwrap().recv().await
                 }, if shell_results_rx.is_some() => {
                     self.apply_shell_result(shell_result, &mut ui_state);
+                }
+
+                Some(voice_result) = async {
+                    voice_rx.as_mut().unwrap().recv().await
+                }, if voice_rx.is_some() => {
+                    Self::apply_voice_result(voice_result, &mut ui_state);
                 }
 
 
@@ -10541,10 +11058,10 @@ impl ReplLoop {
         }
 
         let stat = codape_ui::diff::stat(&codape_ui::diff::parse_unified(&result.output));
-        ui_state.left_pane_content.clone_from(&result.output);
-        ui_state.left_pane_title = format!("diff  {}", stat.summary());
-        ui_state.left_pane_is_diff = true;
-        ui_state.left_pane_scroll = 0;
+        // Through the tab shelf, so a diff opened after a file (or after an
+        // earlier diff) is a second view rather than a replacement: the pane
+        // remembers what it was showing and the tab keys can return to it.
+        ui_state.pane_show(format!("diff  {}", stat.summary()), result.output, true);
         ui_state.layout_mode = codape_ui::state::LayoutMode::HorizontalSplit { left_percent: 50 };
         let summary = stat.summary();
         ui_state
@@ -10762,6 +11279,141 @@ impl ReplLoop {
                 tools.join("\n  ")
             )
         }
+    }
+
+    /// Do what an accepted plugin-browser row means.
+    ///
+    /// Two of the three verbs are preferences written to the user's settings
+    /// file and reported as such. They deliberately do not unload the plugin:
+    /// its commands, skills and hooks were registered on the manager at
+    /// startup, and taking those back mid-session would leave the registry
+    /// pointing at a plugin that no longer answers. The message says "next
+    /// session" for the same reason.
+    fn act_on_plugin_choice(
+        &self,
+        choice: crate::session_lists::PluginChoice,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        use crate::session_lists::PluginChoice;
+
+        let path = Self::user_settings_path();
+        match choice {
+            PluginChoice::Inspect(name) => {
+                let body = self.plugin_detail(&name);
+                ui_state
+                    .messages
+                    .push(codape_ui::message_list::Message {
+                        role: codape_ui::message_list::MessageRole::Assistant,
+                        content: body.into(),
+                        tool_name: None,
+                        streaming: false,
+                        folded: false,
+                        image: None,
+                    });
+            }
+            PluginChoice::Toggle(name) => {
+                let enabled = !crate::plugin_prefs::PluginPrefs::load(&path).is_enabled(&name);
+                match crate::plugin_prefs::write_flag(&path, &name, "enabled", enabled) {
+                    Ok(()) if enabled => ui_state
+                        .notifications
+                        .success(format!("Plugin {name} loads in new sessions.")),
+                    Ok(()) => ui_state
+                        .notifications
+                        .info(format!("Plugin {name} is off for new sessions.")),
+                    Err(error) => ui_state.notifications.err(format!(
+                        "Could not save the plugin preference: {error}"
+                    )),
+                }
+            }
+            PluginChoice::Favorite(name) => {
+                let favorite = !crate::plugin_prefs::PluginPrefs::load(&path).is_favorite(&name);
+                match crate::plugin_prefs::write_flag(&path, &name, "favorite", favorite) {
+                    Ok(()) if favorite => {
+                        ui_state.notifications.success(format!("Pinned {name}."));
+                    }
+                    Ok(()) => ui_state.notifications.info(format!("Unpinned {name}.")),
+                    Err(error) => ui_state.notifications.err(format!(
+                        "Could not save the plugin preference: {error}"
+                    )),
+                }
+            }
+            PluginChoice::InstallFrom => {
+                Self::open_plugin_source_field(ui_state);
+            }
+        }
+    }
+
+    /// Open the field a plugin install reads its source from.
+    ///
+    /// The browser's first row. It is a field rather than a keypress because a
+    /// source is typed — `./my-plugin`, `https://github.com/acme/plugin.git`,
+    /// `github:acme/plugin`, an archive URL, or a marketplace name — and the
+    /// row that carries it has nothing to put in it.
+    fn open_plugin_source_field(ui_state: &mut codape_ui::state::UiState) {
+        use codape_ui::overlay::{Overlay, TextInput};
+        ui_state.overlays.push(Overlay::TextInput(TextInput::new(
+            "Install a plugin from (directory, git remote, archive URL, or marketplace name)",
+            "",
+            crate::session_lists::PLUGIN_INSTALL_KEY,
+        )));
+    }
+
+    /// Queue the install of the source just typed, and start it.
+    ///
+    /// The same deferred path `/plugin install <source>` takes, so the browser
+    /// and the command cannot drift: `CommandDeferred::PluginInstall` is what
+    /// both produce, and `spawn_deferred_work` is what runs it off the frame
+    /// that is drawing the spinner.
+    fn start_plugin_install(&mut self, source: &str, ui_state: &mut codape_ui::state::UiState) {
+        let source = source.trim();
+        if source.is_empty() {
+            // An empty field is a cancelled question, not an install of "".
+            ui_state
+                .notifications
+                .info("No plugin source given; nothing was installed.");
+            return;
+        }
+        self.pending_deferred = Some(codape_commands::CommandDeferred::PluginInstall {
+            source: source.to_string(),
+        });
+        ui_state
+            .notifications
+            .info(format!("Installing plugin from '{source}'..."));
+        self.spawn_deferred_work();
+    }
+
+    /// What a plugin contributes, as the inspect row prints it.
+    fn plugin_detail(&self, name: &str) -> String {
+        let Some(manager) = self.plugins.manager.as_ref() else {
+            return format!("No plugin manager in this session, so {name} has no details.");
+        };
+        let Some(handle) = manager.get_plugin(name) else {
+            return format!("Plugin {name} is not loaded in this session.");
+        };
+        let prefs = crate::plugin_prefs::PluginPrefs::load(&Self::user_settings_path());
+        let list = |values: &[String]| {
+            if values.is_empty() {
+                "none".to_string()
+            } else {
+                values.join(", ")
+            }
+        };
+        format!(
+            "{name} {version}\n\
+             State:   {state:?}\n\
+             Path:    {path}\n\
+             Commands: {commands}\n\
+             Skills:   {skills}\n\
+             Loads in new sessions: {enabled}\n\
+             Pinned: {favorite}",
+            version = handle.version,
+            state = handle.state,
+            path = handle.path.display(),
+            commands = list(&handle.commands),
+            skills = list(&handle.skills),
+            enabled = if prefs.is_enabled(name) { "yes" } else { "no" },
+            favorite = if prefs.is_favorite(name) { "yes" } else { "no" },
+        )
     }
 
     /// Install a plugin from the same sources `codape plugin install` accepts.
@@ -11661,6 +12313,91 @@ impl ReplLoop {
         self.spawn_shell_command(command, ui_state);
     }
 
+    /// Run the configured transcription command and put its text on the line.
+    ///
+    /// Nothing happens when no command is configured, except a message saying
+    /// how to configure one. A key that silently did nothing would read as
+    /// broken, and the person pressing it is exactly the one who needs to know
+    /// that the microphone belongs to a command they have not written yet.
+    fn start_voice_transcription(&self, ui_state: &mut codape_ui::state::UiState) {
+        // The same gate `/voice` applies, for the same reason: the flag is how
+        // a machine that must not listen says so, and a key that bypassed it
+        // would make the flag advisory.
+        if !self.options.feature_flags.voice_mode {
+            ui_state.notifications.warn(
+                "Voice mode is off. Enable the voice_mode feature flag.",
+            );
+            return;
+        }
+        let Some(command) =
+            crate::voice_input::command_from_file(&Self::user_settings_path())
+        else {
+            ui_state.notifications.warn(
+                "No voice command. Set voice.command in settings.json to a \
+                 command that prints the transcript.",
+            );
+            return;
+        };
+        // A second press while one is running would start a second recorder on
+        // one microphone; the state machine already knows it is busy, so the
+        // guard is a read of it rather than a second flag.
+        if ui_state.voice.is_active() {
+            ui_state
+                .notifications
+                .info("Voice input is already running.");
+            return;
+        }
+        ui_state.voice.start_listening();
+        ui_state.voice.begin_transcribing();
+        ui_state
+            .notifications
+            .info("Listening... (transcribing in the background)");
+
+        let tx = self.voice_runs.tx.clone();
+        let cwd = self.cwd.clone();
+        tokio::spawn(async move {
+            let outcome = run_voice_command(&cwd, &command).await;
+            // A closed receiver means the TUI is gone; nothing left to tell.
+            let _ = tx.send(VoiceResult { outcome });
+        });
+    }
+
+    /// Put a finished transcription on the prompt line.
+    ///
+    /// Inserted at the cursor rather than replacing the line: the point of
+    /// dictating is usually to add a sentence to what is already typed, and a
+    /// replacement would throw away the half-written prompt the person was
+    /// looking at when they pressed the key.
+    fn apply_voice_result(result: VoiceResult, ui_state: &mut codape_ui::state::UiState) {
+        match result.outcome {
+            Ok(text) => {
+                // `finish_transcribing` is the machine's own exit: it clears
+                // the busy state and hands back the text, or keeps listening
+                // when the recogniser heard nothing.
+                if let Some(text) = ui_state.voice.finish_transcribing(text) {
+                    ui_state.input.paste(&text);
+                    ui_state
+                        .notifications
+                        .success("Transcribed onto the prompt.");
+                } else {
+                    ui_state
+                        .notifications
+                        .warn("Nothing was transcribed.");
+                }
+            }
+            Err(error) => {
+                ui_state.voice.fail(error.clone());
+                ui_state
+                    .notifications
+                    .err(format!("Voice input failed: {error}"));
+                // Back to idle so the next press is not refused as "already
+                // running" — the error is in the transcript, and the retry is
+                // the same key.
+                ui_state.voice.retry();
+            }
+        }
+    }
+
     /// Run one shell command in a task and hand its output back to the loop.
     fn spawn_shell_command(&self, command: String, ui_state: &mut codape_ui::state::UiState) {
         let Some(dispatcher) = self.agents.dispatcher.clone() else {
@@ -12001,6 +12738,27 @@ impl ReplLoop {
                             });
                             return;
                         }
+                        // With no argument, offer the sessions rather than
+                        // silently taking the newest: "resume" with nothing
+                        // after it is a request to choose, and picking the
+                        // latest on the person's behalf made the one case they
+                        // could not see the one that decided for them. The
+                        // row accepts through `act_on_list_choice`, which
+                        // takes the same path `/resume <id>` does.
+                        //
+                        // `has_modal`, not `is_active`: the `/` completion
+                        // palette for the command being typed is up by
+                        // definition, and asking whether *any* overlay existed
+                        // made this branch unreachable from the command line.
+                        if args.is_empty() && !ui_state.overlays.has_modal() {
+                            // The palette is stale the moment the command
+                            // runs — it lists `/resume` as a completion and
+                            // would sit over the list it just opened.
+                            ui_state.overlays.pop_palette();
+                            let picker = self.session_choices();
+                            Self::open_list(ui_state, picker);
+                            return;
+                        }
                         match self.resume_tui_session(args.first().map(String::as_str), ui_state) {
                             Ok(_) => {}
                             Err(err) => {
@@ -12051,12 +12809,10 @@ impl ReplLoop {
                         };
                         match std::fs::read_to_string(&path) {
                             Ok(content) => {
-                                ui_state.left_pane_content = content;
-                                ui_state.left_pane_title.clone_from(&args[0]);
-                                // A file opened over a diff replaces it; the
-                                // pane shows one thing at a time.
-                                ui_state.left_pane_is_diff = false;
-                                ui_state.left_pane_scroll = 0;
+                                // A view of its own: the diff that was open
+                                // stays on the shelf behind it, one tab key
+                                // away.
+                                ui_state.pane_show(args[0].clone(), content, false);
                                 ui_state.layout_mode =
                                     codape_ui::state::LayoutMode::HorizontalSplit {
                                         left_percent: 50,
@@ -12438,7 +13194,7 @@ impl ReplLoop {
         // better than a paragraph — and the row is the way to change it.
         if args.is_empty()
             && matches!(cmd_name, "theme" | "plugin")
-            && !ui_state.overlays.is_active()
+            && !ui_state.overlays.has_modal()
         {
             let picker = if cmd_name == "theme" {
                 self.theme_choices(ui_state)
@@ -14015,8 +14771,36 @@ impl ReplLoop {
                     None => "The agent manager has no event channel to subscribe to.".into(),
                 }
             }
+            Some(command @ ("pin" | "unpin")) => {
+                let Some(target) = args.get(1) else {
+                    return "Usage: /agents <pin|unpin> <agent-id>".into();
+                };
+                // Named, so idempotent — `/agents pin` twice is still pinned.
+                // The roster's row is the toggle; a command that said "pin"
+                // and unpinned would be a trap for a script.
+                let want = command == "pin";
+                let currently = self
+                    .agents
+                    .pinned_agents
+                    .iter()
+                    .any(|pinned| pinned == target);
+                if want != currently {
+                    let _ = crate::session_lists::toggle_pin(
+                        &mut self.agents.pinned_agents,
+                        target,
+                    );
+                }
+                if want {
+                    format!("Pinned agent {target} to the top of the roster.")
+                } else {
+                    format!("Unpinned agent {target}.")
+                }
+            }
             Some(other) => {
-                format!("Unknown /agents subcommand {other:?}. Usage: /agents <list|logs|follow>")
+                format!(
+                    "Unknown /agents subcommand {other:?}. \
+                     Usage: /agents <list|logs|follow|pin|unpin>"
+                )
             }
         }
     }
@@ -15872,10 +16656,17 @@ mod tests {
         phase.note_text_delta();
         assert_eq!(phase.status_label().as_deref(), Some("Thinking..."));
 
-        phase.note_tool_start("Running cargo test -p codape-cli...");
+        // The shell tool is classified by its command, so the footer says
+        // what the agent is doing *and* what it is doing it to.
+        let input = serde_json::json!({"command": "cargo test -p codape-cli"});
+        phase.note_tool_start(&running_status(
+            "Bash",
+            Some(&input),
+            &ToolCall::summarize_activity("Bash", &input),
+        ));
         assert_eq!(
             phase.status_label().as_deref(),
-            Some("Running cargo test -p codape-cli...")
+            Some("Running tests · cargo test -p codape-cli")
         );
 
         phase.note_permission_request("Read", &serde_json::json!({"file_path":"src/lib.rs"}));
@@ -16590,11 +17381,21 @@ mod tests {
         assert!(!last.streaming);
     }
 
+    /// A permission prompt asks about the call, so it keeps the call's own
+    /// sentence: unlike the footer, the reader here has to recognise which
+    /// request they are approving.
     #[test]
     fn permission_activity_labels_are_user_facing() {
         assert_eq!(
-            permission_activity_label("Running cargo test -p codape-cli..."),
+            permission_activity_label(&ToolCall::summarize_activity(
+                "Bash",
+                &serde_json::json!({"command": "cargo test -p codape-cli"})
+            )),
             "Waiting for permission: Running cargo test -p codape-cli..."
+        );
+        assert_eq!(
+            permission_activity_label(""),
+            "Waiting for permission..."
         );
     }
 

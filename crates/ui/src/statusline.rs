@@ -42,8 +42,6 @@ pub struct Statusline {
     pub thinking_started: Option<Instant>,
     /// Duration of the last completed turn.
     pub last_duration: Option<Duration>,
-    /// Current plan execution status (e.g. "Step 2/5: Running tests").
-    pub plan_status: Option<String>,
     /// Detailed thinking label (e.g. "Thinking (Esc to cancel)").
     pub thinking_label: Option<String>,
     /// Spinner animation frame index (incremented each draw while thinking).
@@ -78,7 +76,6 @@ impl Statusline {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -117,24 +114,20 @@ impl Statusline {
                 .map(|s| Self::fmt_duration(s.elapsed()))
                 .unwrap_or_default();
 
+            // One label, because there is one slot. This used to fall back to
+            // `plan_status` — the plan panel's `Step 2/5: ...`, guessed from
+            // the text stream — but the session sets `thinking_label` from the
+            // semantic phase (`Running tests · cargo test -p codape-cli`) in
+            // every frame in which `plan_status` was ever set, so that fallback
+            // could not render and the field is gone. The plan panel still
+            // records the same steps for `/plan`.
             let label = self.thinking_label.as_ref().map_or_else(
                 || {
-                    self.plan_status.as_ref().map_or_else(
-                        || {
-                            if elapsed.is_empty() {
-                                "Thinking...".into()
-                            } else {
-                                format!("Thinking...  ({elapsed})")
-                            }
-                        },
-                        |plan| {
-                            if elapsed.is_empty() {
-                                plan.clone()
-                            } else {
-                                format!("{plan}  ({elapsed})")
-                            }
-                        },
-                    )
+                    if elapsed.is_empty() {
+                        "Thinking...".into()
+                    } else {
+                        format!("Thinking...  ({elapsed})")
+                    }
                 },
                 |active| {
                     if elapsed.is_empty() {
@@ -269,7 +262,6 @@ mod tests {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -326,7 +318,6 @@ mod tests {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -354,7 +345,6 @@ mod tests {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -415,7 +405,6 @@ mod tests {
             thinking: false,
             thinking_started: None,
             last_duration: None,
-            plan_status: None,
             thinking_label: None,
             spinner_frame: 0,
             show_tokens: true,
@@ -477,31 +466,33 @@ mod tests {
         assert!(rendered.contains("7m 27s"));
     }
 
+    /// The footer's one label is the semantic phase, verbatim. This used to be
+    /// a two-way race with the plan panel's guessed `Step 2/5: ...`; the plan
+    /// side lost every frame in practice, so only this path is left.
     #[test]
-    fn plan_status_shows_during_thinking() {
+    fn the_semantic_phase_is_what_the_footer_shows() {
         let sl = Statusline {
             thinking: true,
-            plan_status: Some("Step 2/5: Running tests".into()),
+            thinking_label: Some("Running tests · cargo test -p codape-cli".into()),
             spinner_frame: 0,
             ..Statusline::new()
         };
         let rendered = sl.render(200);
-        assert!(rendered.contains("Step 2/5"));
-        assert!(rendered.contains("Running tests"));
+        assert!(rendered.contains("Running tests · cargo test -p codape-cli"));
     }
 
+    /// A session with no phase to report still says something, so the spinner
+    /// never travels beside an empty label.
     #[test]
-    fn active_thinking_label_takes_priority_over_plan_status() {
+    fn a_missing_phase_falls_back_to_thinking() {
         let sl = Statusline {
             thinking: true,
-            thinking_label: Some("Thinking...".into()),
-            plan_status: Some("Planning".into()),
+            thinking_label: None,
             spinner_frame: 0,
             ..Statusline::new()
         };
         let rendered = sl.render(200);
         assert!(rendered.contains("Thinking..."));
-        assert!(!rendered.contains("Planning"));
     }
 
     #[test]

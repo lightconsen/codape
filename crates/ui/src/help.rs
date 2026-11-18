@@ -34,6 +34,8 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::Cancel,
             Action::CyclePermissionMode,
             Action::ImagePaste,
+            Action::AttachmentBrowser,
+            Action::VoiceInput,
             Action::HistorySearch,
             Action::HistorySearchPrevious,
             Action::HistorySearchNext,
@@ -50,10 +52,12 @@ const SECTIONS: &[(&str, &[Action])] = &[
         "Choosing and inspecting",
         &[
             Action::ModelPicker,
+            Action::EffortSlider,
             Action::AgentsView,
             Action::Rewind,
             Action::ThemePicker,
             Action::PluginBrowser,
+            Action::SessionPicker,
             Action::Help,
         ],
     ),
@@ -65,6 +69,8 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::ToggleSplitPane,
             Action::DiffPreviousFile,
             Action::DiffNextFile,
+            Action::PanePreviousTab,
+            Action::PaneNextTab,
             Action::TranscriptFullscreen,
         ],
     ),
@@ -95,9 +101,12 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ToggleToolOutput => "Fold or expand tool calls and results",
         Action::ToggleThinking => "Fold or expand the model's reasoning",
         Action::ModelPicker => "Change model and reasoning effort",
+        Action::EffortSlider => "Change only the reasoning effort",
         Action::ToggleSplitPane => "Switch between one pane and a split view",
         Action::CyclePermissionMode => "Cycle permission mode (default → edits → plan)",
         Action::ImagePaste => "Attach the image on the clipboard",
+        Action::AttachmentBrowser => "See, show or remove the images attached to the next prompt",
+        Action::VoiceInput => "Transcribe from the microphone onto the prompt",
         Action::Cancel => "Stop the turn, clear the line, or close a dialog",
         Action::HistorySearch => "Search previous prompts",
         Action::ConfirmYes => "Run the destructive command",
@@ -119,8 +128,11 @@ pub const fn describe(action: Action) -> &'static str {
         Action::Rewind => "Rewind the conversation, and the files it changed",
         Action::ThemePicker => "Choose a colour theme",
         Action::PluginBrowser => "Installed plugins and marketplaces",
+        Action::SessionPicker => "Resume an earlier session of this workspace",
         Action::DiffPreviousFile => "Jump to the previous file in the diff",
         Action::DiffNextFile => "Jump to the next file in the diff",
+        Action::PanePreviousTab => "Show the pane's previous view",
+        Action::PaneNextTab => "Show the pane's next view",
         Action::TranscriptFullscreen => "Give the transcript the whole screen",
         Action::ListPrevious => "Previous row",
         Action::ListNext => "Next row",
@@ -211,9 +223,12 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
+    Action::EffortSlider,
     Action::ToggleSplitPane,
     Action::CyclePermissionMode,
     Action::ImagePaste,
+    Action::AttachmentBrowser,
+    Action::VoiceInput,
     Action::Cancel,
     Action::HistorySearch,
     Action::ConfirmYes,
@@ -235,8 +250,11 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::Rewind,
     Action::ThemePicker,
     Action::PluginBrowser,
+    Action::SessionPicker,
     Action::DiffPreviousFile,
     Action::DiffNextFile,
+    Action::PanePreviousTab,
+    Action::PaneNextTab,
     Action::TranscriptFullscreen,
     Action::ListPrevious,
     Action::ListNext,
@@ -254,8 +272,10 @@ mod tests {
         assert!(rendered.contains("Choose a colour theme"), "{rendered}");
         assert!(rendered.contains("Rewind the conversation"), "{rendered}");
         assert!(rendered.contains("This page"), "{rendered}");
+        assert!(rendered.contains("Resume an earlier session"), "{rendered}");
         // The default keystroke must appear beside it, not just the sentence.
         assert!(rendered.contains("ctrl+g"), "{rendered}");
+        assert!(rendered.contains("alt+s"), "{rendered}");
     }
 
     #[test]

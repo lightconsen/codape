@@ -226,11 +226,11 @@ chrome_get_content    — Extract page HTML as markdown"
 
     // /voice — report the voice input state
     //
-    // The mode is not a toggle this command can flip on its own: the
-    // microphone is owned by whatever host implements `codape_ui::voice`, and
-    // this build's `voice` cargo feature is not enabled anywhere (the compile
-    // gate in `crates/ui/src/lib.rs`). Before this, the command answered
-    // "Toggled" and nothing was ever listening.
+    // Not a toggle: the microphone belongs to a command the person configures,
+    // not to a flag this command can flip. `alt+m` runs that command and puts
+    // its output on the prompt, so what this command can usefully say is
+    // whether one is configured — which is the difference between the key
+    // working and the key explaining itself.
     registry.register(SlashCommand::local(
         "voice",
         "Show voice input status",
@@ -243,11 +243,26 @@ chrome_get_content    — Extract page HTML as markdown"
                     "Voice mode is not available. Enable the voice_mode feature flag.",
                 );
             }
-            CommandResult::success(
-                "Voice Mode: enabled in this build, but this host has no microphone.\n\
-                 Voice input needs a host that drives the STT state machine \
-                 (record → transcribe → insert); the terminal host does not.",
-            )
+            let settings = read_user_settings_at(&ctx.config_dir);
+            let command = settings
+                .as_ref()
+                .and_then(|settings| settings.get("voice"))
+                .and_then(|voice| voice.get("command"))
+                .and_then(|command| command.as_str())
+                .map(str::trim)
+                .filter(|command| !command.is_empty());
+            match command {
+                Some(command) => CommandResult::success(format!(
+                    "Voice Mode: on. `alt+m` runs this and puts its output on the prompt:\n\
+                     {command}"
+                )),
+                None => CommandResult::success(
+                    "Voice Mode: no transcription command configured.\n\
+                     Set voice.command in settings.json to a command that prints \
+                     the transcript on stdout, then press alt+m. The microphone \
+                     is that command's; this program only reads what it prints.",
+                ),
+            }
         }),
     ));
 
@@ -535,23 +550,52 @@ mod tests {
         assert!(result.output.contains("not available"));
     }
 
-    /// With the flag on, the command reports that this host has no
-    /// microphone. It used to answer "Voice Mode: Toggled" while nothing
-    /// ever listened, which read as a working feature.
+    /// With the flag on but no command configured, the command says how to
+    /// configure one. It used to answer "Voice Mode: Toggled" while nothing
+    /// ever listened.
     #[test]
-    fn voice_with_the_flag_on_admits_there_is_no_microphone() {
+    fn voice_without_a_configured_command_explains_how_to_set_one() {
+        let tmp = tempfile::tempdir().unwrap();
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let mut c = ctx();
+        let mut c = ctx_in(tmp.path());
         c.feature_flags.insert("voice_mode".to_string(), true);
         let result = reg.execute("voice", &c, &[]);
-        assert!(result.output.contains("no microphone"), "{}", result.output);
+        assert!(
+            result.output.contains("voice.command"),
+            "{}",
+            result.output
+        );
         assert!(
             !result.output.contains("Toggled"),
             "the command still claims to toggle: {}",
+            result.output
+        );
+    }
+
+    /// A configured command is named, because that is the thing `alt+m` runs.
+    #[test]
+    fn voice_names_the_configured_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"voice": {"command": "stt.sh --lang en"}}"#,
+        )
+        .unwrap();
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let mut c = ctx_in(tmp.path());
+        c.feature_flags.insert("voice_mode".to_string(), true);
+        let result = reg.execute("voice", &c, &[]);
+        assert!(
+            result.output.contains("stt.sh --lang en"),
+            "the command does not name what alt+m would run: {}",
             result.output
         );
     }

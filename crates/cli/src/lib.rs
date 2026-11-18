@@ -21,6 +21,7 @@ pub mod orchestrator;
 pub mod output_ceiling;
 pub mod output_styles;
 pub mod plugin_monitors;
+pub mod plugin_prefs;
 pub mod recovery;
 pub mod repl;
 pub mod self_update;
@@ -30,6 +31,7 @@ pub mod tmux;
 pub mod tool_sandbox;
 pub mod tracing_setup;
 pub mod version;
+pub mod voice_input;
 pub mod welcome;
 
 /// Serialises tests that mutate process-wide environment variables (`PATH`,

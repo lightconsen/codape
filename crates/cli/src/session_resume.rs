@@ -36,6 +36,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::session_lists::SessionRow;
+
 /// Persisted representation of a visible interactive plan step.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedPlanStep {
@@ -317,17 +319,86 @@ pub fn list_recent_sessions(cwd: &str, limit: usize) -> Vec<SessionMeta> {
     });
 
     for meta in transcript_metas(cwd) {
-        if !sessions
-            .iter()
-            .any(|existing| existing.session_id == meta.session_id)
+        if let Some(existing) = sessions
+            .iter_mut()
+            .find(|existing| existing.session_id == meta.session_id)
         {
-            sessions.push(meta);
+            // The transcript is the document; the index is a cache of it that
+            // can lag. An indexed row with no title would otherwise draw as
+            // `(untitled)` in the picker while the title sits in the file one
+            // directory over — and the index is only filled by a separate
+            // backfill pass, so on a fresh workspace that is every row.
+            if existing.ai_title.is_none() {
+                existing.ai_title = meta.ai_title;
+            }
+            // Same for the usage counters: a transcript-only row knows neither,
+            // and its zero must not overwrite a figure the index did record.
+            if existing.total_tokens == 0 && meta.total_tokens > 0 {
+                existing.total_tokens = meta.total_tokens;
+            }
+            continue;
         }
+        sessions.push(meta);
     }
 
     sessions.sort_by_key(|a| std::cmp::Reverse(a.last_active_at));
     sessions.truncate(limit);
     sessions
+}
+
+/// How long ago a session was last active, in the shortest form that is still
+/// unambiguous.
+///
+/// A picker row is one line and the ordering already carries recency, so this
+/// says "how long ago" rather than printing a timestamp a person would have to
+/// subtract from now. Coarse on purpose: "3 weeks ago" is what someone needs
+/// in order to recognise a session, and seconds of precision would only make
+/// the column ragged.
+#[must_use]
+pub fn humanise_age(last_active: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = (now - last_active).num_seconds();
+    if seconds < 0 {
+        // A transcript dated in the future is a clock the file was written on
+        // disagreeing with this one, not a session from tomorrow. "just now"
+        // is the honest reading; a negative age would sort and read as noise.
+        return "just now".into();
+    }
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    if seconds < 60 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if hours < 24 {
+        format!("{hours}h ago")
+    } else if days < 7 {
+        format!("{days}d ago")
+    } else if days < 30 {
+        format!("{}w ago", days / 7)
+    } else if days < 365 {
+        format!("{}mo ago", days / 30)
+    } else {
+        format!("{}y ago", days / 365)
+    }
+}
+
+/// The rows a session picker draws, newest first.
+///
+/// The mapping lives here rather than in `session_lists` because it is a
+/// `SessionMeta` question, and `now` is a parameter so the age column can be
+/// tested without waiting for a clock.
+#[must_use]
+pub fn session_rows_from(metas: &[SessionMeta], now: DateTime<Utc>) -> Vec<SessionRow> {
+    metas
+        .iter()
+        .map(|meta| SessionRow {
+            id: meta.session_id.clone(),
+            title: meta.ai_title.clone(),
+            age: humanise_age(meta.last_active_at, now),
+            tokens: meta.total_tokens,
+        })
+        .collect()
 }
 
 /// Turn a free-form query into safe FTS5 terms.
@@ -484,6 +555,47 @@ pub fn remove_snapshot(cwd: &str, session_id: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_age_is_coarse_and_never_negative() {
+        let now = Utc::now();
+        let ago = |seconds: i64| humanise_age(now - chrono::Duration::seconds(seconds), now);
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ago(60), "1m ago");
+        assert_eq!(ago(3_600), "1h ago");
+        assert_eq!(ago(86_400), "1d ago");
+        assert_eq!(ago(7 * 86_400), "1w ago");
+        assert_eq!(ago(30 * 86_400), "1mo ago");
+        assert_eq!(ago(400 * 86_400), "1y ago");
+        // A transcript mtime from a machine whose clock ran ahead reads as
+        // now rather than as a negative age that would sort above everything.
+        assert_eq!(
+            humanise_age(now + chrono::Duration::seconds(120), now),
+            "just now"
+        );
+    }
+
+    #[test]
+    fn session_rows_carry_the_id_the_title_and_the_age() {
+        let now = Utc::now();
+        let metas = vec![SessionMeta {
+            session_id: "abc123".into(),
+            project_path: "/tmp/x".into(),
+            ai_title: Some("fix the flaky test".into()),
+            tag: None,
+            pr_url: None,
+            created_at: now - chrono::Duration::hours(2),
+            last_active_at: now - chrono::Duration::hours(2),
+            total_cost_usd: None,
+            total_tokens: 42,
+        }];
+        let rows = session_rows_from(&metas, now);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "abc123");
+        assert_eq!(rows[0].age, "2h ago");
+        assert_eq!(rows[0].tokens, 42);
+    }
 
     #[test]
     fn latest_session_id_uses_jsonl_files() {

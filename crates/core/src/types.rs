@@ -178,6 +178,24 @@ impl ToolCall {
         Self::summarize_activity(&self.name, &self.input)
     }
 
+    /// What kind of work this call is, for a surface that reports a phase.
+    ///
+    /// The status line used to print the call's summary verbatim, so a person
+    /// watched one row of prose — `Running cargo test -p codape-cli...` —
+    /// instead of knowing whether the agent was reading, editing, or running
+    /// the suite. Those are the three states a long turn is actually in, and
+    /// they are properties of the tool, not of the sentence describing it:
+    /// parsing the summary back into a phase would break the moment a filename
+    /// contained "test".
+    ///
+    /// Deliberately coarse. Everything that is not a known tool is
+    /// [`ToolPhase::Other`], because a phase model that guesses is worse than
+    /// one that admits it does not know. See [`ToolPhase::of`].
+    #[must_use]
+    pub fn phase(&self) -> ToolPhase {
+        ToolPhase::of(&self.name, Some(&self.input))
+    }
+
     /// Build a short, safe activity summary for a tool name and input payload.
     #[must_use]
     pub fn summarize_activity(name: &str, input: &serde_json::Value) -> String {
@@ -229,6 +247,163 @@ impl ToolCall {
 fn extract_tool_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+}
+
+/// What the model is doing, as a surface can report it.
+///
+/// A property of a tool call rather than of the sentence describing it — see
+/// [`ToolCall::phase`]. The variants are the states a long turn is legibly in;
+/// they are not a task taxonomy and nothing should grow one here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolPhase {
+    /// Reading files: the agent is looking, not changing anything.
+    Reading,
+    /// Searching: grep, glob, or the web.
+    Searching,
+    /// Changing files.
+    Editing,
+    /// A shell command, split further by the program it runs.
+    Shell,
+    /// Running a built-in or project test suite.
+    Testing,
+    /// Building or type-checking.
+    Building,
+    /// A version-control command.
+    Git,
+    /// A package manager.
+    Installing,
+    /// A sub-agent.
+    Delegating,
+    /// Anything else, named or not.
+    Other,
+}
+
+impl ToolPhase {
+    /// Classify a tool by its name and, for a shell, its command.
+    ///
+    /// Takes the name and input rather than a [`ToolCall`] because the event
+    /// that drives the status line carries exactly those two things
+    /// (`EngineEvent::ToolCallStart`), and a surface should not have to
+    /// reconstruct a call to ask what phase it is in.
+    #[must_use]
+    pub fn of(name: &str, input: Option<&serde_json::Value>) -> Self {
+        match name.to_ascii_lowercase().as_str() {
+            "read" | "listdir" | "list_dir" | "currentdir" | "current_dir" => Self::Reading,
+            "grep" | "rg" | "glob" | "web_search" | "web_fetch" => Self::Searching,
+            "write" | "edit" | "apply_patch" | "notebook_edit" => Self::Editing,
+            "bash" | "shell" | "powershell" => input.map_or(Self::Shell, shell_phase),
+            "task" | "agent" => Self::Delegating,
+            _ => Self::Other,
+        }
+    }
+
+    /// The label a status line shows for this phase.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Reading => "Reading",
+            Self::Searching => "Searching",
+            Self::Editing => "Editing",
+            Self::Shell => "Running a command",
+            Self::Testing => "Running tests",
+            Self::Building => "Building",
+            Self::Git => "Using git",
+            Self::Installing => "Installing packages",
+            Self::Delegating => "Delegating to an agent",
+            Self::Other => "Working",
+        }
+    }
+}
+
+/// Split a shell command into the phase its first word implies.
+///
+/// Only the first word is read, and only the first *meaningful* one: `cargo
+/// test` and `cargo build` are different phases while `sudo cargo test` is the
+/// same as `cargo test`. Suggestions, so an unrecognised command is
+/// [`ToolPhase::Shell`] rather than a guess.
+fn shell_phase(input: &serde_json::Value) -> ToolPhase {
+    let Some(command) = extract_tool_string(input, &["command", "cmd"]) else {
+        return ToolPhase::Shell;
+    };
+    let mut words = command.split_whitespace().filter(|word| {
+        !matches!(
+            *word,
+            "sudo" | "env" | "time" | "nohup" | "command" | "exec"
+        )
+    });
+    // Command prefixes in `VAR=value` form say nothing about the program.
+    let program = words.find(|word| !word.contains('=')).unwrap_or("");
+    let argument = words.next().unwrap_or("");
+    match program {
+        "cargo" => match argument {
+            "test" | "nextest" | "bench" => ToolPhase::Testing,
+            "build" | "check" | "clippy" | "doc" => ToolPhase::Building,
+            "install" => ToolPhase::Installing,
+            _ => ToolPhase::Shell,
+        },
+        "npm" | "pnpm" | "yarn" | "bun" => match argument {
+            "test" | "t" => ToolPhase::Testing,
+            "install" | "i" | "add" => ToolPhase::Installing,
+            "build" => ToolPhase::Building,
+            _ => ToolPhase::Shell,
+        },
+        "pytest" | "jest" | "vitest" | "mocha" | "rspec" | "ctest" => ToolPhase::Testing,
+        "make" => match argument {
+            "test" | "check" => ToolPhase::Testing,
+            _ => ToolPhase::Building,
+        },
+        "go" => match argument {
+            "test" => ToolPhase::Testing,
+            "build" | "vet" => ToolPhase::Building,
+            _ => ToolPhase::Shell,
+        },
+        "python" | "python3" | "node" | "deno" => {
+            if command.contains("test") {
+                ToolPhase::Testing
+            } else {
+                ToolPhase::Shell
+            }
+        }
+        "git" => ToolPhase::Git,
+        "pip" | "pip3" | "uv" | "poetry" | "apt" | "apt-get" | "brew" | "pacman" | "dnf" => {
+            ToolPhase::Installing
+        }
+        _ => ToolPhase::Shell,
+    }
+}
+
+/// The status line for a tool that is running: `Running tests · cargo test`.
+///
+/// The phase comes first because it is the state a person is waiting on, then
+/// the subject, which the call's input knows and the summary only implies. The
+/// transcript row still prints the whole summary; this is the footer.
+///
+/// `summary` is what a phase of [`ToolPhase::Other`] falls back to, and what a
+/// call whose input names nothing falls back to — an MCP tool with no path or
+/// command still has its own name in the summary.
+#[must_use]
+pub fn running_status(name: &str, input: Option<&serde_json::Value>, summary: &str) -> String {
+    let phase = ToolPhase::of(name, input);
+    if phase == ToolPhase::Other {
+        return summary.to_string();
+    }
+    let subject = tool_subject(name, input).unwrap_or_else(|| summary.to_string());
+    format!("{} · {subject}", phase.label())
+}
+
+/// The path, pattern, command, URL or query a tool is working on.
+fn tool_subject(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let input = input?;
+    let raw = match name.to_ascii_lowercase().as_str() {
+        "read" | "write" | "edit" | "notebook_edit" => {
+            extract_tool_string(input, &["file_path", "path", "file"])
+        }
+        "grep" | "rg" | "glob" | "web_search" => extract_tool_string(input, &["pattern", "query"]),
+        "bash" | "shell" | "powershell" => extract_tool_string(input, &["command", "cmd"]),
+        "web_fetch" => extract_tool_string(input, &["url"]),
+        _ => None,
+    }?;
+    Some(summarize_tool_text(raw))
 }
 
 fn summarize_tool_text(text: &str) -> String {
@@ -1757,6 +1932,131 @@ pub enum CompactionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(name: &str, input: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            name: name.into(),
+            input,
+        }
+    }
+
+    #[test]
+    fn a_tool_call_knows_which_phase_it_is() {
+        let json = serde_json::json!({});
+        assert_eq!(call("Read", json.clone()).phase(), ToolPhase::Reading);
+        assert_eq!(call("Grep", json.clone()).phase(), ToolPhase::Searching);
+        assert_eq!(call("Edit", json.clone()).phase(), ToolPhase::Editing);
+        assert_eq!(call("Task", json.clone()).phase(), ToolPhase::Delegating);
+        assert_eq!(call("mcp__foo__bar", json).phase(), ToolPhase::Other);
+    }
+
+    #[test]
+    fn a_shell_command_is_classified_by_its_program_and_first_argument() {
+        let phase = |command: &str| {
+            call("Bash", serde_json::json!({ "command": command })).phase()
+        };
+        assert_eq!(phase("cargo test -p codape-cli"), ToolPhase::Testing);
+        assert_eq!(phase("cargo nextest run"), ToolPhase::Testing);
+        assert_eq!(phase("cargo clippy --workspace"), ToolPhase::Building);
+        assert_eq!(phase("cargo build --release"), ToolPhase::Building);
+        assert_eq!(
+            phase("cargo install just"),
+            ToolPhase::Installing,
+            "install is not building"
+        );
+        assert_eq!(phase("git status"), ToolPhase::Git);
+        assert_eq!(phase("npm test"), ToolPhase::Testing);
+        assert_eq!(phase("npm install"), ToolPhase::Installing);
+        assert_eq!(phase("pytest -q"), ToolPhase::Testing);
+        assert_eq!(phase("make"), ToolPhase::Building);
+        assert_eq!(phase("go test ./..."), ToolPhase::Testing);
+        assert_eq!(phase("pip install requests"), ToolPhase::Installing);
+        assert_eq!(phase("ls -la"), ToolPhase::Shell, "nothing known: admit it");
+    }
+
+    #[test]
+    fn a_wrapper_does_not_hide_the_program() {
+        let phase = |command: &str| {
+            call("Bash", serde_json::json!({ "command": command })).phase()
+        };
+        assert_eq!(phase("sudo cargo test"), ToolPhase::Testing);
+        assert_eq!(phase("RUST_LOG=debug cargo test"), ToolPhase::Testing);
+        assert_eq!(phase("time cargo build"), ToolPhase::Building);
+    }
+
+    /// The footer names the state first and the subject second, because the
+    /// state is what a person is waiting on and the subject is only useful
+    /// once they know what kind of thing is happening.
+    #[test]
+    fn the_running_label_names_the_phase_then_the_subject() {
+        assert_eq!(
+            running_status(
+                "Bash",
+                Some(&serde_json::json!({"command": "cargo test -p codape-cli"})),
+                "Running cargo test -p codape-cli...",
+            ),
+            "Running tests · cargo test -p codape-cli"
+        );
+        assert_eq!(
+            running_status(
+                "Read",
+                Some(&serde_json::json!({"file_path": "src/lib.rs"})),
+                "Reading src/lib.rs...",
+            ),
+            "Reading · src/lib.rs"
+        );
+        assert_eq!(
+            running_status(
+                "Edit",
+                Some(&serde_json::json!({"file_path": "src/repl.rs"})),
+                "Updating src/repl.rs...",
+            ),
+            "Editing · src/repl.rs"
+        );
+    }
+
+    /// A tool the model does not classify keeps its own summary: the phase
+    /// model is coarse on purpose and must not swallow the one label that
+    /// still says what is happening.
+    #[test]
+    fn an_unknown_tool_keeps_its_summary_verbatim() {
+        assert_eq!(
+            running_status("mcp__jira__search", Some(&serde_json::json!({})), "Running mcp__jira__search..."),
+            "Running mcp__jira__search..."
+        );
+        // Known tool, but the input names nothing: same fallback.
+        assert_eq!(
+            running_status("Bash", Some(&serde_json::json!({})), "Running shell command..."),
+            "Running a command · Running shell command..."
+        );
+        // No input at all (a start event that did not carry one).
+        assert_eq!(
+            running_status("Read", None, "Reading files..."),
+            "Reading · Reading files..."
+        );
+    }
+
+    #[test]
+    fn every_phase_has_a_distinct_label() {
+        let phases = [
+            ToolPhase::Reading,
+            ToolPhase::Searching,
+            ToolPhase::Editing,
+            ToolPhase::Shell,
+            ToolPhase::Testing,
+            ToolPhase::Building,
+            ToolPhase::Git,
+            ToolPhase::Installing,
+            ToolPhase::Delegating,
+            ToolPhase::Other,
+        ];
+        let mut labels: Vec<&str> = phases.iter().map(|phase| phase.label()).collect();
+        let total = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), total, "two phases read the same");
+    }
 
     // ─── serde roundtrip tests (Phase 0.2 requirement) ──────────────────────
 

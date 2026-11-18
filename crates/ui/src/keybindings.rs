@@ -124,12 +124,18 @@ pub enum Action {
     ToggleThinking,
     /// Open the model and effort chooser.
     ModelPicker,
+    /// Open the reasoning-effort slider alone.
+    EffortSlider,
     /// Switch between one pane and a split view.
     ToggleSplitPane,
     /// Advance the permission mode (default → accept edits → plan → …).
     CyclePermissionMode,
     /// Attach the image on the clipboard to the next prompt.
     ImagePaste,
+    /// Run the configured transcription command and put its text on the line.
+    VoiceInput,
+    /// Browse the images attached to the next prompt.
+    AttachmentBrowser,
     /// Stop the running turn, clear the input line, or close the overlay.
     Cancel,
     /// Open reverse history search.
@@ -172,10 +178,16 @@ pub enum Action {
     ThemePicker,
     /// Browse installed plugins and configured marketplaces.
     PluginBrowser,
+    /// Pick a previous session of this workspace to resume.
+    SessionPicker,
     /// Jump to the previous file in the diff pane.
     DiffPreviousFile,
     /// Jump to the next file in the diff pane.
     DiffNextFile,
+    /// Switch the left pane to the view on its left.
+    PanePreviousTab,
+    /// Switch the left pane to the view on its right.
+    PaneNextTab,
     /// Give the transcript the whole screen, or give the prompt its room back.
     TranscriptFullscreen,
     /// Move the highlight up in a modal list.
@@ -194,9 +206,12 @@ impl Action {
             Self::ToggleToolOutput => "app:toggleToolOutput",
             Self::ToggleThinking => "app:toggleThinking",
             Self::ModelPicker => "chat:modelPicker",
+            Self::EffortSlider => "chat:effortSlider",
             Self::ToggleSplitPane => "app:toggleSplitPane",
             Self::CyclePermissionMode => "app:cyclePermissionMode",
             Self::ImagePaste => "chat:imagePaste",
+            Self::VoiceInput => "chat:voiceInput",
+            Self::AttachmentBrowser => "app:attachmentBrowser",
             Self::Cancel => "chat:cancel",
             Self::HistorySearch => "history:search",
             Self::ConfirmYes => "confirm:yes",
@@ -218,8 +233,11 @@ impl Action {
             Self::Rewind => "app:rewind",
             Self::ThemePicker => "app:themePicker",
             Self::PluginBrowser => "app:pluginBrowser",
+            Self::SessionPicker => "app:sessionPicker",
             Self::DiffPreviousFile => "app:diffPreviousFile",
             Self::DiffNextFile => "app:diffNextFile",
+            Self::PanePreviousTab => "app:panePreviousTab",
+            Self::PaneNextTab => "app:paneNextTab",
             Self::TranscriptFullscreen => "app:transcriptFullscreen",
             Self::ListPrevious => "list:previous",
             Self::ListNext => "list:next",
@@ -236,17 +254,23 @@ impl Action {
             | Self::ToggleSplitPane
             | Self::DiffPreviousFile
             | Self::DiffNextFile
+            | Self::PanePreviousTab
+            | Self::PaneNextTab
             | Self::TranscriptFullscreen
             | Self::CyclePermissionMode => Context::Global,
             Self::ImagePaste
+            | Self::VoiceInput
             | Self::Cancel
             | Self::HistorySearch
             | Self::ModelPicker
+            | Self::EffortSlider
             | Self::AgentsView
             | Self::Help
             | Self::Rewind
             | Self::ThemePicker
-            | Self::PluginBrowser => Context::Chat,
+            | Self::PluginBrowser
+            | Self::SessionPicker
+            | Self::AttachmentBrowser => Context::Chat,
             Self::ConfirmYes | Self::ConfirmNo => Context::Confirmation,
             Self::PermissionAllow | Self::PermissionAllowSession | Self::PermissionDeny => {
                 Context::PermissionDialog
@@ -274,7 +298,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 33] {
+    pub const fn all() -> [Self; 39] {
         ALL_ACTIONS
     }
 
@@ -285,9 +309,20 @@ impl Action {
             Self::ToggleToolOutput => &["ctrl+o"],
             Self::ToggleThinking => &["ctrl+e"],
             Self::ModelPicker => &["ctrl+p"],
+            // The effort half of the picker, on its own key: `alt+e` is
+            // "effort" and its neighbour `alt+v` is the attachment browser,
+            // which is the other thing this row of alt-keys opens.
+            Self::EffortSlider => &["alt+e"],
             Self::ToggleSplitPane => &["ctrl+shift+s"],
             Self::CyclePermissionMode => &["shift+tab"],
             Self::ImagePaste => &["ctrl+v"],
+            // The microphone key. `alt+m` sits beside `alt+v`'s attachment
+            // browser and `alt+e`'s effort slider: the same row of single
+            // keystrokes, each for one thing a person reaches for.
+            Self::VoiceInput => &["alt+m"],
+            // Next to the key that attaches one: `ctrl+v` adds a picture,
+            // `alt+v` asks which ones are attached.
+            Self::AttachmentBrowser => &["alt+v"],
             Self::Cancel | Self::AutocompleteDismiss | Self::HistorySearchCancel => &["esc"],
             Self::HistorySearch => &["ctrl+r"],
             Self::ConfirmYes => &["y", "Y"],
@@ -315,7 +350,7 @@ impl Action {
             // and it does not submit anything here either.
             Self::HistorySearchAccept => &["tab", "enter"],
             Self::FileMentionAccept | Self::ListAccept => &["enter"],
-            // The five surfaces share a key row: they are peers in the sense
+            // The list openers share a key row: they are peers in the sense
             // that a person reaches for whichever one they mean. Single
             // keystrokes only — the parser refuses chords, because most
             // terminals never report the second half of one.
@@ -324,11 +359,22 @@ impl Action {
             Self::Rewind => &["alt+r"],
             Self::ThemePicker => &["ctrl+y"],
             Self::PluginBrowser => &["alt+p"],
+            // `alt+s` for sessions: the roster of the ones `/resume` can load.
+            // The picker is the only list that used to have no key, reachable
+            // only as `/resume` with no argument, which made the most-used
+            // surface the one with the longest path to it.
+            Self::SessionPicker => &["alt+s"],
             // The diff pane is read top to bottom, so the file jumps sit on
             // the arrows' vertical neighbours and do not collide with the
             // transcript scrolling.
             Self::DiffPreviousFile => &["alt+up"],
             Self::DiffNextFile => &["alt+down"],
+            // The pane's own left and right, on the arrows beside the file
+            // jumps' up and down. Global rather than chat-scoped: the keys act
+            // on the pane, not on the line being typed, and they do nothing at
+            // all unless more than one view is open.
+            Self::PanePreviousTab => &["alt+left"],
+            Self::PaneNextTab => &["alt+right"],
             // The toggle a person reaches for when the answer is long. `ctrl+t`
             // is the transcript size control in most terminals' muscle memory.
             Self::TranscriptFullscreen => &["ctrl+t"],
@@ -336,13 +382,16 @@ impl Action {
     }
 }
 
-const ALL_ACTIONS: [Action; 33] = [
+const ALL_ACTIONS: [Action; 39] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
+    Action::EffortSlider,
     Action::ToggleSplitPane,
     Action::CyclePermissionMode,
     Action::ImagePaste,
+    Action::AttachmentBrowser,
+    Action::VoiceInput,
     Action::Cancel,
     Action::HistorySearch,
     Action::ConfirmYes,
@@ -364,8 +413,11 @@ const ALL_ACTIONS: [Action; 33] = [
     Action::Rewind,
     Action::ThemePicker,
     Action::PluginBrowser,
+    Action::SessionPicker,
     Action::DiffPreviousFile,
     Action::DiffNextFile,
+    Action::PanePreviousTab,
+    Action::PaneNextTab,
     Action::TranscriptFullscreen,
     Action::ListPrevious,
     Action::ListNext,
@@ -1066,6 +1118,42 @@ mod tests {
         assert_eq!(
             bindings.resolve(Context::Chat, &key(KeyCode::Char('y'), KeyModifiers::NONE)),
             None
+        );
+    }
+
+    /// Every list has a key. The session picker was the one that did not, so
+    /// the most-used list was the only one reachable solely by typing a
+    /// command; this pins the row of openers together.
+    #[test]
+    fn every_list_opener_has_a_key_of_its_own() {
+        let bindings = KeyBindings::default();
+        let openers = [
+            Action::AgentsView,
+            Action::Rewind,
+            Action::ThemePicker,
+            Action::PluginBrowser,
+            Action::SessionPicker,
+            Action::AttachmentBrowser,
+        ];
+        let mut seen: Vec<KeyStroke> = Vec::new();
+        for action in openers {
+            let strokes = bindings.strokes(action);
+            assert_eq!(
+                strokes.len(),
+                1,
+                "{} should have exactly one default key",
+                action.as_str()
+            );
+            assert!(
+                !seen.contains(&strokes[0]),
+                "{} shares its key with another list opener",
+                action.as_str()
+            );
+            seen.push(strokes[0]);
+        }
+        assert_eq!(
+            bindings.resolve(Context::Chat, &key(KeyCode::Char('s'), KeyModifiers::ALT)),
+            Some(Action::SessionPicker)
         );
     }
 

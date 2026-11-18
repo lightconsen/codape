@@ -223,6 +223,73 @@ fn an_installed_plugin_process_serves_its_slash_command() {
     );
 }
 
+/// A plugin switched off in the browser does not load in the next session.
+///
+/// The browser writes `plugins.<name>.enabled` to `settings.json`; this is the
+/// other half of that promise. Switching a plugin off has to keep its
+/// commands out of the session, because "off" that still answers
+/// `/mock-plugin/hello` is not off.
+#[test]
+fn a_plugin_switched_off_does_not_load_in_the_next_session() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join("settings.json"),
+        serde_json::json!({
+            "config_version": 4,
+            "telemetry_enabled": false,
+            "plugins": {
+                "mock-plugin": {
+                    "options": {"GREETING": "hi-from-settings"},
+                    "enabled": false
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("settings");
+    let source = write_plugin_source(workspace.path());
+    let (mut provider, base_url) = start_static_provider();
+
+    let install = run(
+        workspace.path(),
+        home.path(),
+        &["plugin", "install", source.to_str().unwrap()],
+        None,
+        &base_url,
+    );
+    assert!(
+        String::from_utf8_lossy(&install.stdout).contains("Plugin installed to:"),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stdout)
+    );
+
+    // The directory is still there — off is a preference, not an uninstall —
+    // but nothing from it reached the session.
+    let installed = workspace
+        .path()
+        .join(".codape")
+        .join("plugins")
+        .join("mock-plugin");
+    assert!(installed.join("bin/plugin").exists(), "{installed:?}");
+
+    let output = run(
+        workspace.path(),
+        home.path(),
+        &["-p"],
+        Some("/mock-plugin/hello world"),
+        &base_url,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("plugin-hello:"),
+        "a switched-off plugin answered its command: {stdout}"
+    );
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+}
+
 fn run_with_key(
     cwd: &Path,
     home: &Path,
