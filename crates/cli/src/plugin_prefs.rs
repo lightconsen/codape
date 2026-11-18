@@ -82,29 +82,6 @@ impl PluginPrefs {
     pub fn is_favorite(&self, name: &str) -> bool {
         self.favorites.contains(name)
     }
-
-    /// Record a switch and report the state that was written.
-    ///
-    /// Returns the new value so the caller announces what happened rather than
-    /// what it asked for: the write can refuse (a settings file that is not a
-    /// JSON object), and a message saying "disabled" after a failed write is
-    /// the kind of lie that gets discovered a session later.
-    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
-        if enabled {
-            self.disabled.remove(name);
-        } else {
-            self.disabled.insert(name.to_string());
-        }
-    }
-
-    /// Pin or unpin a plugin.
-    pub fn set_favorite(&mut self, name: &str, favorite: bool) {
-        if favorite {
-            self.favorites.insert(name.to_string());
-        } else {
-            self.favorites.remove(name);
-        }
-    }
 }
 
 /// Write one plugin's `enabled` or `favorite` bit into a settings file.
