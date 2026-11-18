@@ -26,4 +26,11 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # chrono is unmaintained (all versions); the advisory names jiff and
+    # `time` as alternatives and offers no upgrade path. It is load-bearing
+    # across the workspace — every timestamp in the transcript store, the
+    # session index, the bridge heartbeat and the artifacts registry is a
+    # `DateTime<Utc>` — so replacing it is a migration of its own, not a
+    # dependency bump. Unmaintained; no known vulnerability.
+    "RUSTSEC-2026-0543",
 ]
