@@ -3478,3 +3478,79 @@ fn the_welcome_page_names_the_configured_provider_and_directory() {
         "the card has no model row:\n{screen}"
     );
 }
+
+/// The surfaces that were only reachable by typing a slash command, driven by
+/// their keys through a real terminal.
+///
+/// These four keys are the ones the goal named as missing: a list you can
+/// choose from (`Ctrl+Y` for themes), a help page (`Alt+H`), and a transcript
+/// that can take the whole screen (`Ctrl+T`). A unit test that calls
+/// `handle_key_event` proves the branch exists; this proves the bytes a
+/// terminal actually sends reach it, and that what appears is a dialog rather
+/// than a line of text scrolled into the transcript.
+#[test]
+fn the_list_surfaces_open_from_their_keys() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    // Ctrl+Y: the theme list, with a filter line and the sessions's current
+    // theme marked. Typing narrows it; Enter applies the highlighted row.
+    session.send_bytes(&[0x19]);
+    session.wait_for_text("Filter:", SCREEN_TIMEOUT);
+    let screen = session.wait_for_text("current", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("Theme"),
+        "the list did not name itself:\n{screen}"
+    );
+    session.send_text("lig");
+    session.enter();
+    session.wait_for_text("Theme changed to: light", SCREEN_TIMEOUT);
+
+    // Alt+H: the help page. It is generated from the binding table, so the
+    // page has to carry a key rather than only prose.
+    session.send_bytes(b"\x1bh");
+    let screen = session.wait_for_text("Keybindings", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("Give the transcript the whole screen"),
+        "the help page is missing the new actions:\n{screen}"
+    );
+    session.esc();
+    session.wait_for_text_absent("Keybindings", SCREEN_TIMEOUT);
+
+    // Ctrl+T: the transcript takes every row and one footer row says how to
+    // get back.
+    session.send_bytes(&[0x14]);
+    let screen = session.wait_for_text("returns to the prompt", SCREEN_TIMEOUT);
+    assert!(
+        !screen.contains('❯'),
+        "the prompt stayed on screen in the full-screen transcript:\n{screen}"
+    );
+    session.send_bytes(&[0x14]);
+    session.wait_for_text("❯", SCREEN_TIMEOUT);
+}
+
+/// The rewind list is drawn from the engine's messages, so it needs a turn.
+#[test]
+fn the_rewind_list_lists_the_turns_messages() {
+    let dir = setup_project_dir();
+    let (server, mut session) = session_with_static_server(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("hello");
+    session.wait_for_text("Hello!", SCREEN_TIMEOUT);
+
+    session.send_bytes(b"\x1br"); // Alt+R
+    let screen = session.wait_for_text("Rewind to message", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("hello"),
+        "the list has no row for the prompt that was sent:\n{screen}"
+    );
+    session.esc();
+    session.wait_for_text_absent("Rewind to message", SCREEN_TIMEOUT);
+    // The session is still usable after closing the list.
+    session.send_line("/status");
+    let screen = session.wait_for_text("System Status", SCREEN_TIMEOUT);
+    drop(session);
+    drop(server);
+    assert!(screen.contains("System Status"));
+}

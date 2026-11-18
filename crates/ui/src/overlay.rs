@@ -49,6 +49,16 @@ pub enum Overlay {
         title: String,
         /// Overlay body content.
         body: String,
+        /// Rows the body is scrolled down.
+        ///
+        /// The box grows to hold the body, but only up to the screen: a body
+        /// longer than that has to be reachable rather than clipped, and the
+        /// help page is longer than any terminal. Kept here rather than in
+        /// `UiState` because the position belongs to the body being read: the
+        /// next `Detail` to open is a different document and starts at the
+        /// top, and the state that replaces this one would have to remember to
+        /// reset it.
+        scroll: u16,
     },
     /// Confirmation dialog.
     Confirm {
@@ -62,6 +72,13 @@ pub enum Overlay {
     /// level the model does not have are both mistakes — and because the set
     /// of choices is small enough to show.
     ModelPicker(ModelPicker),
+    /// A filterable list of choices supplied by the session.
+    ///
+    /// One overlay for every surface that is "a titled list you narrow by
+    /// typing and pick from": the agent roster, the rewind points, the
+    /// theme list, the installed plugins and their marketplaces. The rows are
+    /// the session's; the interaction is [`crate::picker::Picker`]'s.
+    List(crate::picker::Picker),
 }
 
 /// The choices in an open [`Overlay::ModelPicker`].

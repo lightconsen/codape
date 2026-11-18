@@ -342,6 +342,19 @@ pub struct UiState {
     /// a frame that shrank since the key was pressed cannot scroll past the
     /// end.
     pub left_pane_scroll: usize,
+    /// Whether the transcript is filling the screen.
+    ///
+    /// Not a [`ViewMode`]: the view is the same view, drawn into more rows. A
+    /// second mode would need every key branch to ask which mode it is in, and
+    /// the answer here is only ever "does the input box have room".
+    pub transcript_fullscreen: bool,
+    /// What the full-screen footer says, when the session set one.
+    ///
+    /// Set by whoever toggles [`Self::transcript_fullscreen`], because the
+    /// renderer has no keymap: it is the session that knows which key its table
+    /// resolves to, and a footer naming the built-in default would tell a
+    /// person who rebound it to press a key that does nothing.
+    pub transcript_footer: String,
     /// How the transcript draws an attached picture.
     ///
     /// Defaults to [`crate::transcript_image::ImageProtocol::None`] so a state
@@ -379,6 +392,8 @@ impl UiState {
             left_pane_title: String::new(),
             left_pane_is_diff: false,
             left_pane_scroll: 0,
+            transcript_fullscreen: false,
+            transcript_footer: String::new(),
             image_protocol: crate::transcript_image::ImageProtocol::None,
         }
     }

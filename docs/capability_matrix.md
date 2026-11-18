@@ -78,6 +78,28 @@ opposed to what a host can add.
 | Desktop / mobile hosts | ❌ | No desktop app and no mobile host in this repository. `/desktop` reports "active" only for a registered `desktop` surface; `/mobile` names `codape bridge` as the remote path in |
 | Editor surface | ❌ | An editor drives a session through `codape ide bridge` (text tool calls over MCP), not `UiSurface`. See `docs/surfaces.md` → *What is implemented* |
 
+### Interactive surfaces in the terminal
+
+Every row is reachable from a key as well as from the slash command named
+beside it, and the key is rebindable in `keybindings.json`. The rows themselves
+are built in `crates/cli/src/session_lists.rs` and drawn by one
+`codape_ui::picker::Picker`.
+
+| Surface | Key | Also | Notes |
+|---------|-----|------|-------|
+| Model + effort picker | `ctrl+p` (`chat:modelPicker`) | `/model` | Both halves in one dialog: `Tab` moves between the model list and the effort level, `←`/`→` clamp at the ends |
+| Agent roster | `ctrl+g` | `/agents` | Lists spawned and defined agents; a row follows or replays that agent's log |
+| Rewind selector | `alt+r` | `/rewind` | Rows are numbered from the engine session, the same numbering `perform_rewind` takes |
+| Theme picker | `ctrl+y` | `/theme` | Installed themes with the current one marked; picking applies it |
+| Plugin browser | `alt+p` | `/plugin` | Installed plugins with version, state and path, then configured marketplaces with their URL |
+| Help page | `alt+h` | `/keybindings` (the diagnostic) | Generated from the binding table, grouped by intent, and it names where the bindings came from |
+| Full-screen transcript | `ctrl+t` | — | Layout flag: the message area takes every row and one footer row says how to leave |
+| Diff file jump | `alt+up` / `alt+down` | — | Lands on the next/previous `diff --git` header; does not wrap |
+
+There is no settings menu. Settings live in files — `settings.json`,
+`keybindings.json`, `.codape/` — and the commands that write them are how they
+change; a menu over the same files would be a second place to look.
+
 ## Command System
 
 | Capability | Status | Notes |

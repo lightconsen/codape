@@ -1080,6 +1080,83 @@ fn push_activity_row(ui_state: &mut codape_ui::state::UiState, label: &str) {
     });
 }
 
+/// Jump the diff pane to the next or previous file.
+///
+/// The pane is one scrolled column of several files. Paging through it a
+/// screen at a time is how a person reads it; jumping file to file is how they
+/// look for one. The jump lands on the `diff --git` line, so the file's path
+/// is the first thing on screen rather than its tail.
+fn jump_diff_file(ui_state: &mut codape_ui::state::UiState, forward: bool) {
+    use codape_ui::state::LayoutMode;
+    if !ui_state.left_pane_is_diff || ui_state.layout_mode == LayoutMode::SinglePane {
+        // Nothing to jump in. Say so rather than moving the transcript: the
+        // key is only meaningful with a diff on screen, and a silent no-op is
+        // indistinguishable from a broken binding.
+        ui_state
+            .notifications
+            .warn("No diff is open: run /diff first");
+        return;
+    }
+    let starts =
+        codape_ui::diff::file_starts(&codape_ui::diff::parse_unified(&ui_state.left_pane_content));
+    match codape_ui::diff::step_file(&starts, ui_state.left_pane_scroll, forward) {
+        Some(target) => {
+            ui_state.left_pane_scroll = target;
+            // Name the file that was landed on, so a keyboard-only reader
+            // knows where the jump went.
+            let name = ui_state
+                .left_pane_content
+                .lines()
+                .nth(target)
+                .and_then(|line| line.rsplit(" b/").next())
+                .unwrap_or("");
+            ui_state.notifications.info(format!("diff → {name}"));
+        }
+        None => ui_state.notifications.info(if forward {
+            "Already at the last file"
+        } else {
+            "Already at the first file"
+        }),
+    }
+}
+
+/// Give the transcript the whole screen, or give the prompt its room back.
+///
+/// The footer names the key the *table* resolves, not the built-in default:
+/// rebinding the toggle has to move the instruction with it, or the one row
+/// left on screen tells the person to press something that does nothing.
+fn toggle_transcript_fullscreen(
+    ui_state: &mut codape_ui::state::UiState,
+    keybindings: &codape_ui::keybindings::KeyBindings,
+) {
+    use codape_ui::keybindings::{Action, KeyStroke};
+
+    ui_state.transcript_fullscreen = !ui_state.transcript_fullscreen;
+    if !ui_state.transcript_fullscreen {
+        ui_state.transcript_footer.clear();
+        return;
+    }
+    let bound = keybindings.strokes(Action::TranscriptFullscreen);
+    let keys = if bound.is_empty() {
+        String::new()
+    } else {
+        bound
+            .iter()
+            .map(KeyStroke::display)
+            .collect::<Vec<_>>()
+            .join(" or ")
+    };
+    ui_state.transcript_footer = if keys.is_empty() {
+        "Transcript — no key is bound to return to the prompt".to_string()
+    } else {
+        format!("Transcript — {keys} returns to the prompt")
+    };
+    // A full-screen reader is usually at the bottom looking for the newest
+    // output; leaving the old scroll offset would open on a message they had
+    // already read.
+    ui_state.messages.scroll_to_bottom();
+}
+
 /// Scroll one page, in whichever pane is being read.
 ///
 /// With a diff beside the transcript, PageUp/PageDown are for the diff: that
@@ -1297,6 +1374,7 @@ fn show_detail_overlay(
     ui_state.overlays.push(codape_ui::overlay::Overlay::Detail {
         title: title.into(),
         body: body.into(),
+        scroll: 0,
     });
 }
 
@@ -6146,6 +6224,307 @@ impl ReplLoop {
         self.ui.keybindings.resolve(context, key)
     }
 
+    // ─── Modal lists ────────────────────────────────────────────────────
+
+    /// Push a modal list, unless one is already open.
+    ///
+    /// Stacking is refused rather than supported: a list is opened by a key
+    /// the session reads only when nothing else has the keyboard, so a second
+    /// one could only arrive from a race. Refusing keeps the top of the stack
+    /// the one the key handler is looking at.
+    fn open_list(ui_state: &mut codape_ui::state::UiState, picker: codape_ui::picker::Picker) {
+        if ui_state.overlays.is_active() {
+            return;
+        }
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::List(picker));
+    }
+
+    /// The agent roster, built from the live manager.
+    async fn agent_roster(&self) -> codape_ui::picker::Picker {
+        let Some(manager) = self.agents.manager.as_ref().map(Arc::clone) else {
+            return crate::session_lists::agent_rows(&[]);
+        };
+        let manager = manager.lock().await;
+        let rows: Vec<crate::session_lists::AgentRow> = manager
+            .list_agents()
+            .into_iter()
+            .map(|agent| crate::session_lists::AgentRow {
+                id: agent.task_handle.id.clone(),
+                kind: format!("{:?}", agent.agent_type),
+                status: format!("{:?}", agent.status()).to_lowercase(),
+                prompt: agent.prompt.lines().next().unwrap_or("").trim().to_string(),
+                resumable: !agent.transcript().is_empty(),
+            })
+            .collect();
+        drop(manager);
+        crate::session_lists::agent_rows(&rows)
+    }
+
+    /// The rewritable points in the conversation.
+    ///
+    /// Drawn from the engine's session, not from the drawn transcript. The two
+    /// are not the same list — command output and notices are drawn but were
+    /// never sent, and a turn's text is stored in one message but drawn as
+    /// several — and `perform_rewind` truncates the engine's list. Numbering
+    /// the drawn one would hand a number to `perform_rewind` that names a
+    /// different message.
+    fn rewind_points(&self) -> codape_ui::picker::Picker {
+        let Some(engine) = self.session.engine.as_ref() else {
+            return crate::session_lists::rewind_rows(&[]);
+        };
+        let session = engine.session();
+        let tool_names: std::collections::HashMap<String, String> = session
+            .messages
+            .iter()
+            .filter_map(|message| match &message.content {
+                codape_core::types::MessageContent::ToolCall(call) => {
+                    Some((call.id.clone(), call.name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let rows: Vec<crate::session_lists::RewindRow> = session
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                let drawn = core_message_to_ui_message(message, &tool_names);
+                crate::session_lists::RewindRow {
+                    // `perform_rewind` keeps the first `n` messages, so the
+                    // row for message index 0 is 1: rewinding to it leaves the
+                    // opening message and nothing after it.
+                    number: index + 1,
+                    role: format!("{:?}", drawn.role),
+                    preview: truncate_for_row(&drawn.content, 48),
+                }
+            })
+            .collect();
+        crate::session_lists::rewind_rows(&rows)
+    }
+
+    /// The installed themes, with the session's current one marked.
+    fn theme_choices(&self, ui_state: &codape_ui::state::UiState) -> codape_ui::picker::Picker {
+        let manager = self.theme_manager();
+        crate::session_lists::theme_rows(&manager.names(), &ui_state.theme.name)
+    }
+
+    /// Installed plugins plus the configured marketplaces.
+    ///
+    /// Marketplaces are read from settings rather than from a startup
+    /// snapshot: `/plugin marketplace add` writes the settings file mid-session
+    /// and the next open of this list should see it.
+    fn plugin_choices(&self) -> codape_ui::picker::Picker {
+        let plugins: Vec<crate::session_lists::PluginRow> = self
+            .plugins
+            .manager
+            .as_ref()
+            .map(|manager| {
+                manager
+                    .list_plugins()
+                    .into_iter()
+                    .map(|name| {
+                        // What `/plugin components` calls a component, and what
+                        // the row has space to say: the version and the state,
+                        // then the path so a person can go look at it.
+                        let detail = manager
+                            .get_plugin(&name)
+                            .map_or_else(String::new, |handle| {
+                                format!(
+                                    "{version} · {state:?} · {path}",
+                                    version = handle.version,
+                                    state = handle.state,
+                                    path = handle.path.display()
+                                )
+                            });
+                        crate::session_lists::PluginRow { name, detail }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let marketplaces = self.configured_marketplace_names();
+        crate::session_lists::plugin_rows(&plugins, &marketplaces)
+    }
+
+    /// The marketplaces the settings files name, as `(name, url)`.
+    fn configured_marketplace_names(&self) -> Vec<(String, String)> {
+        let service = codape_config::settings::ConfigService::new(
+            codape_config::config_home().join("settings.json"),
+            crate::orchestrator::StartupOrchestrator::find_project_config(&self.cwd),
+        )
+        .with_local_config_path(
+            std::path::Path::new(&self.cwd).join(".codape/settings.local.json"),
+        );
+        let host = service.load_plugin_host_config();
+        crate::orchestrator::StartupOrchestrator::configured_marketplaces(&host.marketplaces)
+    }
+
+    /// Handle a key while a modal list owns the keyboard.
+    ///
+    /// One branch for every list: the type is carried by the row keys, which
+    /// [`crate::session_lists`] writes and reads back. That keeps this out of
+    /// `handle_key_event`, which is already over the line limit.
+    async fn handle_list_key(
+        &mut self,
+        key: &crossterm::event::KeyEvent,
+        ui_state: &mut codape_ui::state::UiState,
+    ) -> TuiKeyFlow {
+        use codape_ui::keybindings::{Action as Shortcut, Context as ShortcutContext};
+
+        let shortcut = self.shortcut(ShortcutContext::List, key);
+        // Esc is `Cancel`, which lives in the Chat context; a list is modal,
+        // so the chat binding is the one that closes it.
+        let cancel = shortcut == Some(Shortcut::Cancel)
+            || self.shortcut(ShortcutContext::Chat, key) == Some(Shortcut::Cancel);
+
+        let mut accepted: Option<String> = None;
+        let mut refusal: Option<String> = None;
+
+        if let Some(codape_ui::overlay::Overlay::List(picker)) = ui_state.overlays.top_mut() {
+            match shortcut {
+                Some(Shortcut::ListPrevious) => picker.move_selection(-1),
+                Some(Shortcut::ListNext) => picker.move_selection(1),
+                Some(Shortcut::ListAccept) => match picker.accept() {
+                    Some(key) => accepted = Some(key.to_string()),
+                    None => refusal = picker.refusal(),
+                },
+                _ => match key.code {
+                    // Typing filters. Modifiers are excluded so `ctrl+g` and
+                    // friends stay openers rather than becoming letters.
+                    crossterm::event::KeyCode::Char(character)
+                        if !key.modifiers.intersects(
+                            crossterm::event::KeyModifiers::CONTROL
+                                | crossterm::event::KeyModifiers::ALT,
+                        ) =>
+                    {
+                        picker.push_query(character);
+                    }
+                    crossterm::event::KeyCode::Backspace => picker.pop_query(),
+                    _ => {}
+                },
+            }
+        }
+
+        if cancel {
+            ui_state.overlays.pop();
+            return TuiKeyFlow::Handled;
+        }
+        if let Some(message) = refusal {
+            ui_state.notifications.warn(message);
+            return TuiKeyFlow::Handled;
+        }
+        if let Some(key) = accepted {
+            ui_state.overlays.pop();
+            self.act_on_list_choice(&key, ui_state).await;
+            return TuiKeyFlow::Handled;
+        }
+        TuiKeyFlow::Handled
+    }
+
+    /// Do what an accepted row means.
+    ///
+    /// The key's prefix says which list it came from, so the lists do not need
+    /// a parallel enum threaded through the UI crate.
+    async fn act_on_list_choice(
+        &mut self,
+        key: &str,
+        ui_state: &mut codape_ui::state::UiState,
+    ) -> bool {
+        use crate::session_lists::AgentChoice;
+
+        if let Some(choice) = AgentChoice::parse(key) {
+            match choice {
+                AgentChoice::Logs(id) => {
+                    let text = match codape_agents::read_agent_log(&id) {
+                        Err(error) => format!("Could not read the log for {id}: {error}"),
+                        Ok(events) if events.is_empty() => format!("No logged events for {id}."),
+                        Ok(events) => {
+                            let total = events.len();
+                            let mut lines = vec![format!("{total} event(s) for {id} (last 20):")];
+                            for event in events.iter().rev().take(20).rev() {
+                                lines.push(format!("  {event:?}"));
+                            }
+                            lines.join("\n")
+                        }
+                    };
+                    ui_state.messages.push(codape_ui::message_list::Message {
+                        role: codape_ui::message_list::MessageRole::Assistant,
+                        content: text.into(),
+                        tool_name: None,
+                        streaming: false,
+                        folded: false,
+                        image: None,
+                    });
+                }
+                AgentChoice::Follow(id) => {
+                    // Same path `/agents follow <id>` takes. The manager hands
+                    // out a receiver synchronously, so the lock is held only
+                    // long enough to take one.
+                    let Some(manager) = self.agents.manager.as_ref().map(Arc::clone) else {
+                        ui_state
+                            .notifications
+                            .warn("No agent manager is running in this session.");
+                        return true;
+                    };
+                    let subscription = manager.lock().await.subscribe_to_agent(&id);
+                    match subscription {
+                        Some(receiver) => {
+                            self.agents.observable_rx = Some(receiver);
+                            ui_state
+                                .notifications
+                                .info(format!("Following observable events from agent {id}."));
+                        }
+                        None => ui_state
+                            .notifications
+                            .warn(format!("Agent {id} has no event channel to subscribe to.")),
+                    }
+                }
+            }
+            return true;
+        }
+        // A rewind row is a bare message number.
+        if let Ok(number) = key.parse::<usize>() {
+            let message = match self.perform_rewind(number) {
+                Ok((removed, restored, removed_files)) => format!(
+                    "Rewound to message {number}. {removed} messages removed. {restored} \
+                     file(s) restored, {removed_files} created file(s) removed."
+                ),
+                Err(error) => error,
+            };
+            ui_state.messages.push(codape_ui::message_list::Message {
+                role: codape_ui::message_list::MessageRole::System,
+                content: message.into(),
+                tool_name: None,
+                streaming: false,
+                folded: false,
+                image: None,
+            });
+            return true;
+        }
+        if let Some(name) = key.strip_prefix("plugin:") {
+            ui_state
+                .notifications
+                .info(format!("Installed plugin: {name}"));
+            return true;
+        }
+        if let Some(name) = key.strip_prefix("marketplace:") {
+            ui_state.notifications.info(format!(
+                "Marketplace: {name} · /plugin marketplace add <name> <url> to add more"
+            ));
+            return true;
+        }
+        // A theme row is a bare theme name. Tried last, so a numeric key is a
+        // message number rather than a theme.
+        if self.apply_tui_theme(ui_state, key) {
+            ui_state
+                .notifications
+                .info(format!("Theme changed to: {key}"));
+            return true;
+        }
+        false
+    }
+
     /// Handle one key press from the interactive loop.
     ///
     /// Returns [`TuiKeyFlow::Handled`] for every key it consumed and
@@ -6300,6 +6679,35 @@ impl ReplLoop {
         // Dismiss one on the next key and handle that key
         // normally, so typing `/status` after a failure
         // both closes the dialog and reaches the input.
+        //
+        // A detail body can be taller than its box — the help page is roughly
+        // twice as tall — so the keys that move through it scroll it instead
+        // of closing it. Anything else dismisses, which keeps the old
+        // "press any key" behaviour for a body that fits.
+        if let Some(codape_ui::overlay::Overlay::Detail { scroll, .. }) =
+            ui_state.overlays.top_mut()
+        {
+            let page = u16::try_from(ui_state.messages.viewport_height.max(1)).unwrap_or(u16::MAX);
+            // How far the body moves, as an unsigned row count plus a
+            // direction. A signed step would need a lossy cast to apply, and
+            // the two directions are not symmetric anyway: one saturates at
+            // the top, the other at the bottom.
+            let step = match key.code {
+                KeyCode::Up => Some((1u16, true)),
+                KeyCode::Down => Some((1, false)),
+                KeyCode::PageUp => Some((page, true)),
+                KeyCode::PageDown => Some((page, false)),
+                _ => None,
+            };
+            if let Some((amount, up)) = step {
+                *scroll = if up {
+                    scroll.saturating_sub(amount)
+                } else {
+                    scroll.saturating_add(amount)
+                };
+                return TuiKeyFlow::Handled;
+            }
+        }
         if matches!(
             ui_state.overlays.top(),
             Some(
@@ -6308,6 +6716,17 @@ impl ReplLoop {
             )
         ) {
             ui_state.overlays.clear();
+        }
+
+        // A modal list owns the keyboard while it is open: typing narrows it
+        // rather than reaching the line, and the arrows move its highlight.
+        // Handled before the global shortcuts so an opener cannot stack a
+        // second list on top of one already showing rows.
+        if matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::List(_))
+        ) {
+            return self.handle_list_key(&key, ui_state).await;
         }
 
         // A mod UI block owns Tab/Shift+Tab, Enter and Esc
@@ -6355,6 +6774,58 @@ impl ReplLoop {
                         && self.mcp.pending_form.is_none() =>
                 {
                     self.open_model_picker(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
+                // The five list openers. They share one guard because they
+                // share one reason for it: each reads the session (the roster,
+                // the messages, the themes) at the moment it opens, and a
+                // second copy opened over the first would be built from the
+                // same facts and cover them.
+                Shortcut::AgentsView
+                | Shortcut::Help
+                | Shortcut::Rewind
+                | Shortcut::ThemePicker
+                | Shortcut::PluginBrowser
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none()
+                        && self.mcp.pending_elicitation.is_none() =>
+                {
+                    match shortcut {
+                        Shortcut::AgentsView => {
+                            let picker = self.agent_roster().await;
+                            Self::open_list(ui_state, picker);
+                        }
+                        Shortcut::Rewind => {
+                            let picker = self.rewind_points();
+                            Self::open_list(ui_state, picker);
+                        }
+                        Shortcut::ThemePicker => {
+                            let picker = self.theme_choices(ui_state);
+                            Self::open_list(ui_state, picker);
+                        }
+                        Shortcut::PluginBrowser => {
+                            let picker = self.plugin_choices();
+                            Self::open_list(ui_state, picker);
+                        }
+                        // The help page is not a picker: nothing is chosen, so
+                        // it is the ordinary detail overlay and any key closes
+                        // it.
+                        _ => {
+                            let sources: Vec<String> = self
+                                .ui
+                                .keybinding_sources
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect();
+                            let body = codape_ui::help::render(&self.ui.keybindings, &sources);
+                            ui_state.overlays.push(Overlay::Detail {
+                                title: "Help".to_string(),
+                                body,
+                                scroll: 0,
+                            });
+                        }
+                    }
                     return TuiKeyFlow::Handled;
                 }
                 Shortcut::CyclePermissionMode => {
@@ -6415,6 +6886,16 @@ impl ReplLoop {
                         LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
                         LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
                     };
+                    return TuiKeyFlow::Handled;
+                }
+                Shortcut::DiffPreviousFile | Shortcut::DiffNextFile => {
+                    jump_diff_file(ui_state, matches!(shortcut, Shortcut::DiffNextFile));
+                    return TuiKeyFlow::Handled;
+                }
+                Shortcut::TranscriptFullscreen
+                    if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
+                {
+                    toggle_transcript_fullscreen(ui_state, &self.ui.keybindings);
                     return TuiKeyFlow::Handled;
                 }
                 Shortcut::ImagePaste
@@ -8886,6 +9367,27 @@ fn truncate_on_char_boundary(text: &str, limit: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// One row's worth of a message: its first non-empty line, clipped to `limit`
+/// characters.
+///
+/// A list row is a single line, and a message is not. Taking the first line
+/// rather than the first `limit` characters keeps a code block from filling the
+/// row with its fence, and the ellipsis says the row is a summary rather than
+/// the message.
+fn truncate_for_row(text: &str, limit: usize) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.chars().count() <= limit {
+        return first.to_string();
+    }
+    let mut clipped: String = first.chars().take(limit).collect();
+    clipped.push('…');
+    clipped
 }
 
 /// Most consecutive auto-submitted turns one person-initiated turn may spawn.
@@ -11899,11 +12401,19 @@ impl ReplLoop {
         // registry cannot reach; it is handled here so the TUI path restores
         // files the same way the non-TUI path does.
         if cmd_name == "rewind" {
+            // With no number, the command opens the same list its key does.
+            // Printing the usage line was the old behaviour, and it made a
+            // person read the count off the usage text and retype a number.
+            if args.is_empty() {
+                let picker = self.rewind_points();
+                Self::open_list(ui_state, picker);
+                return;
+            }
             let message = args
                 .first()
                 .and_then(|value| value.parse::<usize>().ok())
                 .map_or_else(
-                    || "Usage: /rewind <message-number>".to_string(),
+                    || "Usage: /rewind [<message-number>]".to_string(),
                     |n| match self.perform_rewind(n) {
                         Ok((removed, restored, removed_files)) => format!(
                             "Rewound to message {n}. {removed} messages removed. {restored} \
@@ -11920,6 +12430,22 @@ impl ReplLoop {
                 folded: false,
                 image: None,
             });
+            return;
+        }
+        // A bare `/theme` and a bare `/plugin` open the list rather than
+        // printing one. Both commands' no-argument forms exist to answer "what
+        // is there and what am I on", which is a question a list answers
+        // better than a paragraph — and the row is the way to change it.
+        if args.is_empty()
+            && matches!(cmd_name, "theme" | "plugin")
+            && !ui_state.overlays.is_active()
+        {
+            let picker = if cmd_name == "theme" {
+                self.theme_choices(ui_state)
+            } else {
+                self.plugin_choices()
+            };
+            Self::open_list(ui_state, picker);
             return;
         }
         let ctx = self.build_context();
@@ -17775,6 +18301,208 @@ mod tests {
         )
         .await;
         assert!(!thinking, "Esc no longer cancels the running turn");
+    }
+
+    fn alt(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    /// Press `key` against a fresh UI state, for a test that only cares what
+    /// the key did to the overlay stack.
+    macro_rules! press_key {
+        ($repl:expr, $ui_state:expr, $live:expr, $vim:expr, $key:expr) => {{
+            let mut thinking = false;
+            let mut query_done_rx = None;
+            let mut elicit_rx = None;
+            let mut tui_elicit_rx = None;
+            let mut queued = std::collections::VecDeque::new();
+            $repl
+                .handle_key_event(
+                    $key,
+                    $ui_state,
+                    $live,
+                    $vim,
+                    &mut thinking,
+                    &mut query_done_rx,
+                    &mut elicit_rx,
+                    &mut tui_elicit_rx,
+                    &mut queued,
+                )
+                .await
+        }};
+    }
+
+    #[tokio::test]
+    async fn the_help_page_opens_from_its_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+
+        press_key!(&mut repl, &mut ui_state, &mut live, &mut vim, alt('h'));
+
+        match ui_state.overlays.top() {
+            Some(codape_ui::overlay::Overlay::Detail { title, body, .. }) => {
+                assert_eq!(title, "Help");
+                // The page is generated from the live table, so the default
+                // keystroke has to appear in it rather than only the sentence.
+                assert!(body.contains("ctrl+g"), "{body}");
+                assert!(body.contains("built-in defaults"), "{body}");
+            }
+            other => panic!("expected the help page, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_rewind_list_numbers_the_engines_messages_not_the_drawn_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        {
+            let engine = repl.session.engine.as_mut().expect("engine");
+            let mut session = engine.session().clone();
+            session.messages = vec![
+                codape_core::types::Message::user("first prompt"),
+                codape_core::types::Message::assistant("first answer"),
+                codape_core::types::Message::user("second prompt"),
+            ];
+            engine.set_session(session);
+        }
+        let mut ui_state = codape_ui::state::UiState::new();
+        // A notice the session drew but never sent. It is not a rewind target,
+        // and numbering from it would shift every number by one.
+        ui_state.messages.push(codape_ui::message_list::Message {
+            role: codape_ui::message_list::MessageRole::System,
+            content: "notice".into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        });
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+
+        press_key!(&mut repl, &mut ui_state, &mut live, &mut vim, alt('r'));
+        let picker = match ui_state.overlays.top() {
+            Some(codape_ui::overlay::Overlay::List(picker)) => picker,
+            other => panic!("expected the rewind list, got {other:?}"),
+        };
+        assert_eq!(
+            picker.items.len(),
+            3,
+            "the list must be the engine's three messages, not the drawn one"
+        );
+        // Newest first: rewinding to the third message removes nothing, which
+        // is what makes it the sensible first row.
+        assert_eq!(picker.items[0].key, "3");
+        assert_eq!(picker.items[2].key, "1");
+
+        // Down then Enter accepts message 2 and truncates the session there.
+        press_key!(
+            &mut repl,
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            press(KeyCode::Down)
+        );
+        press_key!(
+            &mut repl,
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            press(KeyCode::Enter)
+        );
+        assert!(ui_state.overlays.top().is_none(), "the list stayed open");
+        let engine = repl.session.engine.as_ref().expect("engine");
+        assert_eq!(engine.session().messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_modal_list_takes_typing_before_the_input_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state.input.text = "draft".into();
+        ui_state.overlays.push(codape_ui::overlay::Overlay::List(
+            crate::session_lists::theme_rows(&["dark".to_string(), "light".to_string()], "dark"),
+        ));
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+
+        for c in "lig".chars() {
+            press_key!(
+                &mut repl,
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                press(KeyCode::Char(c))
+            );
+        }
+        match ui_state.overlays.top() {
+            Some(codape_ui::overlay::Overlay::List(picker)) => {
+                assert_eq!(picker.query, "lig");
+                assert_eq!(picker.visible().len(), 1, "the list did not narrow");
+            }
+            other => panic!("the list closed: {other:?}"),
+        }
+        assert_eq!(ui_state.input.text, "draft", "the query reached the line");
+
+        // Esc closes it and leaves the line alone, the way Esc closes every
+        // other modal.
+        press_key!(
+            &mut repl,
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            press(KeyCode::Esc)
+        );
+        assert!(
+            ui_state.overlays.top().is_none(),
+            "Esc did not close the list"
+        );
+        assert_eq!(ui_state.input.text, "draft");
+    }
+
+    #[tokio::test]
+    async fn an_opener_does_not_stack_a_list_on_an_open_overlay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        ui_state
+            .overlays
+            .push(codape_ui::overlay::Overlay::Confirm {
+                message: "Run it?".into(),
+            });
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+
+        let depth = ui_state.overlays.len();
+        press_key!(&mut repl, &mut ui_state, &mut live, &mut vim, alt('r'));
+        assert_eq!(
+            ui_state.overlays.len(),
+            depth,
+            "a list was pushed over a confirmation"
+        );
+    }
+
+    #[test]
+    fn a_row_preview_takes_the_first_line_and_clips_on_a_character_boundary() {
+        assert_eq!(truncate_for_row("hello\nsecond", 48), "hello");
+        assert_eq!(
+            truncate_for_row("\n\n   spaced   \nrest", 48),
+            "spaced",
+            "blank lines are skipped, and the line is trimmed"
+        );
+        assert_eq!(
+            truncate_for_row("абвгдеёжз", 4),
+            "абвг…",
+            "clipping counts characters, not bytes"
+        );
+        assert_eq!(
+            truncate_for_row("short", 48),
+            "short",
+            "no ellipsis when it fits"
+        );
     }
 
     /// The command prints the live table, its provenance, and the problems it

@@ -378,6 +378,26 @@ const RULE_IDX: usize = 5;
 const INPUT_IDX: usize = 6;
 const RULE_BELOW_IDX: usize = 7;
 const PERMISSION_IDX: usize = 8;
+const FOOTER_IDX: usize = 9;
+
+/// Which of the optional panes this frame draws.
+///
+/// A named struct rather than a row of bools: `Panes` appears once in the
+/// signature, and a call site that named the fields cannot put `statusline`
+/// where `notification` goes. `fullscreen` rides here too because it is the
+/// same decision — which panes exist — even though it overrides two of the
+/// others rather than adding one.
+#[derive(Debug, Clone, Copy, Default)]
+struct Panes {
+    /// The notification bar above the todo panel.
+    notification: bool,
+    /// The statusline, which is three rows: text and the blank rows around it.
+    statusline: bool,
+    /// The permission bar, which is two rows: text and the blank row below.
+    permission_bar: bool,
+    /// The transcript is taking the whole screen, so the prompt is gone.
+    fullscreen: bool,
+}
 
 /// The vertical pane stack, top to bottom.
 ///
@@ -388,25 +408,32 @@ const PERMISSION_IDX: usize = 8;
 /// the model has not written a list.
 fn frame_constraints(
     inline_palette_height: u16,
-    show_notif: bool,
+    panes: Panes,
     todo_height: u16,
-    show_statusline: bool,
     input_height: u16,
-    show_perm_bar: bool,
 ) -> Vec<Constraint> {
+    // Fullscreen collapses the input box (both rules and the buffer) and adds
+    // one footer row in its place. The message area is `Min(1)`, so it takes
+    // everything the others leave.
+    let (rule_above, input_rows, rule_below, footer) = if panes.fullscreen {
+        (0, 0, 0, 1)
+    } else {
+        (1, input_height.max(1), 1, 0)
+    };
     vec![
-        Constraint::Min(1),                        // message area
-        Constraint::Length(inline_palette_height), // inline command hint
-        Constraint::Length(u16::from(show_notif)), // notification bar
-        Constraint::Length(todo_height),           // todo panel
+        Constraint::Min(1),                                // message area
+        Constraint::Length(inline_palette_height),         // inline command hint
+        Constraint::Length(u16::from(panes.notification)), // notification bar
+        Constraint::Length(todo_height),                   // todo panel
         // One row of text with one blank row above and below it.
-        Constraint::Length(if show_statusline { 3 } else { 0 }), // statusline
-        Constraint::Length(1),                                   // rule above the input
-        Constraint::Length(input_height.max(1)),                 // input lines
-        Constraint::Length(1),                                   // rule below the input
+        Constraint::Length(if panes.statusline { 3 } else { 0 }), // statusline
+        Constraint::Length(rule_above),                           // rule above the input
+        Constraint::Length(input_rows),                           // input lines
+        Constraint::Length(rule_below),                           // rule below the input
         // The bar is one line plus a blank row below it, so the text does not
         // sit against the bottom edge of the terminal.
-        Constraint::Length(if show_perm_bar { 2 } else { 0 }), // permission bar
+        Constraint::Length(if panes.permission_bar { 2 } else { 0 }), // permission bar
+        Constraint::Length(footer),                                   // fullscreen hint
     ]
 }
 
@@ -450,39 +477,56 @@ fn render_frame(
 
     let is_compact = state.force_compact || area.height < 20;
 
+    // The full-screen transcript is the same frame with everything but the
+    // message area collapsed: the input, the statusline, the todo panel and
+    // the rules all go to zero height, and one row at the bottom says how to
+    // get back. Keeping one layout instead of a second renderer is what makes
+    // scrolling, the cache and the mouse selection behave identically in both.
+    let fullscreen = state.transcript_fullscreen;
+
     // Determine chunk heights
-    let inline_palette_height = if is_compact {
+    let inline_palette_height = if is_compact || fullscreen {
         0
     } else {
         inline_palette_height(state)
     };
-    let show_statusline = !is_compact;
-    let show_notif = state.notifications.active_count() > 0 && !is_compact;
+    let show_statusline = !is_compact && !fullscreen;
+    let show_notif = state.notifications.active_count() > 0 && !is_compact && !fullscreen;
 
-    let show_perm_bar = !is_compact;
+    let show_perm_bar = !is_compact && !fullscreen;
     // The todo panel sits above the statusline. It is the model's own plan, so
     // it stays visible in compact mode too, but capped so the transcript keeps
     // most of the screen.
     let max_todo_height = area.height.saturating_sub(6).max(1);
-    let todo_height = state.todos.display_height().min(max_todo_height);
+    let todo_height = if fullscreen {
+        0
+    } else {
+        state.todos.display_height().min(max_todo_height)
+    };
     // A long or multi-line input grows its own pane rather than being clipped
     // to one row. It is capped so the transcript keeps most of the screen.
     let max_input_height = area.height.saturating_sub(3).max(1);
-    let input_height = if state.history_search.is_some() {
+    let input_height = if fullscreen {
+        0
+    } else if state.history_search.is_some() {
         // The query line plus at least one match row.
         2.min(max_input_height)
     } else {
         input_display_height(&state.input, area.width).min(max_input_height)
     };
+    let footer_height = u16::from(fullscreen);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(frame_constraints(
             inline_palette_height,
-            show_notif,
+            Panes {
+                notification: show_notif,
+                statusline: show_statusline,
+                permission_bar: show_perm_bar,
+                fullscreen,
+            },
             todo_height,
-            show_statusline,
             input_height,
-            show_perm_bar,
         ))
         .split(area);
 
@@ -493,7 +537,7 @@ fn render_frame(
     // no notification, a computed statusline index of 1 lands on the
     // zero-height palette slot and the line disappears. Index by the
     // constraint position instead.
-    debug_assert_eq!(chunks.len(), PERMISSION_IDX + 1);
+    debug_assert_eq!(chunks.len(), FOOTER_IDX + 1);
 
     // Message area (index 0) — may be split horizontally
     let msg_area = chunks[0];
@@ -573,6 +617,13 @@ fn render_frame(
             &state.permission_bar,
             &state.theme,
         );
+    }
+
+    // The one row a full-screen transcript keeps: how to leave it. It names
+    // the key the session actually resolves rather than a literal, so a
+    // rebound toggle does not tell the person to press one that does nothing.
+    if fullscreen && footer_height > 0 {
+        render_fullscreen_footer(frame, chunks[FOOTER_IDX], state);
     }
 
     // Overlay (only non-palette overlays; palette is rendered inline)
@@ -737,6 +788,19 @@ fn wrapped_line_count(text: &str, width: usize) -> usize {
     }
 
     lines.max(1)
+}
+
+/// Rows a body occupies when wrapped, with blank lines counted.
+///
+/// [`wrap_text`] drops empty paragraphs, which is right for a transcript where
+/// a stray newline is noise and wrong for an overlay body, whose blank lines
+/// are layout: the model picker puts its effort row below one blank line and
+/// its key hints below another, so a count that ignores them sizes the box two
+/// rows short and clips the hints off the bottom.
+fn wrapped_rows_with_blanks(text: &str, width: usize) -> usize {
+    text.split('\n')
+        .map(|paragraph| wrapped_line_count(paragraph, width))
+        .sum()
 }
 
 const fn message_prefix(role: crate::message_list::MessageRole) -> &'static str {
@@ -2207,6 +2271,35 @@ fn render_input_rule(frame: &mut Frame, area: ratatui::layout::Rect, theme: &The
     frame.render_widget(Paragraph::new(rule), area);
 }
 
+/// The single row a full-screen transcript keeps: how to get out.
+fn render_fullscreen_footer(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let text = if state.transcript_footer.is_empty() {
+        "Transcript — the same key again returns to the prompt".to_string()
+    } else {
+        state.transcript_footer.clone()
+    };
+    // Clipped here rather than wrapped: the footer is one row, and a wrapped
+    // one would eat a second row out of the transcript.
+    let mut clipped = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + width > area.width.saturating_sub(2) as usize {
+            break;
+        }
+        clipped.push(character);
+        used += width;
+    }
+    let line = Line::from(Span::styled(
+        format!(" {clipped} "),
+        Style::default().fg(state.theme.dim),
+    ));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn render_input(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -2460,14 +2553,12 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
             // Both inline lists are handled separately; skip here.
             return;
         }
-        Overlay::Detail { title, body } => {
-            let _ = title;
-            body.clone()
-        }
+        Overlay::Detail { body, .. } => body.clone(),
         Overlay::Confirm { message } => {
             format!("{message}\n[y/n]")
         }
         Overlay::ModelPicker(picker) => picker.render(),
+        Overlay::List(picker) => picker.render(14),
     };
 
     let title = match overlay {
@@ -2478,12 +2569,21 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::FileMention { .. } => "Files",
         Overlay::Confirm { .. } => "Confirm",
         Overlay::ModelPicker { .. } => "Model",
+        Overlay::List(picker) => picker.title.as_str(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .style(Style::default().fg(state.theme.overlay_border));
-    let mut paragraph = Paragraph::new(content)
+    // A detail body is the one overlay that can be longer than its box: the
+    // help page is several screens' worth of rows in a box that has to fit on
+    // one. `scroll` counts *drawn* rows after wrapping, which is what a reader
+    // means by a page.
+    let detail_scroll = match overlay {
+        Overlay::Detail { scroll, .. } => Some((*scroll, 0)),
+        _ => None,
+    };
+    let mut paragraph = Paragraph::new(content.clone())
         .style(Style::default().fg(state.theme.foreground))
         .block(block);
 
@@ -2493,19 +2593,34 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
     // box — so they keep their fixed layout and are clipped instead.
     // The picker's body is a list, so it wraps like a detail body rather than
     // clipping like a fixed-layout dialog.
-    let is_detail = matches!(overlay, Overlay::Detail { .. } | Overlay::ModelPicker(_));
+    let is_detail = matches!(
+        overlay,
+        Overlay::Detail { .. } | Overlay::ModelPicker(_) | Overlay::List(_)
+    );
     if is_detail {
         paragraph = paragraph.wrap(Wrap { trim: false });
+    }
+    if let Some(offset) = detail_scroll {
+        paragraph = paragraph.scroll(offset);
     }
     let w = if is_detail {
         area.width.saturating_sub(4).min(100)
     } else {
         50.min(area.width.saturating_sub(4))
     };
+    // A detail body gets the box it needs, up to the screen. The old fixed
+    // twenty rows was right when every detail was a provider error; the help
+    // page is longer than that, and a page that ends mid-sentence is not a
+    // page. The body also scrolls from the keyboard, so the box never has to
+    // be larger than the screen, and a body larger than the screen is
+    // reachable a screenful at a time.
+    let max_h = area.height.saturating_sub(4);
     let h = if is_detail {
-        area.height.saturating_sub(4).min(20)
+        let inner = usize::from(w.saturating_sub(2)).max(1);
+        let rows = u16::try_from(wrapped_rows_with_blanks(&content, inner)).unwrap_or(u16::MAX);
+        rows.saturating_add(2).max(8).min(max_h)
     } else {
-        10.min(area.height.saturating_sub(4))
+        10.min(max_h)
     };
     let x = (area.width - w) / 2;
     let y = (area.height - h) / 2;
@@ -3164,7 +3279,15 @@ mod layout_tests {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints(frame_constraints(
-                palette, notif, todos, statusline, input, perm,
+                palette,
+                Panes {
+                    notification: notif,
+                    statusline,
+                    permission_bar: perm,
+                    fullscreen: false,
+                },
+                todos,
+                input,
             ))
             .split(ratatui::layout::Rect::new(0, 0, 80, height))
             .to_vec()
@@ -3274,7 +3397,7 @@ mod layout_tests {
     #[test]
     fn pane_indices_follow_the_constraint_order() {
         let chunks = chunks_with_todos(30, 4, true, 2, true, 1, true);
-        assert_eq!(chunks.len(), PERMISSION_IDX + 1, "one rect per constraint");
+        assert_eq!(chunks.len(), FOOTER_IDX + 1, "one rect per constraint");
         assert_eq!(chunks[PALETTE_IDX].height, 4, "palette");
         assert_eq!(chunks[NOTIFICATION_IDX].height, 1, "notification");
         assert_eq!(chunks[TODOS_IDX].height, 2, "todo panel");
@@ -3283,11 +3406,52 @@ mod layout_tests {
         assert_eq!(chunks[INPUT_IDX].height, 1, "input");
         assert_eq!(chunks[RULE_BELOW_IDX].height, 1, "input rule below");
         assert_eq!(chunks[PERMISSION_IDX].height, 2, "permission");
+        assert_eq!(chunks[FOOTER_IDX].height, 0, "no footer outside fullscreen");
         assert!(chunks[0].height > 1, "message area");
         // Rects are contiguous and in order, top to bottom.
         for pair in chunks.windows(2) {
             assert_eq!(pair[0].y + pair[0].height, pair[1].y);
         }
+    }
+
+    /// The full-screen transcript keeps the message area and one footer row,
+    /// and collapses the prompt box rather than hiding it.
+    #[test]
+    fn fullscreen_keeps_only_the_transcript_and_its_hint() {
+        let mut state = UiState {
+            transcript_fullscreen: true,
+            transcript_footer: "ctrl+t returns to the prompt".into(),
+            ..UiState::default()
+        };
+        let buffer = render_to_buffer(80, 30, &mut state);
+        let rows: Vec<String> = (0..30).map(|y| row_text(&buffer, y)).collect();
+
+        let footer = rows[29].to_ascii_lowercase();
+        assert!(
+            footer.contains("ctrl+t") && footer.contains("returns"),
+            "the footer did not name the key: {footer:?}"
+        );
+        // The prompt is gone: neither its rule nor its prompt glyph is drawn.
+        assert!(
+            !rows.iter().any(|row| row.contains("> ")),
+            "the prompt was still drawn: {rows:?}"
+        );
+        // The transcript itself still starts at the top of the screen.
+        assert!(
+            !rows[0].trim().is_empty(),
+            "the transcript no longer had the top row: {rows:?}"
+        );
+
+        state.transcript_fullscreen = false;
+        let buffer = render_to_buffer(80, 30, &mut state);
+        let rows: Vec<String> = (0..30).map(|y| row_text(&buffer, y)).collect();
+        assert!(
+            !rows[29]
+                .to_ascii_lowercase()
+                .contains("returns to the prompt"),
+            "leaving full screen left the hint behind: {:?}",
+            rows[29]
+        );
     }
 
     /// A list the model wrote through `TodoWrite` is painted above the
@@ -3886,6 +4050,7 @@ mod layout_tests {
         state.overlays.push(Overlay::Detail {
             title: "Failure Details".into(),
             body: format!("{}ENDMARK", "x".repeat(70)),
+            scroll: 0,
         });
         let buffer = render_to_buffer(120, 30, &mut state);
         let screen: String = (0..30)
@@ -3895,6 +4060,93 @@ mod layout_tests {
 
         assert!(screen.contains("Failure Details"), "{screen}");
         assert!(screen.contains("ENDMARK"), "{screen}");
+    }
+
+    /// A detail body taller than twenty rows has to be both fully boxed and
+    /// scrollable.
+    ///
+    /// The help page is longer than the old fixed cap, so its second half was
+    /// unreachable: the box stopped at twenty rows and there was no way to
+    /// move it. The box now follows the body up to the screen, and `scroll`
+    /// moves the rest into view.
+    #[test]
+    fn a_long_detail_body_grows_its_box_and_scrolls() {
+        use crate::overlay::Overlay;
+
+        let rows = |count: usize| -> String {
+            (0..count)
+                .map(|row| format!("row{row:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let screen_of = |state: &mut UiState| -> String {
+            let buffer = render_to_buffer(120, 40, state);
+            (0..40)
+                .map(|y| row_text(&buffer, y))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Thirty rows fits a forty-row terminal, and is past the old cap.
+        let mut state = UiState::default();
+        state.overlays.push(Overlay::Detail {
+            title: "Help".into(),
+            body: rows(30),
+            scroll: 0,
+        });
+        let screen = screen_of(&mut state);
+        assert!(screen.contains("row00"), "the top is missing:\n{screen}");
+        assert!(
+            screen.contains("row29"),
+            "the box stopped at the old twenty-row cap:\n{screen}"
+        );
+
+        // A body taller than the screen scrolls: the top rows go, the last
+        // ones arrive.
+        let mut state = UiState::default();
+        state.overlays.push(Overlay::Detail {
+            title: "Help".into(),
+            body: rows(60),
+            scroll: 40,
+        });
+        let screen = screen_of(&mut state);
+        assert!(
+            !screen.contains("row00"),
+            "the scroll offset was ignored:\n{screen}"
+        );
+        assert!(
+            screen.contains("row59"),
+            "scrolling lost the end of the body:\n{screen}"
+        );
+    }
+
+    /// A body's blank lines are layout, so the box has to be big enough for
+    /// them. The model picker's last row is its key hints, below two blank
+    /// lines; a count that drops the blanks clips exactly that row.
+    #[test]
+    fn a_body_with_blank_lines_gets_a_box_that_holds_all_of_them() {
+        use crate::overlay::{ModelPicker, Overlay};
+
+        let picker = ModelPicker::new(
+            vec!["claude-sonnet-4-6".into(), "claude-opus-5-5".into()],
+            "claude-sonnet-4-6",
+            None,
+        );
+        let mut state = UiState::default();
+        state.overlays.push(Overlay::ModelPicker(picker));
+        let buffer = render_to_buffer(120, 40, &mut state);
+        let screen: String = (0..40)
+            .map(|y| row_text(&buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("[tab] model/effort"),
+            "the key hints fell off the bottom of the box:\n{screen}"
+        );
+        assert!(
+            screen.contains("Effort: off"),
+            "the effort row is missing:\n{screen}"
+        );
     }
 
     /// A terminal too small for the box gets readable plain lines instead of a

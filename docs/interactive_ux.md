@@ -108,18 +108,24 @@ Current TUI already has foundational pieces:
 - `overlay stack`
 - `thinking spinner`
 - live elapsed timer while `thinking = true`
+- a modal `Picker` list (`crates/ui/src/picker.rs`), which the agent roster, the rewind points, the theme list and the plugin browser all open. One overlay, one `Context::List`, one key handler: the rows are the session's and the row keys carry what the row means (`follow:<id>`, `plugin:<name>`, a bare number for a rewind point, a bare name for a theme), so no parallel enum crosses the crate boundary
+- a help page generated from the keybinding table (`crates/ui/src/help.rs`), opened by `alt+h` and grouped by what a person is trying to do rather than by action name
+- a full-screen transcript (`Ctrl+T`), a layout flag rather than a view mode: every pane but the message area collapses to zero height and one footer row replaces the input box
 
 Current limitations:
 
 - runtime mostly only displays `Thinking`
 - no full phase model (`Planning`, `Running tests`, `Applying patch`, etc.)
 - plan state is populated and persisted by the REPL, though the UI still renders a coarse view
+- the effort level is adjustable inside the model picker but has no slider of its own
+- no tabs, no attachment browser, no diff file list panel: `Alt+Up`/`Alt+Down` jump between the files of the open diff, which is navigation over the pane rather than a separate list
+- the agent roster lists, follows and replays agents; it does not pin, rename or jump between groups
 - a portable-PTY E2E harness exists at `crates/cli/tests/interactive_tui.rs`
 - coverage is split between that PTY suite and headless `-p` flows
 
 ## Screen Model
 
-The current interactive screen can expose up to 6 vertical regions:
+The current interactive screen can expose up to 10 vertical regions:
 
 ```text
 +--------------------------------------------------+
@@ -129,11 +135,19 @@ The current interactive screen can expose up to 6 vertical regions:
 +--------------------------------------------------+
 |                Notification Bar                  |
 +--------------------------------------------------+
+|                    Todo Panel                    |
++--------------------------------------------------+
 |                   Status Line                    |
++--------------------------------------------------+
+|                 Rule (above input)               |
 +--------------------------------------------------+
 |                    Input Line                    |
 +--------------------------------------------------+
+|                 Rule (below input)               |
++--------------------------------------------------+
 |                  Permission Bar                  |
++--------------------------------------------------+
+|              Fullscreen Hint (Ctrl+T)            |
 +--------------------------------------------------+
 ```
 
@@ -145,13 +159,32 @@ Default startup normally shows only a subset:
 +--------------------------------------------------+
 |                   Status Line                    |
 +--------------------------------------------------+
+|                 Rule (above input)               |
++--------------------------------------------------+
 |                    Input Line                    |
++--------------------------------------------------+
+|                 Rule (below input)               |
 +--------------------------------------------------+
 |                  Permission Bar                  |
 +--------------------------------------------------+
 ```
 
-Compact mode can collapse this further.
+Compact mode can collapse this further. In the full-screen transcript every
+row except the message area and the hint collapses to zero height:
+
+```text
++--------------------------------------------------+
+|                                                  |
+|                  Message Area                    |
+|                                                  |
++--------------------------------------------------+
+|        ctrl+t — back to the prompt               |
++--------------------------------------------------+
+```
+
+Each region is its own layout constraint and its index is the constraint
+position, never "which regions happen to be visible": `Layout::split` keeps one
+rect per constraint even at zero height.
 
 ## UX Principles
 

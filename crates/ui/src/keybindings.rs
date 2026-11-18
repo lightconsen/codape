@@ -51,6 +51,12 @@ pub enum Context {
     FileMention,
     /// Reverse history search (opened by `history:search`).
     HistorySearch,
+    /// A modal list — the agent roster, rewind points, themes, plugins.
+    ///
+    /// Its own context because these keys mean something only while such a
+    /// list is open: `enter` chooses a row rather than submitting the prompt,
+    /// and ordinary characters filter rather than type.
+    List,
 }
 
 impl Context {
@@ -65,6 +71,7 @@ impl Context {
             Self::Autocomplete => "Autocomplete",
             Self::FileMention => "FileMention",
             Self::HistorySearch => "HistorySearch",
+            Self::List => "List",
         }
     }
 
@@ -82,6 +89,7 @@ impl Context {
             Self::Autocomplete,
             Self::FileMention,
             Self::HistorySearch,
+            Self::List,
         ]
         .into_iter()
         .find(|context| context.as_str().to_ascii_lowercase() == lowered)
@@ -89,7 +97,7 @@ impl Context {
 
     /// Every context, for help text and validation messages.
     #[must_use]
-    pub const fn all() -> [Self; 7] {
+    pub const fn all() -> [Self; 8] {
         [
             Self::Global,
             Self::Chat,
@@ -98,6 +106,7 @@ impl Context {
             Self::Autocomplete,
             Self::FileMention,
             Self::HistorySearch,
+            Self::List,
         ]
     }
 }
@@ -153,6 +162,28 @@ pub enum Action {
     HistorySearchAccept,
     /// Close history search without changing the line.
     HistorySearchCancel,
+    /// Open the agent roster.
+    AgentsView,
+    /// Open the help page.
+    Help,
+    /// Rewind the session to an earlier point, chosen from a list.
+    Rewind,
+    /// Choose the colour theme from a list.
+    ThemePicker,
+    /// Browse installed plugins and configured marketplaces.
+    PluginBrowser,
+    /// Jump to the previous file in the diff pane.
+    DiffPreviousFile,
+    /// Jump to the next file in the diff pane.
+    DiffNextFile,
+    /// Give the transcript the whole screen, or give the prompt its room back.
+    TranscriptFullscreen,
+    /// Move the highlight up in a modal list.
+    ListPrevious,
+    /// Move the highlight down in a modal list.
+    ListNext,
+    /// Accept the highlighted row of a modal list.
+    ListAccept,
 }
 
 impl Action {
@@ -182,6 +213,17 @@ impl Action {
             Self::HistorySearchNext => "historySearch:next",
             Self::HistorySearchAccept => "historySearch:accept",
             Self::HistorySearchCancel => "historySearch:cancel",
+            Self::AgentsView => "app:agentsView",
+            Self::Help => "app:help",
+            Self::Rewind => "app:rewind",
+            Self::ThemePicker => "app:themePicker",
+            Self::PluginBrowser => "app:pluginBrowser",
+            Self::DiffPreviousFile => "app:diffPreviousFile",
+            Self::DiffNextFile => "app:diffNextFile",
+            Self::TranscriptFullscreen => "app:transcriptFullscreen",
+            Self::ListPrevious => "list:previous",
+            Self::ListNext => "list:next",
+            Self::ListAccept => "list:accept",
         }
     }
 
@@ -192,10 +234,19 @@ impl Action {
             Self::ToggleToolOutput
             | Self::ToggleThinking
             | Self::ToggleSplitPane
+            | Self::DiffPreviousFile
+            | Self::DiffNextFile
+            | Self::TranscriptFullscreen
             | Self::CyclePermissionMode => Context::Global,
-            Self::ImagePaste | Self::Cancel | Self::HistorySearch | Self::ModelPicker => {
-                Context::Chat
-            }
+            Self::ImagePaste
+            | Self::Cancel
+            | Self::HistorySearch
+            | Self::ModelPicker
+            | Self::AgentsView
+            | Self::Help
+            | Self::Rewind
+            | Self::ThemePicker
+            | Self::PluginBrowser => Context::Chat,
             Self::ConfirmYes | Self::ConfirmNo => Context::Confirmation,
             Self::PermissionAllow | Self::PermissionAllowSession | Self::PermissionDeny => {
                 Context::PermissionDialog
@@ -209,6 +260,7 @@ impl Action {
             | Self::HistorySearchNext
             | Self::HistorySearchAccept
             | Self::HistorySearchCancel => Context::HistorySearch,
+            Self::ListPrevious | Self::ListNext | Self::ListAccept => Context::List,
         }
     }
 
@@ -222,7 +274,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 22] {
+    pub const fn all() -> [Self; 33] {
         ALL_ACTIONS
     }
 
@@ -246,24 +298,45 @@ impl Action {
             // The palette and the history search navigate with the same keys;
             // they are separate actions because a binding may move one
             // without moving the other. Esc closes either, and also cancels a
-            // run, which is why the three share a line.
-            Self::AutocompletePrevious | Self::HistorySearchPrevious => &["up"],
-            Self::AutocompleteNext | Self::HistorySearchNext => &["down"],
+            // run, which is why the three share a line. A modal list navigates
+            // the same way, in its own context.
+            Self::AutocompletePrevious | Self::HistorySearchPrevious | Self::ListPrevious => {
+                &["up"]
+            }
+            Self::AutocompleteNext | Self::HistorySearchNext | Self::ListNext => &["down"],
             // The `/` palette completes on Tab. Enter is deliberately not in
             // its table, so it falls through and submits the line — a list
             // that swallowed Enter made the prompt untypeable while a
             // suggestion was showing. The `@` list inserts on Tab too, through
-            // the palette bindings it inherits, and on Enter.
+            // the palette bindings it inherits, and on Enter. A modal list
+            // accepts on Enter, which is why it is in that arm.
             Self::AutocompleteAccept => &["tab"],
             // Enter is how a shell's reverse search hands back the command,
             // and it does not submit anything here either.
             Self::HistorySearchAccept => &["tab", "enter"],
-            Self::FileMentionAccept => &["enter"],
+            Self::FileMentionAccept | Self::ListAccept => &["enter"],
+            // The five surfaces share a key row: they are peers in the sense
+            // that a person reaches for whichever one they mean. Single
+            // keystrokes only — the parser refuses chords, because most
+            // terminals never report the second half of one.
+            Self::AgentsView => &["ctrl+g"],
+            Self::Help => &["alt+h"],
+            Self::Rewind => &["alt+r"],
+            Self::ThemePicker => &["ctrl+y"],
+            Self::PluginBrowser => &["alt+p"],
+            // The diff pane is read top to bottom, so the file jumps sit on
+            // the arrows' vertical neighbours and do not collide with the
+            // transcript scrolling.
+            Self::DiffPreviousFile => &["alt+up"],
+            Self::DiffNextFile => &["alt+down"],
+            // The toggle a person reaches for when the answer is long. `ctrl+t`
+            // is the transcript size control in most terminals' muscle memory.
+            Self::TranscriptFullscreen => &["ctrl+t"],
         }
     }
 }
 
-const ALL_ACTIONS: [Action; 22] = [
+const ALL_ACTIONS: [Action; 33] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -286,6 +359,17 @@ const ALL_ACTIONS: [Action; 22] = [
     Action::HistorySearchNext,
     Action::HistorySearchAccept,
     Action::HistorySearchCancel,
+    Action::AgentsView,
+    Action::Help,
+    Action::Rewind,
+    Action::ThemePicker,
+    Action::PluginBrowser,
+    Action::DiffPreviousFile,
+    Action::DiffNextFile,
+    Action::TranscriptFullscreen,
+    Action::ListPrevious,
+    Action::ListNext,
+    Action::ListAccept,
 ];
 
 /// A named key, for everything that is not a character.

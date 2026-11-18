@@ -118,6 +118,38 @@ pub fn stat(lines: &[DiffLine]) -> DiffStat {
     out
 }
 
+/// The line index of each file's `diff --git` header, in order.
+///
+/// A diff is a scrollable column of several files, and the headers are the
+/// only landmarks in it. Counting them once is what lets the pane jump between
+/// files instead of paging through them a screen at a time.
+#[must_use]
+pub fn file_starts(lines: &[DiffLine]) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.text.starts_with("diff --git"))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Where to scroll to reach the next (`forward`) or previous file.
+///
+/// "Next" is the first header strictly below `current`, not the next one in
+/// the list, so pressing the key twice in a row moves twice even if the first
+/// press landed exactly on a header. `None` when there is nothing further in
+/// that direction — the caller leaves the pane where it is rather than
+/// wrapping to the top, because a jump to the first file looks like a scroll
+/// that went the wrong way.
+#[must_use]
+pub fn step_file(starts: &[usize], current: usize, forward: bool) -> Option<usize> {
+    if forward {
+        starts.iter().copied().find(|start| *start > current)
+    } else {
+        starts.iter().copied().rev().find(|start| *start < current)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +232,42 @@ index 111..222 100644\n\
         let lines = parse_unified("Not a git repository\n");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Not a git repository");
+    }
+
+    const TWO_FILES: &str = "diff --git a/one.rs b/one.rs\n\
+index 1..2 100644\n\
+--- a/one.rs\n\
++++ b/one.rs\n\
+@@ -1 +1 @@\n\
+-a\n\
++b\n\
+diff --git a/two.rs b/two.rs\n\
+index 3..4 100644\n\
+--- a/two.rs\n\
++++ b/two.rs\n\
+@@ -1 +1 @@\n\
+-c\n\
++d\n";
+
+    #[test]
+    fn the_file_starts_are_the_diff_git_lines() {
+        let lines = parse_unified(TWO_FILES);
+        assert_eq!(file_starts(&lines), vec![0, 7]);
+    }
+
+    #[test]
+    fn stepping_skips_the_file_already_on_screen() {
+        let lines = parse_unified(TWO_FILES);
+        let starts = file_starts(&lines);
+
+        // Landing on the first file, then asking again, goes to the second.
+        assert_eq!(step_file(&starts, 0, true), Some(7));
+        // The last file has nothing after it: no wrap to the top.
+        assert_eq!(step_file(&starts, 7, true), None);
+        assert_eq!(step_file(&starts, 7, false), Some(0));
+        assert_eq!(step_file(&starts, 0, false), None);
+        // From inside a file, forward reaches the next header, not this one.
+        assert_eq!(step_file(&starts, 3, true), Some(7));
+        assert_eq!(step_file(&starts, 3, false), Some(0));
     }
 }
