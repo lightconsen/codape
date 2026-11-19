@@ -77,6 +77,7 @@ opposed to what a host can add.
 | Reserved surface ids | ✅ | `KNOWN_SURFACE_IDS`: `terminal`, `ide`, `desktop`, `web` — names a host may register; no implementation here |
 | Desktop / mobile hosts | ❌ | No desktop app and no mobile host in this repository. `/desktop` reports "active" only for a registered `desktop` surface; `/mobile` names `codape bridge` as the remote path in |
 | Editor surface | ❌ | An editor drives a session through `codape ide bridge` (text tool calls over MCP), not `UiSurface`. See `docs/surfaces.md` → *What is implemented* |
+| Mod panel pane | ✅ | A mod's `$.ui.panel(slot, …)` draws into a named slot the host holds, so it stays on screen beside the conversation and updates in place instead of appending a transcript block. `codape_ui::panel::PanelStore` owns the slots; the terminal draws them in their own band between the transcript and the prompt. Four slots at a time; a fifth `Set` is dropped and reported. Not clickable and not focusable — a mod that wants buttons uses a `$.ui.render` block |
 
 ### Interactive surfaces in the terminal
 
@@ -100,10 +101,20 @@ are built in `crates/cli/src/session_lists.rs` and drawn by one
 | Full-screen transcript | `ctrl+t` | — | Layout flag: the message area takes every row and one footer row says how to leave |
 | Diff file jump | `alt+up` / `alt+down` | — | Lands on the next/previous `diff --git` header; does not wrap. A patch of several files also lists them above the patch, marked with the one the pane is showing and each file's own `+N -M` |
 | Pane tabs | `alt+left` / `alt+right` (`app:panePreviousTab` / `app:paneNextTab`) | — | Every `/diff` and `/open` is a view the pane remembers, with its own scroll. The bar appears only from the second view on, numbers each one (`1:diff 2:src/lib.rs`), cuts the overflow with an ellipsis, and wraps at both ends. Re-running the same command refreshes its tab rather than adding one |
+| Transcript selection | mouse drag | — | Press on the transcript and drag to select; releasing copies the selected text to the clipboard and says how many characters went. A click inside a mod UI button is that button rather than the start of a selection. The selection is drawn by the TUI, so a repaint cannot take it away the way the terminal's own selection can |
+| Settings menu | `alt+c` (`app:settings`) | `/settings` | One row per setting this menu knows how to change — model, permission mode, vim mode, theme, prompt caching, telemetry — with the current value beside it. `Enter` steps the row to its next value and leaves the menu up, because adjusting several settings is the point; a row that only takes effect on the next start says `· next session`. Rows write `settings.json` and the live ones apply to the session immediately, so the file and the running session do not disagree |
 
-There is no settings menu. Settings live in files — `settings.json`,
-`keybindings.json`, `.codape/` — and the commands that write them are how they
-change; a menu over the same files would be a second place to look.
+Settings are still files — `settings.json`, `keybindings.json`, `.codape/` — and
+the slash commands remain the full way to write them. The menu is the subset
+worth stepping through without remembering a value, not a second place settings
+live.
+
+### Writing a prompt
+
+| Surface | Key | Notes |
+|---------|-----|-------|
+| External editor | `ctrl+x` (`chat:externalEditor`) | Writes the line to a temporary `.md` file, hands the terminal to `visual`/`editor` from `settings.json` or else `$VISUAL`/`$EDITOR`, and reads the file back when the editor exits successfully. The prompt file is one trailing newline shorter than what the editor saved, and a non-zero exit leaves the line exactly as it was. Deliberately **not** run through a shell: `$EDITOR` names a program and its flags, and a shell would also run `&&` chains and globs the person did not write |
+| Set a line aside | `ctrl+s` (`chat:stash`) | One slot, two directions: with nothing held the line goes into the slot and the prompt empties; with something held it comes back and whatever was on the line takes its place. The rule above the input says `set aside: …` while something is held, because a prompt nothing draws is a prompt people forget they have |
 
 ## Command System
 

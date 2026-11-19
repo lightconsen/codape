@@ -1056,6 +1056,14 @@ enum TuiKeyFlow {
     Handled,
     /// Ctrl+D: leave the session.
     Quit,
+    /// Hand the terminal to `$EDITOR` and take the prompt back.
+    ///
+    /// A third answer rather than work done inside the key handler because the
+    /// editor needs the terminal the loop owns — the alternate screen, raw
+    /// mode, the keyboard-enhancement stack — and `handle_key_event` is handed
+    /// the state, not the `TerminalUi`. Reporting the intent keeps the
+    /// handover in the one place that can perform it.
+    ExternalEditor,
 }
 
 /// Run the configured transcription command and return what it heard.
@@ -1107,6 +1115,66 @@ fn normalize_plan_label(label: &str) -> String {
         "Working".into()
     } else {
         trimmed.into()
+    }
+}
+
+/// Write a whole `settings.json` document back, creating the directory.
+///
+/// The same shape the slash commands write: pretty-printed JSON, no atomic
+/// rename. Kept here beside the menu rather than in `codape-config` because
+/// the file is a document the caller already read and edited, and the write is
+/// the last step of that edit rather than a settings operation of its own.
+fn write_settings_document(
+    path: &std::path::Path,
+    document: &serde_json::Value,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(document)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    std::fs::write(path, text)
+}
+
+/// Put the line aside, or take back the one that was put aside.
+///
+/// One key, two directions, because there is one slot. With a prompt held, the
+/// press takes it back — and anything already on the line is swapped into the
+/// slot rather than dropped, so the two never collide: the key always trades
+/// what is on the line for what is in the slot, and the only question is
+/// whether the slot was empty. That makes "stash, ask something, restore" the
+/// two-press path and makes a third press undo the second.
+///
+/// An empty line with nothing held is a no-op rather than a notice: there is
+/// nothing to report, and a message on every press of a key that mostly does
+/// nothing would be noise.
+fn stash_or_restore_input(ui_state: &mut codape_ui::state::UiState) {
+    let held = ui_state.stashed_input.take();
+    let line = std::mem::take(&mut ui_state.input.text);
+    let line_is_blank = line.trim().is_empty();
+    ui_state.input.text = held.clone().unwrap_or_default();
+    ui_state.input.cursor = ui_state.input.text.len();
+    ui_state.input.suggestion = None;
+    ui_state.input.history_pos = 0;
+    // A blank line is not worth holding: it would make the next press restore
+    // nothing and look broken.
+    ui_state.stashed_input = if line_is_blank { None } else { Some(line) };
+    match (held, ui_state.stashed_input.as_deref()) {
+        (Some(_), Some(set_aside)) => {
+            let preview = set_aside.lines().next().unwrap_or_default();
+            ui_state
+                .notifications
+                .info(format!("Line swapped; now holding: {preview}"));
+        }
+        (Some(_), None) => ui_state.notifications.info("Line restored"),
+        (None, Some(set_aside)) => {
+            let preview = set_aside.lines().next().unwrap_or_default();
+            ui_state
+                .notifications
+                .info(format!("Line set aside: {preview}"));
+        }
+        // Nothing was on the line and nothing was held.
+        (None, None) => {}
     }
 }
 
@@ -1587,6 +1655,18 @@ fn protocol_frame(
                 subtype: "mod_ui".to_string(),
                 session_id: session_id.to_string(),
                 data: serde_json::Map::from_iter([("elements".to_string(), elements)]),
+            })
+        }
+        // Panels travel as their own subtype because they are not content: a
+        // host that follows the stream applies them to slots it holds rather
+        // than appending them, and one that does not keeps the same
+        // transcript.
+        EngineEvent::ModPanel(updates) => {
+            let updates = serde_json::to_value(updates).ok()?;
+            ProtocolMessage::System(SystemFrame {
+                subtype: "mod_panel".to_string(),
+                session_id: session_id.to_string(),
+                data: serde_json::Map::from_iter([("updates".to_string(), updates)]),
             })
         }
         _ => return None,
@@ -6368,6 +6448,19 @@ impl ReplLoop {
                     self.persist_interactive_snapshot(ui_state);
                 }
             }
+            EngineEvent::ModPanel(updates) => {
+                // A panel is not transcript content: it takes rows of its own
+                // and stays across redraws and `/clear`. Applying it here is
+                // all the interactive surface has to do; the next frame draws
+                // whatever the store holds.
+                let dropped = ui_state.panels.apply(&updates);
+                if dropped > 0 {
+                    ui_state.notifications.err(format!(
+                        "{dropped} mod panel(s) were not shown: at most {} panels at a time",
+                        codape_core::ui_protocol::MAX_PANEL_SLOTS
+                    ));
+                }
+            }
             EngineEvent::StreamInterrupted {
                 reason,
                 partial_len,
@@ -6464,6 +6557,337 @@ impl ReplLoop {
         ui_state
             .overlays
             .push(codape_ui::overlay::Overlay::List(picker));
+    }
+
+    /// The settings menu, built from the settings file and the theme install.
+    ///
+    /// Read from disk each time it opens rather than from a snapshot: the
+    /// commands write the same file mid-session, and a menu showing a value
+    /// `/theme` had since changed would make the row look stuck.
+    fn settings_choices(&self) -> codape_ui::picker::Picker {
+        let settings = std::fs::read_to_string(Self::user_settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let themes = self.theme_manager().names();
+        crate::settings_menu::rows(&settings, &themes)
+    }
+
+    /// Every setting the menu offers, as `(key, current value)`.
+    ///
+    /// Read from the file each time, like the menu's rows. A key the file does
+    /// not hold reads as empty, which is what `/settings <key>` reports rather
+    /// than pretending the key is unset-but-known.
+    fn describe_settings() -> Vec<(String, String)> {
+        let settings = std::fs::read_to_string(Self::user_settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        crate::settings_menu::ROWS
+            .iter()
+            .map(|row| {
+                (
+                    row.key.to_string(),
+                    crate::settings_menu::value_at(&settings, row.key),
+                )
+            })
+            .collect()
+    }
+
+    /// Set one setting to an exact value, as `/settings <key> <value>`.
+    ///
+    /// The value is checked against the row's own list rather than taken as
+    /// written: a typo in a theme name or a permission mode would otherwise be
+    /// persisted and then silently ignored at the next start.
+    fn set_setting_value(
+        &mut self,
+        key: &str,
+        value: &str,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        let Some(row) = crate::settings_menu::row_for(key) else {
+            ui_state
+                .notifications
+                .warn(format!("No setting named {key}."));
+            return;
+        };
+        let choices = crate::settings_menu::choices_for(row, &self.theme_manager().names());
+        // A person typing `/settings model opus` means the model `/model opus`
+        // means. Resolve the alias first, so the value is checked against the
+        // canonical list while the shorthand still works. Every other row's
+        // value is taken as written.
+        let value = if row.key == "model" {
+            ModelId::from_alias(value).0
+        } else {
+            value.to_string()
+        };
+        let value = value.as_str();
+        if !choices.iter().any(|choice| choice == value) {
+            ui_state
+                .notifications
+                .warn(format!("{key} takes one of: {}", choices.join(", ")));
+            return;
+        }
+        let path = Self::user_settings_path();
+        let mut document = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        crate::settings_menu::set_at(
+            &mut document,
+            row.key,
+            crate::settings_menu::value_to_json(value),
+        );
+        if let Err(error) = write_settings_document(&path, &document) {
+            ui_state
+                .notifications
+                .err(format!("Could not write {}: {error}", path.display()));
+            return;
+        }
+        match if row.live {
+            self.apply_live_setting(row.key, value, ui_state)
+        } else {
+            None
+        } {
+            Some(note) => ui_state.notifications.success(note),
+            None => ui_state.notifications.info(format!(
+                "{}: {value}{}",
+                row.label,
+                if row.live {
+                    ""
+                } else {
+                    " (applies at the next start)"
+                }
+            )),
+        }
+    }
+
+    /// Apply one press of a settings row: step its value, write the file, and
+    /// do to the running session what the change means.
+    ///
+    /// The write comes first and the session change second, in that order on
+    /// purpose: a file that could not be written leaves the session alone
+    /// rather than applying a setting that would be gone at the next start.
+    fn apply_setting_row(&mut self, key: &str, ui_state: &mut codape_ui::state::UiState) {
+        let Some(row) = crate::settings_menu::row_for(key) else {
+            ui_state
+                .notifications
+                .warn(format!("No setting named {key}."));
+            return;
+        };
+        let path = Self::user_settings_path();
+        let mut document = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let current = crate::settings_menu::value_at(&document, row.key);
+        let themes = crate::settings_menu::choices_for(row, &self.theme_manager().names());
+        let Some(next) = crate::settings_menu::next_value(row, &themes, &current) else {
+            ui_state
+                .notifications
+                .warn(format!("{} has no value to move to.", row.label));
+            return;
+        };
+        crate::settings_menu::set_at(
+            &mut document,
+            row.key,
+            crate::settings_menu::value_to_json(&next),
+        );
+        if let Err(error) = write_settings_document(&path, &document) {
+            ui_state
+                .notifications
+                .err(format!("Could not write {}: {error}", path.display()));
+            return;
+        }
+        // What the change means to the running session. Only the rows marked
+        // live do anything here; the rest say plainly that they take effect at
+        // the next start, which is the truth and better than a notice that
+        // implies otherwise.
+        let applied = if row.live {
+            self.apply_live_setting(row.key, &next, ui_state)
+        } else {
+            None
+        };
+        match applied {
+            Some(note) => ui_state.notifications.success(note),
+            None if row.live => ui_state
+                .notifications
+                .info(format!("{}: {next}", row.label)),
+            None => ui_state
+                .notifications
+                .info(format!("{}: {next} (applies at the next start)", row.label)),
+        }
+    }
+
+    /// Do what a live setting change means to the session, if this program has
+    /// a way to adopt it.
+    ///
+    /// Returns a sentence when it did something worth reporting, `None` when
+    /// the value was written and the session needs no change beyond the file.
+    fn apply_live_setting(
+        &mut self,
+        key: &str,
+        value: &str,
+        ui_state: &mut codape_ui::state::UiState,
+    ) -> Option<String> {
+        match key {
+            "model" => {
+                let model = ModelId::from_alias(value);
+                self.set_model(model.clone());
+                Some(format!("Model: {}", model.0))
+            }
+            "permission_mode" => {
+                let mode = value
+                    .parse::<codape_core::permissions::PermissionMode>()
+                    .ok()?;
+                ui_state.permission_bar.mode = mode;
+                if let Some(ref mut engine) = self.session.engine {
+                    let checker = engine.permission_checker();
+                    if let Ok(mut checker) = checker.lock() {
+                        checker.set_mode(mode);
+                    }
+                }
+                Some(format!(
+                    "Permission mode: {}",
+                    ui_state.permission_bar.label()
+                ))
+            }
+            "vim_mode" => {
+                self.ui.vim_mode_enabled = value == "true";
+                Some(format!(
+                    "Vim mode: {}",
+                    if self.ui.vim_mode_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                ))
+            }
+            "statusline.theme" => {
+                if self.apply_tui_theme(ui_state, value) {
+                    Some(format!("Theme: {value}"))
+                } else {
+                    Some(format!("Theme {value} could not be loaded"))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Hand the terminal to `$EDITOR` with the prompt, and take back what it
+    /// saved.
+    ///
+    /// Synchronous on purpose, unlike the voice command: the editor needs the
+    /// tty the loop is holding, and the text has to be back before the next
+    /// frame — there is nothing to draw while the editor is up, because the
+    /// editor is drawing.
+    ///
+    /// The order matters. Raw mode goes off and the alternate screen goes down
+    /// first, or the editor draws into a screen it cannot leave; they come back
+    /// on afterwards, and the redrawn frame is what restores the transcript.
+    /// The event thread is parked for the same reason: a poll still running
+    /// while the editor reads the keyboard would swallow its keystrokes.
+    ///
+    /// A failed editor leaves the prompt exactly as it was. That is why the
+    /// text is only read back once the process exited successfully: an editor
+    /// that crashed after truncating its buffer has nothing worth keeping, and
+    /// the line the person had is worth more than the half-file.
+    fn run_external_editor(
+        &self,
+        terminal_ui: &mut codape_ui::terminal::TerminalUi,
+        ui_state: &mut codape_ui::state::UiState,
+        editor_pause: &std::sync::atomic::AtomicBool,
+    ) {
+        let settings = std::fs::read_to_string(Self::user_settings_path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(command) =
+            crate::external_editor::resolve(&settings, |name| std::env::var(name).ok())
+        else {
+            ui_state
+                .notifications
+                .warn("No editor configured: set $EDITOR, $VISUAL or \"visual\" in settings.json.");
+            return;
+        };
+        let mut parts = crate::external_editor::split_command(&command);
+        if parts.is_empty() {
+            ui_state
+                .notifications
+                .warn(format!("The configured editor names no program: {command}"));
+            return;
+        }
+        let program = parts.remove(0);
+
+        // The buffer lives in a directory of its own, removed on drop. A path
+        // that outlived the session would leave prompts in the temporary
+        // directory for anyone to read.
+        let Ok(directory) = tempfile::tempdir() else {
+            ui_state
+                .notifications
+                .err("Could not create a temporary file for the editor.");
+            return;
+        };
+        let path = crate::external_editor::prompt_path(directory.path());
+        if let Err(error) = std::fs::write(&path, ui_state.input.text.as_bytes()) {
+            ui_state.notifications.err(format!(
+                "Could not write the prompt for the editor: {error}"
+            ));
+            return;
+        }
+
+        editor_pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = terminal_ui.exit();
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::terminal::Clear(crossterm::terminal::ClearType::All);
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, 0));
+
+        let outcome = std::process::Command::new(&program)
+            .args(&parts)
+            .arg(&path)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .current_dir(&self.cwd)
+            .status();
+
+        let _ = crossterm::terminal::enable_raw_mode();
+        let _ = terminal_ui.enter();
+        editor_pause.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        match outcome {
+            Err(error) => {
+                ui_state
+                    .notifications
+                    .err(format!("Could not run {program}: {error}"));
+            }
+            Ok(status) if !status.success() => {
+                // A non-zero exit is an editor saying "do not use this". The
+                // line keeps what it had.
+                ui_state.notifications.warn(format!(
+                    "{program} exited with {status}; the prompt is unchanged."
+                ));
+            }
+            Ok(_) => {
+                // The file came back empty when the person cleared the line in
+                // the editor, which means the line is cleared here too — so
+                // both outcomes write the buffer, and the only difference is
+                // what the notice says.
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let loaded = crate::external_editor::prompt_from_file(&text);
+                let lines = loaded.as_deref().map_or(0, |prompt| prompt.lines().count());
+                ui_state.input.text = loaded.unwrap_or_default();
+                ui_state.input.cursor = ui_state.input.text.len();
+                ui_state.input.suggestion = None;
+                ui_state.input.history_pos = 0;
+                if lines > 0 {
+                    ui_state.notifications.info(format!(
+                        "Prompt loaded from {program} ({lines} line{})",
+                        if lines == 1 { "" } else { "s" }
+                    ));
+                }
+            }
+        }
     }
 
     /// The agent roster, built from the live manager.
@@ -6714,7 +7138,19 @@ impl ReplLoop {
         let mut accepted: Option<String> = None;
         let mut refusal: Option<String> = None;
 
-        if let Some(codape_ui::overlay::Overlay::List(picker)) = ui_state.overlays.top_mut() {
+        // The menu keeps its own picker open across an accept; only `accepted`
+        // tells the two apart below. Matched as one arm because the
+        // interaction — filter, highlight, accept — is the same; what differs
+        // is what happens to the box afterwards.
+        let menu_open = matches!(
+            ui_state.overlays.top(),
+            Some(codape_ui::overlay::Overlay::Settings(_))
+        );
+        if let Some(
+            codape_ui::overlay::Overlay::List(picker)
+            | codape_ui::overlay::Overlay::Settings(picker),
+        ) = ui_state.overlays.top_mut()
+        {
             match shortcut {
                 Some(Shortcut::ListPrevious) => picker.move_selection(-1),
                 Some(Shortcut::ListNext) => picker.move_selection(1),
@@ -6748,7 +7184,9 @@ impl ReplLoop {
             return TuiKeyFlow::Handled;
         }
         if let Some(key) = accepted {
-            ui_state.overlays.pop();
+            if !menu_open {
+                ui_state.overlays.pop();
+            }
             self.act_on_list_choice(&key, ui_state).await;
             return TuiKeyFlow::Handled;
         }
@@ -6765,6 +7203,33 @@ impl ReplLoop {
         ui_state: &mut codape_ui::state::UiState,
     ) -> bool {
         use crate::session_lists::AgentChoice;
+
+        // A settings row is not a choice that closes the menu: a person
+        // adjusting settings changes several in a row, and a menu that closed
+        // after each press would make the second cost a reopen. The row is
+        // written, then the box is replaced in place with one rebuilt from the
+        // file — so the value column shows what the file now says, and the
+        // highlight stays on the row being adjusted.
+        if let Some(setting) = crate::settings_menu::key_from_row(key).map(str::to_string) {
+            let (selected, query) = match ui_state.overlays.top() {
+                Some(codape_ui::overlay::Overlay::Settings(picker)) => {
+                    (picker.selected, picker.query.clone())
+                }
+                _ => (0, String::new()),
+            };
+            self.apply_setting_row(&setting, ui_state);
+            let mut picker = self.settings_choices();
+            // The filter survives the rebuild: a person who narrowed the menu
+            // to step one setting twice would otherwise have to retype it, and
+            // the highlight means the row they just changed.
+            picker.set_query(query);
+            picker.selected = selected.min(picker.visible().len().saturating_sub(1));
+            ui_state.overlays.pop();
+            ui_state
+                .overlays
+                .push(codape_ui::overlay::Overlay::Settings(picker));
+            return true;
+        }
 
         if let Some(choice) = AgentChoice::parse(key) {
             match choice {
@@ -7135,7 +7600,7 @@ impl ReplLoop {
         // second list on top of one already showing rows.
         if matches!(
             ui_state.overlays.top(),
-            Some(codape_ui::overlay::Overlay::List(_))
+            Some(codape_ui::overlay::Overlay::List(_) | codape_ui::overlay::Overlay::Settings(_))
         ) {
             return self.handle_list_key(&key, ui_state).await;
         }
@@ -7205,6 +7670,51 @@ impl ReplLoop {
                         && self.mcp.pending_elicitation.is_none() =>
                 {
                     self.start_voice_transcription(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
+                // Writing the prompt with room. The handover itself happens in
+                // the loop, which owns the terminal; this only reports that it
+                // was asked for. Guarded like the other keys that take the
+                // screen away: a dialog owns the keyboard, and an editor
+                // started under one would be drawn over and lose the
+                // keystrokes typed into it.
+                Shortcut::ExternalEditor
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none()
+                        && self.mcp.pending_elicitation.is_none() =>
+                {
+                    return TuiKeyFlow::ExternalEditor;
+                }
+                // Put the line aside, or take back the one that was put aside.
+                // No overlay guard: this is the one shortcut that is useful
+                // *while* something is open, and it touches only the line the
+                // session owns. The overlay's own keys are matched before this
+                // table is consulted, so a dialog still gets its characters.
+                Shortcut::StashInput => {
+                    stash_or_restore_input(ui_state);
+                    return TuiKeyFlow::Handled;
+                }
+                // The settings menu. A list like the others, opened from a
+                // table built here because it reads the theme install and the
+                // settings file.
+                Shortcut::SettingsMenu
+                    if !ui_state.overlays.is_active()
+                        && live.pending_confirmation.is_none()
+                        && self.mcp.pending_form.is_none()
+                        && self.mcp.pending_elicitation.is_none() =>
+                {
+                    let picker = self.settings_choices();
+                    if ui_state.overlays.has_modal() {
+                        // Left alone rather than stacked; `open_list`'s rule,
+                        // stated here because this one opens a `Settings`
+                        // rather than a `List`.
+                        return TuiKeyFlow::Handled;
+                    }
+                    ui_state.overlays.pop_palette();
+                    ui_state
+                        .overlays
+                        .push(codape_ui::overlay::Overlay::Settings(picker));
                     return TuiKeyFlow::Handled;
                 }
                 // The five list openers. They share one guard because they
@@ -8312,9 +8822,21 @@ impl ReplLoop {
         self.adopt_background_jobs(&mut ui_state);
 
         // Crossterm event channel — read in a blocking thread
+        //
+        // The pause flag exists for the one feature that takes the terminal
+        // away: while `$EDITOR` owns the tty, this thread would keep polling it
+        // and swallow the editor's keystrokes into a queue nobody reads until
+        // the editor exits — by which point they mean something else. Parked
+        // for the handover, resumed after it.
+        let editor_pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (ct_tx, mut ct_rx) = tokio::sync::mpsc::unbounded_channel::<crossterm::event::Event>();
+        let pause_for_editor = Arc::clone(&editor_pause);
         std::thread::spawn(move || {
             loop {
+                if pause_for_editor.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
                 // A transient terminal error (a resize or a signal delivered
                 // between `poll` and `read`) must not end keyboard input for
                 // the rest of the session. Only a closed receiver ends the
@@ -8707,7 +9229,7 @@ impl ReplLoop {
                             let Some(key) = codape_ui::input::key_press(key) else {
                                 continue;
                             };
-                            if self
+                            let flow = self
                                 .handle_key_event(
                                     key,
                                     &mut ui_state,
@@ -8719,10 +9241,16 @@ impl ReplLoop {
                                     &mut tui_elicit_rx,
                                     &mut queued_prompts,
                                 )
-                                .await
-                                == TuiKeyFlow::Quit
-                            {
+                                .await;
+                            if flow == TuiKeyFlow::Quit {
                                 break Ok(());
+                            }
+                            if flow == TuiKeyFlow::ExternalEditor {
+                                self.run_external_editor(
+                                    &mut terminal_ui,
+                                    &mut ui_state,
+                                    &editor_pause,
+                                );
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -9595,6 +10123,11 @@ impl ReplLoop {
             match event {
                 EngineEvent::TextDelta(delta) => output.push_str(&delta),
                 EngineEvent::ModUi(elements) => append_mod_ui_block(output, &elements),
+                // Everything else, panels included, is a surface's business.
+                // A panel in particular is a slot the host keeps on screen;
+                // this run has no surface, so there is nothing to update.
+                // Saying so would put a frame of noise in the middle of the
+                // answer for a mod that works perfectly well in the TUI.
                 _ => {}
             }
         }
@@ -10152,7 +10685,14 @@ impl ReplLoop {
             None => Err("mod UI activation is unavailable in this session".to_string()),
         };
         match outcome {
-            Ok(elements) => {
+            Ok(activation) => {
+                // A button press is also a chance for the mod to change its
+                // panel: both halves came back from the same call, so both are
+                // applied before the transcript is redrawn.
+                if !activation.panel_updates.is_empty() {
+                    ui_state.panels.apply(&activation.panel_updates);
+                }
+                let elements = activation.elements;
                 let rendered = codape_ui::mod_elements::render_mod_ui_text(
                     &elements,
                     codape_ui::mod_elements::MOD_UI_DEFAULT_WIDTH,
@@ -13209,6 +13749,41 @@ impl ReplLoop {
             Self::open_list(ui_state, picker);
             return;
         }
+        // `/settings` is the menu under its command name, plus the direct form
+        // for a script or for a person who would rather type the value than
+        // cycle to it: a bare name is for browsing, and forcing an argument
+        // through a dialog would only make the command worse than the file.
+        if cmd_name == "settings" {
+            match args {
+                [] => {
+                    if ui_state.overlays.has_modal() {
+                        return;
+                    }
+                    let picker = self.settings_choices();
+                    ui_state.overlays.pop_palette();
+                    ui_state
+                        .overlays
+                        .push(codape_ui::overlay::Overlay::Settings(picker));
+                }
+                [key] => {
+                    let lines = Self::describe_settings();
+                    let found = lines
+                        .into_iter()
+                        .find(|line| line.0 == *key)
+                        .map(|line| line.1);
+                    match found {
+                        Some(value) => ui_state.notifications.info(format!("{key}: {value}")),
+                        None => ui_state
+                            .notifications
+                            .warn(format!("No setting named {key}.")),
+                    }
+                }
+                [key, rest @ ..] => {
+                    self.set_setting_value(key, &rest.join(" "), ui_state);
+                }
+            }
+            return;
+        }
         let ctx = self.build_context();
         let result = self.commands.execute(cmd_name, &ctx, args);
         self.sync_command_state(cmd_name, &result);
@@ -15047,6 +15622,67 @@ mod tests {
     use codape_core::types::{ToolResult, UsageSummary};
 
     // ── Verification pass ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_stashed_line_comes_back_and_the_replacement_is_held() {
+        let mut ui = codape_ui::state::UiState::new();
+        ui.input.text = "first question".into();
+
+        stash_or_restore_input(&mut ui);
+        assert!(ui.input.text.is_empty(), "the line went into the slot");
+        assert_eq!(ui.stashed_input.as_deref(), Some("first question"));
+
+        ui.input.text = "a quick aside".into();
+        stash_or_restore_input(&mut ui);
+        // The held line comes back...
+        assert_eq!(ui.input.text, "first question");
+        // ...and the aside is not dropped: the key trades the two.
+        assert_eq!(ui.stashed_input.as_deref(), Some("a quick aside"));
+    }
+
+    #[test]
+    fn a_stash_into_an_empty_slot_restores_it_and_empties_the_slot() {
+        let mut ui = codape_ui::state::UiState::new();
+        ui.stashed_input = Some("held".into());
+        stash_or_restore_input(&mut ui);
+        assert_eq!(ui.input.text, "held");
+        assert!(ui.stashed_input.is_none(), "the slot gave its line back");
+        // The cursor sits at the end, so typing continues the restored line.
+        assert_eq!(ui.input.cursor, ui.input.text.len());
+    }
+
+    #[test]
+    fn a_blank_line_is_not_worth_holding() {
+        let mut ui = codape_ui::state::UiState::new();
+        ui.input.text = "   ".into();
+        stash_or_restore_input(&mut ui);
+        assert!(ui.stashed_input.is_none(), "spaces are not a prompt");
+        assert!(ui.input.text.is_empty());
+    }
+
+    #[test]
+    fn stashing_twice_with_nothing_typed_puts_the_same_line_back() {
+        // The third press undoes the second: nothing was typed in between, so
+        // the line that left is the line that returns.
+        let mut ui = codape_ui::state::UiState::new();
+        ui.input.text = "one".into();
+        stash_or_restore_input(&mut ui);
+        stash_or_restore_input(&mut ui);
+        assert_eq!(ui.input.text, "one");
+        assert!(ui.stashed_input.is_none());
+    }
+
+    #[test]
+    fn an_empty_press_with_nothing_held_says_nothing() {
+        let mut ui = codape_ui::state::UiState::new();
+        let before = ui.notifications.history().len();
+        stash_or_restore_input(&mut ui);
+        assert_eq!(
+            ui.notifications.history().len(),
+            before,
+            "a no-op is not a notice"
+        );
+    }
 
     #[test]
     fn verification_verdict_is_read_from_the_last_clause() {
@@ -17159,6 +17795,22 @@ mod tests {
         };
         assert_eq!(frame.subtype, "mod_ui");
         assert_eq!(frame.data["elements"][0]["id"], "retry");
+
+        // A panel is a different subtype on purpose: a host applies it to a
+        // slot it holds instead of appending it to the transcript.
+        let mod_panel = protocol_frame(
+            &EngineEvent::ModPanel(vec![codape_core::ui_protocol::ModPanelUpdate::Clear {
+                slot: "build".into(),
+            }]),
+            "s1",
+            false,
+        );
+        let Some(ProtocolMessage::System(frame)) = mod_panel else {
+            panic!("a mod panel should be a system frame");
+        };
+        assert_eq!(frame.subtype, "mod_panel");
+        assert_eq!(frame.data["updates"][0]["op"], "clear");
+        assert_eq!(frame.data["updates"][0]["slot"], "build");
     }
 
     /// A shared buffer the sink can write into while the test holds the other
@@ -19071,6 +19723,86 @@ mod tests {
         assert_eq!(ui_state.input.text, "git status");
         assert!(!thinking, "Enter started a turn instead of accepting");
         assert!(query_done_rx.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_settings_menu_opens_filters_and_closes() {
+        // Opening and filtering only read the settings file; the write is
+        // exercised end to end by the PTY test, which can give the child a
+        // config home of its own. Driving that here would mean mutating the
+        // process environment, which this crate forbids `unsafe` for.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = repl_with_keys(tmp.path());
+        let mut ui_state = codape_ui::state::UiState::new();
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let mut thinking = false;
+        let mut query_done_rx = None;
+        let mut elicit_rx = None;
+        let mut tui_elicit_rx = None;
+        let mut queued = std::collections::VecDeque::new();
+
+        repl.handle_key_event(
+            crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        let Some(codape_ui::overlay::Overlay::Settings(picker)) = ui_state.overlays.top() else {
+            panic!("Alt+C did not open the menu: {:?}", ui_state.overlays.top());
+        };
+        assert_eq!(picker.title, "Settings");
+        assert_eq!(
+            picker.items.len(),
+            crate::settings_menu::ROWS.len(),
+            "the menu does not offer every row"
+        );
+
+        // Typing filters the menu rather than reaching the prompt.
+        for c in "Vim".chars() {
+            repl.handle_key_event(
+                press(KeyCode::Char(c)),
+                &mut ui_state,
+                &mut live,
+                &mut vim,
+                &mut thinking,
+                &mut query_done_rx,
+                &mut elicit_rx,
+                &mut tui_elicit_rx,
+                &mut queued,
+            )
+            .await;
+        }
+        let Some(codape_ui::overlay::Overlay::Settings(picker)) = ui_state.overlays.top() else {
+            panic!("the menu closed while filtering");
+        };
+        assert_eq!(picker.query, "Vim");
+        assert_eq!(picker.visible().len(), 1, "the filter did not narrow");
+        assert!(
+            ui_state.input.text.is_empty(),
+            "the filter reached the line"
+        );
+
+        // Esc closes it and leaves nothing behind.
+        repl.handle_key_event(
+            press(KeyCode::Esc),
+            &mut ui_state,
+            &mut live,
+            &mut vim,
+            &mut thinking,
+            &mut query_done_rx,
+            &mut elicit_rx,
+            &mut tui_elicit_rx,
+            &mut queued,
+        )
+        .await;
+        assert!(ui_state.overlays.top().is_none(), "the menu stayed open");
     }
 
     #[tokio::test]

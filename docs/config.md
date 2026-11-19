@@ -210,6 +210,30 @@ Terminal.app renders 24-bit background sequences unreliably. Terminals that
 advertise truecolor through `COLORTERM` or a `-direct` `TERM` keep the exact
 palette.
 
+### External Editor
+
+`ctrl+x` in the TUI writes the prompt to a temporary Markdown file, hands the
+terminal to an editor, and reads the file back when the editor exits
+successfully. Two keys name that editor, and they are read from `settings.json`
+first:
+
+```json
+{ "visual": "code -w", "editor": "vim" }
+```
+
+`visual` is preferred over `editor` (the same split the shell makes: `$VISUAL`
+is the full-screen editor, `$EDITOR` the line one). When neither is set, the
+process's `$VISUAL` then `$EDITOR` is used. The value is a program plus its
+arguments, split on whitespace with quotes honoured; it is **not** run through a
+shell, so `&&` chains and globs stay literal arguments rather than becoming
+something the person did not write.
+
+Both keys are allowed in a settings file but deliberately unmodelled: no layer
+merges them, and they are the machine's own configuration. They still have to
+appear in `KNOWN_SETTINGS_FIELDS` — a key outside that list rejects the whole
+file (see *Invalid Files and Size Cap*), which would have discarded every other
+setting in a file that named an editor.
+
 ### Permission Rules (`permissions.allow` / `deny` / `ask`)
 
 Codape reads the Claude-compatible rule block from any settings layer:

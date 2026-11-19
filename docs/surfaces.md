@@ -45,6 +45,30 @@ Activation is surface-agnostic: a surface delivers the button `id` to
 returns the elements to render in its place. The terminal routes both `Enter`
 and mouse clicks through it.
 
+A mod has a second, unrelated contribution path. `$.ui.panel(slot, …)` does
+not render a block: it names a slot the host keeps, so the surface holds the
+tree until the mod replaces or clears it.
+
+```
+mod hook returns $.ui.panel(slot, ...) / $.ui.clearPanel(slot)
+        │
+        ▼
+HookFireResult.panel_updates ──► EngineEvent::ModPanel(Vec<ModPanelUpdate>)
+        │
+        ├─ in-process host: the active surface applies them to its own slots
+        │     terminal: codape_ui::panel::PanelStore, drawn in its own band
+        │
+        └─ out-of-process host:
+              core::wire_protocol  → WireEvent::ModPanel { updates }
+              stream-json          → {"type":"system","subtype":"mod_panel","updates":[...]}
+```
+
+The operations (`set` / `clear`, each naming its slot) are what cross the
+boundary, so a host can hold the same slots across turns and no mod can erase
+another's panel by rendering its own. The store is plain data by design: it
+owns which slots exist and in what order, and the drawing belongs to whichever
+surface shows it.
+
 The descriptor also travels to mods: `$.session.surface` is the active id and
 `$.session.surfaceCapabilities` is the capability object. A mod that renders a
 button can check `interactive` first, and a mod that changes behaviour per
@@ -66,6 +90,10 @@ terminal.
   passes `active_descriptor()` into `ModSession`.
 - `core::wire_protocol` and the stream-json protocol both carry mod UI, so a
   surface outside this process receives the same tree.
+- Mod panels carry the same way: `WireEvent::ModPanel` and the `mod_panel`
+  frame. The terminal draws them from `codape_ui::panel::PanelStore` in a band
+  between the transcript and the prompt; a headless run ignores them, having no
+  surface to hold a slot.
 
 Only the terminal is registered as a `UiSurface`. An editor reaches a running
 session through a different path — `codape ide bridge`, a stdio MCP server that
@@ -85,6 +113,10 @@ editor needs an implementation this repository does not have.
 5. For an out-of-process host, consume `WireEvent::ModUi` (or the stream-json
    `system`/`mod_ui` frame) and send activation back through the same protocol
    the host already uses for control requests.
+6. If the host has somewhere to keep a panel, consume `WireEvent::ModPanel`
+   (the `system`/`mod_panel` frame) and apply each `set`/`clear` to a slot of
+   its own. Skipping this step is fine — panels are the one contribution a host
+   may decline without losing anything else.
 
 No change is needed in the engine, `crates/mods`, or the element schema. The
 element tree is the shared contract; the surface decides how it looks.

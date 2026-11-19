@@ -39,6 +39,9 @@ pub fn engine_event_to_wire(event: &EngineEvent) -> Option<WireEvent> {
         EngineEvent::ModUi(elements) => WireEvent::ModUi {
             elements: elements.clone(),
         },
+        EngineEvent::ModPanel(updates) => WireEvent::ModPanel {
+            updates: updates.clone(),
+        },
         EngineEvent::CompactBoundary => WireEvent::CompactBoundary,
         EngineEvent::Compaction(event) => WireEvent::Compaction(event.clone()),
         EngineEvent::PermissionRequest { id, tool, args } => WireEvent::PermissionRequest {
@@ -101,6 +104,7 @@ pub fn wire_event_to_engine(event: &WireEvent) -> Option<EngineEvent> {
             result: ToolResult::from(result.clone()),
         },
         WireEvent::ModUi { elements } => EngineEvent::ModUi(elements.clone()),
+        WireEvent::ModPanel { updates } => EngineEvent::ModPanel(updates.clone()),
         WireEvent::CompactBoundary => EngineEvent::CompactBoundary,
         WireEvent::Compaction(event) => EngineEvent::Compaction(event.clone()),
         WireEvent::PermissionRequest { id, tool, args } => EngineEvent::PermissionRequest {
@@ -251,6 +255,39 @@ mod tests {
         match wire_event_to_engine(&decoded) {
             Some(EngineEvent::ModUi(back)) => assert_eq!(back, elements),
             other => panic!("expected ModUi, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mod_panel_roundtrip() {
+        use crate::ui_protocol::{ModPanelUpdate, UiElement, UiStyle};
+
+        let updates = vec![
+            ModPanelUpdate::Set {
+                slot: "build".into(),
+                elements: vec![UiElement::Text {
+                    text: "green".into(),
+                    style: UiStyle::Dim,
+                }],
+            },
+            ModPanelUpdate::Clear {
+                slot: "watch".into(),
+            },
+        ];
+        let engine = EngineEvent::ModPanel(updates.clone());
+        let wire = engine_event_to_wire(&engine).expect("a panel crosses the wire");
+        assert!(matches!(wire, WireEvent::ModPanel { .. }));
+
+        // A host that follows the stream applies these to slots it holds, so
+        // the frame has to keep the operation and the slot's name intact.
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains("\"type\":\"mod_panel\""), "{json}");
+        assert!(json.contains("\"op\":\"set\""), "{json}");
+        assert!(json.contains("\"op\":\"clear\""), "{json}");
+        let decoded: WireEvent = serde_json::from_str(&json).unwrap();
+        match wire_event_to_engine(&decoded) {
+            Some(EngineEvent::ModPanel(back)) => assert_eq!(back, updates),
+            other => panic!("expected ModPanel, got {other:?}"),
         }
     }
 

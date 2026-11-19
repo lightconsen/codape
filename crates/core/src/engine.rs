@@ -3615,6 +3615,13 @@ impl QueryEngine {
         if !result.ui.is_empty() {
             let _ = self.event_tx.send(EngineEvent::ModUi(result.ui.clone()));
         }
+        // Panels are a different contract: the host keeps them, so a call that
+        // asked for a change must be reported even when it drew no block.
+        if !result.panel_updates.is_empty() {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::ModPanel(result.panel_updates.clone()));
+        }
         result
     }
 

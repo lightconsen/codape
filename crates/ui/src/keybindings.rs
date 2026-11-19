@@ -168,6 +168,12 @@ pub enum Action {
     HistorySearchAccept,
     /// Close history search without changing the line.
     HistorySearchCancel,
+    /// Write the prompt in `$EDITOR` and take back what comes out.
+    ExternalEditor,
+    /// Put the line aside, or take back the one that was put aside.
+    StashInput,
+    /// Open the settings menu.
+    SettingsMenu,
     /// Open the agent roster.
     AgentsView,
     /// Open the help page.
@@ -228,6 +234,9 @@ impl Action {
             Self::HistorySearchNext => "historySearch:next",
             Self::HistorySearchAccept => "historySearch:accept",
             Self::HistorySearchCancel => "historySearch:cancel",
+            Self::ExternalEditor => "chat:externalEditor",
+            Self::StashInput => "chat:stash",
+            Self::SettingsMenu => "app:settings",
             Self::AgentsView => "app:agentsView",
             Self::Help => "app:help",
             Self::Rewind => "app:rewind",
@@ -262,6 +271,9 @@ impl Action {
             | Self::VoiceInput
             | Self::Cancel
             | Self::HistorySearch
+            | Self::ExternalEditor
+            | Self::StashInput
+            | Self::SettingsMenu
             | Self::ModelPicker
             | Self::EffortSlider
             | Self::AgentsView
@@ -298,7 +310,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 39] {
+    pub const fn all() -> [Self; 42] {
         ALL_ACTIONS
     }
 
@@ -378,11 +390,24 @@ impl Action {
             // The toggle a person reaches for when the answer is long. `ctrl+t`
             // is the transcript size control in most terminals' muscle memory.
             Self::TranscriptFullscreen => &["ctrl+t"],
+            // Writing the prompt somewhere with room. `ctrl+x` is the shell's
+            // "hand this off" prefix and nothing else in the table wanted it;
+            // the key people expect for this in an editor-driven agent is a
+            // chord, and chords are not in the parser, so the prefix alone is
+            // the closest single keystroke to it.
+            Self::ExternalEditor => &["ctrl+x"],
+            // The same key a shell's job control uses for "stop and keep it",
+            // which is what stashing a half-written prompt is: taken off the
+            // line and held, not thrown away.
+            Self::StashInput => &["ctrl+s"],
+            // `alt+c` for configuration, beside the `alt+h` help page and the
+            // `alt+p`/`alt+v` surfaces it sits with.
+            Self::SettingsMenu => &["alt+c"],
         }
     }
 }
 
-const ALL_ACTIONS: [Action; 39] = [
+const ALL_ACTIONS: [Action; 42] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -422,6 +447,9 @@ const ALL_ACTIONS: [Action; 39] = [
     Action::ListPrevious,
     Action::ListNext,
     Action::ListAccept,
+    Action::ExternalEditor,
+    Action::StashInput,
+    Action::SettingsMenu,
 ];
 
 /// A named key, for everything that is not a character.

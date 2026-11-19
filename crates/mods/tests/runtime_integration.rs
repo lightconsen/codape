@@ -437,7 +437,10 @@ fn an_activation_handler_runs_through_the_public_handle() {
     );
     let runtime = load_dir(dir.path());
 
-    let elements = runtime.activate("retry").expect("the handler runs");
+    let elements = runtime
+        .activate("retry")
+        .expect("the handler runs")
+        .elements;
 
     assert_eq!(
         elements,
@@ -452,4 +455,71 @@ fn an_activation_handler_runs_through_the_public_handle() {
             },
         ]
     );
+}
+
+#[test]
+fn a_mod_panel_reaches_the_hosts_slot_store_and_stays_there() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mod(
+        dir.path(),
+        "status.tsx",
+        "function register(on: any) { \
+         on('PostToolUse', '*', function ($: any) { \
+           $.ui.panel('build', <box title=\"Build\"><text>bundle ok</text></box>); }); }",
+    );
+    let runtime = load_dir(dir.path());
+
+    let result = fire(&runtime, "PostToolUse", "Bash");
+    assert!(!result.failed, "{result:?}");
+    assert!(
+        result.ui.is_empty(),
+        "a panel is not a transcript block: {:?}",
+        result.ui
+    );
+
+    // The host owns the slot store; the mod only sends operations.
+    let mut panels = codape_ui::panel::PanelStore::new();
+    assert_eq!(panels.apply(&result.panel_updates), 0);
+    assert_eq!(panels.slots().len(), 1);
+    assert_eq!(panels.slots()[0].slot, "build");
+
+    let drawn = panels
+        .render(40)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(drawn.contains("Build"), "{drawn}");
+    assert!(drawn.contains("bundle ok"), "{drawn}");
+
+    // Drawing the same slot again replaces it rather than stacking a second.
+    let result = fire(&runtime, "PostToolUse", "Bash");
+    assert_eq!(panels.apply(&result.panel_updates), 0);
+    assert_eq!(panels.slots().len(), 1, "the slot is the identity");
+}
+
+#[test]
+fn an_activation_handler_can_clear_a_panel_it_drew() {
+    let dir = tempfile::tempdir().unwrap();
+    write_mod(
+        dir.path(),
+        "toggle.js",
+        "function register(on) { \
+         on('PostToolUse', '*', function ($) { $.ui.panel('build', $.ui.text('ok')); }); \
+         $.ui.onActivate('hide', function ($) { $.ui.clearPanel('build'); }); }",
+    );
+    let runtime = load_dir(dir.path());
+
+    let mut panels = codape_ui::panel::PanelStore::new();
+    panels.apply(
+        &runtime
+            .fire("PostToolUse", "Bash", &HashMap::new())
+            .panel_updates,
+    );
+    assert_eq!(panels.slots().len(), 1);
+
+    let activation = runtime.activate("hide").expect("the handler runs");
+    assert!(activation.elements.is_empty(), "clearing renders no block");
+    panels.apply(&activation.panel_updates);
+    assert!(panels.is_empty(), "the cleared slot draws nothing");
 }

@@ -36,6 +36,8 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::ImagePaste,
             Action::AttachmentBrowser,
             Action::VoiceInput,
+            Action::ExternalEditor,
+            Action::StashInput,
             Action::HistorySearch,
             Action::HistorySearchPrevious,
             Action::HistorySearchNext,
@@ -58,6 +60,7 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::ThemePicker,
             Action::PluginBrowser,
             Action::SessionPicker,
+            Action::SettingsMenu,
             Action::Help,
         ],
     ),
@@ -107,6 +110,8 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ImagePaste => "Attach the image on the clipboard",
         Action::AttachmentBrowser => "See, show or remove the images attached to the next prompt",
         Action::VoiceInput => "Transcribe from the microphone onto the prompt",
+        Action::ExternalEditor => "Write the prompt in $EDITOR and read it back",
+        Action::StashInput => "Set the line aside and take it back",
         Action::Cancel => "Stop the turn, clear the line, or close a dialog",
         Action::HistorySearch => "Search previous prompts",
         Action::ConfirmYes => "Run the destructive command",
@@ -129,6 +134,7 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ThemePicker => "Choose a colour theme",
         Action::PluginBrowser => "Installed plugins and marketplaces",
         Action::SessionPicker => "Resume an earlier session of this workspace",
+        Action::SettingsMenu => "Change a setting from a menu",
         Action::DiffPreviousFile => "Jump to the previous file in the diff",
         Action::DiffNextFile => "Jump to the next file in the diff",
         Action::PanePreviousTab => "Show the pane's previous view",
@@ -259,6 +265,9 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::ListPrevious,
     Action::ListNext,
     Action::ListAccept,
+    Action::ExternalEditor,
+    Action::StashInput,
+    Action::SettingsMenu,
 ];
 
 #[cfg(test)]

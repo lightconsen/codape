@@ -94,6 +94,14 @@ pub enum Overlay {
     /// theme list, the installed plugins and their marketplaces. The rows are
     /// the session's; the interaction is [`crate::picker::Picker`]'s.
     List(crate::picker::Picker),
+    /// The settings menu.
+    ///
+    /// The same interaction and the same rows type as [`Overlay::List`], and
+    /// deliberately a separate variant anyway: a list is *choose once and it
+    /// closes*, and a settings menu is *adjust several and then leave*. Enter
+    /// on a row here changes the value and keeps the menu up, which is a
+    /// different key contract and the reason this cannot be one of the lists.
+    Settings(crate::picker::Picker),
 }
 
 /// The choices in an open [`Overlay::ModelPicker`].

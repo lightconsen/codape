@@ -4123,3 +4123,204 @@ fn the_plugin_browser_can_start_an_install() {
         "the fixture was consumed rather than read"
     );
 }
+
+/// Ctrl+S sets the line aside and Ctrl+S brings it back.
+///
+/// The slot would be useless if nothing showed it: a prompt that disappears
+/// with no trace is a prompt people think they lost. So this drives the key
+/// through a real terminal and checks both halves — the line leaves, the rule
+/// above the input says what is held, and the next press returns it.
+#[test]
+fn the_stash_key_sets_the_line_aside_and_takes_it_back() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_text("a long question about the diff");
+    session.wait_for_text("a long question about the diff", SCREEN_TIMEOUT);
+
+    // Ctrl+S is 0x13.
+    session.send_bytes(&[0x13]);
+    let screen = session.wait_for_text("set aside: a long question", SCREEN_TIMEOUT);
+    assert!(
+        !screen.contains("❯ a long question"),
+        "the line stayed on the prompt after being set aside:\n{screen}"
+    );
+
+    // A second press, with nothing typed in between, puts it back and clears
+    // the badge.
+    session.send_bytes(&[0x13]);
+    session.wait_for_text("❯ a long question about the diff", SCREEN_TIMEOUT);
+    session.wait_for_text_absent("set aside:", SCREEN_TIMEOUT);
+}
+
+/// Alt+C opens the settings menu over the same file the commands write.
+///
+/// Enter steps the highlighted row and leaves the menu up — adjusting several
+/// settings is the point — and the file is written as the row changes. Vim
+/// mode is the row chosen here because it is live: the footer badge in the
+/// session is the proof that the running session adopted it, not just the
+/// file.
+#[test]
+fn the_settings_menu_steps_a_value_and_keeps_itself_open() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_bytes(b"\x1bc"); // Alt+C
+    let screen = session.wait_for_text("Settings", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("Filter: "),
+        "Alt+C did not open the settings menu:\n{screen}"
+    );
+    assert!(
+        screen.contains("Permission mode"),
+        "the menu does not list the rows it knows:\n{screen}"
+    );
+    assert!(
+        screen.contains("· next session"),
+        "a row that only applies at the next start does not say so:\n{screen}"
+    );
+
+    // Narrow to the vim row and flip it. The filter is typed into the menu,
+    // so the highlight is on that row by the time Enter lands.
+    session.send_text("vim");
+    session.wait_for_text("Filter: vim", SCREEN_TIMEOUT);
+    session.enter();
+    session.wait_for_text("Vim mode: on", SCREEN_TIMEOUT);
+
+    // The menu stayed up: its filter line is still drawn.
+    session.wait_for_text("Filter: vim", SCREEN_TIMEOUT);
+
+    session.esc();
+    session.wait_for_text_absent("Filter:", SCREEN_TIMEOUT);
+
+    // The write landed in the config home this session was given.
+    let written = std::fs::read_to_string(session.config_home().join("settings.json"))
+        .expect("settings.json written by the menu");
+    let parsed: serde_json::Value = serde_json::from_str(&written).expect("valid json");
+    assert_eq!(
+        parsed["vim_mode"],
+        serde_json::Value::Bool(true),
+        "{written}"
+    );
+}
+
+/// Ctrl+X hands the line to `$EDITOR` and takes back what the editor saved.
+///
+/// The editor here is a script that rewrites the file it is given, which is
+/// exactly the contract: the path is the last argument, the exit status says
+/// whether to keep the file, and the file is the answer. The session has to
+/// come back too — the alternate screen and raw mode are the editor's while it
+/// runs, and the prompt has to be drawable afterwards.
+#[test]
+fn the_external_editor_key_replaces_the_line_with_what_the_editor_saved() {
+    let dir = setup_project_dir();
+    let home = tempfile::tempdir().expect("shared home");
+    let editor = home.path().join("fake-editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'a prompt written in the editor\\n\\nsecond block\\n' > \"$1\"\n",
+    )
+    .expect("write editor script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod editor");
+    }
+    std::fs::write(
+        home.path().join("settings.json"),
+        serde_json::json!({
+            "config_version": 4,
+            "telemetry_enabled": false,
+            "editor": editor.to_str().expect("utf-8 path"),
+        })
+        .to_string(),
+    )
+    .expect("settings");
+
+    let mut session =
+        PtySession::launch_with_home(dir.path(), &[], "claude-sonnet-4-6", home.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_text("half a thought");
+    session.wait_for_text("half a thought", SCREEN_TIMEOUT);
+
+    session.send_bytes(&[0x18]); // Ctrl+X
+    let screen = session.wait_for_text("Prompt loaded from", SCREEN_TIMEOUT);
+    // The first line of the file is on the prompt, and the trailing newline
+    // the editor added is gone; the deliberate blank line between the two
+    // paragraphs is not.
+    assert!(
+        screen.contains("a prompt written in the editor"),
+        "the editor's text did not reach the prompt:\n{screen}"
+    );
+    assert!(
+        !screen.contains("half a thought"),
+        "the line kept its old text after the editor saved:\n{screen}"
+    );
+
+    // The session is usable: the prompt takes input and the screen is the TUI
+    // again rather than the editor's last frame.
+    session.send_text(" tail");
+    session.wait_for_text("second block", SCREEN_TIMEOUT);
+}
+
+/// A mod's panel is drawn by the host, beside the conversation, and stays.
+///
+/// The mod sends only the operation (`$.ui.panel(slot, ...)`); the rows appear
+/// because the terminal keeps a slot store of its own, not because the mod
+/// appended a transcript block. The proof is that the panel is on screen in a
+/// frame the transcript's text did not produce and sits above the prompt row.
+#[test]
+fn a_mod_panel_stays_on_screen_beside_the_conversation() {
+    let dir = setup_project_dir();
+    let mods = tempfile::tempdir().expect("mods dir");
+    std::fs::write(
+        mods.path().join("status.js"),
+        "function register(on) { on('UserPromptSubmit', '*', function ($) { \
+         $.ui.panel('build', $.ui.text('mod-panel-here')); }); }",
+    )
+    .expect("write mod");
+
+    let mods_dir = mods.path().to_string_lossy().into_owned();
+    let (_server, mut session) = session_with_static_server_envs(
+        dir.path(),
+        &[("CODAPE_MODS", "1"), ("CODAPE_MODS_DIR", &mods_dir)],
+    );
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_line("hello");
+    let screen = session.wait_for_text("mod-panel-here", SCREEN_TIMEOUT);
+
+    let rows: Vec<&str> = screen.lines().collect();
+    let panel_row = rows
+        .iter()
+        .position(|row| row.contains("mod-panel-here"))
+        .expect("the panel row");
+    let prompt_row = rows
+        .iter()
+        .position(|row| row.contains('❯'))
+        .expect("the prompt row");
+    assert!(
+        panel_row < prompt_row,
+        "the panel drew below the prompt (panel {panel_row}, prompt {prompt_row}):\n{screen}"
+    );
+
+    // Panels are not transcript content: the turn's own text is still there,
+    // and the panel did not replace it.
+    let screen = session.wait_for_text("Hello!", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("mod-panel-here"),
+        "the panel did not survive the turn's transcript update:\n{screen}"
+    );
+
+    // A session that keeps running keeps the panel: a prompt repaints the
+    // frame without consulting the mod again.
+    session.send_text("still here");
+    let screen = session.wait_for_text("still here", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("mod-panel-here"),
+        "the panel left the screen on an unrelated repaint:\n{screen}"
+    );
+}

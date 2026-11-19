@@ -71,7 +71,13 @@ pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// and managed layers may set it (the project layers are stripped in
 /// [`Settings::resolve`]), so a repository-controlled file still cannot
 /// inject environment variables into a session.
-const KNOWN_SETTINGS_FIELDS: [&str; 19] = [
+///
+/// `editor` and `visual` are allowed but unmodelled, like `plugins` and
+/// `marketplaces`: the external-editor key reads them straight out of the
+/// document, and they are the person's own machine configuration rather than
+/// something the session merges across layers. Listing them here is not
+/// optional — a key absent from this table rejects the whole file.
+const KNOWN_SETTINGS_FIELDS: [&str; 21] = [
     "config_version",
     "model",
     "permission_mode",
@@ -91,6 +97,8 @@ const KNOWN_SETTINGS_FIELDS: [&str; 19] = [
     "prompt_caching",
     "env",
     "provider",
+    "editor",
+    "visual",
 ];
 
 /// Permission modes accepted in settings, most restrictive first.
@@ -2023,6 +2031,24 @@ mod tests {
             matches!(result, Err(ConfigError::UnknownField { ref field }) if field == "unknown_key")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_editor_keys_are_allowed_even_though_nothing_models_them() {
+        // The external-editor key reads `editor`/`visual` straight out of the
+        // document, so they have to pass the unknown-field gate. A key missing
+        // from the allowlist rejects the whole file, which would silently
+        // discard every other setting in it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"editor":"nvim","visual":"code -w"}"#).unwrap();
+        let loaded = load_settings_file(&path, "user")
+            .expect("the editor keys are allowed")
+            .expect("the file exists");
+        // Unmodelled, so the typed parse leaves no trace of them — the point is
+        // that the file still loads. A single file is not merged against the
+        // built-in defaults here; that happens in `resolve`.
+        assert_eq!(loaded.model, None);
     }
 
     #[test]

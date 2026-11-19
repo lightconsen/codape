@@ -34,6 +34,26 @@ fn write_user_settings(
     Ok(())
 }
 
+/// Read a dotted path out of the parsed settings, for display.
+///
+/// Missing is the empty string, which every caller here renders as `unset`.
+fn read_path(settings: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    let mut node = &serde_json::Value::Object(settings.clone());
+    for segment in key.split('.') {
+        let Some(next) = node.get(segment) else {
+            return String::new();
+        };
+        node = next;
+    }
+    match node {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Bool(flag) => flag.to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 /// Register config commands.
 pub fn register(registry: &mut CommandRegistry) {
     // /config — show/edit config
@@ -191,6 +211,55 @@ pub fn register(registry: &mut CommandRegistry) {
                     "Permission mode set to: {mode:?}\nSaved to settings.json. Use in the REPL for immediate effect.",
                 )).with_state_change(true)
             }
+        }),
+    ));
+
+    // /settings — the menu, under its command name.
+    //
+    // The registry's handler is the non-interactive half: it reports the
+    // values and writes one. The interactive session intercepts the command
+    // before this runs, because a bare `/settings` opens the menu and a menu
+    // is not something a command handler owning no terminal can draw. Keeping
+    // this registered means the name is in the palette, `/help` lists it, and
+    // a headless `-p` run gets a real answer instead of "unknown command".
+    registry.register(SlashCommand::local(
+        "settings",
+        "Change a setting, or open the settings menu",
+        true,
+        true,
+        true,
+        Arc::new(|ctx: &CommandContext, args: &[String]| {
+            let settings = read_user_settings(&ctx.config_dir).unwrap_or_default();
+            if args.is_empty() {
+                let mut lines = vec!["Settings (settings.json)".to_string()];
+                for key in [
+                    "model",
+                    "permission_mode",
+                    "vim_mode",
+                    "statusline.theme",
+                    "prompt_caching",
+                    "telemetry_enabled",
+                ] {
+                    let value = read_path(&settings, key);
+                    lines.push(format!(
+                        "  {key}: {}",
+                        if value.is_empty() { "unset" } else { &value }
+                    ));
+                }
+                lines.push(String::new());
+                lines.push("Usage: /settings <key> <value>".to_string());
+                lines.push("In the TUI, bare /settings opens a menu (alt+c).".to_string());
+                return CommandResult::success(lines.join("\n"));
+            }
+            if args.len() == 1 {
+                let value = read_path(&settings, &args[0]);
+                return if value.is_empty() {
+                    CommandResult::error(format!("Key '{}' is not set.", args[0]))
+                } else {
+                    CommandResult::success(format!("{}: {value}", args[0]))
+                };
+            }
+            CommandResult::error("Usage: /settings [<key> [<value>]]")
         }),
     ));
 }
@@ -385,5 +454,81 @@ mod tests {
         };
         let result = reg.execute("permissions", &ctx(), &["foobar".into()]);
         assert!(result.output.contains("Error"));
+    }
+
+    #[test]
+    fn settings_lists_the_keys_it_knows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = serde_json::json!({
+            "model": "haiku",
+            "statusline": {"theme": "dark"},
+        });
+        std::fs::write(tmp.path().join("settings.json"), settings.to_string()).unwrap();
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute("settings", &ctx_in(tmp.path()), &[]);
+        assert!(!result.output.starts_with("Error:"), "{}", result.output);
+        // A dotted key is read through the nested object, not printed as a
+        // whole JSON blob.
+        assert!(
+            result.output.contains("statusline.theme: dark"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("model: haiku"), "{}", result.output);
+        // A key the file does not hold says so instead of printing nothing.
+        assert!(
+            result.output.contains("vim_mode: unset"),
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn settings_reports_one_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            serde_json::json!({"telemetry_enabled": false}).to_string(),
+        )
+        .unwrap();
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute(
+            "settings",
+            &ctx_in(tmp.path()),
+            &["telemetry_enabled".into()],
+        );
+        // `false` is a value, not an absence.
+        assert_eq!(result.output, "telemetry_enabled: false");
+
+        let missing = reg.execute("settings", &ctx_in(tmp.path()), &["nope".into()]);
+        assert!(missing.output.starts_with("Error:"), "{}", missing.output);
+        assert!(missing.output.contains("not set"), "{}", missing.output);
+    }
+
+    #[test]
+    fn settings_refuses_to_write_from_the_registry() {
+        // The registry's half reports; it never writes. Writing lives in the
+        // interactive menu, which validates against the row's own choices.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute(
+            "settings",
+            &ctx_in(tmp.path()),
+            &["model".into(), "opus".into()],
+        );
+        assert!(result.output.starts_with("Error:"), "{}", result.output);
+        assert!(!tmp.path().join("settings.json").exists());
     }
 }

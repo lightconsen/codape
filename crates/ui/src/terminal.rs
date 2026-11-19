@@ -370,15 +370,16 @@ fn panic_exit_commands(
 /// with the palette hidden and no notification, a computed statusline index of
 /// 1 lands on the zero-height palette slot and the line disappears. Index by the
 /// constraint position instead.
-const PALETTE_IDX: usize = 1;
-const NOTIFICATION_IDX: usize = 2;
-const TODOS_IDX: usize = 3;
-const STATUSLINE_IDX: usize = 4;
-const RULE_IDX: usize = 5;
-const INPUT_IDX: usize = 6;
-const RULE_BELOW_IDX: usize = 7;
-const PERMISSION_IDX: usize = 8;
-const FOOTER_IDX: usize = 9;
+const PANEL_IDX: usize = 1;
+const PALETTE_IDX: usize = 2;
+const NOTIFICATION_IDX: usize = 3;
+const TODOS_IDX: usize = 4;
+const STATUSLINE_IDX: usize = 5;
+const RULE_IDX: usize = 6;
+const INPUT_IDX: usize = 7;
+const RULE_BELOW_IDX: usize = 8;
+const PERMISSION_IDX: usize = 9;
+const FOOTER_IDX: usize = 10;
 
 /// Which of the optional panes this frame draws.
 ///
@@ -407,6 +408,7 @@ struct Panes {
 /// `todo_height` is the row count the `TodoWrite` panel asked for, zero when
 /// the model has not written a list.
 fn frame_constraints(
+    panel_height: u16,
     inline_palette_height: u16,
     panes: Panes,
     todo_height: u16,
@@ -420,8 +422,14 @@ fn frame_constraints(
     } else {
         (1, input_height.max(1), 1, 0)
     };
+    // A mod panel sits directly under the conversation and above everything
+    // else: it is the mod's own reading of the session, so it belongs beside
+    // the transcript rather than below the prompt where the person's own
+    // controls are.
+    let panel_rows = if panes.fullscreen { 0 } else { panel_height };
     vec![
         Constraint::Min(1),                                // message area
+        Constraint::Length(panel_rows),                    // mod panels
         Constraint::Length(inline_palette_height),         // inline command hint
         Constraint::Length(u16::from(panes.notification)), // notification bar
         Constraint::Length(todo_height),                   // todo panel
@@ -515,9 +523,23 @@ fn render_frame(
         input_display_height(&state.input, area.width).min(max_input_height)
     };
     let footer_height = u16::from(fullscreen);
+    // Mod panels take their own rows below the conversation. They are capped
+    // so the transcript never drops below a few rows: a panel that grows
+    // without bound would be a mod taking the screen, which is not what a
+    // panel is for.
+    let max_panel_height = area.height.saturating_sub(8).max(1);
+    let panel_height = if fullscreen {
+        0
+    } else {
+        state
+            .panels
+            .display_height(area.width as usize)
+            .min(max_panel_height)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(frame_constraints(
+            panel_height,
             inline_palette_height,
             Panes {
                 notification: show_notif,
@@ -565,6 +587,11 @@ fn render_frame(
         render_messages(frame, msg_area, state, mod_ui_blocks, mod_ui_hit_regions);
     }
 
+    // Mod panels, directly under the conversation.
+    if panel_height > 0 {
+        render_mod_panels(frame, chunks[PANEL_IDX], state);
+    }
+
     // Inline palette (index 1)
     if inline_palette_height > 0 {
         render_inline_palette(frame, chunks[PALETTE_IDX], state);
@@ -595,8 +622,11 @@ fn render_frame(
         render_todo_panel(frame, chunks[TODOS_IDX], &state.todos, &state.theme);
     }
 
-    // Rules that frame the input box
-    render_input_rule(frame, chunks[RULE_IDX], &state.theme);
+    // Rules that frame the input box. The one above carries the stashed-line
+    // badge, if there is a line set aside: a prompt nothing draws is a prompt
+    // people forget they have, and the slot only exists to be taken back.
+    let stash_hint = state.stashed_input.as_deref().map(stash_badge);
+    render_input_rule_with_hint(frame, chunks[RULE_IDX], &state.theme, stash_hint.as_deref());
 
     // Input line
     render_input(
@@ -2342,6 +2372,24 @@ fn render_statusline(
     frame.render_widget(paragraph, text_area);
 }
 
+/// Draw a mod's panels, top to bottom, directly under the conversation.
+///
+/// The rows are clipped to `area`, and the store's own height calculation is
+/// what asked the layout for them, so in practice nothing is cut. Clipping
+/// rather than refusing to draw is what keeps a resize from leaving a stale
+/// frame: a panel taller than the terminal shows its top, which is the part a
+/// status surface puts first.
+fn render_mod_panels(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiState) {
+    if area.height == 0 || area.width == 0 || state.panels.is_empty() {
+        return;
+    }
+    let lines = state.panels.render(area.width as usize);
+    if lines.is_empty() {
+        return;
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn render_todo_panel(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -2394,14 +2442,64 @@ fn render_permission_bar(
 
 /// A horizontal rule separating the transcript from the input box.
 fn render_input_rule(frame: &mut Frame, area: ratatui::layout::Rect, theme: &Theme) {
+    render_input_rule_with_hint(frame, area, theme, None);
+}
+
+/// The rule above the input, with an optional label on its right end.
+///
+/// The label sits on the rule itself rather than in a row of its own: a held
+/// prompt is a fact about the line below, and a new row would move the input
+/// (and the cursor) every time one was set aside. Drawing it here also means
+/// the rule keeps its full width, so the box's shape does not change.
+fn render_input_rule_with_hint(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    theme: &Theme,
+    hint: Option<&str>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let rule = Line::from(Span::styled(
-        "─".repeat(area.width as usize),
-        Style::default().fg(theme.border),
-    ));
-    frame.render_widget(Paragraph::new(rule), area);
+    let border = Style::default().fg(theme.border);
+    let width = area.width as usize;
+    // `─` is three bytes per cell, so the rule is built by column count
+    // rather than by truncating a byte string.
+    let rule = |columns: usize| "─".repeat(columns);
+    let mut spans = Vec::new();
+    match hint {
+        // The six cells are the two padding blanks inside the label and the two
+        // that separate it from the rule and the edge.
+        Some(hint) if unicode_width::UnicodeWidthStr::width(hint) + 6 < width => {
+            let text = format!(" {hint} ");
+            let used = unicode_width::UnicodeWidthStr::width(text.as_str());
+            spans.push(Span::styled(rule(width.saturating_sub(used + 2)), border));
+            spans.push(Span::styled(text, Style::default().fg(theme.dim)));
+            spans.push(Span::styled("  ", border));
+        }
+        _ => spans.push(Span::styled(rule(width), border)),
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The badge the rule above the input carries while a prompt is set aside.
+///
+/// The first line only, clipped: the badge's job is to say "there is one, and
+/// roughly what it was", and the whole text is one keypress away. A held
+/// prompt of several lines keeps its first line plus an ellipsis, so a
+/// wrapped paragraph does not read the same as a one-line question.
+fn stash_badge(held: &str) -> String {
+    let mut preview: String = held
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(32)
+        .collect();
+    if held.lines().count() > 1 || held.chars().count() > 32 {
+        preview.push('…');
+    }
+    format!("set aside: {preview}")
 }
 
 /// The single row a full-screen transcript keeps: how to get out.
@@ -2693,7 +2791,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::ModelPicker(picker) => picker.render(),
         Overlay::EffortSlider(slider) => slider.render(),
         Overlay::TextInput(field) => field.render(),
-        Overlay::List(picker) => picker.render(14),
+        Overlay::List(picker) | Overlay::Settings(picker) => picker.render(14),
     };
 
     let title = match overlay {
@@ -2706,7 +2804,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
         Overlay::ModelPicker { .. } => "Model",
         Overlay::EffortSlider { .. } => "Effort",
         Overlay::TextInput { .. } => "Rename",
-        Overlay::List(picker) => picker.title.as_str(),
+        Overlay::List(picker) | Overlay::Settings(picker) => picker.title.as_str(),
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2737,6 +2835,7 @@ fn render_overlay(frame: &mut Frame, area: ratatui::layout::Rect, state: &UiStat
             | Overlay::EffortSlider(_)
             | Overlay::TextInput(_)
             | Overlay::List(_)
+            | Overlay::Settings(_)
     );
     if is_detail {
         paragraph = paragraph.wrap(Wrap { trim: false });
@@ -3523,6 +3622,7 @@ mod layout_tests {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints(frame_constraints(
+                0,
                 palette,
                 Panes {
                     notification: notif,
@@ -3637,11 +3737,109 @@ mod layout_tests {
         );
     }
 
+    /// A held prompt must be visible, not only remembered: the rule above the
+    /// input carries a badge naming what is set aside.
+    #[test]
+    fn a_stashed_prompt_is_shown_above_the_input() {
+        let mut state = UiState {
+            stashed_input: Some("the long question\nwith a second line".into()),
+            ..UiState::default()
+        };
+        let buffer = render_to_buffer(80, 12, &mut state);
+        let rule_y = chunks_for(12, 0, false, false, 1, false)[RULE_IDX].y;
+        let row = row_text(&buffer, rule_y);
+        assert!(
+            row.contains("set aside: the long question…"),
+            "the stashed prompt is not named (row {rule_y}): {row:?}"
+        );
+        // The rule keeps its full width: the badge sits on it, not in place of
+        // it, and the cells after the label are the rule's own.
+        assert_eq!(
+            row.chars().count(),
+            80,
+            "the rule no longer spans the pane: {row:?}"
+        );
+
+        // Nothing held, nothing drawn.
+        let mut state = UiState::default();
+        let buffer = render_to_buffer(80, 12, &mut state);
+        let row = row_text(&buffer, rule_y);
+        assert!(
+            !row.contains("set aside"),
+            "a badge without a held prompt: {row:?}"
+        );
+    }
+
+    /// A mod panel occupies its own rows between the transcript and the
+    /// prompt, stays there across a redraw, and gives the rows back when it is
+    /// cleared.
+    #[test]
+    fn a_mod_panel_draws_below_the_transcript_and_above_the_prompt() {
+        use codape_core::ui_protocol::{ModPanelUpdate, UiElement, UiStyle};
+
+        let mut state = UiState::default();
+        let buffer = render_to_buffer(80, 20, &mut state);
+        let input_y_before = chunks_for(20, 0, false, false, 1, false)[INPUT_IDX].y;
+        assert!(
+            !row_text(&buffer, input_y_before).is_empty(),
+            "the input drew on a frame with no panels"
+        );
+
+        state.panels.apply(&[ModPanelUpdate::Set {
+            slot: "status".into(),
+            elements: vec![UiElement::Text {
+                text: "build green".into(),
+                style: UiStyle::Plain,
+            }],
+        }]);
+        // The frame after the update is the one that has to show it: a panel
+        // that only appears on the next unrelated repaint is a panel the
+        // person has no reason to believe in.
+        let buffer = render_to_buffer(80, 20, &mut state);
+        let rows: Vec<String> = (0..20).map(|y| row_text(&buffer, y)).collect();
+        assert!(
+            rows.iter().any(|row| row.contains("build green")),
+            "the panel is not on screen:\n{}",
+            rows.join("\n")
+        );
+        // It sits above the input: the conversation shrinks, the prompt does
+        // not move up into the transcript's space.
+        let panel_row = rows
+            .iter()
+            .position(|row| row.contains("build green"))
+            .expect("the panel row");
+        let input_row = rows
+            .iter()
+            .position(|row| row.contains('❯'))
+            .expect("the input row");
+        assert!(
+            panel_row < input_row,
+            "the panel drew below the input (panel {panel_row}, input {input_row})"
+        );
+
+        // Clearing gives the rows back to the transcript.
+        let mut state = UiState {
+            panels: state.panels.clone(),
+            ..UiState::default()
+        };
+        state.panels.apply(&[ModPanelUpdate::Clear {
+            slot: "status".into(),
+        }]);
+        let buffer = render_to_buffer(80, 20, &mut state);
+        let rows: Vec<String> = (0..20).map(|y| row_text(&buffer, y)).collect();
+        assert!(
+            !rows.iter().any(|row| row.contains("build green")),
+            "a cleared panel is still drawn:\n{}",
+            rows.join("\n")
+        );
+    }
+
     /// Every index the renderer uses must name the constraint it claims to.
     #[test]
     fn pane_indices_follow_the_constraint_order() {
         let chunks = chunks_with_todos(30, 4, true, 2, true, 1, true);
         assert_eq!(chunks.len(), FOOTER_IDX + 1, "one rect per constraint");
+        assert_eq!(chunks[PANEL_IDX].height, 0, "no panel without a mod");
         assert_eq!(chunks[PALETTE_IDX].height, 4, "palette");
         assert_eq!(chunks[NOTIFICATION_IDX].height, 1, "notification");
         assert_eq!(chunks[TODOS_IDX].height, 2, "todo panel");

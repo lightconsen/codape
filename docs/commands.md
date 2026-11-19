@@ -18,12 +18,12 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (80 commands across 13 registered modules)
+### Command Inventory (81 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
 | `session_commands` | `/clear`, `/exit`, `/session` | Session lifecycle |
-| `config_commands` | `/config`, `/model`, `/permissions` | Core configuration |
+| `config_commands` | `/config`, `/model`, `/permissions`, `/settings` | Core configuration |
 | `stats_commands` | `/stats`, `/cost`, `/usage` | Usage statistics |
 | `content_commands` | `/compact`, `/help`, `/version` | Session content & help |
 | `session_extension_commands` | `/resume`, `/rename`, `/rewind` | Session persistence & manipulation |
@@ -65,6 +65,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/status` and `/doctor` show comprehensive system health (API key, MCP, git, model, feature flags).
 - `/memory` reads and searches long-term memory entries.
 - `/hooks`, `/mcp`, `/plugin`, `/skills`, `/tasks` list and manage subsystem state. `/hooks` names each installed hook with its event, kind, tier and target — taken from the registry the session built, not from a directory — and `/hooks test <event>` fires that installed executor and reports what happened, which is the one question about hooks a running session can answer honestly: rewriting the file would not reach the executor it already holds, so `/hooks` does not offer to. `/mcp` reports the servers `.mcp.json` configures even when the session is not connected, and `/mcp add <name> (command | --url <url>)`, `/mcp remove <name>` and `/mcp test <name>` write that file, drop a server from it, or connect to one and list its tools — the same operations as `codape mcp add|remove|test`, reachable without leaving the session. A server added this way joins the session's tools on the next start, because the tool registry was built at startup. `/plugin` reads both the project's `.codape/plugins` and the config home; with no argument in the TUI it opens the installed plugins and configured marketplaces as a list, with each row naming the plugin's version, state and path or the marketplace's URL. `/plugin install <source>` installs from a directory, git URL, `github:owner/repo` shorthand or archive. `/plugin components` lists the themes, output styles, workflows, monitors, LSP servers, channels, binaries, types and experimental data contributed by active plugins.
+- `/settings [<key> [<value>]]` is the command half of the settings menu. Bare `/settings` in the TUI opens the same menu `alt+c` does; in a headless run it lists the six keys the menu knows with their current values, `/settings <key>` reports one, and a third argument is refused because the registry holds no validator for it — the menu is where a value is written, and it checks the value against the row's own choices. The same read-modify-write `settings.json` `/config set` uses.
 - `/keybindings` prints the live keymap: every action, its keystrokes and its context, the files it was read from, and every problem found in them. It re-reads the files before printing, so a person who just edited `keybindings.json` sees the edit without restarting. Bindings live in `keybindings.json` under the config home and `.codape/`; see [ui.md](ui.md) → *Architecture Patterns*.
 - `/agents [list|logs <id> [count]|follow <id|all>]` is a REPL built-in: `list` names the agent definitions the session can spawn and the agents it has spawned, `logs` replays one agent's log, and `follow` subscribes to its events. A registry entry mirrors it so `/help` lists it.
 - `/ide` prints the same thing `codape ide` prints: the MCP snippet an editor needs to launch `codape ide bridge`, and the state of the daemon that bridge would reach. It is the in-session way to discover the editor integration without leaving the REPL.

@@ -429,7 +429,7 @@ struct Reply {
 
 /// The activation counterpart of [`Reply`].
 struct ActivateReply {
-    result: Result<Vec<UiElement>, String>,
+    result: Result<codape_core::ui_protocol::ModUiActivation, String>,
     timed_out: bool,
 }
 
@@ -818,11 +818,16 @@ impl ModRuntime {
     /// no registered handler is ignored: it logs a warning and yields no
     /// elements.
     ///
+    /// The result carries both halves of what a handler may produce: the block
+    /// elements it rendered and any panel changes it asked for. They are
+    /// returned together because both were computed in the same call under the
+    /// same budget; splitting them would mean running the handler twice.
+    ///
     /// # Errors
     ///
     /// Returns the handler's error message when it throws, returns invalid
     /// elements, or exceeds the wall-clock budget.
-    pub fn activate(&self, id: &str) -> Result<Vec<UiElement>, String> {
+    pub fn activate(&self, id: &str) -> Result<codape_core::ui_protocol::ModUiActivation, String> {
         if let Some(reason) = self.disabled_reason() {
             return Err(reason);
         }
@@ -1978,6 +1983,10 @@ fn install_main_harness(ctx: &Ctx<'_>) -> Result<(), String> {
             &MAX_SUBMISSIONS_PER_HOOK_CALL.to_string(),
         )
         .replace(
+            "@@MAX_PANEL_SLOTS@@",
+            &codape_core::ui_protocol::MAX_PANEL_SLOTS.to_string(),
+        )
+        .replace(
             "@@MAX_PENDING_PROMPTS@@",
             &MAX_PENDING_PROMPTS_PER_TURN.to_string(),
         );
@@ -2193,6 +2202,7 @@ fn inner_result_json(result: &HookFireResult) -> String {
         "failed": result.failed,
         "ui": result.ui,
         "pendingPrompts": result.pending_prompts,
+        "panelUpdates": result.panel_updates,
     })
     .to_string()
 }
@@ -2377,7 +2387,7 @@ fn run_activation<'js>(
     deadline: &Deadline,
     downstream: &DownstreamPool,
     budget_message: &str,
-) -> Result<Result<Vec<UiElement>, String>, String> {
+) -> Result<Result<codape_core::ui_protocol::ModUiActivation, String>, String> {
     let activate: Function<'js> = ctx.globals().get("__codapeActivate").map_err(|error| {
         format!(
             "could not read the runtime harness: {}",
@@ -2444,27 +2454,51 @@ fn parse_chain_result(text: &str) -> Result<HookFireResult, String> {
             .unwrap_or(false),
         ui,
         pending_prompts: strings("pendingPrompts"),
+        panel_updates: panels(&reply, "panelUpdates", "the hook chain")?,
     })
 }
 
+/// Read the panel updates out of a harness reply.
+///
+/// The per-call reply names them `panels`; the merged chain result names them
+/// `panelUpdates`, matching the rest of the merged result's field naming. Both
+/// decode the same array and both must reject a malformed one rather than
+/// apply half of it.
+fn panels(
+    reply: &serde_json::Value,
+    key: &str,
+    who: &str,
+) -> Result<Vec<codape_core::ui_protocol::ModPanelUpdate>, String> {
+    match reply.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(value) => codape_core::ui_protocol::parse_mod_panel_updates(value)
+            .map_err(|error| format!("{who} returned invalid panels: {error}")),
+    }
+}
+
 /// Read the harness activation result back.
-fn parse_activation_result(text: &str) -> Result<Result<Vec<UiElement>, String>, String> {
+fn parse_activation_result(
+    text: &str,
+) -> Result<Result<codape_core::ui_protocol::ModUiActivation, String>, String> {
     let reply: serde_json::Value = serde_json::from_str(text)
         .map_err(|error| format!("the activation handler returned unreadable output: {error}"))?;
 
     if reply.get("found").and_then(serde_json::Value::as_bool) == Some(false) {
-        return Ok(Ok(Vec::new()));
+        return Ok(Ok(codape_core::ui_protocol::ModUiActivation::default()));
     }
     if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
         return Ok(Err(string_field(&reply, "error")
             .unwrap_or_else(|| "the activation handler failed".to_string())));
     }
-    match reply.get("ui") {
-        None | Some(serde_json::Value::Null) => Ok(Ok(Vec::new())),
+    let elements = match reply.get("ui") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
         Some(value) => parse_ui_elements(value)
-            .map(Ok)
-            .map_err(|error| format!("the activation handler returned invalid UI: {error}")),
-    }
+            .map_err(|error| format!("the activation handler returned invalid UI: {error}"))?,
+    };
+    Ok(Ok(codape_core::ui_protocol::ModUiActivation {
+        elements,
+        panel_updates: panels(&reply, "panels", "the activation handler")?,
+    }))
 }
 
 /// The wall-clock error text shared by the hook and activation paths.
@@ -2513,6 +2547,11 @@ fn merge_with_inner(js: HookFireResult, inner: HookFireResult) -> HookFireResult
         watch_paths: dedupe_paths(watch_paths),
         ui,
         pending_prompts,
+        panel_updates: {
+            let mut updates = js.panel_updates;
+            updates.extend(inner.panel_updates);
+            updates
+        },
     }
 }
 
@@ -2641,10 +2680,15 @@ fn install_host_api<'js>(ctx: &Ctx<'js>, session: &ModSession, name: &str) -> Re
         .prop("$", Property::from(dollar))
         .map_err(|error| js_error(ctx, error))?;
 
-    let host_api = HOST_UI_API.replace(
-        "@@MAX_SUBMISSIONS_PER_CALL@@",
-        &MAX_SUBMISSIONS_PER_HOOK_CALL.to_string(),
-    );
+    let host_api = HOST_UI_API
+        .replace(
+            "@@MAX_SUBMISSIONS_PER_CALL@@",
+            &MAX_SUBMISSIONS_PER_HOOK_CALL.to_string(),
+        )
+        .replace(
+            "@@MAX_PANEL_SLOTS@@",
+            &codape_core::ui_protocol::MAX_PANEL_SLOTS.to_string(),
+        );
     ctx.eval::<(), _>(host_api.as_str())
         .map_err(|error| js_error(ctx, error))?;
     ctx.eval::<(), _>(JSX_RUNTIME)
@@ -2679,6 +2723,7 @@ const HOST_UI_API: &str = r#"
   // additionally caps what a whole turn may leave queued.
   const MAX_SUBMISSION_LENGTH = 8192;
   const MAX_SUBMISSIONS_PER_CALL = @@MAX_SUBMISSIONS_PER_CALL@@;
+  const MAX_PANEL_UPDATES_PER_CALL = @@MAX_PANEL_SLOTS@@;
   const TRUNCATION_MARKER = '…';
   const staging = [];
   const notices = [];
@@ -2690,6 +2735,15 @@ const HOST_UI_API: &str = r#"
   const submissionFrames = [];
   let droppedNotices = 0;
   let droppedSubmissions = 0;
+  // Panel changes a hook asked for. Unlike `staging`, these outlive the call:
+  // the host applies them to a slot it keeps on screen, so they travel as
+  // operations rather than as a whole new set of panels.
+  // `let`, not `const`: the per-call frame swaps this array, exactly as
+  // `submissions` does. A `const` here is a strict-mode TypeError on the first
+  // nested call, and it takes the whole host API install down with it.
+  let panelUpdates = [];
+  let droppedPanels = 0;
+  const panelFrames = [];
 
   function notify(text) {
     if (typeof text !== 'string') {
@@ -2850,6 +2904,53 @@ const HOST_UI_API: &str = r#"
       }
       return undefined;
     },
+    // Draw a panel beside the conversation and keep it there. Unlike
+    // `$.ui.render`, which appends a block to the transcript, this changes a
+    // slot the host holds: the panel stays on screen after the hook call
+    // returns, and calling `$.ui.panel(slot, ...)` again replaces it in place.
+    // A panel is per session; nothing but `clearPanel` or the session ending
+    // removes one.
+    panel: function (slot) {
+      if (typeof slot !== 'string' || slot.length === 0) {
+        throw new TypeError('$.ui.panel(slot, elements...): slot must be a non-empty string');
+      }
+      if (arguments.length < 2) {
+        throw new TypeError('$.ui.panel(slot, elements...): at least one element is required');
+      }
+      if (panelUpdates.length >= MAX_PANEL_UPDATES_PER_CALL) {
+        droppedPanels += 1;
+        return undefined;
+      }
+      const elements = [];
+      for (let index = 1; index < arguments.length; index++) {
+        const child = arguments[index];
+        if (Array.isArray(child)) {
+          for (let inner = 0; inner < child.length; inner++) {
+            assertElement(child[inner], 0);
+            elements.push(child[inner]);
+          }
+        } else {
+          assertElement(child, 0);
+          elements.push(child);
+        }
+      }
+      panelUpdates.push({ op: 'set', slot: slot, elements: elements });
+      return undefined;
+    },
+    // Remove a panel from the session. An unknown slot is a no-op rather than
+    // an error: a mod that clears on the way out should not have to know
+    // whether it ever drew.
+    clearPanel: function (slot) {
+      if (typeof slot !== 'string' || slot.length === 0) {
+        throw new TypeError('$.ui.clearPanel(slot): slot must be a non-empty string');
+      }
+      if (panelUpdates.length >= MAX_PANEL_UPDATES_PER_CALL) {
+        droppedPanels += 1;
+        return undefined;
+      }
+      panelUpdates.push({ op: 'clear', slot: slot });
+      return undefined;
+    },
     // Host plumbing: the dispatcher clears and drains this area around each
     // hook call. Mods have no reason to call these.
     __resetUi: function () {
@@ -2857,12 +2958,32 @@ const HOST_UI_API: &str = r#"
       notices.length = 0;
       droppedNotices = 0;
     },
+    // Panel updates are taken per call and are not part of the staging area:
+    // the dispatcher hands them back beside the elements. The frame mirrors
+    // submissions, because a mod whose first hook calls `next()` runs its own
+    // later hooks in this same realm while the first is still suspended.
+    __takePanelUpdates: function () {
+      const taken = { updates: panelUpdates, dropped: droppedPanels };
+      const parent = panelFrames.pop();
+      if (parent) {
+        panelUpdates = parent.updates;
+        droppedPanels = parent.dropped;
+      } else {
+        panelUpdates = [];
+        droppedPanels = 0;
+      }
+      return taken;
+    },
     // Start a hook call's submission frame. `__resetUi` deliberately leaves
     // submissions alone: a call nested by `next(e)` must not clear its parent.
+    // Panel updates get the same treatment, for the same reason.
     __beginCall: function () {
       submissionFrames.push({ prompts: submissions, dropped: droppedSubmissions });
       submissions = [];
       droppedSubmissions = 0;
+      panelFrames.push({ updates: panelUpdates, dropped: droppedPanels });
+      panelUpdates = [];
+      droppedPanels = 0;
     },
     // The dispatcher takes submissions separately from rendered elements: they
     // are not displayed, they are handed to the turn loop. Taking also closes
@@ -3115,6 +3236,9 @@ globalThis.__codapeCall = async function (modIndex, hookIndex, event, input, con
     const submitted = (ui && typeof ui.__takeSubmissions === 'function')
       ? ui.__takeSubmissions()
       : { prompts: [], dropped: 0 };
+    const panels = (ui && typeof ui.__takePanelUpdates === 'function')
+      ? ui.__takePanelUpdates()
+      : { updates: [], dropped: 0 };
     if (submitted.dropped > 0) {
       staged.push({
         type: 'text',
@@ -3123,15 +3247,25 @@ globalThis.__codapeCall = async function (modIndex, hookIndex, event, input, con
         style: 'dim'
       });
     }
+    if (panels.dropped > 0) {
+      staged.push({
+        type: 'text',
+        text: '[' + panels.dropped + ' panel update(s) dropped: at most '
+          + __codapeMaxPanelSlots + ' per hook call]',
+        style: 'dim'
+      });
+    }
     return JSON.stringify({
       ok: true,
       result: __codapeNormalize(value),
       ui: staged,
-      submissions: submitted.prompts
+      submissions: submitted.prompts,
+      panels: panels.updates
     });
   } catch (error) {
     if (ui && typeof ui.__takeSubmissions === 'function') ui.__takeSubmissions();
     if (ui && typeof ui.__takeUi === 'function') ui.__takeUi();
+    if (ui && typeof ui.__takePanelUpdates === 'function') ui.__takePanelUpdates();
     const message = (error && error.message) ? String(error.message) : String(error);
     return JSON.stringify({ ok: false, error: message });
   }
@@ -3182,13 +3316,24 @@ globalThis.__codapeActivate = async function (id, eventJson) {
     const staged = (ui && typeof ui.__takeUi === 'function') ? ui.__takeUi() : [];
     // Close the submission frame; an activation cannot start a turn.
     if (ui && typeof ui.__takeSubmissions === 'function') ui.__takeSubmissions();
+    // A button press is a mod deciding its panel should change, so this path
+    // carries panel updates too. They leave through the same reply as a hook's,
+    // and the host applies them to the same slots.
+    const panels = (ui && typeof ui.__takePanelUpdates === 'function')
+      ? ui.__takePanelUpdates()
+      : { updates: [], dropped: 0 };
     let returned = [];
     if (Array.isArray(value)) {
       returned = value;
     } else if (value !== null && typeof value === 'object') {
       returned = [value];
     }
-    return JSON.stringify({ found: true, ok: true, ui: staged.concat(returned) });
+    return JSON.stringify({
+      found: true,
+      ok: true,
+      ui: staged.concat(returned),
+      panels: panels.updates
+    });
   } catch (error) {
     if (ui && typeof ui.__takeSubmissions === 'function') ui.__takeSubmissions();
     if (ui && typeof ui.__takeUi === 'function') ui.__takeUi();
@@ -3218,7 +3363,8 @@ globalThis.__codapeEmptyResult = function () {
     errors: [],
     failed: false,
     ui: [],
-    pendingPrompts: []
+    pendingPrompts: [],
+    panelUpdates: []
   };
 };
 
@@ -3266,7 +3412,7 @@ globalThis.__codapePublicResult = function (result) {
 // combined and deduplicated; downstream errors and failure state are carried.
 // The calling hook's submissions happened before it called `next`, so they
 // precede everything the downstream chain queued.
-globalThis.__codapeMergeEffect = function (effect, ui, submissions, downstream) {
+globalThis.__codapeMergeEffect = function (effect, ui, submissions, panels, downstream) {
   const ownWatchPaths = (effect !== null && Array.isArray(effect.watchPaths))
     ? effect.watchPaths
     : [];
@@ -3282,11 +3428,12 @@ globalThis.__codapeMergeEffect = function (effect, ui, submissions, downstream) 
     failed: downstream.failed,
     watchPaths: __codapeDedupe(ownWatchPaths.concat(downstream.watchPaths)),
     ui: ui.concat(downstream.ui),
-    pendingPrompts: submissions.concat(downstream.pendingPrompts)
+    pendingPrompts: submissions.concat(downstream.pendingPrompts),
+    panelUpdates: panels.concat(downstream.panelUpdates)
   };
 };
 
-globalThis.__codapeApplyEffect = function (combined, effect, ui, submissions) {
+globalThis.__codapeApplyEffect = function (combined, effect, ui, submissions, panels) {
   if (effect !== null) {
     if (effect.stop === true) combined.stop = true;
     if (effect.updatedInput !== undefined) combined.updatedInput = effect.updatedInput;
@@ -3295,6 +3442,7 @@ globalThis.__codapeApplyEffect = function (combined, effect, ui, submissions) {
   }
   combined.ui = combined.ui.concat(ui);
   combined.pendingPrompts = combined.pendingPrompts.concat(submissions);
+  combined.panelUpdates = combined.panelUpdates.concat(panels);
 };
 
 globalThis.__codapeApplyResult = function (combined, result) {
@@ -3310,6 +3458,7 @@ globalThis.__codapeApplyResult = function (combined, result) {
   combined.errors = combined.errors.concat(result.errors);
   combined.ui = combined.ui.concat(result.ui);
   combined.pendingPrompts = combined.pendingPrompts.concat(result.pendingPrompts);
+  combined.panelUpdates = combined.panelUpdates.concat(result.panelUpdates);
 };
 
 // The inner executor ran second, so it wins an updated-value conflict; a side
@@ -3327,7 +3476,8 @@ globalThis.__codapeMergeWithInner = function (js, inner) {
     failed: js.failed || inner.failed,
     watchPaths: __codapeDedupe(js.watchPaths.concat(inner.watchPaths)),
     ui: js.ui.concat(inner.ui),
-    pendingPrompts: js.pendingPrompts.concat(inner.pendingPrompts)
+    pendingPrompts: js.pendingPrompts.concat(inner.pendingPrompts),
+    panelUpdates: js.panelUpdates.concat(inner.panelUpdates)
   };
 };
 
@@ -3395,13 +3545,14 @@ globalThis.__codapeChain = async function (hooks, start, event, input, contextJs
 
     if (reply.ok) {
       const submissions = Array.isArray(reply.submissions) ? reply.submissions : [];
+      const panels = Array.isArray(reply.panels) ? reply.panels : [];
       if (downstream !== null) {
         __codapeApplyResult(
           combined,
-          __codapeMergeEffect(reply.result, reply.ui, submissions, downstream)
+          __codapeMergeEffect(reply.result, reply.ui, submissions, panels, downstream)
         );
       } else {
-        __codapeApplyEffect(combined, reply.result, reply.ui, submissions);
+        __codapeApplyEffect(combined, reply.result, reply.ui, submissions, panels);
       }
     } else {
       if (downstream !== null) {
@@ -3459,6 +3610,7 @@ globalThis.__codapeRun = async function (chainJson, event, input, contextJson, g
 
 globalThis.__codapeMaxChainDepth = @@MAX_CHAIN_DEPTH@@;
 globalThis.__codapeMaxSubmissionsPerCall = @@MAX_SUBMISSIONS_PER_CALL@@;
+globalThis.__codapeMaxPanelSlots = @@MAX_PANEL_SLOTS@@;
 globalThis.__codapeMaxPendingPrompts = @@MAX_PENDING_PROMPTS@@;
 "#;
 
@@ -5344,6 +5496,172 @@ mod tests {
         assert!(second.ui.is_empty(), "the second call notified nothing");
     }
 
+    // ── Panels ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_hook_can_draw_a_panel_beside_the_conversation() {
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($) { \
+             $.ui.panel('status', $.ui.text('build green')); }); }",
+        );
+
+        let result = runtime.fire("PostToolUse", "Read", &HashMap::new());
+
+        assert!(!result.failed, "{result:?}");
+        assert!(
+            result.ui.is_empty(),
+            "a panel is not a transcript block: {:?}",
+            result.ui
+        );
+        assert_eq!(
+            result.panel_updates,
+            vec![codape_core::ui_protocol::ModPanelUpdate::Set {
+                slot: "status".to_string(),
+                elements: vec![UiElement::Text {
+                    text: "build green".to_string(),
+                    style: UiStyle::Plain,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_panel_can_be_cleared() {
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($) { \
+             $.ui.clearPanel('status'); }); }",
+        );
+
+        let result = runtime.fire("PostToolUse", "Read", &HashMap::new());
+
+        assert_eq!(
+            result.panel_updates,
+            vec![codape_core::ui_protocol::ModPanelUpdate::Clear {
+                slot: "status".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rendering_the_same_slot_twice_in_one_call_keeps_both_in_order() {
+        // The host applies them in order, so the second wins. The runtime must
+        // not silently collapse them: that is the host's rule, not its own,
+        // and a surface that wants to log both would lose one.
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($) { \
+             $.ui.panel('status', $.ui.text('one')); \
+             $.ui.panel('status', $.ui.text('two')); }); }",
+        );
+
+        let result = runtime.fire("PostToolUse", "Read", &HashMap::new());
+
+        assert_eq!(result.panel_updates.len(), 2, "{:?}", result.panel_updates);
+        assert!(matches!(
+            &result.panel_updates[1],
+            codape_core::ui_protocol::ModPanelUpdate::Set { elements, .. }
+                if elements == &vec![UiElement::Text {
+                    text: "two".to_string(),
+                    style: UiStyle::Plain,
+                }]
+        ));
+    }
+
+    #[test]
+    fn a_panel_update_past_the_cap_is_dropped_and_reported() {
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($) { \
+             for (let index = 0; index < 9; index++) { \
+               $.ui.panel('slot' + index, $.ui.text('x')); } }); }",
+        );
+
+        let result = runtime.fire("PostToolUse", "Read", &HashMap::new());
+
+        assert_eq!(
+            result.panel_updates.len(),
+            codape_core::ui_protocol::MAX_PANEL_SLOTS,
+            "only the cap survives"
+        );
+        // The overflow is reported as a transcript block, the same way the
+        // other caps are: a mod that asked for something it did not get should
+        // not have to guess.
+        let notice = result
+            .ui
+            .iter()
+            .find_map(|element| match element {
+                UiElement::Text { text, style } if *style == UiStyle::Dim => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a drop summary");
+        assert!(notice.contains("panel update(s) dropped"), "{notice}");
+    }
+
+    #[test]
+    fn a_panel_needs_a_slot_and_something_to_draw() {
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($, e) { \
+             if (e.input === 'nofslot') { $.ui.panel('', $.ui.text('x')); } \
+             if (e.input === 'nobody') { $.ui.panel('status'); } }); }",
+        );
+
+        for input in ["nofslot", "nobody"] {
+            let result = runtime.fire("PostToolUse", input, &HashMap::new());
+            assert!(result.failed, "input {input} should be rejected");
+            assert!(
+                result.panel_updates.is_empty(),
+                "{:?}",
+                result.panel_updates
+            );
+        }
+    }
+
+    #[test]
+    fn an_activation_handler_can_change_its_panel() {
+        let runtime = load(
+            "function register(on) { \
+             $.ui.onActivate('refresh', function () { \
+               $.ui.panel('status', $.ui.text('refreshed')); \
+               return [$.ui.text('done')]; }); }",
+        );
+
+        let activation = runtime.activate("refresh").expect("the handler succeeds");
+
+        assert_eq!(
+            activation.elements,
+            vec![UiElement::Text {
+                text: "done".to_string(),
+                style: UiStyle::Plain,
+            }]
+        );
+        assert_eq!(
+            activation.panel_updates,
+            vec![codape_core::ui_protocol::ModPanelUpdate::Set {
+                slot: "status".to_string(),
+                elements: vec![UiElement::Text {
+                    text: "refreshed".to_string(),
+                    style: UiStyle::Plain,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn a_panel_does_not_leak_into_the_next_hook_call() {
+        let runtime = load(
+            "function register(on) { on('PostToolUse', '*', function ($, e) { \
+             if (e.input === 'draw') { $.ui.panel('status', $.ui.text('once')); } }); }",
+        );
+
+        let first = runtime.fire("PostToolUse", "draw", &HashMap::new());
+        assert_eq!(first.panel_updates.len(), 1);
+
+        let second = runtime.fire("PostToolUse", "quiet", &HashMap::new());
+        assert!(
+            second.panel_updates.is_empty(),
+            "the first call's panel came back: {:?}",
+            second.panel_updates
+        );
+    }
+
     // ── UI activation ───────────────────────────────────────────────────────
 
     #[test]
@@ -5354,7 +5672,10 @@ mod tests {
                return [$.ui.text('ran ' + event.id)]; }); }",
         );
 
-        let elements = runtime.activate("retry").expect("the handler succeeds");
+        let elements = runtime
+            .activate("retry")
+            .expect("the handler succeeds")
+            .elements;
 
         assert_eq!(
             elements,
@@ -5374,7 +5695,10 @@ mod tests {
                return $.ui.text('the event is ' + event.event); }); }",
         );
 
-        let elements = runtime.activate("go").expect("the handler succeeds");
+        let elements = runtime
+            .activate("go")
+            .expect("the handler succeeds")
+            .elements;
 
         assert_eq!(
             elements,
@@ -5401,7 +5725,10 @@ mod tests {
                return $.ui.text('after the await'); }); }",
         );
 
-        let elements = runtime.activate("go").expect("the handler succeeds");
+        let elements = runtime
+            .activate("go")
+            .expect("the handler succeeds")
+            .elements;
 
         assert_eq!(
             elements,
@@ -5418,7 +5745,7 @@ mod tests {
 
         assert_eq!(
             runtime.activate("missing").expect("a miss is not an error"),
-            Vec::<UiElement>::new()
+            codape_core::ui_protocol::ModUiActivation::default()
         );
     }
 
@@ -5430,7 +5757,10 @@ mod tests {
              $.ui.onActivate('go', function () { return [$.ui.text('second')]; }); }",
         );
 
-        let elements = runtime.activate("go").expect("the handler succeeds");
+        let elements = runtime
+            .activate("go")
+            .expect("the handler succeeds")
+            .elements;
 
         assert_eq!(
             elements,

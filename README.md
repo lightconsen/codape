@@ -52,7 +52,7 @@ server mode for editors and other clients.
 | | |
 |---|---|
 | **Tools** | 54 tool types registered at startup — read, write, edit, glob, grep, shell, web fetch and search, LSP, notebook editing, tasks, cron, MCP, and the Chrome DevTools family |
-| **Commands** | 78 slash commands — `/commit`, `/compact`, `/review`, `/diff`, `/resume` and the rest of the daily-driver set (the count is what `/help` prints) |
+| **Commands** | 81 slash commands — `/commit`, `/compact`, `/review`, `/diff`, `/resume` and the rest of the daily-driver set (the count is what `/help` prints) |
 | **Sub-agents** | Six built-in agents (general, explore, plan, verification, and two setup helpers), plus your own; parallel and background execution in isolated worktrees |
 | **Memory** | JSONL transcripts, a searchable session index, and long-term memory that survives across sessions |
 | **Extensibility** | MCP servers, WASM and process plugins, hooks on 22 lifecycle events, and an embeddable WebSocket server |

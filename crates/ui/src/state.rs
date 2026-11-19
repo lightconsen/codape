@@ -383,6 +383,24 @@ pub struct UiState {
     /// the machine is what says "idle", and a field that appeared and
     /// disappeared would make every reader ask whether voice was on.
     pub voice: VoiceState,
+    /// The prompt that was set aside, waiting to be taken back.
+    ///
+    /// One slot, not a stack. Stashing is "I need to ask something else
+    /// first", which happens once at a time; a stack would make the second
+    /// stash hide the first with no key that reaches it. Empty is the ordinary
+    /// case and means nothing is held.
+    ///
+    /// On the state rather than in the session so the footer can draw it: a
+    /// stashed prompt that nothing shows is a prompt people forget they have.
+    pub stashed_input: Option<String>,
+    /// The mod panels the session is showing.
+    ///
+    /// On the state, not in the engine: the panels are the host's, and the
+    /// engine's `EngineEvent::ModPanel` only says what changed. Living here is
+    /// what lets the same slots survive a redraw, a resize and a `/clear` —
+    /// they are not transcript content, so clearing the conversation must not
+    /// clear them.
+    pub panels: crate::panel::PanelStore,
 }
 
 impl UiState {
@@ -419,6 +437,8 @@ impl UiState {
             transcript_fullscreen: false,
             transcript_footer: String::new(),
             image_protocol: crate::transcript_image::ImageProtocol::None,
+            stashed_input: None,
+            panels: crate::panel::PanelStore::new(),
         }
     }
 

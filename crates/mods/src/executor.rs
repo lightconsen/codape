@@ -5,7 +5,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use codape_core::hook_executor::{HookExecutor, HookFireResult};
-use codape_core::ui_protocol::UiElement;
 
 use crate::runtime::{ModInfo, ModRuntime, ModSession, is_gating_event};
 
@@ -22,15 +21,16 @@ pub struct ModUiHandle {
 impl ModUiHandle {
     /// Deliver a button activation to the mod worker.
     ///
-    /// The returned elements are a host-owned snapshot, ready to render. An id
-    /// with no registered `$.ui.onActivate` handler is ignored with a logged
-    /// warning and yields no elements.
+    /// The result is a host-owned snapshot, ready to render: the block elements
+    /// the handler produced plus any panel changes it asked for. An id with no
+    /// registered `$.ui.onActivate` handler is ignored with a logged warning
+    /// and yields an empty result.
     ///
     /// # Errors
     ///
     /// Returns the handler's error message when it throws, returns invalid
     /// elements, or exceeds the wall-clock budget.
-    pub fn activate(&self, id: &str) -> Result<Vec<UiElement>, String> {
+    pub fn activate(&self, id: &str) -> Result<codape_core::ui_protocol::ModUiActivation, String> {
         self.runtime.activate(id)
     }
 
@@ -404,7 +404,10 @@ mod tests {
         ));
         let handle = executor.ui_handle();
 
-        let elements = handle.activate("run").expect("the handler succeeds");
+        let elements = handle
+            .activate("run")
+            .expect("the handler succeeds")
+            .elements;
 
         assert_eq!(
             elements,
@@ -415,7 +418,7 @@ mod tests {
         );
         assert_eq!(
             handle.activate("missing").expect("a miss is not an error"),
-            Vec::<UiElement>::new()
+            codape_core::ui_protocol::ModUiActivation::default()
         );
     }
 

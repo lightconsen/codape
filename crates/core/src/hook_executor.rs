@@ -69,6 +69,14 @@ pub struct HookFireResult {
     /// call may contribute at most a small, fixed number; the runtime enforces
     /// the caps and reports dropped calls separately.
     pub pending_prompts: Vec<String>,
+    /// Panel changes a mod asked the host to make during this hook call, in
+    /// call order.
+    ///
+    /// Unlike [`ui`](Self::ui), which the host appends to the transcript and
+    /// forgets, these change a panel that stays on screen until it is replaced
+    /// or cleared. The engine does not apply them either: the surface that owns
+    /// the pane does, so a headless run has no panels to update.
+    pub panel_updates: Vec<crate::ui_protocol::ModPanelUpdate>,
 }
 
 /// Abstract hook executor — implemented by `codape-hooks::HookRegistry`.

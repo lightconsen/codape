@@ -269,6 +269,11 @@ impl UiState {
                 // This runtime has no mod renderer; the REPL owns that surface.
                 tracing::debug!(elements = elements.len(), "mod UI event");
             }
+            EngineEvent::ModPanel(updates) => {
+                // Panels belong to a surface that keeps them on screen; this
+                // transcript-only runtime has none.
+                tracing::debug!(updates = updates.len(), "mod panel event");
+            }
             EngineEvent::PermissionExplanation { tool, explanation } => {
                 // Store explanation in transcript as an advisory note.
                 self.transcript

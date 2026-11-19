@@ -65,6 +65,15 @@ pub enum WireEvent {
         /// The element tree, in emission order.
         elements: Vec<UiElement>,
     },
+    /// A mod changed one of its persistent panels.
+    ///
+    /// The panel counterpart of [`ModUi`](Self::ModUi): a wire client that
+    /// draws a side pane applies these to the slots it holds, and one that does
+    /// not can ignore the frame without losing anything from the transcript.
+    ModPanel {
+        /// The changes, in emission order.
+        updates: Vec<crate::ui_protocol::ModPanelUpdate>,
+    },
     /// A compact boundary marker was inserted.
     CompactBoundary,
     /// Compaction was requested, ran, or stood down, and why.

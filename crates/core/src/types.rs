@@ -1789,6 +1789,15 @@ pub enum EngineEvent {
     /// renders it without consulting the mod's runtime, so a slow or unloaded
     /// mod cannot break rendering.
     ModUi(Vec<UiElement>),
+    /// A mod asked the host to change one of its persistent panels.
+    ///
+    /// Distinct from [`ModUi`](Self::ModUi), which appends a block to the
+    /// transcript and is forgotten. A panel stays on screen until it is
+    /// replaced or cleared, so these arrive as changes to a slot the surface
+    /// owns rather than as content. Emitted only when the hook's aggregate
+    /// result carried at least one change; a headless run has no panels and
+    /// ignores them.
+    ModPanel(Vec<crate::ui_protocol::ModPanelUpdate>),
     /// A permission explanation was generated for a tool request.
     PermissionExplanation {
         /// Tool name.

@@ -792,8 +792,86 @@ The same applies when the REPL is not attached to a terminal.
 - **Terminal only.** There is no web or other surface. Only the most recent
   block with buttons is interactive; an older block's buttons are inert, and
   activation is still available through keyboard focus plus `Enter`.
-- **One block per hook call.** The host renders a hook's tree on its own; it
-  is not merged into the built-in panes.
+- **A block is transcript content.** A `$.ui.render` tree is appended as one
+  block and belongs to that transcript; it is not merged into the built-in
+  panes. A panel (§ [Panels](#panels)) is the contract for content that
+  belongs on screen rather than in the conversation.
+- **Panels are not interactive.** They are drawn, not focused: no cursor, no
+  buttons, no key routing. A mod that needs a button renders a block.
+
+## Panels
+
+A block goes into the transcript and is forgotten. A **panel** is the other
+contract: the host holds it in a named slot, keeps drawing it beside the
+conversation, and replaces it in place when the mod renders that slot again.
+That is what a status line, a watch list or a build indicator wants — one
+thing that stays on screen and changes, not one transcript entry per update.
+
+```js
+function register(on) {
+  on('PostToolUse', 'Edit', function ($, e) {
+    $.ui.panel('build',
+      $.ui.box({ title: 'Build' },
+        $.ui.text('touched ' + e.input, 'dim')));
+  });
+
+  on('SessionEnd', '*', function ($) {
+    $.ui.clearPanel('build');
+  });
+}
+```
+
+### `$.ui.panel(slot, element(s)...)`
+
+Sets the slot named `slot`. The slot is the identity: rendering the same slot
+again **replaces** its content rather than adding a second panel. `slot` must
+be a non-empty string and at least one element is required; both are checked
+at the call site and throw a `TypeError`. Each argument after the slot is a
+child element, and an array is flattened one level, exactly as `$.ui.box`
+takes its children.
+
+The elements are validated the same way `render` validates a block: an
+unknown type or style throws before anything is sent.
+
+### `$.ui.clearPanel(slot)`
+
+Removes the slot. Clearing a slot that does not exist is a no-op rather than
+an error, so a mod that clears on the way out does not have to know whether
+it ever drew.
+
+### What the host does with them
+
+Panel changes are **operations**, not a new set of panels: `{op: 'set'}` and
+`{op: 'clear'}`, each naming its slot. They travel in
+`HookFireResult::panel_updates` and the engine emits
+`EngineEvent::ModPanel(updates)` when the list is non-empty. Because each
+update names the slot it addresses, one mod's hook cannot erase another mod's
+panel the way a whole-set replacement would.
+
+The host keeps them in a `PanelStore` that is session state, not transcript
+state: a redraw, a resize and `/clear` all leave the panels where they were.
+The terminal draws them in their own band between the conversation and the
+prompt, and the band takes rows from the transcript only while it has
+something to draw.
+
+- **At most four slots.** A `set` for a *new* slot past the cap is dropped —
+  not by evicting someone else's panel, because the mod that asked most
+  recently is the one whose request cannot be honoured. The drop is reported:
+  a dim line in the hook's block and a notice in the terminal. Replacing an
+  existing slot never counts against the cap.
+- **At most four updates per hook call.** A call past that is truncated the
+  same way, with the same kind of notice.
+- **They survive a turn.** A panel is redrawn from the store on every frame,
+  so it is on screen for the whole session, not just the turn that drew it.
+- **Clearing is the only removal**, apart from ending the session.
+
+A button activation (`$.ui.onActivate`) may change panels too: the handler's
+return value carries both the block elements and the panel updates from the
+same call, so a click can update the slot and render a block without running
+the handler twice.
+
+**Headless runs have no surface** and ignore `EngineEvent::ModPanel` — the
+same rule as a non-interactive block.
 
 ## Not yet
 
