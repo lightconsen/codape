@@ -1,12 +1,20 @@
 name: Pages
 
-# Builds site/ and publishes it to GitHub Pages at codape.com.
+# Builds site/ and publishes it to GitHub Pages at codape.com, and checks a
+# pull request's site/ before it can reach main.
 #
-# Scoped to site/** on push, because this repository's `main` is otherwise a
-# Rust workspace and a docs-only or crate-only merge should not redeploy the
-# marketing page. There is no `paths-ignore` on `pull_request` for the same
-# reason there is none in ci.yml: a required check that never reports leaves the
-# pull request unmergeable.
+# The push side is scoped to site/**, because this repository's `main` is
+# otherwise a Rust workspace and a docs-only or crate-only merge should not
+# redeploy the marketing page.
+#
+# The pull_request side deliberately has no `paths:` filter. A required check
+# that never reports does not count as passing -- it sits "Expected" forever and
+# leaves the pull request unmergeable, which is the trap ci.yml documents for
+# its own matrix. So the `Site` job runs on every pull request and decides
+# inside whether site/ was touched; when it was not, the job finishes in a few
+# seconds having proven that the page it does not need to build still builds.
+# That keeps the check safe to add to the ruleset later without blocking Rust
+# pull requests.
 
 on:
   push:
@@ -14,20 +22,85 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/pages.yml'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Pages allows one deployment at a time. Queue rather than cancel: a cancelled
-# run mid-deploy can leave the environment reporting a failed deployment.
+# Deployments queue rather than cancel: a cancelled run mid-deploy can leave the
+# environment reporting a failed deployment. Pull request checks are the
+# opposite -- a newer push makes the old one uninteresting, so cancel it. The
+# ref is part of the group so one pull request's checks never queue behind
+# another's, or behind a deploy.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The pull-request half: type-check and build the page, never deploy.
+  #
+  # Same steps as the deploy build so the two cannot disagree about what
+  # "builds" means. The install/build steps are skipped when the pull request
+  # touches nothing the site depends on, which is why the job is cheap on a Rust
+  # change.
+  check:
+    name: Site
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Three-dot diff against the merge base needs the base commit, not
+          # just the merge ref.
+          fetch-depth: 0
+
+      - name: Did site/ change?
+        id: scope
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=true
+          if git diff --quiet "$BASE...HEAD" -- site .github/workflows/pages.yml; then
+            changed=false
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "site/ $( [ "$changed" = true ] && echo 'changed' || echo 'unchanged, skipping the build' )"
+
+      - if: steps.scope.outputs.changed == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - if: steps.scope.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - if: steps.scope.outputs.changed == 'true'
+        name: Install
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - if: steps.scope.outputs.changed == 'true'
+        name: Lint
+        working-directory: site
+        run: pnpm lint
+
+      # `pnpm build` type-checks with tsc before Vite bundles, so a type error
+      # fails here rather than merging a page that cannot be built.
+      - if: steps.scope.outputs.changed == 'true'
+        name: Build
+        working-directory: site
+        run: pnpm build
+
   build:
     name: Build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,6 +138,7 @@ jobs:
   deploy:
     name: Deploy
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
