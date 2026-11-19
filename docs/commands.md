@@ -29,7 +29,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `session_extension_commands` | `/resume`, `/rename`, `/rewind` | Session persistence & manipulation |
 | `config_extension_commands` | `/theme`, `/hooks`, `/mcp`, `/plugin`, `/memory`, `/skills`, `/tasks`, `/plan` | Extended configuration |
 | `diagnostic_commands` | `/status`, `/doctor` | System health checks |
-| `context_commands` | `/copy`, `/init`, `/summary`, `/files`, `/context`, `/add-dir` | Context management. `/copy [<n>…]` puts the session's text on the clipboard: no argument copies all of it, numbers copy those messages using `/rewind`'s numbering. Reasoning rows are left out |
+| `context_commands` | `/copy`, `/init`, `/summary`, `/files`, `/context`, `/add-dir` | Context management. `/copy [<n>…]` puts the session's text on the clipboard: no argument copies all of it, numbers copy those messages using `/rewind`'s numbering. Reasoning rows are left out. `ctrl+shift+c` is the same clipboard without a command — it copies the transcript exactly as drawn on screen |
 | `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |

@@ -92,6 +92,13 @@ pub struct MessageView {
     pub viewport_height: usize,
     /// Number of rendered lines scrolled up from the newest content.
     pub scroll_offset: usize,
+    /// Where the transcript was drawn in the last frame.
+    ///
+    /// Recorded by the renderer so a keyboard copy can name the one region
+    /// that is the conversation. Without it the only known rectangle is the
+    /// whole frame, and a copy would take the prompt, the statusline and the
+    /// permission bar along with the answer.
+    pub area: ratatui::layout::Rect,
     /// Cache for rendered transcript lines while scrolling through history.
     pub render_cache: RenderedMessageCache,
 }
@@ -107,6 +114,7 @@ impl MessageView {
             total_height: 0,
             viewport_height: 0,
             scroll_offset: 0,
+            area: ratatui::layout::Rect::default(),
             render_cache: RenderedMessageCache::default(),
         }
     }

@@ -208,6 +208,13 @@ pub enum Action {
     ListNext,
     /// Accept the highlighted row of a modal list.
     ListAccept,
+    /// Copy the transcript as it is on screen to the clipboard.
+    ///
+    /// The keyboard half of copying. A mouse drag copies whatever rectangle
+    /// was selected, which needs a pointer; `/copy <n>` copies named messages,
+    /// which needs the message's number. This is the third case, and the one
+    /// with no argument: the answer being read right now.
+    CopyTranscript,
 }
 
 impl Action {
@@ -258,6 +265,7 @@ impl Action {
             Self::ListPrevious => "list:previous",
             Self::ListNext => "list:next",
             Self::ListAccept => "list:accept",
+            Self::CopyTranscript => "app:copyTranscript",
         }
     }
 
@@ -273,6 +281,7 @@ impl Action {
             | Self::PanePreviousTab
             | Self::PaneNextTab
             | Self::TranscriptFullscreen
+            | Self::CopyTranscript
             | Self::CyclePermissionMode => Context::Global,
             Self::ImagePaste
             | Self::VoiceInput
@@ -318,7 +327,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 43] {
+    pub const fn all() -> [Self; 44] {
         ALL_ACTIONS
     }
 
@@ -416,11 +425,17 @@ impl Action {
             // `alt+c` for configuration, beside the `alt+h` help page and the
             // `alt+p`/`alt+v` surfaces it sits with.
             Self::SettingsMenu => &["alt+c"],
+            // The copy key most terminals use, and the one thing the transcript
+            // was missing without a pointer. Not reserved: the terminal's own
+            // ctrl+shift+c copies the terminal's selection, which the TUI's
+            // repainting makes unreliable, so taking it here is the fix rather
+            // than a collision.
+            Self::CopyTranscript => &["ctrl+shift+c"],
         }
     }
 }
 
-const ALL_ACTIONS: [Action; 43] = [
+const ALL_ACTIONS: [Action; 44] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -464,6 +479,7 @@ const ALL_ACTIONS: [Action; 43] = [
     Action::StashInput,
     Action::SendNow,
     Action::SettingsMenu,
+    Action::CopyTranscript,
 ];
 
 /// A named key, for everything that is not a character.
