@@ -3434,7 +3434,7 @@ impl ReplLoop {
     pub fn new(cwd: String, model: ModelId) -> Self {
         let mut commands = CommandRegistry::new();
         codape_commands::registry::register_all_commands(&mut commands);
-        let mut this = Self {
+        Self {
             commands,
             model: ModelSettings {
                 current: model,
@@ -3596,9 +3596,7 @@ impl ReplLoop {
             },
             shell_results: ShellResults::new(),
             voice_runs: VoiceRuns::new(),
-        };
-        this.init_command_persistence();
-        this
+        }
     }
 
     /// Supply settings-file context-window overrides for this session.
@@ -3955,7 +3953,7 @@ impl ReplLoop {
         #[cfg(feature = "hot-reload")]
         let (config_watcher, config_changed_rx) = Self::init_config_watcher(&cwd);
 
-        let mut this = Self {
+        Self {
             commands,
             model: ModelSettings {
                 current: model,
@@ -4115,9 +4113,7 @@ impl ReplLoop {
             },
             shell_results: ShellResults::new(),
             voice_runs: VoiceRuns::new(),
-        };
-        this.init_command_persistence();
-        this
+        }
     }
 
     /// Start serving artifacts and register the tool family.
@@ -6107,8 +6103,19 @@ impl ReplLoop {
         Ok(message)
     }
 
-    /// Initialize command history and macro registry from disk.
-    fn init_command_persistence(&mut self) {
+    /// Load command history and macros from the config home.
+    ///
+    /// Deliberately **not** called by a constructor. Between them these two
+    /// files are written on every slash command (`append`) and every
+    /// `/macro define`, so a `ReplLoop` that loads them by default turns
+    /// "construct a loop" into "edit the developer's `~/.codape`". Unit tests
+    /// and integration tests both construct loops freely, and an integration
+    /// test binary is not `cfg!(test)` — it links the library normally — so a
+    /// compile-time switch cannot tell them apart from the real binary.
+    ///
+    /// The binary is what calls this, from the orchestrator's two builders,
+    /// which is the same place every other startup-only decision is applied.
+    pub fn init_command_persistence(&mut self) {
         let config_dir = codape_config::settings::config_home();
         let history_path = config_dir.join("command_history.jsonl");
         self.command_history.set_file_path(history_path);
@@ -8511,55 +8518,6 @@ impl ReplLoop {
             }
             VimAction::SearchPrev => {
                 ui_state.search.prev();
-            }
-            VimAction::ExportCopy => {
-                use codape_ui::export::{ExportFormat, copy_to_clipboard, export_messages};
-                use codape_ui::selector::MessageSelector;
-                let core_msgs: Vec<codape_core::types::Message> = ui_state
-                    .messages
-                    .messages
-                    .iter()
-                    // Reasoning is not part of the conversation: exporting it
-                    // would hand the model's notes to the recipient as if they
-                    // were the answer.
-                    .filter(|m| m.role != codape_ui::message_list::MessageRole::Thinking)
-                    .map(|m| {
-                        let role = match m.role {
-                            codape_ui::message_list::MessageRole::User => {
-                                codape_core::types::Role::User
-                            }
-                            // `Thinking` cannot reach here — it is filtered out
-                            // above — so it is folded in with `Assistant`
-                            // rather than given a body of its own; the arm is
-                            // still listed so a new role cannot silently
-                            // export as something else.
-                            codape_ui::message_list::MessageRole::Assistant
-                            | codape_ui::message_list::MessageRole::Thinking => {
-                                codape_core::types::Role::Assistant
-                            }
-                            codape_ui::message_list::MessageRole::System => {
-                                codape_core::types::Role::System
-                            }
-                            codape_ui::message_list::MessageRole::ToolCall
-                            | codape_ui::message_list::MessageRole::ToolResult => {
-                                codape_core::types::Role::Tool
-                            }
-                        };
-                        codape_core::types::Message {
-                            role,
-                            content: codape_core::types::MessageContent::Text(
-                                m.content.to_string(),
-                            ),
-                        }
-                    })
-                    .collect();
-                let selector = MessageSelector::new(core_msgs.len());
-                let exported = export_messages(&core_msgs, &selector, ExportFormat::PlainText);
-                if let Err(e) = copy_to_clipboard(&exported) {
-                    ui_state.notifications.err(format!("Copy failed: {e}"));
-                } else {
-                    ui_state.notifications.success("Copied to clipboard");
-                }
             }
             VimAction::Repeat | VimAction::Ignore => {}
             VimAction::Append => {
@@ -15568,6 +15526,10 @@ impl ReplLoop {
             // `/cost` prints that as `n/a (model price unknown)` rather than
             // as a dollar figure built on Sonnet's fallback rate.
             ctx.cost_usd = engine.cost_tracker().known_total_cost();
+            // `/copy` needs the text itself. `message_count` above is the size
+            // of the same list and cannot stand in for it: the handler used to
+            // have nothing but the count, which is why it copied a placeholder.
+            ctx.transcript.clone_from(&engine.session().messages);
         }
         ctx
     }
@@ -19693,6 +19655,727 @@ mod tests {
         );
         repl.with_no_persistence(true);
         repl
+    }
+
+    // ── The slash-command half of `process_tui_input` ────────────────────────
+    //
+    // Routing a typed line to the right handler is the part of the TUI the
+    // `codape-commands` tests cannot reach: they call the registry directly,
+    // so the argument split, the built-in arms, the pipe, the destructive
+    // confirmation and the prompt-command hand-off are all exercised only
+    // here.
+
+    /// A loop whose command history and macros live in their own directory.
+    ///
+    /// `init_command_persistence` already keeps a test build off the real
+    /// config home, so this is what makes the two files observable: the test
+    /// can then assert that a command really was recorded, and that macros
+    /// really are per-session, without either assertion depending on files
+    /// the developer happens to have.
+    fn repl_with_isolated_state(cwd: &std::path::Path, state: &std::path::Path) -> ReplLoop {
+        let mut repl = repl_with_keys(cwd);
+        // The constructor already read the real files in; a fresh pair is what
+        // makes this session's history and macros the ones the test defines.
+        repl.command_history = CommandHistory::new(1000);
+        repl.command_history
+            .set_file_path(state.join("command_history.jsonl"));
+        repl.macro_registry = MacroRegistry::new();
+        repl.macro_registry.set_file_path(state.join("macros.json"));
+        repl
+    }
+
+    /// The state `process_tui_input` takes, so a test can call it by name.
+    struct TuiHarness {
+        repl: ReplLoop,
+        ui: codape_ui::state::UiState,
+        thinking: bool,
+        phase: InteractivePhase,
+        query_done_rx:
+            Option<tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>>,
+        elicit_rx: Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
+        tui_elicit_rx: Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
+        queued: std::collections::VecDeque<String>,
+    }
+
+    impl TuiHarness {
+        fn new(cwd: &std::path::Path, state: &std::path::Path) -> Self {
+            Self {
+                repl: repl_with_isolated_state(cwd, state),
+                ui: codape_ui::state::UiState::new(),
+                thinking: false,
+                phase: InteractivePhase::Idle,
+                query_done_rx: None,
+                elicit_rx: None,
+                tui_elicit_rx: None,
+                queued: std::collections::VecDeque::new(),
+            }
+        }
+
+        fn submit(&mut self, text: &str) {
+            self.repl.process_tui_input(
+                text,
+                &mut self.ui,
+                &mut self.thinking,
+                &mut self.phase,
+                &mut self.query_done_rx,
+                &mut self.elicit_rx,
+                &mut self.tui_elicit_rx,
+                &mut self.queued,
+            );
+        }
+
+        /// Every transcript row, so an assertion can say what was on screen
+        /// when it failed.
+        fn screen(&self) -> String {
+            self.ui
+                .messages
+                .messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// Answer the top dialog with one key, the way the event loop does.
+        async fn press(&mut self, key: crossterm::event::KeyEvent) {
+            let mut live = InteractiveLive::new();
+            let mut vim = codape_ui::vim::VimState::new_insert();
+            self.repl
+                .handle_key_event(
+                    key,
+                    &mut self.ui,
+                    &mut live,
+                    &mut vim,
+                    &mut self.thinking,
+                    &mut self.query_done_rx,
+                    &mut self.elicit_rx,
+                    &mut self.tui_elicit_rx,
+                    &mut self.queued,
+                )
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slash_command_reaches_the_registry_and_is_recorded_in_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/version");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("Codape"),
+            "the registry did not answer: {screen}"
+        );
+        assert!(
+            !screen.contains("Unknown command"),
+            "a registered command was not found: {screen}"
+        );
+        // The history line is what the composer's up-arrow and the `/` palette
+        // replay, so a command that ran without being recorded is a command
+        // the person cannot repeat.
+        let recorded: Vec<&str> = harness
+            .repl
+            .command_history
+            .list(10)
+            .iter()
+            .map(|entry| entry.cmd.as_str())
+            .collect();
+        assert_eq!(recorded, vec!["version"], "history: {recorded:?}");
+        // A slash command is not a turn.
+        assert!(!harness.thinking, "a slash command started a query");
+        assert!(harness.queued.is_empty(), "a slash command queued a turn");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_slash_command_says_so_instead_of_becoming_a_turn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/nosuchthing now");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("Unknown command: /nosuchthing"),
+            "the miss was not reported: {screen}"
+        );
+        // Falling through to the turn path would send "/nosuchthing now" to the
+        // model, which is how a typo turns into a billed request.
+        assert!(!harness.thinking, "an unknown command started a turn");
+        assert!(
+            harness.queued.is_empty(),
+            "an unknown command queued a turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pipe_runs_every_segment_and_joins_the_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/version | /usage");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("Codape"),
+            "the first segment did not run: {screen}"
+        );
+        assert!(
+            screen.contains("Token Usage"),
+            "the second segment did not run: {screen}"
+        );
+        // The separator is how a reader tells where one segment's output ends.
+        assert!(
+            screen.contains("\n---\n"),
+            "segments were not separated: {screen}"
+        );
+        // The joined block is one assistant row, not two system rows: it is a
+        // result the model could equally have produced.
+        let roles: Vec<_> = harness
+            .ui
+            .messages
+            .messages
+            .iter()
+            .filter(|message| message.content.contains("---"))
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(
+            roles,
+            vec![codape_ui::message_list::MessageRole::Assistant],
+            "a pipe did not produce one assistant row"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_destructive_command_asks_before_it_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/clear");
+
+        assert!(
+            matches!(
+                harness.ui.overlays.top(),
+                Some(codape_ui::overlay::Overlay::Confirm { .. })
+            ),
+            "no confirmation for a destructive command: {:?}",
+            harness.ui.overlays.top()
+        );
+        assert_eq!(
+            harness
+                .repl
+                .permissions
+                .pending_destructive_cmd
+                .as_ref()
+                .map(|(cmd, args)| (cmd.as_str(), args.len())),
+            Some(("clear", 0))
+        );
+
+        // Answering no drops the work instead of running it later.
+        harness.press(press(KeyCode::Char('n'))).await;
+        assert!(
+            harness.repl.permissions.pending_destructive_cmd.is_none(),
+            "a refused command stayed queued"
+        );
+        assert!(
+            harness.screen().contains("Command cancelled."),
+            "the refusal was not said: {}",
+            harness.screen()
+        );
+
+        // Answering yes runs exactly the command that was held, arguments and
+        // all, through the same path the unconfirmed command would have taken.
+        harness.submit("/clear");
+        harness.press(press(KeyCode::Char('y'))).await;
+        assert!(
+            harness.screen().contains("Session cleared"),
+            "the confirmed command did not run: {}",
+            harness.screen()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_command_expands_into_a_turn_rather_than_printing_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let commands = tempfile::tempdir().unwrap();
+        std::fs::write(
+            commands.path().join("note-this.md"),
+            "---\ndescription: Review a file\n---\nReview $1 carefully.\n",
+        )
+        .unwrap();
+
+        let mut harness = TuiHarness::new(tmp.path(), state.path());
+        harness
+            .repl
+            .with_custom_command_dirs(&[commands.path().to_path_buf()]);
+        // A turn is already running, so the expansion has to wait for it. This
+        // is the branch that keeps a prompt command from starting a second
+        // turn on top of the first.
+        harness.thinking = true;
+
+        harness.submit("/note-this src/lib.rs");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("→ /note-this"),
+            "the run was not named: {screen}"
+        );
+        assert!(
+            screen.contains("Review src/lib.rs carefully."),
+            "the arguments were not substituted: {screen}"
+        );
+        assert_eq!(
+            harness.queued.len(),
+            1,
+            "the expansion was not queued: {:?}",
+            harness.queued
+        );
+        assert!(
+            harness.queued[0].contains("Review src/lib.rs carefully."),
+            "the queued text is not the expanded prompt: {:?}",
+            harness.queued
+        );
+        // The queued prompt is on screen as the user's own message, because a
+        // turn nobody can see waiting is a turn people submit twice.
+        assert!(
+            harness
+                .ui
+                .messages
+                .messages
+                .iter()
+                .any(
+                    |message| message.role == codape_ui::message_list::MessageRole::User
+                        && message.content.contains("Review src/lib.rs")
+                ),
+            "the expansion has no user row: {screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_mcp_builtin_answers_from_the_command_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/mcp list");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("MCP"),
+            "`/mcp list` did not answer: {screen}"
+        );
+        // No manager is attached to a bare loop, so the honest answer is that
+        // nothing is connected — not an empty listing that reads as "connected
+        // to nothing".
+        assert!(
+            screen.contains("Not connected"),
+            "the unconnected state was not stated: {screen}"
+        );
+        assert!(!harness.thinking, "`/mcp` started a turn");
+    }
+
+    #[tokio::test]
+    async fn disabling_slash_commands_also_disables_the_builtin_exit() {
+        // `--disable-slash-commands` used to leave the built-ins running, so
+        // `/exit` still ended the session and the flag only hid commands from
+        // `/help`.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        harness.repl.with_no_slash_commands(true);
+
+        harness.submit("/exit");
+
+        assert!(
+            harness.repl.running,
+            "the built-in exit ran despite the flag: {}",
+            harness.screen()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_model_opens_the_picker_and_effort_reads_back_what_was_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // A bare `/model` is a request to choose, not to be told the current
+        // name: the picker is the only place the effort level is visible too.
+        harness.submit("/model");
+        assert!(
+            matches!(
+                harness.ui.overlays.top(),
+                Some(codape_ui::overlay::Overlay::ModelPicker(_))
+            ),
+            "`/model` did not open the chooser: {:?}",
+            harness.ui.overlays.top()
+        );
+
+        // `/effort` with no argument reports, and with one it sets — through
+        // the same call the picker makes, so the two cannot disagree.
+        harness.ui.overlays.clear();
+        harness.submit("/effort");
+        assert!(
+            harness
+                .ui
+                .notifications
+                .latest()
+                .is_some_and(|note| note.message.contains("Reasoning effort: off")),
+            "`/effort` did not report the current level"
+        );
+
+        harness.submit("/effort high");
+        assert_eq!(
+            harness
+                .repl
+                .model
+                .reasoning_effort
+                .map(codape_core::api_client::ReasoningEffort::as_str),
+            Some("high"),
+            "`/effort high` did not set the level"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typed_prompt_during_a_turn_is_queued_and_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        // The engine was moved into the running turn, so this is exactly the
+        // shape the loop is in mid-answer.
+        harness.repl.session.engine = None;
+        harness.thinking = true;
+
+        harness.submit("and also check the tests");
+
+        assert_eq!(
+            harness.queued.len(),
+            1,
+            "the prompt was not queued: {:?}",
+            harness.queued
+        );
+        assert_eq!(harness.queued[0], "and also check the tests");
+        // Without a visible marker the line looks lost, and the person types
+        // it again — which then runs it twice.
+        assert!(
+            harness
+                .screen()
+                .contains("[Queued until current turn finishes]"),
+            "the queue was not shown: {}",
+            harness.screen()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loop_with_no_engine_says_so_rather_than_swallowing_the_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut repl = ReplLoop::new(tmp.path().to_string_lossy().into_owned(), ModelId::sonnet());
+        repl.with_no_persistence(true);
+        let mut harness = TuiHarness {
+            repl,
+            ui: codape_ui::state::UiState::new(),
+            thinking: false,
+            phase: InteractivePhase::Idle,
+            query_done_rx: None,
+            elicit_rx: None,
+            tui_elicit_rx: None,
+            queued: std::collections::VecDeque::new(),
+        };
+
+        harness.submit("hello");
+
+        assert!(
+            harness.screen().contains("[No engine configured]"),
+            "the missing engine was not reported: {}",
+            harness.screen()
+        );
+        assert!(!harness.thinking);
+        assert!(harness.queued.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_while_a_turn_is_running() {
+        // Resuming swaps the session out from under the turn that is writing
+        // it. The guard is the only thing standing between the two.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        harness.thinking = true;
+
+        harness.submit("/resume some-session-id");
+
+        assert!(
+            harness
+                .screen()
+                .contains("Finish or cancel the active turn before resuming"),
+            "the guard was not reported: {}",
+            harness.screen()
+        );
+    }
+
+    #[tokio::test]
+    async fn open_puts_the_file_in_the_pane_and_reports_a_missing_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "the file body\n").unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/open notes.txt");
+
+        assert_eq!(harness.ui.left_pane_content, "the file body\n");
+        assert!(
+            matches!(
+                harness.ui.layout_mode,
+                codape_ui::state::LayoutMode::HorizontalSplit { .. }
+            ),
+            "the pane was filled but not shown: {:?}",
+            harness.ui.layout_mode
+        );
+        assert!(harness.screen().contains("Opened notes.txt"));
+
+        // A path that cannot be read is reported in the transcript, not left
+        // as a silent no-op that looks like the key did not work.
+        harness.submit("/open missing.txt");
+        assert!(
+            harness.screen().contains("Failed to open missing.txt"),
+            "a failed open was silent: {}",
+            harness.screen()
+        );
+
+        // `/open` with no argument is a usage error rather than a blank pane.
+        harness.submit("/open");
+        assert!(harness.screen().contains("Usage: /open <path>"));
+    }
+
+    #[tokio::test]
+    async fn a_defined_macro_runs_its_commands_through_the_full_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/macro define greet /version");
+        assert!(
+            harness.screen().contains("Defined macro 'greet'"),
+            "the macro was not defined: {}",
+            harness.screen()
+        );
+        assert!(harness.repl.macro_registry.has("greet"));
+
+        // Invoking the macro name goes through `execute_single_command`, so a
+        // segment is allowed to be a built-in or a registry command and the
+        // macro is not a second, weaker dispatcher.
+        harness.submit("/greet");
+        assert!(
+            harness.screen().contains("Codape"),
+            "the macro's command did not run: {}",
+            harness.screen()
+        );
+        assert!(!harness.thinking, "a macro started a turn");
+    }
+
+    #[tokio::test]
+    async fn compact_and_plan_answer_from_the_session_they_are_attached_to() {
+        use codape_core::types::{Message, MessageContent};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // A session with nothing in it is a real answer, not an error: the
+        // command reports that there is nothing to compact rather than
+        // claiming it compacted zero messages.
+        harness.submit("/compact");
+        assert!(
+            harness.screen().contains("already compact"),
+            "/compact on an empty session: {}",
+            harness.screen()
+        );
+
+        // Give the session enough messages that compaction has something to
+        // do, then compact. The engine owns the messages; `/compact` has to
+        // reach through to it rather than truncating the view.
+        {
+            let engine = harness.repl.session.engine.as_mut().expect("engine");
+            let mut session = engine.session().clone();
+            for index in 0..12 {
+                session.messages.push(Message {
+                    role: if index % 2 == 0 {
+                        codape_core::types::Role::User
+                    } else {
+                        codape_core::types::Role::Assistant
+                    },
+                    content: MessageContent::Text(format!("message {index}")),
+                });
+            }
+            engine.set_session(session);
+        }
+        harness.submit("/compact");
+        assert!(
+            harness.screen().contains("Context compacted")
+                || harness.screen().contains("already compact"),
+            "/compact did not answer: {}",
+            harness.screen()
+        );
+
+        // `/plan` puts the current plan in an overlay rather than appending a
+        // paragraph, and an empty plan is stated as such.
+        harness.ui.overlays.clear();
+        harness.submit("/plan");
+        let Some(codape_ui::overlay::Overlay::Detail { title, body, .. }) =
+            harness.ui.overlays.top()
+        else {
+            panic!(
+                "`/plan` did not open a detail overlay: {:?}",
+                harness.ui.overlays.top()
+            );
+        };
+        assert_eq!(title, "Current Plan");
+        assert!(body.contains("No active plan"), "{body}");
+    }
+
+    /// `/copy` used to write the literal string `(last message content)` and
+    /// report success: the dispatcher gave it a message *count*, and a count
+    /// cannot be copied. This drives the real TUI path so the assertion is
+    /// about what reaches the clipboard, not about what a handler returned.
+    ///
+    /// Run in the `ENV_LOCK` and with `pbcopy` replaced on `PATH`, because a
+    /// test that copied to the developer's real clipboard would be another way
+    /// of writing to something that is not the test's.
+    #[tokio::test]
+    #[allow(unsafe_code)] // PATH mutation is unsafe in edition 2024; ENV_LOCK guards it.
+    #[allow(clippy::await_holding_lock)] // ENV_LOCK keeps the fake `pbcopy` on PATH across the await, on purpose.
+    async fn copy_puts_the_session_text_on_the_clipboard() {
+        use codape_core::types::{Message, MessageContent};
+
+        let _guard = crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let copied = tmp.path().join("clipboard.txt");
+        // A stand-in `pbcopy` (and `xclip`) that records its stdin instead of
+        // touching the system clipboard. Written as a shell script so the test
+        // does not need a second binary to exist, and named after all three
+        // clipboard tools so it works on whichever platform runs it.
+        let script = format!("#!/bin/sh\ncat > '{}'\n", copied.display());
+        for name in ["pbcopy", "xclip", "clip"] {
+            let path = bin.join(name);
+            std::fs::write(&path, &script).unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                perms.set_mode(0o755);
+            }
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        // In front of PATH, never in place of it: `ENV_LOCK` is cooperative
+        // and concurrent tests still need the real directories for `sh` and
+        // friends. See `tmux.rs` for the interference this cost once.
+        let previous = std::env::var_os("PATH");
+        // `bin` is moved into the iterator: nothing below needs it again.
+        let mock_first = std::env::join_paths(
+            std::iter::once(bin).chain(
+                previous
+                    .as_deref()
+                    .map(std::env::split_paths)
+                    .into_iter()
+                    .flatten(),
+            ),
+        )
+        .unwrap();
+        // SAFETY: `ENV_LOCK` is held for this test.
+        unsafe { std::env::set_var("PATH", &mock_first) };
+
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        {
+            let engine = harness.repl.session.engine.as_mut().expect("engine");
+            let mut session = engine.session().clone();
+            session
+                .messages
+                .push(Message::user("what does this test prove"));
+            session.messages.push(Message {
+                role: codape_core::types::Role::Assistant,
+                content: MessageContent::Text("that /copy copies real text".into()),
+            });
+            engine.set_session(session);
+        }
+
+        harness.submit("/copy");
+
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("Copied the transcript"),
+            "/copy did not report copying the transcript: {screen}"
+        );
+        let written =
+            std::fs::read_to_string(&copied).expect("`/copy` wrote nothing to the clipboard");
+        assert!(
+            written.contains("what does this test prove"),
+            "the clipboard does not contain the session's text: {written:?}"
+        );
+        assert!(
+            written.contains("that /copy copies real text"),
+            "the clipboard is missing the assistant turn: {written:?}"
+        );
+        assert!(
+            !written.contains("(last message content)"),
+            "/copy still writes its old placeholder: {written:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn keybindings_answers_through_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // `/keybindings` re-reads the files, which is what makes it useful
+        // after an edit, and prints where the bindings came from. `/vim` is
+        // deliberately not driven here: it writes `settings.json` in the real
+        // config home, and a test has no business editing that. The write path
+        // has its own test in `codape-commands`, where the directory is a
+        // parameter.
+        harness.submit("/keybindings");
+
+        let screen = harness.screen();
+        assert!(
+            screen.contains("Keybindings"),
+            "`/keybindings` printed nothing: {screen}"
+        );
+        assert!(
+            screen.contains("Sources"),
+            "`/keybindings` did not say where the bindings came from: {screen}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_resume_offers_the_sessions_instead_of_picking_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        harness.submit("/resume");
+
+        // "resume" with nothing after it is a request to choose. Taking the
+        // newest on the person's behalf made the one case they could not see
+        // the one that decided for them.
+        assert!(
+            matches!(
+                harness.ui.overlays.top(),
+                Some(codape_ui::overlay::Overlay::List(_))
+            ),
+            "`/resume` with no argument did not offer a list: {:?}",
+            harness.ui.overlays.top()
+        );
+        assert!(
+            !harness.screen().contains("Error"),
+            "listing the sessions errored: {}",
+            harness.screen()
+        );
     }
 
     #[tokio::test]

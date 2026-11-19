@@ -35,14 +35,9 @@ pub fn export_messages(
 }
 
 const fn role_label(role: codape_core::types::Role) -> &'static str {
-    use codape_core::types::Role;
-    match role {
-        Role::User => "User",
-        Role::Assistant => "Assistant",
-        Role::System => "System",
-        Role::Tool => "Tool",
-        _ => "Unknown",
-    }
+    // One label table, shared with the plain-text transcript: the Markdown
+    // export and `/copy` name a role the same way.
+    codape_core::transcript::role_label(role)
 }
 
 const fn role_json(role: codape_core::types::Role) -> &'static str {
@@ -57,23 +52,10 @@ const fn role_json(role: codape_core::types::Role) -> &'static str {
 }
 
 fn content_text(content: &codape_core::types::MessageContent) -> String {
-    use codape_core::types::MessageContent;
-    match content {
-        MessageContent::Text(text) => text.clone(),
-        MessageContent::ToolCall(tc) => format!("[tool_call: {}]", tc.name),
-        MessageContent::ToolResult(tr) => format!("[tool_result: {}]", tr.output),
-        // Provider state, not conversation: never exported as visible text.
-        MessageContent::Thinking(_) => String::new(),
-        // An attached image has no text body; its base64 payload would be
-        // useless in a transcript anyway, so the placeholder carries what a
-        // reader needs: that an image was there, and what kind.
-        MessageContent::Image(image) => format!("[image: {}]", image.media_type),
-        // A provider-run tool block is part of the assistant turn but is not
-        // prose. The label says what happened; the JSON it carries is for the
-        // provider, not for a reader of the transcript.
-        MessageContent::ServerBlock(server) => format!("[{}]", server.summary()),
-        _ => "[unknown content]".into(),
-    }
+    // Shared with `/copy`: a tool result, an image and a provider block read
+    // the same way in a JSON export as on the clipboard. A reasoning block has
+    // no text of its own, which `message_text` says with `None`.
+    codape_core::transcript::message_text(content).unwrap_or_default()
 }
 
 /// Whether an exported transcript should show this message at all.
@@ -90,13 +72,10 @@ fn format_messages(messages: &[&Message], format: ExportFormat) -> String {
 }
 
 fn format_plain(messages: &[&Message]) -> String {
-    let mut out = String::new();
-    for msg in messages.iter().filter(|m| is_displayable(m)) {
-        let _ = writeln!(out, "--- {} ---", role_label(msg.role));
-        out.push_str(&content_text(&msg.content));
-        out.push_str("\n\n");
-    }
-    out
+    // One implementation, shared with `/copy`: `codape-commands` cannot depend
+    // on this crate, so the plain-text shape lives in `codape-core` and both
+    // callers read it from there.
+    codape_core::transcript::plain_text(messages)
 }
 
 fn format_markdown(messages: &[&Message]) -> String {

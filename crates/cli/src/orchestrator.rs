@@ -3292,6 +3292,10 @@ impl StartupOrchestrator {
         } else {
             crate::repl::ReplLoop::new(cwd.to_string(), model)
         };
+        // The binary is the only caller that owns the config home: history and
+        // macros are written by every slash command, so loading them is opt-in
+        // rather than something `ReplLoop::new` does for whoever constructs it.
+        repl.init_command_persistence();
         repl.with_provider_label(provider_label);
         if let Some(ref pm) = self.ctx.plugin_manager {
             repl.with_plugin_manager(Arc::clone(pm));
@@ -4702,6 +4706,7 @@ impl StartupOrchestrator {
         } else {
             crate::repl::ReplLoop::new(cwd.to_string(), model)
         };
+        repl.init_command_persistence();
         repl.with_provider_label(provider_label);
         repl.with_resume_session(Some(resolved_session_id));
         if let Some(ref pm) = self.ctx.plugin_manager {

@@ -1170,6 +1170,96 @@ fn clear_command_clears_transcript_state() {
     assert!(!screen.contains("Available commands"));
 }
 
+/// `/copy` with nothing in the session says so, through the real binary.
+///
+/// The success path is covered in `repl.rs` with a stand-in `pbcopy`, because
+/// a test binary that reached the real clipboard would be writing outside
+/// itself. This one pins the other half: the command is reachable from the
+/// built binary and its refusal is the honest one, not a placeholder copy.
+#[test]
+fn copy_with_an_empty_session_says_there_is_nothing_to_copy() {
+    let dir = setup_project_dir();
+    let mut session = session_without_engine(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+    session.send_line("/copy");
+    let screen = session.wait_for_text("no messages to copy", SCREEN_TIMEOUT);
+    drop(session);
+    assert!(
+        !screen.contains("(last message content)"),
+        "`/copy` still reports its old placeholder: {screen}"
+    );
+}
+
+/// `/copy`, end to end: a real terminal, the real binary, a real turn, and
+/// what actually lands in the clipboard.
+///
+/// The fake `pbcopy` goes on the **child's** `PATH` only, so this cannot touch
+/// the machine's clipboard, and the assertion is on the bytes the command
+/// wrote rather than on the line it printed. That distinction is the whole
+/// point: `/copy` used to print success while writing the literal string
+/// `(last message content)`.
+#[test]
+fn copy_puts_the_session_text_on_the_clipboard_end_to_end() {
+    let dir = setup_project_dir();
+    let bin = dir.path().join("clipboard-bin");
+    std::fs::create_dir(&bin).expect("create fake bin");
+    let captured = dir.path().join("clipboard.txt");
+    let script = format!("#!/bin/sh\ncat > '{}'\n", captured.display());
+    for name in ["pbcopy", "xclip", "clip"] {
+        let path = bin.join(name);
+        std::fs::write(&path, &script).expect("write fake clipboard tool");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake clipboard tool");
+        }
+    }
+
+    let (_server, mut session) = {
+        let server = StaticServer::start();
+        let mut envs = server.envs();
+        // In front of the inherited PATH, never in place of it: the child
+        // still needs `sh` and everything else it resolves by name.
+        let child_path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        envs.push(("PATH".to_string(), child_path));
+        let session = PtySession::launch(dir.path(), &envs, "K2.6");
+        (server, session)
+    };
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    // A real turn, so the session has something to copy. The static server's
+    // answer is what the clipboard should contain.
+    session.send_line("hello");
+    session.wait_for_text("Hello!", SCREEN_TIMEOUT);
+
+    session.send_line("/copy");
+    let screen = session.wait_for_text("Copied the transcript", SCREEN_TIMEOUT);
+    drop(session);
+
+    let written = std::fs::read_to_string(&captured).expect("`/copy` wrote nothing");
+    assert!(
+        written.contains("hello"),
+        "the clipboard is missing the user's line: {written:?}"
+    );
+    assert!(
+        written.contains("Hello!"),
+        "the clipboard is missing the assistant's answer: {written:?}"
+    );
+    assert!(
+        !written.contains("(last message content)"),
+        "`/copy` still writes its old placeholder: {written:?}"
+    );
+    assert!(
+        screen.contains("characters"),
+        "`/copy` did not say how much it copied: {screen}"
+    );
+}
+
 #[test]
 fn unknown_command_keeps_repl_usable() {
     let dir = setup_project_dir();

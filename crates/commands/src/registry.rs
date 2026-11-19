@@ -353,6 +353,17 @@ pub struct CommandContext {
     /// command handler runs synchronously, so copying the (bounded) list is
     /// simpler than sharing a mutable registry across the boundary.
     pub recent_commands: Vec<String>,
+    /// The session's transcript, for a command that copies out of it.
+    ///
+    /// `/copy` used to write the literal string `(last message content)` to the
+    /// clipboard: the context carried `message_count`, which is how many
+    /// messages there are and not what any of them say, so no handler could
+    /// reach the text it was asked to copy. A clone rather than a handle for
+    /// the same reason as [`Self::recent_commands`] — the handler is
+    /// synchronous and cannot borrow the engine.
+    ///
+    /// Numbering matches `/rewind`: message 1 is the first in the session.
+    pub transcript: Vec<codape_core::types::Message>,
 }
 
 impl CommandContext {
@@ -405,6 +416,7 @@ impl CommandContext {
             pipe_input: None,
             surface: codape_core::surface::SurfaceDescriptor::terminal(),
             recent_commands: Vec::new(),
+            transcript: Vec::new(),
         }
     }
 

@@ -95,8 +95,6 @@ pub enum VimAction {
     SearchNext,
     /// Previous search match.
     SearchPrev,
-    /// Export/copy message to clipboard.
-    ExportCopy,
     /// Toggle split-pane view.
     ToggleSplit,
     /// Enter characterwise Visual mode (`v`).

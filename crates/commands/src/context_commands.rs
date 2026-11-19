@@ -47,32 +47,42 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 /// Register content & context commands.
 pub fn register(registry: &mut CommandRegistry) {
-    // /copy — copy message content to clipboard
+    // /copy — put transcript text on the clipboard
     registry.register(SlashCommand::local(
         "copy",
-        "Copy message content to clipboard",
+        "Copy the transcript, or the messages you name, to the clipboard",
         true,
         true,
         true,
-        Arc::new(|_ctx: &CommandContext, args: &[String]| {
-            if args.is_empty() {
-                match copy_to_clipboard("(last message content)") {
-                    Ok(()) => CommandResult::success("Copied last message to clipboard."),
-                    Err(e) => CommandResult::error(format!("Clipboard failed: {e}\nEnsure pbcopy (macOS), clip (Windows), or xclip (Linux) is available.")),
+        Arc::new(|ctx: &CommandContext, args: &[String]| {
+            // The text is built before the clipboard is touched, so a bad
+            // message number fails without a side effect and can be tested
+            // without one — the handler itself shells out to `pbcopy`.
+            let text = match codape_core::transcript::copied_text(&ctx.transcript, args) {
+                Ok(text) if text.trim().is_empty() => {
+                    return CommandResult::error(
+                        "Nothing to copy: the selected messages carry no text.",
+                    );
                 }
+                Ok(text) => text,
+                Err(error) => return CommandResult::error(error),
+            };
+            let what = if args.is_empty() {
+                "the transcript".to_string()
             } else {
-                let text = format!("Message(s): {}", args.join(", "));
-                match copy_to_clipboard(&text) {
-                    Ok(()) => CommandResult::success(format!("Copied message(s) {} to clipboard.", args.join(", "))),
-                    // Say which messages were not copied. A bare failure makes
-                    // the command indistinguishable from one that copied
-                    // nothing, on a machine with no clipboard tool.
-                    Err(e) => CommandResult::error(format!(
-                        "Clipboard failed: {e}\nMessage(s) {} were not copied.\n\
-                         Ensure pbcopy (macOS), clip (Windows), or xclip (Linux) is available.",
-                        args.join(", ")
-                    )),
-                }
+                format!("message(s) {}", args.join(", "))
+            };
+            match copy_to_clipboard(&text) {
+                Ok(()) => CommandResult::success(format!(
+                    "Copied {what} to the clipboard ({} characters).",
+                    text.chars().count()
+                )),
+                // Name what was not copied: a bare failure is
+                // indistinguishable from one that copied nothing.
+                Err(error) => CommandResult::error(format!(
+                    "Clipboard failed: {error}\n{what} were not copied.\n\
+                     Ensure pbcopy (macOS), clip (Windows), or xclip (Linux) is available."
+                )),
             }
         }),
     ));
@@ -334,15 +344,41 @@ mod tests {
     }
 
     #[test]
-    fn copy_specific_messages() {
+    fn copy_with_no_transcript_says_there_is_nothing_to_copy() {
         let reg = {
             let mut r = CommandRegistry::new();
             register(&mut r);
             r
         };
-        let result = reg.execute("copy", &ctx(), &["3".into(), "5".into()]);
-        // May succeed or fail depending on platform clipboard, but output mentions the messages
-        assert!(result.output.contains('3') && result.output.contains('5'));
+        let result = reg.execute("copy", &ctx(), &[]);
+        // The context has no transcript, so this must say so rather than
+        // report a copy that wrote a placeholder.
+        assert!(result.output.contains("no messages"), "{}", result.output);
+    }
+
+    #[test]
+    fn copy_of_a_bad_message_number_names_the_problem() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let c = CommandContext {
+            transcript: vec![codape_core::types::Message::user("only one")],
+            ..ctx()
+        };
+        let result = reg.execute("copy", &c, &["7".into()]);
+        assert!(
+            result.output.contains("Message 7 not found"),
+            "{}",
+            result.output
+        );
+        let result = reg.execute("copy", &c, &["zero".into()]);
+        assert!(
+            result.output.contains("not a message number"),
+            "{}",
+            result.output
+        );
     }
 
     #[test]

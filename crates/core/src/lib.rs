@@ -57,6 +57,7 @@ pub mod team_context;
 pub mod test_guard;
 pub mod tool_executor;
 pub mod tool_scheduler;
+pub mod transcript;
 pub mod types;
 pub mod ui_protocol;
 pub mod wire_adapter;

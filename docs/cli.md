@@ -188,8 +188,9 @@ answer, as its own row with the `✻` marker, folded to a one-line preview and
 `[+N lines]`. `Ctrl+E` unfolds every reasoning row; it folds them back. Reasoning
 is never interleaved into the answer text — it is a separate transcript entry —
 and it is left out of `/copy` and any other export, because handing the model's
-notes to a recipient as if they were the answer is wrong. A provider that does
-not stream reasoning simply produces no such rows.
+notes to a recipient as if they were the answer is wrong — the row is passed
+over rather than copied as an empty heading. A provider that does not stream
+reasoning simply produces no such rows.
 
 ### Output ceiling
 
