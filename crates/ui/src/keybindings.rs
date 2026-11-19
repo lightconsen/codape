@@ -172,6 +172,12 @@ pub enum Action {
     ExternalEditor,
     /// Put the line aside, or take back the one that was put aside.
     StashInput,
+    /// Stop the running turn and send the line now.
+    ///
+    /// Enter during a turn queues the line behind it. This is the other
+    /// answer to the same situation: the person changed their mind and the
+    /// half-finished answer is no longer wanted.
+    SendNow,
     /// Open the settings menu.
     SettingsMenu,
     /// Open the agent roster.
@@ -236,6 +242,7 @@ impl Action {
             Self::HistorySearchCancel => "historySearch:cancel",
             Self::ExternalEditor => "chat:externalEditor",
             Self::StashInput => "chat:stash",
+            Self::SendNow => "chat:sendNow",
             Self::SettingsMenu => "app:settings",
             Self::AgentsView => "app:agentsView",
             Self::Help => "app:help",
@@ -273,6 +280,7 @@ impl Action {
             | Self::HistorySearch
             | Self::ExternalEditor
             | Self::StashInput
+            | Self::SendNow
             | Self::SettingsMenu
             | Self::ModelPicker
             | Self::EffortSlider
@@ -310,7 +318,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 42] {
+    pub const fn all() -> [Self; 43] {
         ALL_ACTIONS
     }
 
@@ -400,6 +408,11 @@ impl Action {
             // which is what stashing a half-written prompt is: taken off the
             // line and held, not thrown away.
             Self::StashInput => &["ctrl+s"],
+            // Stop what is running and send this instead. `ctrl+g` is taken by
+            // the agent roster and `ctrl+x` by the editor handover, so this
+            // goes on the one remaining control letter next to `ctrl+s`:
+            // set a line aside, or replace the turn that is running.
+            Self::SendNow => &["ctrl+n"],
             // `alt+c` for configuration, beside the `alt+h` help page and the
             // `alt+p`/`alt+v` surfaces it sits with.
             Self::SettingsMenu => &["alt+c"],
@@ -407,7 +420,7 @@ impl Action {
     }
 }
 
-const ALL_ACTIONS: [Action; 42] = [
+const ALL_ACTIONS: [Action; 43] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -449,6 +462,7 @@ const ALL_ACTIONS: [Action; 42] = [
     Action::ListAccept,
     Action::ExternalEditor,
     Action::StashInput,
+    Action::SendNow,
     Action::SettingsMenu,
 ];
 
@@ -1475,5 +1489,31 @@ mod tests {
                 assert!(!context.as_str().is_empty());
             }
         }
+    }
+
+    #[test]
+    fn send_now_is_a_chat_key_that_does_not_shadow_another() {
+        let bindings = KeyBindings::default();
+        let ctrl_n = key(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert_eq!(
+            bindings.resolve(Context::Chat, &ctrl_n),
+            Some(Action::SendNow)
+        );
+        // The other chat keys it sits beside still resolve to themselves, so
+        // the new binding took a key nothing was using.
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::StashInput)
+        );
+        assert_eq!(
+            bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ExternalEditor)
+        );
     }
 }

@@ -38,6 +38,7 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::VoiceInput,
             Action::ExternalEditor,
             Action::StashInput,
+            Action::SendNow,
             Action::HistorySearch,
             Action::HistorySearchPrevious,
             Action::HistorySearchNext,
@@ -112,6 +113,7 @@ pub const fn describe(action: Action) -> &'static str {
         Action::VoiceInput => "Transcribe from the microphone onto the prompt",
         Action::ExternalEditor => "Write the prompt in $EDITOR and read it back",
         Action::StashInput => "Set the line aside and take it back",
+        Action::SendNow => "Stop the running turn and send this line now",
         Action::Cancel => "Stop the turn, clear the line, or close a dialog",
         Action::HistorySearch => "Search previous prompts",
         Action::ConfirmYes => "Run the destructive command",
@@ -267,6 +269,7 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::ListAccept,
     Action::ExternalEditor,
     Action::StashInput,
+    Action::SendNow,
     Action::SettingsMenu,
 ];
 

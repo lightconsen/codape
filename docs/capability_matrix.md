@@ -115,6 +115,7 @@ live.
 |---------|-----|-------|
 | External editor | `ctrl+x` (`chat:externalEditor`) | Writes the line to a temporary `.md` file, hands the terminal to `visual`/`editor` from `settings.json` or else `$VISUAL`/`$EDITOR`, and reads the file back when the editor exits successfully. The prompt file is one trailing newline shorter than what the editor saved, and a non-zero exit leaves the line exactly as it was. Deliberately **not** run through a shell: `$EDITOR` names a program and its flags, and a shell would also run `&&` chains and globs the person did not write |
 | Set a line aside | `ctrl+s` (`chat:stash`) | One slot, two directions: with nothing held the line goes into the slot and the prompt empties; with something held it comes back and whatever was on the line takes its place. The rule above the input says `set aside: …` while something is held, because a prompt nothing draws is a prompt people forget they have |
+| Replace the running turn | `ctrl+n` (`chat:sendNow`) | Enter during a turn queues the line behind it; this stops the turn and sends the line instead. The abandoned answer keeps its text with a `(superseded)` marker, so nothing that streamed is thrown away. Does nothing when no turn is running or the line is empty — an idle Enter is the same request, and stopping nothing would only append a marker to an answer nobody was writing |
 
 ## Command System
 

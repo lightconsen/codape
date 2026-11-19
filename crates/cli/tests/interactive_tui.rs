@@ -3112,6 +3112,37 @@ fn escape_interrupts_a_running_turn_in_the_default_mode() {
     assert!(screen.contains("(interrupted)"), "{screen}");
 }
 
+/// Ctrl+N stops the running turn and sends the line, instead of queueing it.
+///
+/// The distinction Enter cannot make: Enter during a turn queues behind it,
+/// which is right when the person is adding a follow-up. Ctrl+N is for when
+/// they have changed their mind, and it has to abandon the answer rather than
+/// wait for it. The `(superseded)` marker is the proof the turn was stopped
+/// rather than allowed to finish, and the second prompt's text appearing on
+/// screen is the proof it went out.
+#[test]
+fn ctrl_n_stops_the_running_turn_and_sends_the_line() {
+    let dir = setup_project_dir();
+    let (provider, mut session) = session_with_slow_provider(dir.path());
+    session.wait_for_text(WELCOME_READY, SCREEN_TIMEOUT);
+
+    session.send_line("write a very long response");
+    session.wait_for_text("tick", SCREEN_TIMEOUT);
+
+    // Type the replacement, then Ctrl+N. Ctrl+N is 0x0e.
+    session.send_text("never mind, do this instead");
+    session.wait_for_text("never mind, do this instead", SCREEN_TIMEOUT);
+    session.send_bytes(&[0x0e]);
+
+    let screen = session.wait_for_text("(superseded)", SCREEN_TIMEOUT);
+    assert!(
+        screen.contains("never mind, do this instead"),
+        "the replacement prompt did not go out:\n{screen}"
+    );
+    drop(session);
+    drop(provider);
+}
+
 fn first_run_consent(answer: &str) -> bool {
     let dir = setup_project_dir();
     let mut session = PtySession::launch_unseeded(dir.path(), &[], "claude-sonnet-4-6");

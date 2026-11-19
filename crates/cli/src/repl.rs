@@ -7695,6 +7695,48 @@ impl ReplLoop {
                     stash_or_restore_input(ui_state);
                     return TuiKeyFlow::Handled;
                 }
+                // Stop the turn and send what is on the line. Only meaningful
+                // while a turn is actually running: with nothing in flight the
+                // line is still there for Enter, and stopping an idle session
+                // would append an interruption marker to an answer nobody was
+                // writing.
+                //
+                // Interrupting and then submitting in that order is what makes
+                // this "send now" rather than "send later". The interrupt hands
+                // the engine back to the receiver, so the submit finds no
+                // engine and queues — and the idle boundary starts the queued
+                // prompt the moment the abandoned turn's result arrives. That
+                // is a fraction of a second, not another turn's wait.
+                Shortcut::SendNow
+                    if *thinking
+                        && !ui_state.input.text.is_empty()
+                        && !ui_state.overlays.is_active() =>
+                {
+                    let text = ui_state.input.take();
+                    self.stop_running_query(
+                        ui_state,
+                        thinking,
+                        &mut live.phase,
+                        query_done_rx,
+                        elicit_rx,
+                        tui_elicit_rx,
+                        " (superseded)",
+                    );
+                    live.pending_confirmation = None;
+                    if let Some(text) = text {
+                        self.process_tui_input(
+                            &text,
+                            ui_state,
+                            thinking,
+                            &mut live.phase,
+                            query_done_rx,
+                            elicit_rx,
+                            tui_elicit_rx,
+                            queued_prompts,
+                        );
+                    }
+                    return TuiKeyFlow::Handled;
+                }
                 // The settings menu. A list like the others, opened from a
                 // table built here because it reads the theme install and the
                 // settings file.
