@@ -3,13 +3,13 @@ import { ArrowDown } from "lucide-react"
 import { HeroTerminal } from "@/components/sections/hero-terminal"
 import { CopyCommand } from "@/components/site/copy-command"
 import { Button } from "@/components/ui/button"
-import { INSTALL_CMD, REPO, VERSION } from "@/data/site"
+import { INSTALL_CMD, REPO, STATS, VERSION } from "@/data/site"
 
-const STATS = [
-  { value: "54", label: "tool types" },
-  { value: "78", label: "slash commands" },
-  { value: "22", label: "hook events" },
-  { value: "20", label: "rust crates" },
+const STAT_ITEMS = [
+  { value: `${STATS.tools}`, label: "tool types" },
+  { value: `${STATS.commands}`, label: "slash commands" },
+  { value: `${STATS.hookEvents}`, label: "hook events" },
+  { value: `${STATS.crates}`, label: "rust crates" },
 ]
 
 export function Hero() {
@@ -68,7 +68,7 @@ export function Hero() {
             <CopyCommand command={INSTALL_CMD} className="mt-5 max-w-[540px]" />
 
             <dl className="mt-8 grid max-w-[540px] grid-cols-2 gap-[2px] border-2 border-border bg-border sm:grid-cols-4">
-              {STATS.map((stat) => (
+              {STAT_ITEMS.map((stat) => (
                 <div key={stat.label} className="bg-card px-3 py-3">
                   <dt className="sr-only">{stat.label}</dt>
                   <dd>

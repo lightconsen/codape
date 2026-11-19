@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react"
 import { Menu, X } from "lucide-react"
 
-import { NAV, REPO } from "@/data/site"
+import { NAV, REPO, STATS } from "@/data/site"
 import { cn } from "@/lib/utils"
 import { Wordmark } from "@/components/site/mark"
 
 const TICKER = [
-  "54 TOOL TYPES",
-  "78 SLASH COMMANDS",
-  "22 HOOK EVENTS",
-  "6 SUB-AGENTS",
+  `${STATS.tools} TOOL TYPES`,
+  `${STATS.commands} SLASH COMMANDS`,
+  `${STATS.hookEvents} HOOK EVENTS`,
+  `${STATS.subAgents} SUB-AGENTS`,
   "SANDBOX ON BY DEFAULT",
   "APACHE-2.0",
   "ONE NATIVE BINARY",

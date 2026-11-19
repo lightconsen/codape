@@ -11,6 +11,27 @@ export const INSTALL_URL = "https://codape.com/install.sh"
 export const INSTALL_CMD = `curl -fsSL ${INSTALL_URL} | sh`
 export const VERSION = "0.2.2"
 
+/**
+ * Counts the code asserts, not counts to remember. Each one has a test in the
+ * crate that would have to change for the number here to become wrong:
+ *
+ * - tools     `crates/tools/src/builtins.rs` — `descriptors.len()`
+ * - commands  `crates/commands/tests/slash_integration.rs` — `reg.len()`
+ * - hooks     `crates/hooks/src/events.rs` — the triggered-event list
+ * - agents    the built-in `AgentType` variants in `crates/agents/src/types.rs`
+ * - crates    `ls crates`
+ *
+ * The README's summary table can lag behind these; when the two disagree, this
+ * file should follow the tests.
+ */
+export const STATS = {
+  tools: 59,
+  commands: 80,
+  hookEvents: 23,
+  subAgents: 6,
+  crates: 20,
+} as const
+
 export const NAV = [
   { label: "Capabilities", href: "#capabilities" },
   { label: "Install", href: "#install" },
@@ -21,7 +42,7 @@ export const CAPABILITIES = [
   {
     id: "tools",
     kicker: "Tools",
-    value: "54",
+    value: `${STATS.tools}`,
     title: "A toolbelt, not a chat box",
     body: "Read, write, edit, glob, grep, shell, web fetch and search, LSP, notebooks, tasks, cron, MCP and the Chrome DevTools family — registered at startup.",
     detail: "read · edit · bash · grep · lsp · notebook · mcp",
@@ -29,7 +50,7 @@ export const CAPABILITIES = [
   {
     id: "commands",
     kicker: "Commands",
-    value: "78",
+    value: `${STATS.commands}`,
     title: "The daily-driver set",
     body: "Slash commands for the work around the work: /commit, /compact, /review, /diff, /resume and the rest of the set /help prints.",
     detail: "/commit  /review  /diff  /resume  /compact",
@@ -37,7 +58,7 @@ export const CAPABILITIES = [
   {
     id: "agents",
     kicker: "Sub-agents",
-    value: "6",
+    value: `${STATS.subAgents}`,
     title: "Parallel, isolated, yours",
     body: "General, explore, plan, verification and two setup helpers ship in the binary. Add your own; run them in parallel or in the background inside their own worktrees.",
     detail: "general · explore · plan · verification",
@@ -53,9 +74,9 @@ export const CAPABILITIES = [
   {
     id: "extensibility",
     kicker: "Extensibility",
-    value: "22",
+    value: `${STATS.hookEvents}`,
     title: "Hooks on the seams you care about",
-    body: "MCP servers, WASM and process plugins, hooks across 22 lifecycle events, and an embeddable WebSocket server for editors and SDKs.",
+    body: `MCP servers, WASM and process plugins, hooks across ${STATS.hookEvents} lifecycle events, and an embeddable WebSocket server for editors and SDKs.`,
     detail: "mcp · wasm · process plugins · websocket",
   },
   {
