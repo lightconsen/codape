@@ -1,0 +1,340 @@
+@import "tailwindcss";
+@import "@fontsource/silkscreen/400.css";
+@import "@fontsource/silkscreen/700.css";
+@import "@fontsource-variable/pixelify-sans";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+  Codape's palette — a warm CRT readout.
+
+  Near-black brown paper, bone-white ink, amber phosphor for anything the
+  machine is saying. Copper is the dimmed amber used for structure; it should
+  never compete with the accent for attention.
+
+  Everything square. The page has no rounded corner anywhere, and the only
+  shadows are hard offsets, because a pixel screen has no soft focus.
+*/
+:root {
+  --background: #0c0a07;
+  --foreground: #f3ead9;
+
+  --card: #17130e;
+  --card-foreground: #f3ead9;
+  --popover: #1c1711;
+  --popover-foreground: #f3ead9;
+
+  --primary: #f2a93b;
+  --primary-foreground: #1a1308;
+
+  --secondary: #241c13;
+  --secondary-foreground: #f3ead9;
+
+  --muted: #221b13;
+  --muted-foreground: #a1907a;
+
+  --accent: #2c2216;
+  --accent-foreground: #f8f0e0;
+
+  --destructive: #d2542f;
+
+  --border: #33291d;
+  --input: #3d3122;
+  --ring: #f2a93b;
+
+  --radius: 0px;
+
+  --font-display: "Silkscreen", ui-monospace, monospace;
+  --font-pixel: "Pixelify Sans Variable", ui-sans-serif, sans-serif;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* The one shadow in the system: a hard offset block. */
+  --shadow-pixel: 4px 4px 0 0 #000;
+  --shadow-pixel-amber: 4px 4px 0 0 #8c6a2f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --font-pixel: var(--font-pixel);
+
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    border-radius: 0;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-synthesis: none;
+    text-rendering: geometricPrecision;
+    font-feature-settings: "ss01" 1;
+    font-size: 16px;
+  }
+
+  h1,
+  h2 {
+    @apply font-pixel font-normal;
+    letter-spacing: -0.005em;
+  }
+
+  h3,
+  h4 {
+    @apply font-sans font-semibold;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Images that come from raster art are never smoothed. */
+  img {
+    image-rendering: pixelated;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+    The page's basic unit: a one-pixel-frame panel with an optional title bar,
+    like a window in a tiling window manager.
+  */
+  .panel {
+    @apply border border-border bg-card;
+  }
+
+  .panel-bar {
+    @apply flex items-center gap-2 border-b border-border bg-[#1d1710] px-3 py-2;
+  }
+
+  /* A hard-shadow block that lifts on hover — the page's only motion trick. */
+  .pixel-button {
+    box-shadow: var(--shadow-pixel-amber);
+    transition:
+      transform 120ms steps(2, end),
+      box-shadow 120ms steps(2, end);
+  }
+
+  .pixel-button:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 6px 6px 0 0 #8c6a2f;
+  }
+
+  .pixel-button:active {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 0 #8c6a2f;
+  }
+
+  /* A pixel-corner callout used around small metadata. */
+  .chip {
+    @apply inline-flex items-center gap-1.5 border border-border bg-[#1d1710] px-2 py-1 font-mono text-[10px] tracking-[0.14em] uppercase;
+  }
+}
+
+@layer utilities {
+  /* 8px pixel grid, drawn at low contrast. */
+  .bg-pixel-grid {
+    background-image:
+      linear-gradient(to right, rgb(242 169 59 / 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(242 169 59 / 0.06) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+
+
+  /* A denser dot screen for large empty fields. */
+  .bg-dots {
+    background-image: radial-gradient(rgb(242 169 59 / 0.18) 1px, transparent 1px);
+    background-size: 12px 12px;
+  }
+
+  .mask-fade-b {
+    mask-image: linear-gradient(to bottom, black 45%, transparent 100%);
+  }
+
+  .mask-fade-x {
+    mask-image: linear-gradient(to right, transparent, black 6%, black 94%, transparent);
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .text-pretty {
+    text-wrap: pretty;
+  }
+
+  /* A blinking amber block cursor. */
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 0.55em;
+    height: 1em;
+    margin-left: 0.15em;
+    vertical-align: -0.12em;
+    background: currentColor;
+    animation: caret-blink 1s steps(1, end) infinite;
+  }
+
+  /* Dashed rule drawn at a fixed pixel cadence. */
+  .rule-dashed {
+    background-image: repeating-linear-gradient(
+      to right,
+      var(--border) 0 4px,
+      transparent 4px 8px
+    );
+  }
+
+
+  /* A one-pixel offset frame, the pixel-art stand-in for a soft glow. */
+  .frame-inset {
+    box-shadow:
+      inset 1px 1px 0 0 rgb(255 255 255 / 0.04),
+      inset -1px -1px 0 0 rgb(0 0 0 / 0.6);
+  }
+
+  .hover-raise {
+    transition:
+      transform 140ms steps(3, end),
+      border-color 140ms linear,
+      background-color 140ms linear;
+  }
+
+  .hover-raise:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: var(--shadow-pixel);
+  }
+
+  .scanlines::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgb(0 0 0 / 0.16) 0 1px,
+      transparent 1px 3px
+    );
+    opacity: 0.5;
+  }
+}
+
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes stream-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* The horizontal marquee under the header. */
+@keyframes ticker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes sweep {
+  from {
+    transform: translateY(-120%);
+  }
+  to {
+    transform: translateY(520%);
+  }
+}
+
+.animate-rise {
+  animation: rise-in 640ms steps(6, end) both;
+}
+
+.animate-stream {
+  animation: stream-in 180ms steps(3, end) both;
+}
+
+.ticker-track {
+  animation: ticker 42s linear infinite;
+}
+
+.scanline {
+  animation: sweep 6s linear infinite;
+}
