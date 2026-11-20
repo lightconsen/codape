@@ -69,6 +69,13 @@ fn run_command_with(
         .env("CLAUDE_CONFIG_DIR", home)
         .env("CODAPE_LOG", "off")
         .env("CODAPE_DISABLE_ADOPT", "1")
+        // `/upgrade` and `/release-notes` are swept like any other command,
+        // and both look up the latest release. Left alone they reach GitHub —
+        // and a run whose current version is behind the published tag would
+        // download an archive and replace *this test's* binary mid-sweep. A
+        // closed port keeps it offline and deterministic: the command reports
+        // the failure to reach it, which is still the command answering.
+        .env("CODAPE_API_BASE_URL", "http://127.0.0.1:9/offline-sweep")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -108,12 +115,12 @@ fn every_non_interactive_slash_command_runs() {
         .filter(|command| command.supports_non_interactive)
         .map(|command| command.name.to_string())
         .collect();
-    // 82 commands, 78 of which declare non-interactive support. Pin both so a
+    // 89 commands, 85 of which declare non-interactive support. Pin both so a
     // command that loses the flag (or a new one that forgets it) fails here
     // instead of silently dropping out of the sweep.
     assert_eq!(
         names.len(),
-        78,
+        85,
         "the sweep no longer covers the registry: {names:?}"
     );
     for excluded in ["heapdump", "mock-limits", "voice", "stickers"] {

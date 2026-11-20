@@ -991,7 +991,10 @@ impl PermissionChecker {
         }
 
         if self.mode.is_read_only() {
-            if self.is_tool_read_only(tool_name) {
+            if let Some(ask) = self.plan_mode_exit_ask(tool_name) {
+                return ask;
+            }
+            if self.is_tool_read_only(tool_name) || Self::is_plan_mode_tool(tool_name) {
                 return PermissionResult::Allow;
             }
             return PermissionResult::Deny {
@@ -1157,6 +1160,12 @@ impl PermissionChecker {
     }
 
     /// Check if a tool is read-only (safe for plan mode).
+    ///
+    /// The comparison is against the lowercased tool name, so these are
+    /// `WebSearch`/`WebFetch`/`ToolSearch` as the model spells them —
+    /// `web_search` never matched anything and quietly kept web lookups out of
+    /// plan mode. `grep_code`, `file_search` and `notebook_read` name no tool
+    /// this repository ships; they are kept for hosts that register one.
     #[must_use]
     pub fn is_tool_read_only(&self, tool_name: &str) -> bool {
         matches!(
@@ -1167,13 +1176,55 @@ impl PermissionChecker {
                 | "currentdir"
                 | "grep"
                 | "glob"
-                | "web_search"
-                | "web_fetch"
+                | "websearch"
+                | "webfetch"
                 | "grep_code"
                 | "file_search"
                 | "notebook_read"
                 | "toolsearch"
                 | "lsp"
+        )
+    }
+
+    /// Check if a tool is the way out of plan mode.
+    ///
+    /// `ExitPlanMode` is the only call in plan mode that changes what the
+    /// session may do next, so it is asked about rather than allowed.
+    #[must_use]
+    pub const fn is_plan_mode_exit(tool_name: &str) -> bool {
+        tool_name.eq_ignore_ascii_case("exitplanmode")
+    }
+
+    /// The approval a plan-mode exit asks for, or `None` for any other call.
+    ///
+    /// The engine asks this before its hooks so an auto-approving classifier
+    /// cannot answer on the person's behalf: handing the plan back is their
+    /// decision, not a classification.
+    #[must_use]
+    pub fn plan_mode_exit_ask(&self, tool_name: &str) -> Option<PermissionResult> {
+        if !self.mode.is_read_only() || !Self::is_plan_mode_exit(tool_name) {
+            return None;
+        }
+        Some(PermissionResult::Ask {
+            reason: "the plan is finished — leaving plan mode lets edits resume; approve to \
+                     carry it out"
+                .into(),
+        })
+    }
+
+    /// Check if a tool belongs to the plan-mode protocol itself.
+    ///
+    /// These tools do not touch the working directory, so a plan that cannot
+    /// use them is a plan nobody can read: `EnterPlanMode` is idempotent,
+    /// `TodoWrite` is the plan's own outline and `AskUserQuestion` is how the
+    /// model asks before it proposes anything. Denying them made plan mode a
+    /// trap — the model could get in and had no permitted way to get out.
+    /// `ExitPlanMode` has its own branch above: it is asked about, not allowed.
+    #[must_use]
+    fn is_plan_mode_tool(tool_name: &str) -> bool {
+        matches!(
+            tool_name.to_lowercase().as_str(),
+            "enterplanmode" | "todowrite" | "askuserquestion"
         )
     }
 

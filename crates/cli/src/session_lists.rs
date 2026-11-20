@@ -679,6 +679,120 @@ fn human_size(bytes: usize) -> String {
     }
 }
 
+/// One background job, as the job panel needs it.
+///
+/// A plain struct rather than a `JobRecord` so the row builder is testable
+/// without a store on disk, and so the panel does not have to agree with the
+/// record's field names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobRow {
+    /// The job's id, which is also how `JobOutput` and `JobKill` name it.
+    pub id: String,
+    /// `agent`, `shell`, `workflow` or `cron`.
+    pub kind: String,
+    /// `running`, `done`, `failed` or `interrupted`.
+    pub state: String,
+    /// What the job was asked to do.
+    pub description: String,
+    /// Whether the job has an output file to open.
+    ///
+    /// A cron definition never writes one, so `Enter` on its row says so
+    /// rather than opening an empty pane as though the job had said nothing.
+    pub has_output: bool,
+}
+
+/// What an accepted row of the job panel means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobChoice {
+    /// Show the job's output in the detail overlay.
+    Output(String),
+    /// Stop the job's process group.
+    Kill(String),
+    /// Remove a finished job's record.
+    Forget(String),
+}
+
+impl JobChoice {
+    /// The key [`PickerItem`] carries for this choice.
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::Output(id) => format!("job-out:{id}"),
+            Self::Kill(id) => format!("job-kill:{id}"),
+            Self::Forget(id) => format!("job-forget:{id}"),
+        }
+    }
+
+    /// Read a key back, or say why it is not one we wrote.
+    #[must_use]
+    pub fn parse(key: &str) -> Option<Self> {
+        let (kind, id) = key.split_once(':')?;
+        if id.is_empty() {
+            return None;
+        }
+        match kind {
+            "job-out" => Some(Self::Output(id.to_string())),
+            "job-kill" => Some(Self::Kill(id.to_string())),
+            "job-forget" => Some(Self::Forget(id.to_string())),
+            _ => None,
+        }
+    }
+}
+
+/// Build the background-job panel.
+///
+/// Three rows per job — output, stop, forget — because those are the three
+/// things a person wants from work that is already running or already over,
+/// and the list is the only place all of them are reachable without typing.
+/// Only what *can* be done is offered: a finished job has nothing to stop, and
+/// a running one has nothing to forget.
+#[must_use]
+pub fn job_rows(rows: &[JobRow]) -> Picker {
+    if rows.is_empty() {
+        return Picker::new(
+            "Background jobs",
+            vec![
+                PickerItem::new("", "No background jobs in this workspace")
+                    .disabled("Bash run_in_background and background agents write them here"),
+            ],
+        );
+    }
+
+    let mut items = Vec::with_capacity(rows.len() * 3);
+    for job in rows {
+        let running = job.state == "running";
+        items.push(
+            PickerItem::new(
+                JobChoice::Output(job.id.clone()).key(),
+                format!("{} · {} · {}", job.id, job.kind, job.description),
+            )
+            .with_detail(if job.has_output {
+                format!("{} · output", job.state)
+            } else {
+                job.state.clone()
+            }),
+        );
+        if running {
+            items.push(
+                PickerItem::new(
+                    JobChoice::Kill(job.id.clone()).key(),
+                    format!("{} · stop", job.id),
+                )
+                .with_detail(job.kind.clone()),
+            );
+        } else {
+            items.push(
+                PickerItem::new(
+                    JobChoice::Forget(job.id.clone()).key(),
+                    format!("{} · forget", job.id),
+                )
+                .with_detail("delete the record"),
+            );
+        }
+    }
+    Picker::new(format!("Background jobs ({})", rows.len()), items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,5 +1334,80 @@ mod tests {
         assert_eq!(super::human_size(421_888), "412 KB");
         assert_eq!(super::human_size(1024 * 1024), "1.0 MB");
         assert_eq!(super::human_size(1024 * 1024 + 512 * 1024), "1.5 MB");
+    }
+
+    fn running_job() -> JobRow {
+        JobRow {
+            id: "job-1".into(),
+            kind: "shell".into(),
+            state: "running".into(),
+            description: "npm run dev".into(),
+            has_output: true,
+        }
+    }
+
+    fn finished_job() -> JobRow {
+        JobRow {
+            id: "job-2".into(),
+            kind: "agent".into(),
+            state: "done".into(),
+            description: "review the diff".into(),
+            has_output: true,
+        }
+    }
+
+    #[test]
+    fn a_running_job_offers_stop_and_a_finished_one_offers_forget() {
+        let picker = job_rows(&[running_job(), finished_job()]);
+        let keys: Vec<&str> = picker.items.iter().map(|item| item.key.as_str()).collect();
+        assert!(keys.contains(&"job-out:job-1"), "{keys:?}");
+        assert!(keys.contains(&"job-kill:job-1"), "{keys:?}");
+        assert!(
+            !keys.contains(&"job-forget:job-1"),
+            "a running job's record must not be offered for deletion: {keys:?}"
+        );
+        assert!(keys.contains(&"job-out:job-2"), "{keys:?}");
+        assert!(keys.contains(&"job-forget:job-2"), "{keys:?}");
+        assert!(
+            !keys.contains(&"job-kill:job-2"),
+            "a finished job has nothing to stop: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_job_without_output_says_its_state_instead_of_offering_a_pane() {
+        let picker = job_rows(&[JobRow {
+            id: "cron-1".into(),
+            kind: "cron".into(),
+            state: "running".into(),
+            description: "every 5m".into(),
+            has_output: false,
+        }]);
+        assert_eq!(picker.items[0].detail, "running");
+    }
+
+    #[test]
+    fn an_empty_job_list_says_where_jobs_come_from() {
+        let picker = job_rows(&[]);
+        assert_eq!(picker.items.len(), 1);
+        assert!(picker.items[0].label.contains("No background jobs"));
+    }
+
+    #[test]
+    fn a_job_key_round_trips_and_rejects_other_lists() {
+        for choice in [
+            JobChoice::Output("j1".into()),
+            JobChoice::Kill("j1".into()),
+            JobChoice::Forget("j1".into()),
+        ] {
+            assert_eq!(JobChoice::parse(&choice.key()), Some(choice));
+        }
+        assert_eq!(JobChoice::parse("job-out:"), None);
+        assert_eq!(JobChoice::parse("logs:j1"), None);
+        assert_eq!(
+            JobChoice::parse("job-out:kill:j1"),
+            Some(JobChoice::Output("kill:j1".into())),
+            "the first colon splits, so an id may contain one"
+        );
     }
 }

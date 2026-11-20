@@ -6789,6 +6789,12 @@ impl ReplLoop {
                         tui_elicit_rx,
                         queued_prompts,
                     );
+                    // A command `/upgrade`-like was still a command here:
+                    // this path submits the same way Enter does, so it drains
+                    // what the synchronous dispatch queued. The Vim submit
+                    // arm below does the same for the same reason.
+                    self.drain_pending_setup_hook().await;
+                    self.spawn_deferred_work();
                 }
                 Some(TuiKeyFlow::Handled)
             }
@@ -6826,6 +6832,7 @@ impl ReplLoop {
             | Shortcut::PluginBrowser
             | Shortcut::SessionPicker
             | Shortcut::AttachmentBrowser
+            | Shortcut::JobsPanel
                 if !ui_state.overlays.is_active()
                     && live.pending_confirmation.is_none()
                     && self.mcp.pending_form.is_none()
@@ -6854,6 +6861,10 @@ impl ReplLoop {
                     }
                     Shortcut::AttachmentBrowser => {
                         let picker = self.attachment_choices();
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::JobsPanel => {
+                        let picker = self.job_choices();
                         Self::open_list(ui_state, picker);
                     }
                     // The help page is not a picker: nothing is chosen, so
@@ -6954,6 +6965,20 @@ impl ReplLoop {
                 if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
             {
                 toggle_transcript_fullscreen(ui_state, &self.ui.keybindings);
+                Some(TuiKeyFlow::Handled)
+            }
+            // The todo panel's switch. Guarded on a dialog for the usual
+            // reason, and offered even when the list is empty: hiding a panel
+            // that has nothing in it is not a thing to tell someone about, and
+            // a key that answers "there is nothing there" would be the same
+            // refusal every time the model has not written a list yet.
+            Shortcut::ToggleTodos
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                ui_state.todos_visible = !ui_state.todos_visible;
                 Some(TuiKeyFlow::Handled)
             }
             // The keyboard counterpart of a mouse drag: the caller reads
@@ -7500,6 +7525,45 @@ impl ReplLoop {
         crate::session_lists::plugin_rows(&plugins, &marketplaces)
     }
 
+    /// The background jobs this workspace has a record of, newest first.
+    ///
+    /// Read from `.codape/jobs` each time rather than from a snapshot: a job
+    /// that started or finished since the last open would otherwise show the
+    /// state it had then, and the whole point of this list is to see the ones
+    /// that are running now.
+    fn job_choices(&self) -> codape_ui::picker::Picker {
+        let store = codape_core::job_record::JobStore::new(&self.cwd);
+        let mut records = match store.list() {
+            Ok(records) => records,
+            Err(error) => {
+                return codape_ui::picker::Picker::new(
+                    "Background jobs",
+                    vec![
+                        codape_ui::picker::PickerItem::new(
+                            "",
+                            format!("Could not read the job store: {error}"),
+                        )
+                        .disabled(""),
+                    ],
+                );
+            }
+        };
+        // Newest first: the reason to open this list is usually the job just
+        // started, and the store sorts by id, which is not a clock.
+        records.sort_by_key(|record| std::cmp::Reverse(record.started_at_ms));
+        let rows: Vec<crate::session_lists::JobRow> = records
+            .iter()
+            .map(|record| crate::session_lists::JobRow {
+                id: record.id.clone(),
+                kind: record.kind.label().to_string(),
+                state: record.state.label().to_string(),
+                description: record.description.clone(),
+                has_output: record.kind != codape_core::job_record::JobKind::Cron,
+            })
+            .collect();
+        crate::session_lists::job_rows(&rows)
+    }
+
     /// The images waiting to ride on the next turn, as the browser shows them.
     ///
     /// Built from the pending list rather than from the transcript: the
@@ -7567,6 +7631,99 @@ impl ReplLoop {
                     "Removed {count} image(s); the next turn sends none."
                 ));
             }
+        }
+    }
+
+    /// Act on one row of the background-job panel.
+    ///
+    /// The three rows are the three things `JobOutput` and `JobKill` do by id,
+    /// reached without remembering one. Output opens in the detail overlay
+    /// rather than in the transcript so a long log does not scroll the
+    /// conversation away; the overlay is scrollable and closes on the next key.
+    async fn act_on_job_choice(
+        &self,
+        choice: crate::session_lists::JobChoice,
+        ui_state: &mut codape_ui::state::UiState,
+    ) {
+        use crate::session_lists::JobChoice;
+        use codape_core::job_record::{JobState, JobStore};
+
+        let store = JobStore::new(&self.cwd);
+        match choice {
+            JobChoice::Output(id) => {
+                let path = store.root().join(format!("{id}.out"));
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let record = store.load(&id).ok().flatten();
+                let title = record.as_ref().map_or_else(
+                    || format!("Job {id}"),
+                    |record| {
+                        format!(
+                            "Job {id} · {} · {}",
+                            record.kind.label(),
+                            record.state.label()
+                        )
+                    },
+                );
+                let body = if text.trim().is_empty() {
+                    format!(
+                        "No output yet.\n\nThe job writes to {} while it runs.",
+                        path.display()
+                    )
+                } else {
+                    text
+                };
+                show_detail_overlay(ui_state, title, body);
+            }
+            JobChoice::Kill(id) => {
+                let Some(record) = store.load(&id).ok().flatten() else {
+                    ui_state
+                        .notifications
+                        .warn(format!("Job {id} is no longer in the store."));
+                    return;
+                };
+                if record.state != JobState::Running {
+                    ui_state.notifications.info(format!(
+                        "Job {id} already ended ({}); nothing to stop.",
+                        record.state.label()
+                    ));
+                    return;
+                }
+                let message = if let Some(pid) = record
+                    .pid
+                    .filter(|pid| codape_tools::job_control::group_exists(*pid))
+                {
+                    codape_tools::job_control::terminate_group(pid).await;
+                    let _ = store.settle(
+                        &id,
+                        JobState::Failed,
+                        codape_core::task::now_ms(),
+                        None,
+                        Some("stopped from the job panel".to_string()),
+                    );
+                    format!("Stopped job {id} (pid {pid}) and its process group.")
+                } else {
+                    let _ = store.settle(
+                        &id,
+                        JobState::Failed,
+                        codape_core::task::now_ms(),
+                        None,
+                        Some("the process was already gone".to_string()),
+                    );
+                    format!("Job {id} was not running: its process group is already gone.")
+                };
+                ui_state.notifications.info(message);
+            }
+            JobChoice::Forget(id) => match store.remove(&id) {
+                Ok(true) => ui_state
+                    .notifications
+                    .info(format!("Forgot job {id} (removed its record).")),
+                Ok(false) => ui_state
+                    .notifications
+                    .warn(format!("Job {id} is no longer in the store.")),
+                Err(error) => ui_state
+                    .notifications
+                    .err(format!("Could not remove job {id}: {error}")),
+            },
         }
     }
 
@@ -7872,6 +8029,10 @@ impl ReplLoop {
         }
         if let Some(choice) = crate::session_lists::AttachmentChoice::parse(key) {
             self.act_on_attachment_choice(choice, ui_state);
+            return true;
+        }
+        if let Some(choice) = crate::session_lists::JobChoice::parse(key) {
+            self.act_on_job_choice(choice, ui_state).await;
             return true;
         }
         if let Some(session_id) = crate::session_lists::session_id_from_key(key) {
@@ -12010,6 +12171,8 @@ impl ReplLoop {
             codape_commands::CommandDeferred::HookFire { event } => {
                 Some(self.fire_test_hook(&event).await)
             }
+            codape_commands::CommandDeferred::Upgrade => Some(Self::upgrade().await),
+            codape_commands::CommandDeferred::ReleaseNotes => Some(Self::release_notes().await),
         }
     }
 
@@ -12063,6 +12226,66 @@ impl ReplLoop {
             )
         } else {
             format!("'{event}' fired with errors: {}", result.errors.join("; "))
+        }
+    }
+
+    /// Install the latest release over this binary.
+    ///
+    /// The same updater `codape update` runs, so `/upgrade` and the
+    /// subcommand cannot disagree about which release is current, where the
+    /// checksum comes from, or which install origins are refused. It runs on
+    /// the session's runtime rather than exiting the process: a person who
+    /// asked from inside a session gets the report there.
+    async fn upgrade() -> String {
+        use crate::self_update;
+        let report =
+            match self_update::update(self_update::UpdateOptions { check_only: false }).await {
+                Ok(report) => report,
+                Err(error) => return format!("Update failed: {error}"),
+            };
+        if let Some(path) = &report.installed {
+            format!(
+                "Updated {} -> {} at {}.\nRestart the session to run the new binary.",
+                report.current,
+                report.latest.as_deref().unwrap_or("the latest release"),
+                path.display()
+            )
+        } else {
+            match (report.update_available, &report.latest) {
+                (true, Some(latest)) => format!(
+                    "New version available: {latest} (current: {}), but nothing was written.",
+                    report.current
+                ),
+                (true, None) => "A newer version may be available; the release lookup did not \
+                                 return one."
+                    .to_string(),
+                (false, Some(latest)) => format!("Codape is up to date ({latest})."),
+                (false, None) => "Codape is up to date.".to_string(),
+            }
+        }
+    }
+
+    /// Print the published notes of the latest release.
+    ///
+    /// The same lookup and mirror override the updater uses, through
+    /// [`crate::self_update::latest_notes`]. A release whose body is empty
+    /// says so instead of printing a blank answer, and a release with no
+    /// body field at all is the same case from this side.
+    async fn release_notes() -> String {
+        let client = match reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => return format!("Could not build the HTTP client: {error}"),
+        };
+        match crate::self_update::latest_notes(&client, &crate::self_update::api_base()).await {
+            Ok((tag, Some(notes))) => format!("{tag}\n\n{notes}"),
+            Ok((tag, None)) => {
+                format!("{tag} publishes no notes: the release body is empty.")
+            }
+            Err(error) => format!("Could not read the latest release: {error}"),
         }
     }
 
@@ -14232,6 +14455,14 @@ impl ReplLoop {
                         ),
                     }
                 }
+                // Both reach the network, so they run in this task rather
+                // than on the loop that draws the frame.
+                codape_commands::CommandDeferred::Upgrade => {
+                    ("/upgrade".to_string(), Self::upgrade().await)
+                }
+                codape_commands::CommandDeferred::ReleaseNotes => {
+                    ("/release-notes".to_string(), Self::release_notes().await)
+                }
             };
             let _ = tx.send(ShellCommandResult {
                 command,
@@ -15830,6 +16061,37 @@ impl ReplLoop {
         // settings (a repository-controlled settings file must not be able to
         // inject environment variables).
         ctx.env = codape_commands::load_remote_env();
+        // `/todos` prints the real list, which lives in the dispatcher's store.
+        // The panel draws the same rows from the same store through
+        // `sync_todo_panel`; a command that read anything else could disagree
+        // with what is on screen.
+        ctx.todos = self
+            .agents
+            .dispatcher
+            .as_deref()
+            .map(|dispatcher| {
+                dispatcher
+                    .todo_store()
+                    .get_all()
+                    .into_iter()
+                    .map(|item| codape_commands::TodoRow {
+                        subject: item.subject,
+                        description: item.description,
+                        status: match item.status {
+                            codape_tools::TodoStatus::Pending => {
+                                codape_commands::TodoStatus::Pending
+                            }
+                            codape_tools::TodoStatus::InProgress => {
+                                codape_commands::TodoStatus::InProgress
+                            }
+                            codape_tools::TodoStatus::Completed => {
+                                codape_commands::TodoStatus::Completed
+                            }
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         ctx.recent_commands = self
             .command_history
             .list(1000)
@@ -15854,6 +16116,29 @@ impl ReplLoop {
                 .descriptor()
                 .clone()
         };
+        // `/terminal-setup` reports the same detection that chose the key
+        // encoding, so the command cannot describe a terminal the session is
+        // not on. The id test is the surface's question: a host presenting a
+        // session somewhere other than a terminal has none to identify.
+        ctx.terminal =
+            (ctx.surface.id.as_str() == codape_core::surface::SurfaceId::TERMINAL).then(|| {
+                let profile = codape_ui::terminal_profile::TerminalProfile::from_env();
+                codape_commands::TerminalReport {
+                    name: profile.name().to_string(),
+                    kind: profile.kind.label().to_string(),
+                    disambiguating: matches!(
+                        profile.keyboard_protocol,
+                        codape_ui::terminal_profile::KeyboardProtocol::Disambiguate
+                    ),
+                    supports_disambiguation: profile.kind.supports_kitty_keyboard(),
+                    override_env: codape_ui::terminal_profile::KEYBOARD_PROTOCOL_ENV.to_string(),
+                    override_value: std::env::var(
+                        codape_ui::terminal_profile::KEYBOARD_PROTOCOL_ENV,
+                    )
+                    .ok()
+                    .filter(|value| !value.trim().is_empty()),
+                }
+            });
         ctx.elapsed_secs = self
             .ui
             .query_start_time

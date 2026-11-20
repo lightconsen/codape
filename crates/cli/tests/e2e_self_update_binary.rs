@@ -20,6 +20,8 @@ struct FakeRelease {
     asset: Vec<u8>,
     /// `None` makes the release omit `SHA256SUMS` entirely.
     checksums: Option<String>,
+    /// The release body, which is what `/release-notes` prints.
+    notes: Option<String>,
 }
 
 impl FakeRelease {
@@ -30,6 +32,7 @@ impl FakeRelease {
             asset_name: asset_name.to_string(),
             asset,
             checksums: Some(format!("{digest}  {asset_name}\n")),
+            notes: None,
         }
     }
 
@@ -40,6 +43,11 @@ impl FakeRelease {
 
     fn with_checksum(mut self, digest: &str) -> Self {
         self.checksums = Some(format!("{digest}  {}\n", self.asset_name));
+        self
+    }
+
+    fn with_notes(mut self, notes: &str) -> Self {
+        self.notes = Some(notes.to_string());
         self
     }
 }
@@ -109,7 +117,7 @@ fn route(release: &FakeRelease, path: &str, port: u16) -> (&'static str, Vec<u8>
             "http://127.0.0.1:{port}/releases/download/{}/{}",
             release.tag, release.asset_name
         );
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "tag_name": release.tag,
             "assets": [
                 {"name": release.asset_name, "browser_download_url": asset_url},
@@ -117,6 +125,11 @@ fn route(release: &FakeRelease, path: &str, port: u16) -> (&'static str, Vec<u8>
                  "browser_download_url": format!("http://127.0.0.1:{port}/releases/download/{}/SHA256SUMS", release.tag)},
             ],
         });
+        // Omitted when there are no notes, the way GitHub omits an empty
+        // body — `/release-notes` has to handle both shapes.
+        if let Some(notes) = &release.notes {
+            body["body"] = serde_json::Value::String(notes.clone());
+        }
         return ("200 OK", serde_json::to_vec(&body).expect("serialize"));
     }
     let suffix = format!("/{}/{}", release.tag, release.asset_name);
@@ -367,4 +380,101 @@ fn a_release_without_sha256sums_is_refused() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("SHA256SUMS"), "{stderr}");
     assert_eq!(std::fs::read(&binary).expect("read the copy"), original);
+}
+
+/// Run a slash command through the binary against the fake release server.
+///
+/// `/upgrade` and `/release-notes` are commands, not the `update` subcommand,
+/// so they go through the same entry point a person types into: `-p /<name>`.
+/// The provider is pointed at a closed port — neither command touches the
+/// model, and a sweep that quietly needed one would be testing the wrong
+/// thing.
+fn run_slash_command(binary: &Path, server: &FakeServer, command: &str) -> std::process::Output {
+    Command::new(binary)
+        .args(["-p", &format!("/{command}")])
+        .env("ANTHROPIC_API_KEY", "mock")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:1")
+        .env("CODAPE_API_BASE_URL", &server.base)
+        .env("CODAPE_RELEASE_BASE_URL", server.asset_base())
+        .env("CODAPE_DISABLE_UPDATE_CHECK", "1")
+        .env("CODAPE_LOG", "off")
+        .env("CODAPE_DISABLE_ADOPT", "1")
+        .output()
+        .expect("run a slash command")
+}
+
+/// `/upgrade` replaces the running binary and says to restart.
+///
+/// The command is the same updater as `codape update`, reached from inside a
+/// session; the difference under test is that the deferred work runs and its
+/// report reaches the output rather than being dropped.
+#[test]
+fn the_upgrade_command_replaces_the_binary() {
+    let (tag_name, asset) = payload();
+    let release = FakeRelease::new("v99.0.0", &tag_name, asset);
+    let server = FakeServer::start(release);
+    let (_dir, binary) = copied_binary();
+    let before = std::fs::read(&binary).expect("read the copy");
+
+    let output = run_slash_command(&binary, &server, "upgrade");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "/upgrade failed: {text}");
+    assert!(text.contains("99.0.0"), "{text}");
+    assert!(
+        text.contains("Restart the session"),
+        "the report did not tell the person to restart: {text}"
+    );
+    // The payload is a shell script holding `fake-new-version`, so a copy
+    // that changed to exactly that is the release, not the build.
+    let after = std::fs::read(&binary).expect("read the copy");
+    #[cfg(unix)]
+    {
+        const NEEDLE: &[u8] = b"fake-new-version";
+        assert_ne!(
+            after, before,
+            "/upgrade reported an install but wrote nothing"
+        );
+        assert!(
+            after.windows(NEEDLE.len()).any(|window| window == NEEDLE),
+            "the installed file is not the release's payload"
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = (after, before);
+}
+
+/// `/release-notes` prints the release body the server published.
+#[test]
+fn the_release_notes_command_prints_the_published_body() {
+    let (tag_name, asset) = payload();
+    let release =
+        FakeRelease::new("v99.0.0", &tag_name, asset).with_notes("- the thing\n- the other");
+    let server = FakeServer::start(release);
+    let (_dir, binary) = copied_binary();
+
+    let output = run_slash_command(&binary, &server, "release-notes");
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(output.status.success(), "/release-notes failed: {text}");
+    assert!(text.contains("v99.0.0"), "{text}");
+    assert!(text.contains("- the thing"), "{text}");
+    assert!(text.contains("- the other"), "{text}");
+}
+
+/// A release with no body is a fact to report, not a blank answer.
+#[test]
+fn release_notes_says_a_release_without_a_body_has_none() {
+    let (tag_name, asset) = payload();
+    let release = FakeRelease::new("v99.0.0", &tag_name, asset);
+    let server = FakeServer::start(release);
+    let (_dir, binary) = copied_binary();
+
+    let output = run_slash_command(&binary, &server, "release-notes");
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(output.status.success(), "/release-notes failed: {text}");
+    assert!(text.contains("v99.0.0"), "{text}");
+    assert!(text.contains("no notes"), "{text}");
 }

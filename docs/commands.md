@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 82 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
+Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 89 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
 
 ## Design
 
@@ -13,16 +13,16 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandHandler`** (`registry.rs`) — `Arc<dyn Fn(&CommandContext, &[String]) -> CommandResult + Send + Sync>`.
 - **`SlashCommand`** (`registry.rs`) — Metadata: name, description, kind (`Local`/`LocalUi`/`Prompt`/`Standalone`), `supports_non_interactive`, `remote_safe`, `bridge_safe`, `uses_agent_backend`, `destructive: bool`, `args: CommandArgs`, handler.
 - **`CommandResult`** (`registry.rs`) — Output, `state_changed`, `suppress_output`, `extra_context`, `submit_prompt`, `append_system_prompt`, `override_system_prompt`, `prompt_profile`, `allowed_tools_override`, `scrollable: bool`, `deferred: Option<CommandDeferred>`.
-- **`CommandDeferred`** (`registry.rs`) — Work a synchronous handler hands to the session because the crate cannot do it itself: `PluginInstall { source }` is carried out by the REPL (headless: appended to the command's output; TUI: a `tokio::spawn` reporting through the shell-result channel). Same hand-off shape as `pending_setup`.
+- **`CommandDeferred`** (`registry.rs`) — Work a synchronous handler hands to the session because the crate cannot do it itself: `PluginInstall { source }`, `McpAdd`/`McpRemove`/`McpTest`, `HookFire { event }`, and `Upgrade`/`ReleaseNotes` are carried out by the REPL (headless: appended to the command's output; TUI: a `tokio::spawn` reporting through the shell-result channel, so the network and the binary replacement never run on the draw thread). Same hand-off shape as `pending_setup`.
 - **`CommandArgs`** (`registry.rs`) — Argument validation enum: `None` (no validation), `AtLeast(n)`, `AtMost(n)`, `Exactly(n)`. Validated pre-dispatch in `execute()`.
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (82 commands across 13 registered modules)
+### Command Inventory (89 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
-| `session_commands` | `/clear`, `/exit`, `/session` | Session lifecycle |
+| `session_commands` | `/clear`, `/exit`, `/session`, `/todos` | Session lifecycle. `/todos` prints the list the model keeps through `TodoWrite` — every row with its status marker and description, while the panel under the transcript elides past eight and never shows descriptions |
 | `config_commands` | `/config`, `/model`, `/permissions`, `/settings` | Core configuration |
 | `stats_commands` | `/stats`, `/cost`, `/usage` | Usage statistics |
 | `content_commands` | `/compact`, `/help`, `/version` | Session content & help |
@@ -30,11 +30,11 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `config_extension_commands` | `/theme`, `/hooks`, `/mcp`, `/plugin`, `/memory`, `/skills`, `/tasks`, `/plan` | Extended configuration |
 | `diagnostic_commands` | `/status`, `/doctor` | System health checks |
 | `context_commands` | `/copy`, `/export`, `/init`, `/summary`, `/files`, `/context`, `/add-dir` | Context management. `/copy [<n>…]` puts the session's text on the clipboard: no argument copies all of it, numbers copy those messages using `/rewind`'s numbering. Reasoning rows are left out. `ctrl+shift+c` is the same clipboard without a command — it copies the transcript exactly as drawn on screen. `/export [text\|markdown\|json] [<n>…]` writes those same messages to `<session>.{txt,md,json}` in the working directory; markdown is the default, and reasoning rows are left out of every format |
-| `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
+| `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup`, `/terminal-setup`, `/login`, `/logout`, `/smartphone` | External integrations. `/terminal-setup` reports the terminal this session detected (`TerminalProfile`) and how keys are encoded, naming `CODAPE_KEYBOARD_PROTOCOL` as the one override that is re-read; it does not write a file nothing reads. `/login`, `/logout` and `/smartphone` are honest stubs: this build has no account, OAuth flow or mobile client, and each says so and points at what does exist (`ANTHROPIC_API_KEY` / settings `api_key` / `keyring://`, `/oauth-refresh`, `/doctor`, `codape bridge`, `/mobile`) |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |
 | `advanced_commands` | `/bridge`, `/bridge-kick`, `/teleport`, `/effort`, `/agents`, `/keybindings`, `/ide`, `/ultraplan`, `/insights`, `/thinkback`, `/thinkback-play`, `/statusline` | Advanced/feature-gated; `/effort`, `/agents`, `/keybindings` and `/ide` are REPL built-ins the registry also lists so `/help` shows them |
-| `misc_commands` | `/advisor`, `/btw`, `/good-claude`, `/stickers`, `/bughunter`, `/issue`, `/env`, `/diff`, `/oauth-refresh`, `/backfill-sessions`, `/history` | Miscellaneous. `/history [n]` and `/history search <q>` read the session's recorded command lines. |
+| `misc_commands` | `/advisor`, `/btw`, `/good-claude`, `/stickers`, `/bughunter`, `/issue`, `/env`, `/diff`, `/oauth-refresh`, `/backfill-sessions`, `/history`, `/upgrade`, `/release-notes` | Miscellaneous. `/history [n]` and `/history search <q>` read the session's recorded command lines. `/upgrade` and `/release-notes` are deferred to the CLI (`CommandDeferred::Upgrade` / `ReleaseNotes`), which owns the release lookup and the binary replacement; `/upgrade` is neither remote- nor bridge-safe, because a remote client must not replace the host's executable |
 | `macro_commands` | `/macro` (REPL built-in) | `MacroRegistry` loads, persists and expands macros. `/macro define <name> <command[; command…]>`, `list`, `run <name>`, `delete <name>` are handled by the REPL; a defined macro also runs by typing `/<name>`. |
 
 ### Architecture Patterns
@@ -93,6 +93,27 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
   only for a registered `desktop` surface, and `/mobile` names `codape bridge` as the
   path in because there is no mobile host here.
 - `/stickers` says it is not implemented — no Codape surface renders image messages.
+- `/todos` prints the model's `TodoWrite` list in full: `Todos (n/m done)`, then one
+  `□`/`■`/`✓` marker per row with its subject and, indented under it, the description the
+  panel under the prompt never shows (`alt+t` toggles that panel). The list is a snapshot
+  in `CommandContext.todos`, because `codape-commands` cannot reach the tool crate's
+  `TodoStore`.
+- `/terminal-setup` reports what this session already detected rather than running a
+  wizard: the terminal's name and kind, whether keys arrive disambiguated (and, when they
+  do not, why Ctrl+I and Tab-and-Enter chords would be indistinguishable), and the
+  `CODAPE_KEYBOARD_PROTOCOL=disambiguate|on|legacy|off` override with its current value.
+  Nothing is written, because nothing re-reads a setup file at startup — the detection is
+  `TerminalProfile::from_env()`, and a file it did not consult would be a lie.
+- `/upgrade` installs the latest release over this binary and reports `current -> latest`
+  and the path, telling you to restart; it is neither remote- nor bridge-safe, since a
+  remote client must never replace the host's executable. `/release-notes` prints the
+  latest release's tag and body, or says the body is empty. Both hand off through
+  `CommandDeferred` (`Upgrade`, `ReleaseNotes`): the release API base, the mirror override
+  and `self_update` all live in `codape-cli`, which `codape-commands` does not depend on.
+- `/login`, `/logout` and `/smartphone` are honest stubs. This build has no account, OAuth
+  flow or mobile client; `/login` explains that the credential is `ANTHROPIC_API_KEY`, a
+  settings `api_key` or `keyring://`, `/logout` says nothing deletes the key for you, and
+  `/smartphone` points at `codape bridge` and `/mobile`.
 - `/heapdump` writes a process snapshot (version, OS, pid, RSS/VSZ/threads, open file
   descriptors) to `/tmp/codape-heap.prof` and reports the byte count. It is a process
   snapshot, not a heap profile, and the command says so in its output.

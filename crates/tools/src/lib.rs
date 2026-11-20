@@ -7,7 +7,7 @@ mod context;
 mod cron_scheduler;
 mod dispatcher;
 mod executor;
-mod job_control;
+pub mod job_control;
 mod rate_limiter;
 mod registry;
 mod sandbox_policy;

@@ -207,17 +207,95 @@ async fn dontask_mode_denies_all() {
 async fn plan_mode_allows_read_only_tools() {
     let mut engine = make_engine(PermissionMode::Plan);
 
-    // Note: PermissionChecker recognizes these as read-only.
-    // WebSearch/WebFetch are not in the checker's read-only list
-    // because their tool names ("WebSearch"/"WebFetch") don't match
-    // the lowercase snake_case patterns ("web_search"/"web_fetch").
-    for tool in ["Read", "Glob", "Grep"] {
+    // WebSearch/WebFetch are spelled as the model spells them; the checker
+    // lowercases before matching, so these are in its read-only list.
+    for tool in ["Read", "Glob", "Grep", "WebSearch", "WebFetch"] {
         let (_req, result) = engine
             .evaluate(tool, "{}".into(), None, ctx())
             .await
             .unwrap();
         assert!(result.is_allowed(), "{tool} should be allowed in Plan mode");
     }
+}
+
+/// Plan mode is a place the model can plan from, not a trap it cannot leave.
+///
+/// The tools that make up the plan-mode protocol have to work *inside* plan
+/// mode: the exit restores the previous mode, the outline is written down,
+/// and the questions are asked. This goes through `PermissionEngine::evaluate`
+/// — the path the scheduler actually takes — so a mode-level shortcut that
+/// forgot one of them fails here rather than in a session.
+#[tokio::test]
+async fn plan_mode_lets_the_model_use_the_plan_protocol() {
+    let mut engine = make_engine(PermissionMode::Plan);
+
+    for tool in ["TodoWrite", "AskUserQuestion", "EnterPlanMode"] {
+        let (_req, result) = engine
+            .evaluate(tool, "{}".into(), None, ctx())
+            .await
+            .unwrap();
+        assert!(result.is_allowed(), "{tool} should work inside Plan mode");
+    }
+}
+
+/// Leaving plan mode is the person's decision, so it is asked about.
+#[tokio::test]
+async fn plan_mode_asks_before_carrying_the_plan_out() {
+    let mut engine = make_engine(PermissionMode::Plan);
+    let (_req, result) = engine
+        .evaluate("ExitPlanMode", "{}".into(), None, ctx())
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PermissionResult::Ask { .. }),
+        "ExitPlanMode should ask, got {result:?}"
+    );
+}
+
+/// A classifier may not answer the plan's approval on the person's behalf.
+#[tokio::test]
+async fn an_auto_approve_hook_cannot_accept_a_plan() {
+    let hook = || {
+        std::sync::Arc::new(AutoApproveHook::for_tools(vec![
+            "Bash".into(),
+            "ExitPlanMode".into(),
+        ]))
+    };
+    let mut engine = make_engine(PermissionMode::Plan);
+    engine.add_hook(hook());
+
+    let (_req, result) = engine
+        .evaluate("ExitPlanMode", "{}".into(), None, ctx())
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, PermissionResult::Ask { .. }),
+        "an auto-approve hook accepted a plan, got {result:?}"
+    );
+
+    // The same hook still short-circuits an ordinary ask, so this is a rule
+    // about the plan's exit and not about hooks being ignored.
+    let mut default = make_engine(PermissionMode::Default);
+    default.add_hook(hook());
+    let (_req, result) = default
+        .evaluate("Bash", r#"{"command":"ls"}"#.into(), None, ctx())
+        .await
+        .unwrap();
+    assert!(result.is_allowed(), "the hook stopped working entirely");
+}
+
+/// Outside plan mode the exit call is an ordinary no-op, not a question.
+#[tokio::test]
+async fn exit_plan_mode_is_not_asked_about_outside_plan_mode() {
+    let mut engine = make_engine(PermissionMode::Default);
+    let (_req, result) = engine
+        .evaluate("ExitPlanMode", "{}".into(), None, ctx())
+        .await
+        .unwrap();
+    assert!(
+        result.is_allowed(),
+        "ExitPlanMode outside plan mode should not prompt, got {result:?}"
+    );
 }
 
 #[tokio::test]

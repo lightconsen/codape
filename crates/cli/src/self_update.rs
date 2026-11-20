@@ -55,6 +55,12 @@ pub struct Release {
     pub version: String,
     /// Every downloadable asset.
     pub assets: Vec<ReleaseAsset>,
+    /// The release body — the changelog, as published.
+    ///
+    /// Kept because `/release-notes` has nothing else to show: the tag says
+    /// which version, and this is the only place the publisher says what is
+    /// in it.
+    pub notes: Option<String>,
 }
 
 impl Release {
@@ -233,6 +239,12 @@ pub fn parse_release(body: &serde_json::Value) -> Result<Release, String> {
         tag: tag.to_string(),
         version,
         assets,
+        notes: body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -264,6 +276,20 @@ pub async fn latest_release(timeout: Duration) -> Result<Release, String> {
         .build()
         .map_err(|error| format!("could not build the HTTP client: {error}"))?;
     fetch_release(&client, &api_base()).await
+}
+
+/// The published notes of the latest release.
+///
+/// `/release-notes` answers `(tag, notes)`. Kept separate from
+/// [`latest_release`] only so that function's callers do not grow a second
+/// return value they would not read — this is the same lookup, through the
+/// same client, so a mirror override applies to both.
+pub async fn latest_notes(
+    client: &reqwest::Client,
+    api_base: &str,
+) -> Result<(String, Option<String>), String> {
+    let release = fetch_release(client, api_base).await?;
+    Ok((release.tag, release.notes))
 }
 
 /// The URL an asset is fetched from.
@@ -682,6 +708,42 @@ pub async fn update(options: UpdateOptions) -> Result<UpdateReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_release_keeps_the_published_notes() {
+        let body = serde_json::json!({
+            "tag_name": "v0.2.0",
+            "body": "  ## What's new\n- the thing  \n",
+            "assets": [],
+        });
+        let release = parse_release(&body).unwrap();
+        assert_eq!(release.notes.as_deref(), Some("## What's new\n- the thing"));
+    }
+
+    #[test]
+    fn a_release_without_a_body_has_no_notes() {
+        let body = serde_json::json!({ "tag_name": "v0.2.0", "body": "   ", "assets": [] });
+        assert!(parse_release(&body).unwrap().notes.is_none());
+        let body = serde_json::json!({ "tag_name": "v0.2.0", "assets": [] });
+        assert!(parse_release(&body).unwrap().notes.is_none());
+    }
+
+    /// `/release-notes` needs the release itself, not just a version.
+    ///
+    /// The lookup is the updater's own — same mirror override, same headers —
+    /// so a person behind a mirror sees the notes that mirror publishes rather
+    /// than a second request to github.com that would fail.
+    #[tokio::test]
+    async fn release_notes_use_the_updaters_lookup() {
+        // No network here: the point is the function's shape, and a failure
+        // must be an error rather than a panic or an empty page.
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        let result = latest_notes(&client, "http://127.0.0.1:1").await;
+        assert!(result.is_err(), "{result:?}");
+    }
 
     #[test]
     fn parse_release_reads_the_tag_and_assets() {

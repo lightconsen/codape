@@ -334,9 +334,17 @@ impl PermissionEngine {
         // A hook may still deny an opaque call; it may not auto-approve one.
         // That keeps the auto-classifier and auto-approve hooks from waving
         // through a command the static analysis could not model.
+        //
+        // A plan-mode exit is the exception in the other direction: it is a
+        // question for the person, and a hook answering it with an approval
+        // would carry out a plan nobody accepted. Hooks still get to deny.
+        let plan_exit_ask = {
+            let checker = self.checker.lock().unwrap();
+            checker.plan_mode_exit_ask(tool_name)
+        };
         for hook in &self.hooks {
             if let Some(result) = hook.evaluate(&request, mode).await? {
-                if opaque && result.is_allowed() {
+                if (opaque || plan_exit_ask.is_some()) && result.is_allowed() {
                     continue;
                 }
                 return Ok((request, result));
@@ -435,7 +443,17 @@ impl PermissionEngine {
                             PermissionResult::Allow
                         }
                         Some(ConfirmationResponse::Denied) => PermissionResult::Deny {
-                            reason: format!("tool '{tool_name}' denied by user"),
+                            // A rejected plan says what the rejection was of,
+                            // or the model reads it as an ordinary refusal and
+                            // edits the plan instead of asking again.
+                            reason: if plan_exit_ask.is_some() {
+                                "the plan was not approved — the session is still in plan mode, \
+                                 so no edits have run. Revise the plan and call ExitPlanMode \
+                                 again when it is ready"
+                                    .into()
+                            } else {
+                                format!("tool '{tool_name}' denied by user")
+                            },
                         },
                         // A closed channel is not a decision. The elevation
                         // path already tells these apart (`abandon_pending_elevation`);
