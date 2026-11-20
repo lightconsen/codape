@@ -49,7 +49,7 @@ process-runtime = []
 wasm-runtime = ["dep:wasmtime", "dep:wasmparser", "dep:wat"]
 
 [dependencies.wasmtime]
-version = "50.0.1"
+version = "50.0.3"
 optional = true
 default-features = false
 features = ["anyhow", "cranelift", "runtime", "std", "threads"]
