@@ -154,3 +154,35 @@ fn a_broken_file_is_reported_and_the_session_still_starts() {
     // The rejected binding was not applied, and the default survived it.
     assert!(stdout.contains("ctrl+o"), "{stdout}");
 }
+
+/// A chord written in `keybindings.json` is bound, shown and reported as one.
+///
+/// The parser used to refuse any binding with a space in it outright, so
+/// `ctrl+k ctrl+s` could not be expressed at all. This is the file-level
+/// version of that: the binding reaches the live keymap, and the table prints
+/// the chord as the two keystrokes a person types.
+#[test]
+fn a_chord_from_the_file_is_bound_and_shown() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let home = seed_home(r#"{"config_version": 4, "telemetry_enabled": false}"#);
+    std::fs::write(
+        home.path().join("keybindings.json"),
+        r#"{"bindings":[{"context":"Global","bindings":{"ctrl+k ctrl+s":"app:toggleToolOutput"}}]}"#,
+    )
+    .expect("keybindings file");
+    let (mut provider, base_url) = start_static_provider();
+
+    let output = run(dir.path(), home.path(), &base_url, "/keybindings");
+
+    let _ = provider.kill();
+    let _ = provider.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        !stdout.contains("problem(s) in the files"),
+        "a valid chord was reported as a problem: {stdout}"
+    );
+    assert!(stdout.contains("ctrl+k ctrl+s"), "{stdout}");
+    // Additive, like every other binding: the default stays.
+    assert!(stdout.contains("ctrl+o"), "{stdout}");
+}
