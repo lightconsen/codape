@@ -156,10 +156,14 @@ pub fn entries(keybindings: &KeyBindings) -> Vec<HelpEntry> {
     let mut out = Vec::new();
     for (section, actions) in SECTIONS {
         for action in *actions {
-            let strokes: Vec<String> = keybindings
-                .strokes(*action)
+            // `chords`, not `strokes`: a chord is one binding a person can
+            // press, and printing only the single-keystroke half would leave
+            // the page claiming a key does something it no longer does on its
+            // own.
+            let chords: Vec<String> = keybindings
+                .chords(*action)
                 .iter()
-                .map(crate::keybindings::KeyStroke::display)
+                .map(crate::keybindings::Chord::display)
                 .collect();
             out.push(HelpEntry {
                 section,
@@ -167,7 +171,7 @@ pub fn entries(keybindings: &KeyBindings) -> Vec<HelpEntry> {
                 // An unbound action is dropped rather than shown as
                 // "(unbound)": the page answers "what can I press", and a row
                 // with no key does not.
-                keys: strokes.join(", "),
+                keys: chords.join(", "),
             });
         }
     }
@@ -314,8 +318,8 @@ mod tests {
         // `Help` has a default, so binding nothing to `AgentsView` should drop
         // its row instead of printing a blank key column impossible to press.
         let mut table = KeyBindings::default();
-        let stroke = table.strokes(Action::AgentsView)[0];
-        table.unbind(Context::Chat, stroke);
+        let chord = table.chords(Action::AgentsView)[0].clone();
+        table.unbind(Context::Chat, chord);
         let rendered = render(&table, &[]);
         assert!(!rendered.contains("Open the agent roster"), "{rendered}");
         assert!(rendered.contains("This page"), "others survive: {rendered}");

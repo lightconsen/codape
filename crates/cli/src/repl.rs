@@ -988,6 +988,15 @@ struct InteractiveLive {
     /// cost a full traversal; a file created after the session starts is
     /// still reachable by typing its full path, and a restart picks it up.
     file_list: Option<Arc<Vec<String>>>,
+    /// The keystrokes of a chord pressed so far.
+    ///
+    /// A chord's first half is held here rather than acted on, so `ctrl+x
+    /// ctrl+e` can mean one thing while `ctrl+x` alone means another. The
+    /// loop expires a held prefix after [`codape_ui::keybindings::CHORD_TIMEOUT`]
+    /// and replays the first key as itself.
+    chord: codape_ui::keybindings::ChordTracker,
+    /// When the held prefix was last extended, for the timeout.
+    chord_deadline: Option<std::time::Instant>,
 }
 
 /// What a voice transcription run produced.
@@ -1036,6 +1045,8 @@ impl InteractiveLive {
             mod_ui_focus: ModUiFocus::default(),
             last_stream_snapshot: std::time::Instant::now(),
             file_list: None,
+            chord: codape_ui::keybindings::ChordTracker::default(),
+            chord_deadline: None,
         }
     }
 
@@ -6611,6 +6622,324 @@ impl ReplLoop {
         }
     }
 
+    /// The chat-context shortcuts, one arm per action.
+    ///
+    /// Split out of `handle_key_event` so the chord path and the plain key
+    /// path reach the same table: a chord that completes resolves to an
+    /// [`Action`] and is dispatched here exactly as the single key is.
+    ///
+    /// Every arm carries its own guard rather than sharing one, because the
+    /// reasons differ — a dialog owns the keyboard for the pickers, but
+    /// stashing a line is useful *while* one is open.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_chat_shortcut(
+        &mut self,
+        shortcut: codape_ui::keybindings::Action,
+        ui_state: &mut codape_ui::state::UiState,
+        live: &mut InteractiveLive,
+        thinking: &mut bool,
+        query_done_rx: &mut Option<
+            tokio::sync::oneshot::Receiver<(QueryEngine, Result<TerminalReason, String>)>,
+        >,
+        elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<codape_tools::ElicitRequest>>,
+        tui_elicit_rx: &mut Option<tokio::sync::mpsc::Receiver<TuiElicitationRequest>>,
+        queued_prompts: &mut std::collections::VecDeque<String>,
+    ) -> Option<TuiKeyFlow> {
+        use codape_ui::keybindings::Action as Shortcut;
+        use codape_ui::message_list::MessageRole;
+        use codape_ui::overlay::Overlay;
+        match shortcut {
+            Shortcut::ModelPicker
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none() =>
+            {
+                self.open_model_picker(ui_state);
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::EffortSlider
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none() =>
+            {
+                self.open_effort_slider(ui_state);
+                Some(TuiKeyFlow::Handled)
+            }
+            // The microphone. Guarded like the image keys: it starts a
+            // process and writes to the line, so a modal that owns the
+            // keyboard must not be interrupted by it.
+            Shortcut::VoiceInput
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                self.start_voice_transcription(ui_state);
+                Some(TuiKeyFlow::Handled)
+            }
+            // Writing the prompt with room. The handover itself happens in
+            // the loop, which owns the terminal; this only reports that it
+            // was asked for. Guarded like the other keys that take the
+            // screen away: a dialog owns the keyboard, and an editor
+            // started under one would be drawn over and lose the
+            // keystrokes typed into it.
+            Shortcut::ExternalEditor
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                Some(TuiKeyFlow::ExternalEditor)
+            }
+            // Put the line aside, or take back the one that was put aside.
+            // No overlay guard: this is the one shortcut that is useful
+            // *while* something is open, and it touches only the line the
+            // session owns. The overlay's own keys are matched before this
+            // table is consulted, so a dialog still gets its characters.
+            Shortcut::StashInput => {
+                stash_or_restore_input(ui_state);
+                Some(TuiKeyFlow::Handled)
+            }
+            // Stop the turn and send what is on the line. Only meaningful
+            // while a turn is actually running: with nothing in flight the
+            // line is still there for Enter, and stopping an idle session
+            // would append an interruption marker to an answer nobody was
+            // writing.
+            //
+            // Interrupting and then submitting in that order is what makes
+            // this "send now" rather than "send later". The interrupt hands
+            // the engine back to the receiver, so the submit finds no
+            // engine and queues — and the idle boundary starts the queued
+            // prompt the moment the abandoned turn's result arrives. That
+            // is a fraction of a second, not another turn's wait.
+            Shortcut::SendNow
+                if *thinking
+                    && !ui_state.input.text.is_empty()
+                    && !ui_state.overlays.is_active() =>
+            {
+                let text = ui_state.input.take();
+                self.stop_running_query(
+                    ui_state,
+                    thinking,
+                    &mut live.phase,
+                    query_done_rx,
+                    elicit_rx,
+                    tui_elicit_rx,
+                    " (superseded)",
+                );
+                live.pending_confirmation = None;
+                if let Some(text) = text {
+                    self.process_tui_input(
+                        &text,
+                        ui_state,
+                        thinking,
+                        &mut live.phase,
+                        query_done_rx,
+                        elicit_rx,
+                        tui_elicit_rx,
+                        queued_prompts,
+                    );
+                }
+                Some(TuiKeyFlow::Handled)
+            }
+            // The settings menu. A list like the others, opened from a
+            // table built here because it reads the theme install and the
+            // settings file.
+            Shortcut::SettingsMenu
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                let picker = self.settings_choices();
+                if ui_state.overlays.has_modal() {
+                    // Left alone rather than stacked; `open_list`'s rule,
+                    // stated here because this one opens a `Settings`
+                    // rather than a `List`.
+                    return Some(TuiKeyFlow::Handled);
+                }
+                ui_state.overlays.pop_palette();
+                ui_state
+                    .overlays
+                    .push(codape_ui::overlay::Overlay::Settings(picker));
+                Some(TuiKeyFlow::Handled)
+            }
+            // The five list openers. They share one guard because they
+            // share one reason for it: each reads the session (the roster,
+            // the messages, the themes) at the moment it opens, and a
+            // second copy opened over the first would be built from the
+            // same facts and cover them.
+            Shortcut::AgentsView
+            | Shortcut::Help
+            | Shortcut::Rewind
+            | Shortcut::ThemePicker
+            | Shortcut::PluginBrowser
+            | Shortcut::SessionPicker
+            | Shortcut::AttachmentBrowser
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                match shortcut {
+                    Shortcut::AgentsView => {
+                        let picker = self.agent_roster().await;
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::Rewind => {
+                        let picker = self.rewind_points();
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::ThemePicker => {
+                        let picker = self.theme_choices(ui_state);
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::PluginBrowser => {
+                        let picker = self.plugin_choices();
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::SessionPicker => {
+                        let picker = self.session_choices();
+                        Self::open_list(ui_state, picker);
+                    }
+                    Shortcut::AttachmentBrowser => {
+                        let picker = self.attachment_choices();
+                        Self::open_list(ui_state, picker);
+                    }
+                    // The help page is not a picker: nothing is chosen, so
+                    // it is the ordinary detail overlay and any key closes
+                    // it.
+                    _ => {
+                        let sources: Vec<String> = self
+                            .ui
+                            .keybinding_sources
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect();
+                        let body = codape_ui::help::render(&self.ui.keybindings, &sources);
+                        ui_state.overlays.push(Overlay::Detail {
+                            title: "Help".to_string(),
+                            body,
+                            scroll: 0,
+                        });
+                    }
+                }
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::CyclePermissionMode => {
+                ui_state.permission_bar.cycle_mode();
+                if let Some(ref mut engine) = self.session.engine {
+                    let checker = engine.permission_checker();
+                    if let Ok(mut c) = checker.lock() {
+                        c.set_mode(ui_state.permission_bar.mode);
+                    }
+                }
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::ToggleToolOutput => {
+                let fold = ui_state.messages.messages.iter().any(|message| {
+                    matches!(
+                        message.role,
+                        MessageRole::ToolCall | MessageRole::ToolResult
+                    ) && !message.folded
+                });
+                for message in &mut ui_state.messages.messages {
+                    if matches!(
+                        message.role,
+                        MessageRole::ToolCall | MessageRole::ToolResult
+                    ) {
+                        message.folded = fold;
+                    }
+                }
+                ui_state.notifications.info(if fold {
+                    "Tool output folded (Ctrl+O to expand)"
+                } else {
+                    "Tool output expanded"
+                });
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::ToggleThinking => {
+                // Separate from tool output: reasoning is not a tool result,
+                // and someone reading the answer usually wants one folded
+                // while the other is open.
+                let fold = ui_state
+                    .messages
+                    .messages
+                    .iter()
+                    .any(|message| message.role == MessageRole::Thinking && !message.folded);
+                for message in &mut ui_state.messages.messages {
+                    if message.role == MessageRole::Thinking {
+                        message.folded = fold;
+                    }
+                }
+                ui_state.notifications.info(if fold {
+                    "Thinking folded (Ctrl+E to expand)"
+                } else {
+                    "Thinking expanded"
+                });
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::ToggleSplitPane => {
+                use codape_ui::state::LayoutMode;
+                ui_state.layout_mode = match ui_state.layout_mode {
+                    LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
+                    LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
+                };
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::DiffPreviousFile | Shortcut::DiffNextFile => {
+                jump_diff_file(ui_state, matches!(shortcut, Shortcut::DiffNextFile));
+                Some(TuiKeyFlow::Handled)
+            }
+            // The pane's tabs. Guarded on an open overlay for the usual
+            // reason — the keys belong to whatever has the keyboard — but
+            // not on the pane being open: switching does nothing with a
+            // single view, and a guard that had to ask would only restate
+            // what the switch already knows.
+            Shortcut::PanePreviousTab | Shortcut::PaneNextTab if !ui_state.overlays.is_active() => {
+                ui_state.pane_cycle(matches!(shortcut, Shortcut::PaneNextTab));
+                Some(TuiKeyFlow::Handled)
+            }
+            Shortcut::TranscriptFullscreen
+                if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
+            {
+                toggle_transcript_fullscreen(ui_state, &self.ui.keybindings);
+                Some(TuiKeyFlow::Handled)
+            }
+            // The keyboard counterpart of a mouse drag: the caller reads
+            // the frame and writes the clipboard, because neither is
+            // reachable from here.
+            Shortcut::CopyTranscript
+                if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
+            {
+                Some(TuiKeyFlow::CopyTranscript)
+            }
+            Shortcut::ImagePaste
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                match crate::image_input::read_clipboard_image() {
+                    Ok(image) => {
+                        let media_type = image.media_type.clone();
+                        self.session.effects.pending_images.push(image);
+                        ui_state
+                            .notifications
+                            .success(format!("Image attached on the next prompt ({media_type})"));
+                    }
+                    Err(error) => {
+                        ui_state
+                            .notifications
+                            .warn(format!("No image attached: {error}"));
+                    }
+                }
+                Some(TuiKeyFlow::Handled)
+            }
+            _ => None,
+        }
+    }
+
     /// The shortcut a key performs in a context, if any.
     ///
     /// A thin wrapper so the handler reads as a lookup rather than a chain of
@@ -7552,8 +7881,7 @@ impl ReplLoop {
         queued_prompts: &mut std::collections::VecDeque<String>,
     ) -> TuiKeyFlow {
         use codape_ui::input::{InputAction, InputBuffer};
-        use codape_ui::keybindings::{Action as Shortcut, Context as ShortcutContext};
-        use codape_ui::message_list::MessageRole;
+        use codape_ui::keybindings::{Action as Shortcut, ChordStep, Context as ShortcutContext};
         use codape_ui::overlay::Overlay;
         use codape_ui::state::ViewMode;
         use codape_ui::vim::{VimAction, VimMode};
@@ -7785,298 +8113,47 @@ impl ReplLoop {
         // key: `Shift+Tab` cycles the permission mode, `Ctrl+O` folds tool
         // output, and `Ctrl+Shift+S` splits the pane. Rebinding one in
         // keybindings.json moves it here.
-        if let Some(shortcut) = self.shortcut(ShortcutContext::Chat, &key) {
-            match shortcut {
-                Shortcut::ModelPicker
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none() =>
-                {
-                    self.open_model_picker(ui_state);
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::EffortSlider
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none() =>
-                {
-                    self.open_effort_slider(ui_state);
-                    return TuiKeyFlow::Handled;
-                }
-                // The microphone. Guarded like the image keys: it starts a
-                // process and writes to the line, so a modal that owns the
-                // keyboard must not be interrupted by it.
-                Shortcut::VoiceInput
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none()
-                        && self.mcp.pending_elicitation.is_none() =>
-                {
-                    self.start_voice_transcription(ui_state);
-                    return TuiKeyFlow::Handled;
-                }
-                // Writing the prompt with room. The handover itself happens in
-                // the loop, which owns the terminal; this only reports that it
-                // was asked for. Guarded like the other keys that take the
-                // screen away: a dialog owns the keyboard, and an editor
-                // started under one would be drawn over and lose the
-                // keystrokes typed into it.
-                Shortcut::ExternalEditor
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none()
-                        && self.mcp.pending_elicitation.is_none() =>
-                {
-                    return TuiKeyFlow::ExternalEditor;
-                }
-                // Put the line aside, or take back the one that was put aside.
-                // No overlay guard: this is the one shortcut that is useful
-                // *while* something is open, and it touches only the line the
-                // session owns. The overlay's own keys are matched before this
-                // table is consulted, so a dialog still gets its characters.
-                Shortcut::StashInput => {
-                    stash_or_restore_input(ui_state);
-                    return TuiKeyFlow::Handled;
-                }
-                // Stop the turn and send what is on the line. Only meaningful
-                // while a turn is actually running: with nothing in flight the
-                // line is still there for Enter, and stopping an idle session
-                // would append an interruption marker to an answer nobody was
-                // writing.
-                //
-                // Interrupting and then submitting in that order is what makes
-                // this "send now" rather than "send later". The interrupt hands
-                // the engine back to the receiver, so the submit finds no
-                // engine and queues — and the idle boundary starts the queued
-                // prompt the moment the abandoned turn's result arrives. That
-                // is a fraction of a second, not another turn's wait.
-                Shortcut::SendNow
-                    if *thinking
-                        && !ui_state.input.text.is_empty()
-                        && !ui_state.overlays.is_active() =>
-                {
-                    let text = ui_state.input.take();
-                    self.stop_running_query(
-                        ui_state,
-                        thinking,
-                        &mut live.phase,
-                        query_done_rx,
-                        elicit_rx,
-                        tui_elicit_rx,
-                        " (superseded)",
-                    );
-                    live.pending_confirmation = None;
-                    if let Some(text) = text {
-                        self.process_tui_input(
-                            &text,
-                            ui_state,
-                            thinking,
-                            &mut live.phase,
-                            query_done_rx,
-                            elicit_rx,
-                            tui_elicit_rx,
-                            queued_prompts,
-                        );
-                    }
-                    return TuiKeyFlow::Handled;
-                }
-                // The settings menu. A list like the others, opened from a
-                // table built here because it reads the theme install and the
-                // settings file.
-                Shortcut::SettingsMenu
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none()
-                        && self.mcp.pending_elicitation.is_none() =>
-                {
-                    let picker = self.settings_choices();
-                    if ui_state.overlays.has_modal() {
-                        // Left alone rather than stacked; `open_list`'s rule,
-                        // stated here because this one opens a `Settings`
-                        // rather than a `List`.
-                        return TuiKeyFlow::Handled;
-                    }
-                    ui_state.overlays.pop_palette();
-                    ui_state
-                        .overlays
-                        .push(codape_ui::overlay::Overlay::Settings(picker));
-                    return TuiKeyFlow::Handled;
-                }
-                // The five list openers. They share one guard because they
-                // share one reason for it: each reads the session (the roster,
-                // the messages, the themes) at the moment it opens, and a
-                // second copy opened over the first would be built from the
-                // same facts and cover them.
-                Shortcut::AgentsView
-                | Shortcut::Help
-                | Shortcut::Rewind
-                | Shortcut::ThemePicker
-                | Shortcut::PluginBrowser
-                | Shortcut::SessionPicker
-                | Shortcut::AttachmentBrowser
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none()
-                        && self.mcp.pending_elicitation.is_none() =>
-                {
-                    match shortcut {
-                        Shortcut::AgentsView => {
-                            let picker = self.agent_roster().await;
-                            Self::open_list(ui_state, picker);
-                        }
-                        Shortcut::Rewind => {
-                            let picker = self.rewind_points();
-                            Self::open_list(ui_state, picker);
-                        }
-                        Shortcut::ThemePicker => {
-                            let picker = self.theme_choices(ui_state);
-                            Self::open_list(ui_state, picker);
-                        }
-                        Shortcut::PluginBrowser => {
-                            let picker = self.plugin_choices();
-                            Self::open_list(ui_state, picker);
-                        }
-                        Shortcut::SessionPicker => {
-                            let picker = self.session_choices();
-                            Self::open_list(ui_state, picker);
-                        }
-                        Shortcut::AttachmentBrowser => {
-                            let picker = self.attachment_choices();
-                            Self::open_list(ui_state, picker);
-                        }
-                        // The help page is not a picker: nothing is chosen, so
-                        // it is the ordinary detail overlay and any key closes
-                        // it.
-                        _ => {
-                            let sources: Vec<String> = self
-                                .ui
-                                .keybinding_sources
-                                .iter()
-                                .map(|path| path.display().to_string())
-                                .collect();
-                            let body = codape_ui::help::render(&self.ui.keybindings, &sources);
-                            ui_state.overlays.push(Overlay::Detail {
-                                title: "Help".to_string(),
-                                body,
-                                scroll: 0,
-                            });
-                        }
-                    }
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::CyclePermissionMode => {
-                    ui_state.permission_bar.cycle_mode();
-                    if let Some(ref mut engine) = self.session.engine {
-                        let checker = engine.permission_checker();
-                        if let Ok(mut c) = checker.lock() {
-                            c.set_mode(ui_state.permission_bar.mode);
-                        }
-                    }
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::ToggleToolOutput => {
-                    let fold = ui_state.messages.messages.iter().any(|message| {
-                        matches!(
-                            message.role,
-                            MessageRole::ToolCall | MessageRole::ToolResult
-                        ) && !message.folded
-                    });
-                    for message in &mut ui_state.messages.messages {
-                        if matches!(
-                            message.role,
-                            MessageRole::ToolCall | MessageRole::ToolResult
-                        ) {
-                            message.folded = fold;
-                        }
-                    }
-                    ui_state.notifications.info(if fold {
-                        "Tool output folded (Ctrl+O to expand)"
-                    } else {
-                        "Tool output expanded"
-                    });
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::ToggleThinking => {
-                    // Separate from tool output: reasoning is not a tool result,
-                    // and someone reading the answer usually wants one folded
-                    // while the other is open.
-                    let fold =
-                        ui_state.messages.messages.iter().any(|message| {
-                            message.role == MessageRole::Thinking && !message.folded
-                        });
-                    for message in &mut ui_state.messages.messages {
-                        if message.role == MessageRole::Thinking {
-                            message.folded = fold;
-                        }
-                    }
-                    ui_state.notifications.info(if fold {
-                        "Thinking folded (Ctrl+E to expand)"
-                    } else {
-                        "Thinking expanded"
-                    });
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::ToggleSplitPane => {
-                    use codape_ui::state::LayoutMode;
-                    ui_state.layout_mode = match ui_state.layout_mode {
-                        LayoutMode::SinglePane => LayoutMode::HorizontalSplit { left_percent: 50 },
-                        LayoutMode::HorizontalSplit { .. } => LayoutMode::SinglePane,
-                    };
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::DiffPreviousFile | Shortcut::DiffNextFile => {
-                    jump_diff_file(ui_state, matches!(shortcut, Shortcut::DiffNextFile));
-                    return TuiKeyFlow::Handled;
-                }
-                // The pane's tabs. Guarded on an open overlay for the usual
-                // reason — the keys belong to whatever has the keyboard — but
-                // not on the pane being open: switching does nothing with a
-                // single view, and a guard that had to ask would only restate
-                // what the switch already knows.
-                Shortcut::PanePreviousTab | Shortcut::PaneNextTab
-                    if !ui_state.overlays.is_active() =>
-                {
-                    ui_state.pane_cycle(matches!(shortcut, Shortcut::PaneNextTab));
-                    return TuiKeyFlow::Handled;
-                }
-                Shortcut::TranscriptFullscreen
-                    if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
-                {
-                    toggle_transcript_fullscreen(ui_state, &self.ui.keybindings);
-                    return TuiKeyFlow::Handled;
-                }
-                // The keyboard counterpart of a mouse drag: the caller reads
-                // the frame and writes the clipboard, because neither is
-                // reachable from here.
-                Shortcut::CopyTranscript
-                    if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
-                {
-                    return TuiKeyFlow::CopyTranscript;
-                }
-                Shortcut::ImagePaste
-                    if !ui_state.overlays.is_active()
-                        && live.pending_confirmation.is_none()
-                        && self.mcp.pending_form.is_none()
-                        && self.mcp.pending_elicitation.is_none() =>
-                {
-                    match crate::image_input::read_clipboard_image() {
-                        Ok(image) => {
-                            let media_type = image.media_type.clone();
-                            self.session.effects.pending_images.push(image);
-                            ui_state.notifications.success(format!(
-                                "Image attached on the next prompt ({media_type})"
-                            ));
-                        }
-                        Err(error) => {
-                            ui_state
-                                .notifications
-                                .warn(format!("No image attached: {error}"));
-                        }
-                    }
-                    return TuiKeyFlow::Handled;
-                }
-                _ => {}
+        //
+        // The arms live in `handle_chat_shortcut`, which is one dispatch table
+        // rather than a page of `handle_key_event`: every chord "completes"
+        // into an action and arrives here, so the table is what a key map
+        // reader needs and nothing else.
+        let shortcut = match live
+            .chord
+            .press(&self.ui.keybindings, ShortcutContext::Chat, &key)
+        {
+            ChordStep::Pending => {
+                // The first half of a chord. Held rather than acted on: the
+                // key it is may mean something alone, and the timeout in the
+                // loop replays it if no second half arrives.
+                live.chord_deadline =
+                    Some(std::time::Instant::now() + codape_ui::keybindings::CHORD_TIMEOUT);
+                return TuiKeyFlow::Handled;
             }
+            ChordStep::Complete(action) => {
+                live.chord_deadline = None;
+                Some(action)
+            }
+            ChordStep::Pass => {
+                live.chord_deadline = None;
+                self.shortcut(ShortcutContext::Chat, &key)
+            }
+        };
+        if let Some(shortcut) = shortcut
+            && let Some(flow) = self
+                .handle_chat_shortcut(
+                    shortcut,
+                    ui_state,
+                    live,
+                    thinking,
+                    query_done_rx,
+                    elicit_rx,
+                    tui_elicit_rx,
+                    queued_prompts,
+                )
+                .await
+        {
+            return flow;
         }
 
         // The rename field owns the keyboard while it is open: every letter
@@ -9478,6 +9555,48 @@ impl ReplLoop {
 
                 () = tokio::time::sleep(Duration::from_millis(100)), if thinking => {
                     self.drain_agent_observable_events();
+                }
+
+                // A chord's first half with no second half arriving. The
+                // prefix is dropped and the key replays as what it means
+                // alone, so `ctrl+x` still opens the editor when
+                // `ctrl+x ctrl+e` was also bound and nobody typed the rest.
+                //
+                // The deadline is `None` whenever no chord is held, and the
+                // branch is disabled then, which is the ordinary case: this
+                // arm costs nothing unless a prefix is waiting.
+                () = async {
+                    let deadline = live.chord_deadline.unwrap_or_else(std::time::Instant::now);
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                }, if live.chord_deadline.is_some() => {
+                    if let Some(expired) = live.chord.expire() {
+                        let flow = self
+                            .handle_key_event(
+                                expired,
+                                &mut ui_state,
+                                &mut live,
+                                &mut vim,
+                                &mut thinking,
+                                &mut query_done_rx,
+                                &mut elicit_rx,
+                                &mut tui_elicit_rx,
+                                &mut queued_prompts,
+                            )
+                            .await;
+                        if flow == TuiKeyFlow::Quit {
+                            break Ok(());
+                        }
+                        if flow == TuiKeyFlow::ExternalEditor {
+                            self.run_external_editor(
+                                &mut terminal_ui,
+                                &mut ui_state,
+                                &editor_pause,
+                            );
+                        }
+                        if flow == TuiKeyFlow::CopyTranscript {
+                            copy_transcript_to_clipboard(&terminal_ui, &mut ui_state);
+                        }
+                    }
                 }
 
                 Some(shell_result) = async {
@@ -19889,12 +20008,22 @@ mod tests {
         /// Answer the top dialog with one key, the way the event loop does.
         async fn press(&mut self, key: crossterm::event::KeyEvent) {
             let mut live = InteractiveLive::new();
+            self.press_with(&mut live, key).await;
+        }
+
+        /// Press a key with the caller's `live`, so a sequence of presses can
+        /// share the chord tracker the way the event loop does.
+        async fn press_with(
+            &mut self,
+            live: &mut InteractiveLive,
+            key: crossterm::event::KeyEvent,
+        ) -> TuiKeyFlow {
             let mut vim = codape_ui::vim::VimState::new_insert();
             self.repl
                 .handle_key_event(
                     key,
                     &mut self.ui,
-                    &mut live,
+                    live,
                     &mut vim,
                     &mut self.thinking,
                     &mut self.query_done_rx,
@@ -19902,7 +20031,7 @@ mod tests {
                     &mut self.tui_elicit_rx,
                     &mut self.queued,
                 )
-                .await;
+                .await
         }
     }
 
@@ -20489,6 +20618,98 @@ mod tests {
         assert!(
             !written.contains("(last message content)"),
             "/copy still writes its old placeholder: {written:?}"
+        );
+    }
+
+    /// A chord typed through the key handler runs the action bound to it.
+    ///
+    /// The unit tests in `codape_ui::keybindings` pin the parser and the
+    /// tracker; this pins that the REPL actually consults the tracker before
+    /// its own table, so a chord in a file is not merely parsed and then
+    /// ignored.
+    #[tokio::test]
+    async fn a_chord_from_the_keymap_runs_its_action() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // Help is a Dialog and closes on the next key, which makes "did it
+        // open" observable without starting a turn.
+        let mut bindings = harness.repl.ui.keybindings.clone();
+        bindings.assign(
+            codape_ui::keybindings::Action::Help,
+            codape_ui::keybindings::Chord::parse("ctrl+x ctrl+e").unwrap(),
+        );
+        harness.repl.ui.keybindings = bindings;
+
+        let mut live = InteractiveLive::new();
+        let chat = crossterm::event::KeyModifiers::CONTROL;
+        let flow = harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Char('x'), chat),
+            )
+            .await;
+        assert_eq!(
+            flow,
+            TuiKeyFlow::Handled,
+            "the first half of the chord was not held"
+        );
+        assert!(
+            harness.ui.overlays.top().is_none(),
+            "the first half opened something instead of waiting: {:?}",
+            harness.ui.overlays.top()
+        );
+        assert!(
+            live.chord.is_pending(),
+            "the first half was not recorded as a held sequence"
+        );
+
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Char('e'), chat),
+            )
+            .await;
+        assert!(
+            matches!(
+                harness.ui.overlays.top(),
+                Some(codape_ui::overlay::Overlay::Detail { title, .. }) if title == "Help"
+            ),
+            "the completed chord did not run the help action: {:?}",
+            harness.ui.overlays.top()
+        );
+    }
+
+    /// A prefix with no second half falls back to what the key means alone.
+    ///
+    /// The event loop owns the timer, so this test plays its part: it holds
+    /// the prefix, expires it the way the loop does, and presses the replayed
+    /// key. If the tracker dropped the prefix instead, `ctrl+x` would stop
+    /// opening the editor the moment anything was bound to `ctrl+x …`.
+    #[tokio::test]
+    async fn an_expired_prefix_still_opens_the_external_editor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        let mut bindings = harness.repl.ui.keybindings.clone();
+        bindings.assign(
+            codape_ui::keybindings::Action::Help,
+            codape_ui::keybindings::Chord::parse("ctrl+x ctrl+e").unwrap(),
+        );
+        harness.repl.ui.keybindings = bindings;
+
+        let mut live = InteractiveLive::new();
+        let ctrl = crossterm::event::KeyModifiers::CONTROL;
+        let x = crossterm::event::KeyEvent::new(KeyCode::Char('x'), ctrl);
+        harness.press_with(&mut live, x).await;
+        assert!(live.chord.is_pending());
+
+        let replay = live.chord.expire().expect("the prefix was not replayed");
+        let flow = harness.press_with(&mut live, replay).await;
+        assert_eq!(
+            flow,
+            TuiKeyFlow::ExternalEditor,
+            "the replayed ctrl+x did not reach the editor binding"
         );
     }
 
