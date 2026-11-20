@@ -77,6 +77,10 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::PaneNextTab,
             Action::TranscriptFullscreen,
             Action::CopyTranscript,
+            Action::SelectionExtendUp,
+            Action::SelectionExtendDown,
+            Action::SelectionExtendAll,
+            Action::SelectionLast,
         ],
     ),
     (
@@ -147,6 +151,10 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ListNext => "Next row",
         Action::ListAccept => "Choose the highlighted row",
         Action::CopyTranscript => "Copy the transcript as shown to the clipboard",
+        Action::SelectionExtendUp => "Select another line up, then ctrl+shift+c",
+        Action::SelectionExtendDown => "Give the last line back",
+        Action::SelectionExtendAll => "Select everything on screen",
+        Action::SelectionLast => "Back to the newest line alone",
     }
 }
 
@@ -156,10 +164,14 @@ pub fn entries(keybindings: &KeyBindings) -> Vec<HelpEntry> {
     let mut out = Vec::new();
     for (section, actions) in SECTIONS {
         for action in *actions {
-            let strokes: Vec<String> = keybindings
-                .strokes(*action)
+            // `chords`, not `strokes`: a chord is one binding a person can
+            // press, and printing only the single-keystroke half would leave
+            // the page claiming a key does something it no longer does on its
+            // own.
+            let chords: Vec<String> = keybindings
+                .chords(*action)
                 .iter()
-                .map(crate::keybindings::KeyStroke::display)
+                .map(crate::keybindings::Chord::display)
                 .collect();
             out.push(HelpEntry {
                 section,
@@ -167,7 +179,7 @@ pub fn entries(keybindings: &KeyBindings) -> Vec<HelpEntry> {
                 // An unbound action is dropped rather than shown as
                 // "(unbound)": the page answers "what can I press", and a row
                 // with no key does not.
-                keys: strokes.join(", "),
+                keys: chords.join(", "),
             });
         }
     }
@@ -274,6 +286,10 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::SendNow,
     Action::SettingsMenu,
     Action::CopyTranscript,
+    Action::SelectionExtendUp,
+    Action::SelectionExtendDown,
+    Action::SelectionExtendAll,
+    Action::SelectionLast,
 ];
 
 #[cfg(test)]
@@ -314,8 +330,8 @@ mod tests {
         // `Help` has a default, so binding nothing to `AgentsView` should drop
         // its row instead of printing a blank key column impossible to press.
         let mut table = KeyBindings::default();
-        let stroke = table.strokes(Action::AgentsView)[0];
-        table.unbind(Context::Chat, stroke);
+        let chord = table.chords(Action::AgentsView)[0].clone();
+        table.unbind(Context::Chat, chord);
         let rendered = render(&table, &[]);
         assert!(!rendered.contains("Open the agent roster"), "{rendered}");
         assert!(rendered.contains("This page"), "others survive: {rendered}");

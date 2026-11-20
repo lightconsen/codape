@@ -2,7 +2,7 @@
 
 ## Goal
 
-Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 80 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
+Implements the `/` slash command system that users type in the REPL. Provides a registry with type-safe dispatch across 82 commands covering sessions, configuration, diagnostics, Git integration, context management, macros, history, and advanced features.
 
 ## Design
 
@@ -69,7 +69,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - `/keybindings` prints the live keymap: every action, its keystrokes and its context, the files it was read from, and every problem found in them. It re-reads the files before printing, so a person who just edited `keybindings.json` sees the edit without restarting. Bindings live in `keybindings.json` under the config home and `.codape/`; see [ui.md](ui.md) → *Architecture Patterns*.
 - `/agents [list|logs <id> [count]|follow <id|all>]` is a REPL built-in: `list` names the agent definitions the session can spawn and the agents it has spawned, `logs` replays one agent's log, and `follow` subscribes to its events. A registry entry mirrors it so `/help` lists it.
 - `/ide` prints the same thing `codape ide` prints: the MCP snippet an editor needs to launch `codape ide bridge`, and the state of the daemon that bridge would reach. It is the in-session way to discover the editor integration without leaving the REPL.
-- `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins.
+- `/style [name]` lists or applies an output style as additional system instructions. `default`, `explanatory` and `learning` ship with the binary; a plugin style of the same name wins. Applying one records its **name** as `output_style` in `settings.json`, so the style is the session's default from the next start; a name that resolves to nothing then (a plugin that was since removed) is dropped rather than applied, and an explicit `--append-system-prompt` outranks it for that run.
 - `/resume [id|title fragment]` accepts an exact session id; anything else is resolved through the session index, and an ambiguous fragment lists the candidates instead of guessing. With no argument it opens the same picker `alt+s` does (`app:sessionPicker`) — the sessions listed newest first, narrowed by typing, resumed on Enter.
 - Feature-gated commands (`/ultraplan`, `/thinkback`, `/thinkback-play`, `/voice`, `/ctx_viz`, `/heapdump`, `/mock-limits`, `/stickers`) check `CommandContext.feature_flags`, which the REPL now fills from the resolved `FeatureFlags` (env + `--betas`).
 - `/bridge` and `/bridge-kick` check `CODAPE_BRIDGE_URL` env var.

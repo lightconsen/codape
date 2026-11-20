@@ -214,7 +214,19 @@ pub enum Action {
     /// was selected, which needs a pointer; `/copy <n>` copies named messages,
     /// which needs the message's number. This is the third case, and the one
     /// with no argument: the answer being read right now.
+    ///
+    /// With a selection made by the `SelectionExtend*` actions this copies
+    /// that instead, so the keyboard can take part of the transcript as well
+    /// as all of it.
     CopyTranscript,
+    /// Take one more transcript row into the selection, upward.
+    SelectionExtendUp,
+    /// Give one transcript row back, downward.
+    SelectionExtendDown,
+    /// Select the whole visible transcript.
+    SelectionExtendAll,
+    /// Go back to the newest line alone.
+    SelectionLast,
 }
 
 impl Action {
@@ -266,6 +278,10 @@ impl Action {
             Self::ListNext => "list:next",
             Self::ListAccept => "list:accept",
             Self::CopyTranscript => "app:copyTranscript",
+            Self::SelectionExtendUp => "selection:extendUp",
+            Self::SelectionExtendDown => "selection:extendDown",
+            Self::SelectionExtendAll => "selection:extendAll",
+            Self::SelectionLast => "selection:last",
         }
     }
 
@@ -282,6 +298,10 @@ impl Action {
             | Self::PaneNextTab
             | Self::TranscriptFullscreen
             | Self::CopyTranscript
+            | Self::SelectionExtendUp
+            | Self::SelectionExtendDown
+            | Self::SelectionExtendAll
+            | Self::SelectionLast
             | Self::CyclePermissionMode => Context::Global,
             Self::ImagePaste
             | Self::VoiceInput
@@ -327,7 +347,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 44] {
+    pub const fn all() -> [Self; 48] {
         ALL_ACTIONS
     }
 
@@ -380,9 +400,10 @@ impl Action {
             Self::HistorySearchAccept => &["tab", "enter"],
             Self::FileMentionAccept | Self::ListAccept => &["enter"],
             // The list openers share a key row: they are peers in the sense
-            // that a person reaches for whichever one they mean. Single
-            // keystrokes only — the parser refuses chords, because most
-            // terminals never report the second half of one.
+            // that a person reaches for whichever one they mean. Defaults are
+            // single keystrokes; a chord is available to whoever writes one in
+            // `keybindings.json`, but a default one would delay the key by the
+            // chord timeout for every person who never types the second half.
             Self::AgentsView => &["ctrl+g"],
             Self::Help => &["alt+h"],
             Self::Rewind => &["alt+r"],
@@ -408,10 +429,10 @@ impl Action {
             // is the transcript size control in most terminals' muscle memory.
             Self::TranscriptFullscreen => &["ctrl+t"],
             // Writing the prompt somewhere with room. `ctrl+x` is the shell's
-            // "hand this off" prefix and nothing else in the table wanted it;
-            // the key people expect for this in an editor-driven agent is a
-            // chord, and chords are not in the parser, so the prefix alone is
-            // the closest single keystroke to it.
+            // "hand this off" prefix; it is the key alone rather than
+            // `ctrl+x ctrl+e` because a prefix has to wait for its second
+            // half, and handing the terminal over is not something to delay.
+            // A person who wants the chord spells it in `keybindings.json`.
             Self::ExternalEditor => &["ctrl+x"],
             // The same key a shell's job control uses for "stop and keep it",
             // which is what stashing a half-written prompt is: taken off the
@@ -431,11 +452,19 @@ impl Action {
             // repainting makes unreliable, so taking it here is the fix rather
             // than a collision.
             Self::CopyTranscript => &["ctrl+shift+c"],
+            // The shift+arrow family every text surface has, plus the two
+            // ends. A terminal that does not report SHIFT sends the plain
+            // arrow, which keeps its scroll meaning, so nothing here can be
+            // mistaken for scrolling.
+            Self::SelectionExtendUp => &["shift+up"],
+            Self::SelectionExtendDown => &["shift+down"],
+            Self::SelectionExtendAll => &["shift+home"],
+            Self::SelectionLast => &["shift+end"],
         }
     }
 }
 
-const ALL_ACTIONS: [Action; 44] = [
+const ALL_ACTIONS: [Action; 48] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -480,6 +509,10 @@ const ALL_ACTIONS: [Action; 44] = [
     Action::SendNow,
     Action::SettingsMenu,
     Action::CopyTranscript,
+    Action::SelectionExtendUp,
+    Action::SelectionExtendDown,
+    Action::SelectionExtendAll,
+    Action::SelectionLast,
 ];
 
 /// A named key, for everything that is not a character.
@@ -599,9 +632,9 @@ impl KeyStroke {
         if trimmed.is_empty() {
             return Err("empty keystroke".into());
         }
-        if trimmed.contains(' ') {
+        if trimmed.split_whitespace().count() > 1 {
             return Err(format!(
-                "\"{trimmed}\" is a chord; only single keystrokes are supported"
+                "\"{trimmed}\" is a chord; parse it as a whole with Chord::parse"
             ));
         }
         // The last `+` separates the modifiers from the key, and a key may
@@ -698,6 +731,47 @@ impl KeyStroke {
         out
     }
 
+    /// The keystroke a key event is, as a value.
+    ///
+    /// The inverse of [`Self::matches`], with the same case folding: a
+    /// terminal that reports `Ctrl+Shift+S` as `'S'` with only CONTROL
+    /// produces the keystroke a config writes as `ctrl+shift+s`.
+    #[must_use]
+    pub const fn from_event(event: &KeyEvent) -> Self {
+        let shift_modifier = event.modifiers.contains(KeyModifiers::SHIFT);
+        let (code, shift) = match event.code {
+            KeyCode::Char(c) => (
+                StrokeCode::Char(c.to_ascii_lowercase()),
+                shift_modifier || c.is_uppercase(),
+            ),
+            KeyCode::BackTab => (StrokeCode::Named(NamedKey::Tab), true),
+            KeyCode::Esc => (StrokeCode::Named(NamedKey::Escape), shift_modifier),
+            KeyCode::Enter => (StrokeCode::Named(NamedKey::Enter), shift_modifier),
+            KeyCode::Tab => (StrokeCode::Named(NamedKey::Tab), shift_modifier),
+            KeyCode::Backspace => (StrokeCode::Named(NamedKey::Backspace), shift_modifier),
+            KeyCode::Delete => (StrokeCode::Named(NamedKey::Delete), shift_modifier),
+            KeyCode::Up => (StrokeCode::Named(NamedKey::Up), shift_modifier),
+            KeyCode::Down => (StrokeCode::Named(NamedKey::Down), shift_modifier),
+            KeyCode::Left => (StrokeCode::Named(NamedKey::Left), shift_modifier),
+            KeyCode::Right => (StrokeCode::Named(NamedKey::Right), shift_modifier),
+            KeyCode::Home => (StrokeCode::Named(NamedKey::Home), shift_modifier),
+            KeyCode::End => (StrokeCode::Named(NamedKey::End), shift_modifier),
+            KeyCode::PageUp => (StrokeCode::Named(NamedKey::PageUp), shift_modifier),
+            KeyCode::PageDown => (StrokeCode::Named(NamedKey::PageDown), shift_modifier),
+            KeyCode::Insert => (StrokeCode::Named(NamedKey::Insert), shift_modifier),
+            // A media or function key has no name in the table. It is
+            // represented as a character no keyboard can produce, so it
+            // compares equal to nothing rather than to a real key.
+            _ => (StrokeCode::Char('\0'), shift_modifier),
+        };
+        Self {
+            code,
+            ctrl: event.modifiers.contains(KeyModifiers::CONTROL),
+            alt: event.modifiers.contains(KeyModifiers::ALT),
+            shift,
+        }
+    }
+
     /// Whether this keystroke is one the terminal has already claimed.
     ///
     /// `ctrl+c` and `ctrl+d` are the interrupt and exit keys before any
@@ -773,6 +847,215 @@ fn named_matches(named: NamedKey, code: KeyCode) -> bool {
     }
 }
 
+/// How long a chord may pause between its keystrokes.
+///
+/// Long enough that a deliberate two-key sequence fits inside it, short enough
+/// that a key which is also the start of a chord does not feel stuck.
+pub const CHORD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// One binding as written: a single keystroke, or several pressed in order.
+///
+/// Chords exist because modifiers run out. `ctrl+x` alone hands the prompt to
+/// an editor; `ctrl+x ctrl+e` is the shape an editor-driven agent's users
+/// expect, and it needs a sequence rather than a wider modifier set no
+/// terminal reliably reports.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Chord {
+    strokes: Vec<KeyStroke>,
+}
+
+impl Chord {
+    /// Parse a binding such as `ctrl+o`, `esc`, or `ctrl+x ctrl+e`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of what was wrong, suitable for a validation
+    /// note.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut strokes = Vec::new();
+        for part in text.split_whitespace() {
+            strokes.push(KeyStroke::parse(part)?);
+        }
+        if strokes.is_empty() {
+            return Err("empty keystroke".into());
+        }
+        Ok(Self { strokes })
+    }
+
+    /// A chord of the one keystroke.
+    #[must_use]
+    pub fn single(stroke: KeyStroke) -> Self {
+        Self {
+            strokes: vec![stroke],
+        }
+    }
+
+    /// The keystrokes, in the order they are pressed.
+    #[must_use]
+    pub fn strokes(&self) -> &[KeyStroke] {
+        &self.strokes
+    }
+
+    /// How many keystrokes the chord has.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.strokes.len()
+    }
+
+    /// Whether the chord has no keystrokes. Never true for a parsed chord;
+    /// present because a `len()` without it is a clippy lint.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.strokes.is_empty()
+    }
+
+    /// The canonical spelling: the keystrokes joined by a space.
+    #[must_use]
+    pub fn display(&self) -> String {
+        self.strokes
+            .iter()
+            .map(KeyStroke::display)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Whether two keystrokes mean the same key, as a terminal reports them.
+///
+/// The same folding [`KeyStroke::matches`] applies: `A` and `a` with SHIFT are
+/// one key, and so are `space` and the space character. A chord compares
+/// keystroke values rather than events, so this is the equality it uses.
+fn strokes_agree(a: &KeyStroke, b: &KeyStroke) -> bool {
+    if a.ctrl != b.ctrl || a.alt != b.alt || a.shift != b.shift {
+        return false;
+    }
+    match (a.code, b.code) {
+        (StrokeCode::Char(left), StrokeCode::Char(right)) => left.eq_ignore_ascii_case(&right),
+        (left, right) => left == right,
+    }
+}
+
+/// What a keystroke means, given the strokes of a chord already pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SequenceResolution {
+    /// The sequence is a binding.
+    Action(Action),
+    /// The sequence so far starts a binding that needs more keystrokes.
+    Pending,
+    /// Nothing is bound to the sequence.
+    None,
+}
+
+/// What one key press did to the chord being typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChordStep {
+    /// The key is not part of a chord; handle it as itself.
+    Pass,
+    /// The key extended a chord; more keystrokes are needed.
+    Pending,
+    /// The key completed a chord.
+    Complete(Action),
+}
+
+/// The keystrokes of a chord pressed so far.
+///
+/// The REPL feeds every key through this before doing anything else, so a
+/// chord's first strokes are held instead of acted on. A single-keystroke
+/// binding is unaffected: nothing is pending and the key starts no chord, so
+/// the press passes straight through.
+#[derive(Debug, Clone, Default)]
+pub struct ChordTracker {
+    pending: Vec<KeyStroke>,
+    /// The event that most recently extended the sequence. Kept so a timeout
+    /// can replay it as what it means on its own.
+    last: Option<KeyEvent>,
+    /// The next press replays `last` and must not start a chord again.
+    replay: bool,
+}
+
+impl ChordTracker {
+    /// The keystrokes held so far, for display.
+    #[must_use]
+    pub fn pending(&self) -> &[KeyStroke] {
+        &self.pending
+    }
+
+    /// Whether a sequence is being held.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Feed one key press in.
+    pub fn press(
+        &mut self,
+        bindings: &KeyBindings,
+        context: Context,
+        event: &KeyEvent,
+    ) -> ChordStep {
+        if self.replay {
+            self.replay = false;
+            return ChordStep::Pass;
+        }
+        let stroke = KeyStroke::from_event(event);
+        // A key that both stands alone and starts a longer chord waits: the
+        // longer chord could never be typed otherwise. The timeout replays it
+        // as the binding it has by itself.
+        let extends = bindings.extends_to_longer(context, &self.pending, &stroke);
+        match bindings.resolve_sequence(context, &self.pending, &stroke) {
+            SequenceResolution::Action(action) if !extends => {
+                self.pending.clear();
+                self.last = None;
+                ChordStep::Complete(action)
+            }
+            SequenceResolution::Action(_) | SequenceResolution::Pending => {
+                self.pending.push(stroke);
+                self.last = Some(*event);
+                ChordStep::Pending
+            }
+            // An unrelated key abandons the sequence and is handled as
+            // itself; the held strokes are lost, the way a Vim prefix is lost
+            // when the next key cannot follow it.
+            SequenceResolution::None => {
+                self.pending.clear();
+                self.last = None;
+                ChordStep::Pass
+            }
+        }
+    }
+
+    /// Drop the held sequence, returning the key to replay.
+    ///
+    /// Only a one-keystroke prefix is replayed: `ctrl+x` both opens the editor
+    /// and starts `ctrl+x ctrl+e`, so when the second keystroke does not
+    /// arrive the first has to mean what it means alone. Replaying the second
+    /// stroke of a longer partial chord would be worse than dropping it — it
+    /// would fire a binding the person never asked for.
+    ///
+    /// The caller handles the returned event as an ordinary key press, not
+    /// through [`Self::press`]: the sequence is already over.
+    pub fn expire(&mut self) -> Option<KeyEvent> {
+        let single = self.pending.len() == 1;
+        let last = self.last.take();
+        self.pending.clear();
+        if single {
+            // The next press is the replay and must not be held again; it
+            // would otherwise start the same chord a second time.
+            self.replay = last.is_some();
+            last
+        } else {
+            None
+        }
+    }
+
+    /// Forget the sequence without replaying anything.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.last = None;
+        self.replay = false;
+    }
+}
+
 const fn is_ctrl(modifier: &str) -> bool {
     modifier.eq_ignore_ascii_case("ctrl") || modifier.eq_ignore_ascii_case("control")
 }
@@ -789,22 +1072,49 @@ fn is_cmd(modifier: &str) -> bool {
         .any(|name| modifier.eq_ignore_ascii_case(name))
 }
 
+/// Whether a chord's first `pending.len() + 1` strokes are `pending` then
+/// `stroke`.
+///
+/// `None` when they are not: a chord the sequence has already diverged from.
+/// `Some(n)` gives how many strokes matched, so the caller can tell a complete
+/// binding from a prefix of a longer one.
+fn sequence_prefix_len(
+    chord: &[KeyStroke],
+    pending: &[KeyStroke],
+    stroke: &KeyStroke,
+) -> Option<usize> {
+    let wanted = pending.len() + 1;
+    if chord.len() < wanted {
+        return None;
+    }
+    let combined = pending.iter().chain(std::iter::once(stroke));
+    if chord
+        .iter()
+        .zip(combined)
+        .all(|(bound, pressed)| strokes_agree(bound, pressed))
+    {
+        Some(wanted)
+    } else {
+        None
+    }
+}
+
 /// The effective keymap: every action and the keystrokes that reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyBindings {
-    bindings: std::collections::BTreeMap<Action, Vec<KeyStroke>>,
+    bindings: std::collections::BTreeMap<Action, Vec<Chord>>,
 }
 
 impl Default for KeyBindings {
     fn default() -> Self {
         let mut bindings = std::collections::BTreeMap::new();
         for action in ALL_ACTIONS {
-            let strokes: Vec<KeyStroke> = action
+            let chords: Vec<Chord> = action
                 .defaults()
                 .iter()
-                .filter_map(|text| KeyStroke::parse(text).ok())
+                .filter_map(|text| Chord::parse(text).ok())
                 .collect();
-            bindings.insert(action, strokes);
+            bindings.insert(action, chords);
         }
         Self { bindings }
     }
@@ -825,21 +1135,71 @@ pub struct Loaded {
 }
 
 impl KeyBindings {
-    /// The keystrokes bound to an action.
+    /// The chords bound to an action.
     #[must_use]
-    pub fn strokes(&self, action: Action) -> &[KeyStroke] {
+    pub fn chords(&self, action: Action) -> &[Chord] {
         self.bindings
             .get(&action)
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
 
+    /// The single-keystroke chords bound to an action.
+    ///
+    /// The callers that only print a key (the transcript footer, the help
+    /// page) want the ones a person can press in one go; a chord needs both
+    /// halves named to be usable.
+    #[must_use]
+    pub fn strokes(&self, action: Action) -> Vec<KeyStroke> {
+        self.chords(action)
+            .iter()
+            .filter_map(|chord| match chord.strokes() {
+                [one] => Some(*one),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The action a key performs in a context, if any.
     ///
     /// `Global` bindings are checked first, then the context's own, so a
     /// global shortcut cannot be shadowed by a palette key.
+    ///
+    /// Only single-keystroke bindings are considered: a chord needs the
+    /// tracker. A key that is the *prefix* of a chord still resolves to
+    /// whatever it means alone, which is what a caller without a tracker
+    /// gets.
     #[must_use]
     pub fn resolve(&self, context: Context, event: &KeyEvent) -> Option<Action> {
+        let stroke = KeyStroke::from_event(event);
+        match self.resolve_sequence(context, &[], &stroke) {
+            SequenceResolution::Action(action) => Some(action),
+            // A prefix standing alone: the key is a binding's first half, not
+            // a binding. The caller that asked without a tracker cannot wait
+            // for the second, so it is told nothing.
+            SequenceResolution::Pending | SequenceResolution::None => None,
+        }
+    }
+
+    /// What pressing `stroke` after `pending` means in a context.
+    ///
+    /// The three answers the tracker needs from the table: a full binding, the
+    /// start of one, or nothing at all. Checking the whole prefix is what
+    /// makes `ctrl+x ctrl+e` mean the chord while `ctrl+x` alone still means
+    /// the editor.
+    ///
+    /// A complete binding wins over a longer prefix here — `ctrl+x` resolves
+    /// to the editor even when `ctrl+x ctrl+e` exists — because a caller that
+    /// cannot wait for the second keystroke is asking about this one. The
+    /// tracker asks [`Self::extends_to_longer`] separately when it needs the
+    /// other answer.
+    #[must_use]
+    pub fn resolve_sequence(
+        &self,
+        context: Context,
+        pending: &[KeyStroke],
+        stroke: &KeyStroke,
+    ) -> SequenceResolution {
         let wanted: Vec<Context> = match context {
             Context::Global => vec![Context::Global],
             // The file list walks and dismisses with the palette's keys and
@@ -848,54 +1208,102 @@ impl KeyBindings {
             Context::FileMention => vec![Context::Global, Context::Autocomplete, context],
             _ => vec![Context::Global, context],
         };
+        let mut complete = None;
+        let mut prefix = false;
         for check in wanted {
-            for (action, strokes) in &self.bindings {
+            for (action, chords) in &self.bindings {
                 if action.context() != check {
                     continue;
                 }
-                if strokes.iter().any(|stroke| stroke.matches(event)) {
-                    return Some(*action);
+                for chord in chords {
+                    let strokes = chord.strokes();
+                    let Some(prefix_len) = sequence_prefix_len(strokes, pending, stroke) else {
+                        continue;
+                    };
+                    // The first context that has an answer wins, the same
+                    // order `resolve` used: a global binding before the
+                    // context's own.
+                    if prefix_len == strokes.len() && complete.is_none() {
+                        complete = Some(*action);
+                    } else if prefix_len < strokes.len() {
+                        prefix = true;
+                    }
                 }
             }
+            if let Some(action) = complete {
+                return SequenceResolution::Action(action);
+            }
+            if prefix {
+                return SequenceResolution::Pending;
+            }
         }
-        None
+        SequenceResolution::None
     }
 
-    /// Bind a keystroke to an action, taking it from whoever held it.
+    /// Whether some binding in a context needs more keystrokes after
+    /// `pending` then `stroke`.
+    ///
+    /// The tracker asks this before acting on a completed binding: a key that
+    /// both stands alone and starts a longer chord has to wait, or the longer
+    /// chord could never be typed.
+    #[must_use]
+    pub fn extends_to_longer(
+        &self,
+        context: Context,
+        pending: &[KeyStroke],
+        stroke: &KeyStroke,
+    ) -> bool {
+        let wanted: Vec<Context> = match context {
+            Context::Global => vec![Context::Global],
+            Context::FileMention => vec![Context::Global, Context::Autocomplete, context],
+            _ => vec![Context::Global, context],
+        };
+        wanted.iter().any(|check| {
+            self.bindings.iter().any(|(action, chords)| {
+                action.context() == *check
+                    && chords.iter().any(|chord| {
+                        sequence_prefix_len(chord.strokes(), pending, stroke)
+                            .is_some_and(|matched| matched < chord.len())
+                    })
+            })
+        })
+    }
+
+    /// Bind a chord to an action, taking it from whoever held it.
     ///
     /// Returns the action that lost the key, if any, so the caller can say so:
     /// a silent move is how a config ends up doing nothing.
-    pub fn assign(&mut self, action: Action, stroke: KeyStroke) -> Option<Action> {
+    pub fn assign(&mut self, action: Action, chord: Chord) -> Option<Action> {
         let context = action.context();
         let mut displaced = None;
-        for (existing, strokes) in &mut self.bindings {
+        for (existing, chords) in &mut self.bindings {
             if existing.context() != context || *existing == action {
                 continue;
             }
-            if let Some(index) = strokes.iter().position(|bound| *bound == stroke) {
-                strokes.remove(index);
+            if let Some(index) = chords.iter().position(|bound| *bound == chord) {
+                chords.remove(index);
                 displaced = Some(*existing);
             }
         }
-        let strokes = self.bindings.entry(action).or_default();
-        if !strokes.contains(&stroke) {
-            strokes.push(stroke);
+        let chords = self.bindings.entry(action).or_default();
+        if !chords.contains(&chord) {
+            chords.push(chord);
         }
         displaced
     }
 
-    /// Remove a keystroke from every action in a context.
+    /// Remove a chord from every action in a context.
     ///
     /// Returns the actions that lost it, so an unbind of a key nothing bound
     /// can be reported rather than silently accepted.
-    pub fn unbind(&mut self, context: Context, stroke: KeyStroke) -> Vec<Action> {
+    pub fn unbind(&mut self, context: Context, chord: Chord) -> Vec<Action> {
         let mut removed = Vec::new();
-        for (action, strokes) in &mut self.bindings {
+        for (action, chords) in &mut self.bindings {
             if action.context() != context {
                 continue;
             }
-            if let Some(index) = strokes.iter().position(|bound| *bound == stroke) {
-                strokes.remove(index);
+            if let Some(index) = chords.iter().position(|bound| *bound == chord) {
+                chords.remove(index);
                 removed.push(*action);
             }
         }
@@ -940,29 +1348,31 @@ impl KeyBindings {
         value: &serde_json::Value,
         notes: &mut Vec<String>,
     ) {
-        let stroke = match KeyStroke::parse(key_text) {
-            Ok(stroke) => stroke,
+        let chord = match Chord::parse(key_text) {
+            Ok(chord) => chord,
             Err(problem) => {
                 notes.push(format!("{}: {problem}", context.as_str()));
                 return;
             }
         };
-        if stroke.is_reserved() {
+        // Every stroke of a chord has to be pressable, not only its first:
+        // `ctrl+x ctrl+c` never completes, so the binding would be dead.
+        if let Some(reserved) = chord.strokes().iter().find(|stroke| stroke.is_reserved()) {
             notes.push(format!(
                 "{}: {} is reserved by the terminal and cannot be bound",
                 context.as_str(),
-                stroke.display()
+                reserved.display()
             ));
             return;
         }
         match value {
             serde_json::Value::Null => {
-                let removed = self.unbind(context, stroke);
+                let removed = self.unbind(context, chord.clone());
                 if removed.is_empty() {
                     notes.push(format!(
                         "{}: {} was not bound to anything",
                         context.as_str(),
-                        stroke.display()
+                        chord.display()
                     ));
                 }
             }
@@ -984,22 +1394,54 @@ impl KeyBindings {
                         action.context().as_str()
                     ));
                 }
-                if let Some(displaced) = self.assign(action, stroke) {
+                let shadowed = self.chord_shadow(action, &chord);
+                if let Some(displaced) = self.assign(action, chord.clone()) {
                     notes.push(format!(
                         "{}: {} moved from {} to {}",
                         context.as_str(),
-                        stroke.display(),
+                        chord.display(),
                         displaced.as_str(),
                         action.as_str()
+                    ));
+                }
+                // A prefix the new binding needs is no longer reachable on its
+                // own once the longer chord exists — `ctrl+x` cannot open the
+                // editor *and* start `ctrl+x ctrl+e` at the same time. That is
+                // not an error; it is the fact the person needs in order to
+                // decide, so it is a note.
+                if let Some(shadowed) = shadowed {
+                    notes.push(format!(
+                        "{}: {} now waits for the chord bound to {}",
+                        context.as_str(),
+                        chord.display(),
+                        shadowed.as_str()
                     ));
                 }
             }
             other => notes.push(format!(
                 "{}: {} must be an action name or null, not {other}",
                 context.as_str(),
-                stroke.display()
+                chord.display()
             )),
         }
+    }
+
+    /// The action whose binding this chord turns into a prefix, if any.
+    fn chord_shadow(&self, action: Action, chord: &Chord) -> Option<Action> {
+        if chord.len() < 2 {
+            return None;
+        }
+        let first = chord.strokes()[0];
+        let single = Chord::single(first);
+        ALL_ACTIONS.into_iter().find(|existing| {
+            *existing != action
+                && existing.context() == action.context()
+                && self.bindings.get(existing).is_some_and(|chords| {
+                    chords
+                        .iter()
+                        .any(|bound| bound.len() == 1 && bound == &single)
+                })
+        })
     }
 
     /// Load and merge keybinding files over the defaults.
@@ -1048,10 +1490,7 @@ impl KeyBindings {
             .map(|action| {
                 (
                     *action,
-                    self.strokes(*action)
-                        .iter()
-                        .map(KeyStroke::display)
-                        .collect(),
+                    self.chords(*action).iter().map(Chord::display).collect(),
                 )
             })
             .collect()
@@ -1122,7 +1561,7 @@ mod tests {
         assert!(
             KeyStroke::parse("ctrl+k ctrl+s")
                 .unwrap_err()
-                .contains("chord")
+                .contains("Chord::parse")
         );
         assert!(
             KeyStroke::parse("cmd+p")
@@ -1139,6 +1578,243 @@ mod tests {
         for allowed in ["ctrl+o", "ctrl+v", "ctrl+shift+c", "esc", "ctrl+x"] {
             assert!(!stroke(allowed).is_reserved(), "{allowed}");
         }
+    }
+
+    fn chord(text: &str) -> Chord {
+        Chord::parse(text).expect("chord parses")
+    }
+
+    #[test]
+    fn a_chord_parses_into_its_keystrokes() {
+        let parsed = chord("ctrl+x ctrl+e");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed.strokes(), [stroke("ctrl+x"), stroke("ctrl+e")]);
+        // The canonical spelling is what `/keybindings` prints back, and it has
+        // to round-trip or an edited file would read differently from the one
+        // the page showed.
+        assert_eq!(parsed.display(), "ctrl+x ctrl+e");
+        assert_eq!(chord(&parsed.display()), parsed);
+        // A single keystroke is a one-stroke chord, so one representation
+        // covers both and the table has no second case.
+        assert_eq!(chord("esc").len(), 1);
+        assert_eq!(chord("esc").display(), "esc");
+    }
+
+    #[test]
+    fn a_chord_with_a_bad_stroke_names_the_stroke() {
+        // The message has to say which half was wrong: `ctrl+x ctl+e` is one
+        // typo in a two-key binding, and "invalid chord" would not say where.
+        let problem = Chord::parse("ctrl+x ctl+e").unwrap_err();
+        assert!(problem.contains("ctl"), "{problem}");
+        assert!(problem.contains("not a modifier"), "{problem}");
+        assert!(Chord::parse("   ").is_err());
+    }
+
+    /// `ctrl+x` still means the editor while `ctrl+x ctrl+e` means the
+    /// chord — the case the whole tracker exists for.
+    #[test]
+    fn a_prefix_key_waits_for_the_rest_of_its_chord() {
+        let mut bindings = KeyBindings::default();
+        bindings.assign(Action::ExternalEditor, chord("ctrl+x"));
+        bindings.assign(Action::Help, chord("ctrl+x ctrl+e"));
+        let mut tracker = ChordTracker::default();
+        let x = key(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            tracker.press(&bindings, Context::Chat, &x),
+            ChordStep::Pending,
+            "ctrl+x fired instead of waiting for the chord it starts"
+        );
+        assert_eq!(
+            tracker.press(
+                &bindings,
+                Context::Chat,
+                &key(KeyCode::Char('e'), KeyModifiers::CONTROL)
+            ),
+            ChordStep::Complete(Action::Help),
+            "the second half did not complete the chord"
+        );
+        assert!(!tracker.is_pending(), "the sequence was left held");
+    }
+
+    #[test]
+    fn the_timeout_replays_the_prefix_as_the_key_it_is() {
+        let mut bindings = KeyBindings::default();
+        bindings.assign(Action::ExternalEditor, chord("ctrl+x"));
+        bindings.assign(Action::Help, chord("ctrl+x ctrl+e"));
+        let mut tracker = ChordTracker::default();
+        let x = key(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            tracker.press(&bindings, Context::Chat, &x),
+            ChordStep::Pending
+        );
+        assert_eq!(
+            tracker.expire(),
+            Some(x),
+            "the held prefix was dropped instead of replayed, so ctrl+x stops \
+             opening the editor once a chord is bound to it"
+        );
+        // The replay itself must not be held again: it would restart the same
+        // chord and the key would never fire.
+        assert_eq!(tracker.press(&bindings, Context::Chat, &x), ChordStep::Pass);
+        assert_eq!(
+            bindings.resolve(Context::Chat, &x),
+            Some(Action::ExternalEditor),
+            "the replayed key does not resolve to the binding it had alone"
+        );
+    }
+
+    /// A second stroke that belongs to no binding abandons the sequence and is
+    /// handled as itself. Vim's prefix behaves the same way.
+    #[test]
+    fn an_unrelated_key_abandons_the_chain() {
+        let mut bindings = KeyBindings::default();
+        bindings.assign(Action::Help, chord("ctrl+x ctrl+e"));
+        let mut tracker = ChordTracker::default();
+        assert_eq!(
+            tracker.press(
+                &bindings,
+                Context::Chat,
+                &key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            ),
+            ChordStep::Pending
+        );
+        assert_eq!(
+            tracker.press(
+                &bindings,
+                Context::Chat,
+                &key(KeyCode::Char('a'), KeyModifiers::NONE)
+            ),
+            ChordStep::Pass
+        );
+        assert!(!tracker.is_pending());
+        assert_eq!(tracker.expire(), None, "a dropped sequence replayed");
+    }
+
+    /// A two-stroke prefix is not replayed: neither key means anything alone,
+    /// and firing the second would run a binding the person never asked for.
+    #[test]
+    fn only_a_one_keystroke_prefix_is_replayed() {
+        let mut bindings = KeyBindings::default();
+        bindings.assign(Action::Help, chord("ctrl+x ctrl+e ctrl+h"));
+        let mut tracker = ChordTracker::default();
+        for character in ['x', 'e'] {
+            assert_eq!(
+                tracker.press(
+                    &bindings,
+                    Context::Chat,
+                    &key(KeyCode::Char(character), KeyModifiers::CONTROL)
+                ),
+                ChordStep::Pending
+            );
+        }
+        assert_eq!(tracker.expire(), None);
+    }
+
+    #[test]
+    fn a_single_keystroke_binding_is_unaffected_by_the_tracker() {
+        let bindings = KeyBindings::default();
+        let mut tracker = ChordTracker::default();
+        let ctrl_o = key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(
+            tracker.press(&bindings, Context::Chat, &ctrl_o),
+            ChordStep::Complete(Action::ToggleToolOutput)
+        );
+        assert!(!tracker.is_pending());
+
+        // A key bound to nothing is still nothing.
+        assert_eq!(
+            tracker.press(
+                &bindings,
+                Context::Chat,
+                &key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+            ),
+            ChordStep::Pass
+        );
+    }
+
+    /// A chord in a file is loaded, printed back, and unbindable as a whole.
+    #[test]
+    fn a_chord_from_a_file_is_bound_and_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keybindings.json");
+        std::fs::write(
+            &path,
+            r#"{"bindings":[{"context":"Chat","bindings":{"ctrl+x ctrl+e":"app:help"}}]}"#,
+        )
+        .unwrap();
+        let loaded = KeyBindings::load(&[path.as_path()]);
+        assert_eq!(
+            loaded
+                .bindings
+                .resolve_sequence(Context::Chat, &[stroke("ctrl+x")], &stroke("ctrl+e")),
+            SequenceResolution::Action(Action::Help)
+        );
+        assert!(
+            loaded
+                .bindings
+                .table()
+                .iter()
+                .any(|(action, chords)| *action == Action::Help
+                    && chords.iter().any(|c| c == "ctrl+x ctrl+e")),
+            "the chord is missing from the printed table: {:?}",
+            loaded.bindings.table()
+        );
+        // The only note is the prefix warning the next test pins: `ctrl+x`
+        // alone is the editor's, so the chord takes its first half.
+        assert_eq!(loaded.notes.len(), 1, "{:?}", loaded.notes);
+    }
+
+    /// The longer chord takes the first key away from whatever held it, and
+    /// the load says so rather than leaving a silently dead binding.
+    #[test]
+    fn binding_a_chord_reports_the_prefix_it_takes_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keybindings.json");
+        std::fs::write(
+            &path,
+            r#"{"bindings":[{"context":"Chat","bindings":{"ctrl+x ctrl+e":"app:help"}}]}"#,
+        )
+        .unwrap();
+        let loaded = KeyBindings::load(&[path.as_path()]);
+        assert!(
+            loaded
+                .notes
+                .iter()
+                .any(|note| note.contains("ctrl+x") && note.contains("chat:externalEditor")),
+            "the note does not say which binding the chord takes over: {:?}",
+            loaded.notes
+        );
+    }
+
+    /// A chord with a reserved stroke never completes, so it is refused when
+    /// the file is read rather than left as a key that silently does nothing.
+    #[test]
+    fn a_chord_ending_in_a_reserved_key_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("keybindings.json");
+        std::fs::write(
+            &path,
+            r#"{"bindings":[{"context":"Chat","bindings":{"ctrl+x ctrl+c":"app:help"}}]}"#,
+        )
+        .unwrap();
+        let loaded = KeyBindings::load(&[path.as_path()]);
+        assert!(
+            loaded
+                .notes
+                .iter()
+                .any(|note| note.contains("ctrl+c") && note.contains("reserved")),
+            "{:?}",
+            loaded.notes
+        );
+        assert_eq!(
+            loaded.bindings.resolve(
+                Context::Chat,
+                &key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            None
+        );
     }
 
     #[test]

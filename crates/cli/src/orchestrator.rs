@@ -3051,6 +3051,15 @@ impl StartupOrchestrator {
             repl.with_plugin_agents(manager.plugin_agents());
             self.configure_plugin_components(repl, manager);
         }
+        // After the plugin components, because the persisted style may be one
+        // a plugin contributes. It declines to overwrite an explicit
+        // `--append-system-prompt`, which is a request for this run.
+        let output_style = self
+            .ctx
+            .settings
+            .as_ref()
+            .and_then(|settings| settings.output_style.clone());
+        repl.with_startup_output_style(output_style);
         repl.with_explicit_model_override(self.ctx.model_explicit);
         repl.with_worktree(self.ctx.worktree);
         repl.with_fork_session(self.ctx.fork_session.clone());
