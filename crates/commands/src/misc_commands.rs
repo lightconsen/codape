@@ -312,6 +312,42 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     ));
 
+    // /upgrade — install the latest release over this binary
+    //
+    // The download, checksum verification and the rename all live in the
+    // CLI's updater, which this crate does not depend on. The handler names
+    // the intent; the session carries it out and reports what was installed.
+    // It is not remote-safe: a client reaching this host must not be able to
+    // replace the host's binary.
+    registry.register(SlashCommand::local(
+        "upgrade",
+        "Install the latest release over this binary",
+        true,
+        false,
+        false,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success("Checking for a newer release...")
+                .with_deferred(crate::registry::CommandDeferred::Upgrade)
+        }),
+    ));
+
+    // /release-notes — the latest release's published notes
+    //
+    // Same lookup and same mirror override (`CODAPE_API_BASE_URL`) as the
+    // updater, so a host behind a mirror reads the release it would actually
+    // install. Read-only, so it is safe over a remote or bridge session.
+    registry.register(SlashCommand::local(
+        "release-notes",
+        "Show the published notes of the latest release",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success("Fetching the latest release notes...")
+                .with_deferred(crate::registry::CommandDeferred::ReleaseNotes)
+        }),
+    ));
+
     // /backfill-sessions — write the session index for transcripts that
     // predate it. The index belongs to the CLI (it owns the SQLite handle and
     // the `.codape` layout), so the registry only reports the request; the
@@ -668,5 +704,61 @@ mod tests {
         };
         let result = reg.execute("feedback", &ctx(), &[]);
         assert!(result.output.contains("Use /feedback"));
+    }
+
+    /// `/upgrade` hands the install to the session.
+    ///
+    /// Nothing in this crate can download or replace a binary, so the handler
+    /// only names the work; a result that dropped the deferred request would
+    /// print "Checking for a newer release..." and then never check.
+    #[test]
+    fn upgrade_hands_the_install_to_the_session() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute("upgrade", &ctx(), &[]);
+        assert!(result.output.contains("Checking"), "{}", result.output);
+        assert_eq!(
+            result.deferred,
+            Some(crate::registry::CommandDeferred::Upgrade)
+        );
+    }
+
+    /// Replacing the host binary is not a remote client's decision.
+    #[test]
+    fn upgrade_is_not_safe_for_a_remote_or_bridged_client() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let command = reg.find("upgrade").expect("/upgrade is registered");
+        assert!(!command.remote_safe, "/upgrade must not be remote-safe");
+        assert!(!command.bridge_safe, "/upgrade must not be bridge-safe");
+        assert!(
+            command.supports_non_interactive,
+            "/upgrade has to run in a scripted install"
+        );
+    }
+
+    /// Reading release notes is read-only, so it is safe everywhere.
+    #[test]
+    fn release_notes_hands_the_fetch_to_the_session() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute("release-notes", &ctx(), &[]);
+        assert!(result.output.contains("Fetching"), "{}", result.output);
+        assert_eq!(
+            result.deferred,
+            Some(crate::registry::CommandDeferred::ReleaseNotes)
+        );
+
+        let command = reg.find("release-notes").expect("/release-notes");
+        assert!(command.remote_safe && command.bridge_safe);
     }
 }

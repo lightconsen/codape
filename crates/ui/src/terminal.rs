@@ -574,7 +574,7 @@ fn render_frame(
     // it stays visible in compact mode too, but capped so the transcript keeps
     // most of the screen.
     let max_todo_height = area.height.saturating_sub(6).max(1);
-    let todo_height = if fullscreen {
+    let todo_height = if fullscreen || !state.todos_visible {
         0
     } else {
         state.todos.display_height().min(max_todo_height)

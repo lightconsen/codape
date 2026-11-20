@@ -100,8 +100,13 @@ pub fn group_exists(pid: u32) -> bool {
     }
 }
 
-// Windows kills the tree with `taskkill /T`, so there is no group to probe.
-// The body is a constant, which clippy would prefer spelled `const fn`.
+/// Whether the process group led by `pid` still has a live member.
+///
+/// Windows kills the tree with `taskkill /T`, so there is no group to probe
+/// and this answers `true`: callers use it only to decide whether stopping is
+/// worth attempting.
+///
+/// The body is a constant, which clippy would prefer spelled `const fn`.
 #[cfg(not(unix))]
 #[cfg_attr(not(unix), allow(clippy::missing_const_for_fn))]
 pub fn group_exists(_pid: u32) -> bool {

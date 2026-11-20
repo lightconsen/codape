@@ -1,6 +1,7 @@
 //! Session management commands: /clear, /exit, /session.
 
 use crate::registry::{CommandContext, CommandRegistry, CommandResult, SlashCommand};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Register session management commands.
@@ -64,11 +65,48 @@ pub fn register(registry: &mut CommandRegistry) {
             CommandResult::success(output)
         }),
     ));
+
+    // /todos — the task list the model keeps through TodoWrite
+    //
+    // The panel under the transcript draws the same rows, but it stops at eight
+    // and elides the rest; this is the full list, with the descriptions the
+    // panel never shows. The list belongs to the conversation, so it is read
+    // from a context snapshot rather than from a store this crate cannot
+    // reach.
+    registry.register(SlashCommand::local(
+        "todos",
+        "Show the model's todo list",
+        true,
+        true,
+        true,
+        Arc::new(|ctx: &CommandContext, _args: &[String]| {
+            if ctx.todos.is_empty() {
+                return CommandResult::success(
+                    "No todos. The model writes them with TodoWrite while it works; the panel \
+                     under the prompt draws the same list.",
+                );
+            }
+            let done = ctx
+                .todos
+                .iter()
+                .filter(|todo| todo.status == crate::registry::TodoStatus::Completed)
+                .count();
+            let mut output = format!("Todos ({done}/{} done)", ctx.todos.len());
+            for todo in &ctx.todos {
+                let _ = write!(output, "\n{} {}", todo.status.marker(), todo.subject);
+                if !todo.description.is_empty() {
+                    let _ = write!(output, "\n    {}", todo.description);
+                }
+            }
+            CommandResult::success(output)
+        }),
+    ));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::{TodoRow, TodoStatus};
     use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
@@ -118,5 +156,65 @@ mod tests {
         assert!(result.output.contains("10"));
         assert!(result.output.contains("120s"));
         assert!(result.output.contains("main"));
+    }
+
+    /// With no list, `/todos` says where the list comes from instead of
+    /// printing an empty header.
+    #[test]
+    fn todos_without_a_list_explains_where_it_comes_from() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let result = reg.execute("todos", &ctx(), &[]);
+        assert!(result.output.contains("No todos"), "{}", result.output);
+        assert!(result.output.contains("TodoWrite"), "{}", result.output);
+    }
+
+    /// The command prints the whole list, including what the panel drops:
+    /// the descriptions and every row past the eighth.
+    #[test]
+    fn todos_prints_every_row_with_its_description() {
+        let reg = {
+            let mut r = CommandRegistry::new();
+            register(&mut r);
+            r
+        };
+        let mut c = ctx();
+        c.todos = vec![
+            TodoRow {
+                subject: "Read the registry".into(),
+                description: "find where the counts are pinned".into(),
+                status: TodoStatus::Completed,
+            },
+            TodoRow {
+                subject: "Add the commands".into(),
+                description: String::new(),
+                status: TodoStatus::InProgress,
+            },
+            TodoRow {
+                subject: "Write the tests".into(),
+                description: String::new(),
+                status: TodoStatus::Pending,
+            },
+        ];
+        let result = reg.execute("todos", &c, &[]);
+        assert!(
+            result.output.starts_with("Todos (1/3 done)"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("✓ Read the registry"));
+        assert!(result.output.contains("■ Add the commands"));
+        assert!(result.output.contains("□ Write the tests"));
+        // A description is indented under its own subject.
+        assert!(
+            result
+                .output
+                .contains("\n    find where the counts are pinned"),
+            "{}",
+            result.output
+        );
     }
 }

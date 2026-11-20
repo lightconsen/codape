@@ -118,6 +118,19 @@ pub enum CommandDeferred {
         /// The event to fire, as `/hooks test <event>` spells it.
         event: String,
     },
+    /// Install the latest release over this binary.
+    ///
+    /// `/upgrade` reads the same release the updater does, but downloading and
+    /// replacing the executable is `codape_cli`'s `self_update` module, which
+    /// this crate does not depend on. The handler therefore only names the
+    /// intent; the CLI runs it and reports what was installed.
+    Upgrade,
+    /// Fetch the published notes of the latest release.
+    ///
+    /// Same reason as [`Self::Upgrade`]: the release lookup is HTTP plus the
+    /// mirror override, both of which live in the updater. `/release-notes`
+    /// could not reach them from a synchronous handler.
+    ReleaseNotes,
 }
 
 impl CommandResult {
@@ -364,6 +377,81 @@ pub struct CommandContext {
     ///
     /// Numbering matches `/rewind`: message 1 is the first in the session.
     pub transcript: Vec<codape_core::types::Message>,
+    /// The todo list the model maintains through `TodoWrite`, for `/todos`.
+    ///
+    /// The real list lives in a store inside the tool dispatcher, which this
+    /// crate does not depend on; `/todos` had nothing to print because the
+    /// context carried no copy of it. A snapshot for the same reason as
+    /// [`Self::transcript`] — the handler is synchronous.
+    pub todos: Vec<TodoRow>,
+    /// What terminal this session is attached to, for `/terminal-setup`.
+    ///
+    /// `None` when a host is presenting the session where there is no terminal
+    /// to identify. The CLI builds it from
+    /// `codape_ui::terminal_profile::TerminalProfile`, so this crate reports
+    /// the detection that actually decided the key encoding rather than a
+    /// second, drifting copy of the same rules.
+    pub terminal: Option<TerminalReport>,
+}
+
+/// The terminal a session is attached to, as `/terminal-setup` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalReport {
+    /// `TERM_PROGRAM` when the terminal sets it, else the kind's label.
+    pub name: String,
+    /// The identified emulator, as the profile labels it.
+    pub kind: String,
+    /// Whether Codape asks the terminal to disambiguate keys.
+    ///
+    /// Under the legacy encoding `Ctrl+I` and `Tab`, `Ctrl+M` and `Enter`,
+    /// and `Alt+[` and `Esc` are the same bytes on the wire, so this is the
+    /// difference between those keys being bindable and not.
+    pub disambiguating: bool,
+    /// Whether the identified terminal is known to implement the protocol.
+    pub supports_disambiguation: bool,
+    /// The variable that overrides the automatic choice.
+    pub override_env: String,
+    /// Its value when set, including one this build does not recognise.
+    pub override_value: Option<String>,
+}
+
+/// One row of the todo list, as `/todos` prints it.
+///
+/// A display copy of the tool's item type, which lives in `codape-tools`: this
+/// crate cannot name it without depending on the tool registry, and the panel
+/// only needs the three fields it draws.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodoRow {
+    /// Short subject shown on the row.
+    pub subject: String,
+    /// Longer description, printed under the subject when present.
+    pub description: String,
+    /// Whether the row is pending, in progress, or done.
+    pub status: TodoStatus,
+}
+
+/// How far along one todo row is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TodoStatus {
+    /// Not yet started.
+    #[default]
+    Pending,
+    /// Currently being worked on.
+    InProgress,
+    /// Done.
+    Completed,
+}
+
+impl TodoStatus {
+    /// The marker `/todos` prints in front of a row.
+    #[must_use]
+    pub const fn marker(self) -> char {
+        match self {
+            Self::Pending => '□',
+            Self::InProgress => '■',
+            Self::Completed => '✓',
+        }
+    }
 }
 
 impl CommandContext {
@@ -417,6 +505,8 @@ impl CommandContext {
             surface: codape_core::surface::SurfaceDescriptor::terminal(),
             recent_commands: Vec::new(),
             transcript: Vec::new(),
+            todos: Vec::new(),
+            terminal: None,
         }
     }
 

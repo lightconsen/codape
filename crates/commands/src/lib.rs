@@ -28,5 +28,5 @@ pub use integration_commands::load_remote_env;
 pub use macro_commands::MacroRegistry;
 pub use registry::{
     CommandArgs, CommandContext, CommandDeferred, CommandHandler, CommandRegistry, CommandResult,
-    CommandType, SlashCommand, register_all_commands,
+    CommandType, SlashCommand, TerminalReport, TodoRow, TodoStatus, register_all_commands,
 };

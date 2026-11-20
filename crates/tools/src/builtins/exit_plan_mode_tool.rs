@@ -17,6 +17,15 @@ impl Tool for ExitPlanModeTool {
         )
     }
 
+    fn capabilities(&self) -> crate::tool::ToolCapabilities {
+        crate::tool::ToolCapabilities {
+            // Each handover is its own decision. "Always allow" would turn the
+            // second plan of a session into an exit nobody was shown.
+            suppresses_always_allow_rule: true,
+            ..crate::tool::ToolCapabilities::default()
+        }
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "ExitPlanMode".into(),

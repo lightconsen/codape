@@ -202,6 +202,19 @@ pub enum Action {
     PaneNextTab,
     /// Give the transcript the whole screen, or give the prompt its room back.
     TranscriptFullscreen,
+    /// Open the background-job panel.
+    ///
+    /// The same jobs `JobList`/`JobOutput`/`JobKill` reach by name, as a list
+    /// that can be read without remembering an id: choose a row to see its
+    /// output, stop it, or forget it.
+    JobsPanel,
+    /// Show or hide the todo panel.
+    ///
+    /// The panel is the model's own list of the steps it means to take, and it
+    /// is on by default. This is the person's switch: the rows go back to the
+    /// transcript while it is off, and the list is still there when it is on
+    /// again.
+    ToggleTodos,
     /// Move the highlight up in a modal list.
     ListPrevious,
     /// Move the highlight down in a modal list.
@@ -274,6 +287,8 @@ impl Action {
             Self::PanePreviousTab => "app:panePreviousTab",
             Self::PaneNextTab => "app:paneNextTab",
             Self::TranscriptFullscreen => "app:transcriptFullscreen",
+            Self::ToggleTodos => "app:toggleTodos",
+            Self::JobsPanel => "app:jobsPanel",
             Self::ListPrevious => "list:previous",
             Self::ListNext => "list:next",
             Self::ListAccept => "list:accept",
@@ -297,6 +312,8 @@ impl Action {
             | Self::PanePreviousTab
             | Self::PaneNextTab
             | Self::TranscriptFullscreen
+            | Self::ToggleTodos
+            | Self::JobsPanel
             | Self::CopyTranscript
             | Self::SelectionExtendUp
             | Self::SelectionExtendDown
@@ -347,7 +364,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 48] {
+    pub const fn all() -> [Self; 50] {
         ALL_ACTIONS
     }
 
@@ -428,6 +445,14 @@ impl Action {
             // The toggle a person reaches for when the answer is long. `ctrl+t`
             // is the transcript size control in most terminals' muscle memory.
             Self::TranscriptFullscreen => &["ctrl+t"],
+            // The todo panel's switch. `ctrl+t` is the full-screen transcript,
+            // so the neighbour that is not taken is `alt+t`: one key, the same
+            // row as `alt+e`'s effort slider and `alt+v`'s attachments.
+            Self::ToggleTodos => &["alt+t"],
+            // The job panel. `ctrl+j` is a newline and `alt+j` is free; it is
+            // the neighbour of the todo switch above, which is the list of
+            // what this session means to do while this one is what is running.
+            Self::JobsPanel => &["alt+j"],
             // Writing the prompt somewhere with room. `ctrl+x` is the shell's
             // "hand this off" prefix; it is the key alone rather than
             // `ctrl+x ctrl+e` because a prefix has to wait for its second
@@ -464,7 +489,7 @@ impl Action {
     }
 }
 
-const ALL_ACTIONS: [Action; 48] = [
+const ALL_ACTIONS: [Action; 50] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -501,6 +526,8 @@ const ALL_ACTIONS: [Action; 48] = [
     Action::PanePreviousTab,
     Action::PaneNextTab,
     Action::TranscriptFullscreen,
+    Action::ToggleTodos,
+    Action::JobsPanel,
     Action::ListPrevious,
     Action::ListNext,
     Action::ListAccept,

@@ -420,6 +420,13 @@ pub struct UiState {
     /// second mode would need every key branch to ask which mode it is in, and
     /// the answer here is only ever "does the input box have room".
     pub transcript_fullscreen: bool,
+    /// Whether the todo panel is drawn.
+    ///
+    /// The panel is the model's own outline and is on by default; this is the
+    /// person's switch to get the rows back for the transcript. It does not
+    /// throw the list away: [`Self::todos`] keeps its items, so switching it
+    /// back on shows the same list.
+    pub todos_visible: bool,
     /// What the full-screen footer says, when the session set one.
     ///
     /// Set by whoever toggles [`Self::transcript_fullscreen`], because the
@@ -492,6 +499,7 @@ impl UiState {
             pane_tab_index: 0,
             voice: VoiceState::new(),
             transcript_fullscreen: false,
+            todos_visible: true,
             transcript_footer: String::new(),
             image_protocol: crate::transcript_image::ImageProtocol::None,
             stashed_input: None,

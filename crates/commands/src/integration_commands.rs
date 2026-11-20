@@ -425,11 +425,139 @@ chrome_get_content    — Extract page HTML as markdown"
             .with_state_change(true)
         }),
     ));
+
+    // /terminal-setup — what the terminal is and what this session asked it
+    //
+    // Codape already decides this at startup (`TerminalProfile`), so the
+    // command reports that decision rather than offering a wizard: a "setup"
+    // that wrote a file nothing re-read would be worse than an explanation of
+    // the one override that does reach the next start.
+    registry.register(SlashCommand::local(
+        "terminal-setup",
+        "Show the terminal this session detected and how keys are encoded",
+        true,
+        true,
+        true,
+        Arc::new(|ctx: &CommandContext, _args: &[String]| {
+            let Some(terminal) = &ctx.terminal else {
+                return CommandResult::success(
+                    "No terminal to configure: this session is presented by a host other than \
+                     the terminal surface, so there is no key encoding to choose.",
+                );
+            };
+            let encoding = if terminal.disambiguating {
+                "disambiguating (kitty keyboard protocol)"
+            } else {
+                "legacy (the terminal's default)"
+            };
+            let mut output = format!(
+                "Terminal\n────────\nDetected: {} ({})\nKey encoding: {encoding}\n",
+                terminal.name, terminal.kind
+            );
+            if terminal.disambiguating {
+                output.push_str(
+                    "Ctrl+I/Tab, Ctrl+M/Enter and Alt+[/Esc are told apart in this session.\n",
+                );
+            } else if terminal.supports_disambiguation {
+                output.push_str(
+                    "This terminal implements the protocol, so the choice above came from the \
+                     override.\n",
+                );
+            } else {
+                output.push_str(
+                    "This terminal is not known to implement the kitty keyboard protocol, so \
+                     Ctrl+I/Tab, Ctrl+M/Enter and Alt+[/Esc arrive as the same bytes.\n",
+                );
+            }
+            let _ = write!(
+                output,
+                "\nOverride for the next start:\n  {}={}\n  (disambiguate | on | legacy | off)",
+                terminal.override_env,
+                terminal.override_value.as_deref().unwrap_or("disambiguate"),
+            );
+            if let Some(value) = &terminal.override_value {
+                let _ = write!(output, "\nCurrently set to '{value}'.");
+            }
+            CommandResult::success(output)
+        }),
+    ));
+
+    // /login — a placeholder for an account login flow
+    //
+    // There is no account to log into. Codape authenticates to a model provider
+    // with a key from the environment or `settings.json`, optionally resolved
+    // through `keyring://`; there is no first-party account, no token endpoint
+    // and no browser handshake. The command exists because the name is typed
+    // often enough that answering "Unknown command" tells a person nothing —
+    // but it does not pretend to have started something it has not.
+    registry.register(SlashCommand::local(
+        "login",
+        "Explain how this build authenticates (no account login)",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "No login to perform: this build has no account or OAuth flow.\n\
+                 It authenticates to the model provider with a key, read at startup from \
+                 ANTHROPIC_API_KEY (or another provider's variable), or from the `api_key` in \
+                 settings.json — which may be a `keyring://<item>` reference resolved through \
+                 the OS keychain.\n\
+                 Run /oauth-refresh for what this session can currently see, and /doctor if a \
+                 key you expected is not being used.",
+            )
+            .with_state_change(false)
+        }),
+    ));
+
+    // /logout — the other half of a login that does not exist
+    //
+    // It refuses to delete anything. Removing a credential a person put in
+    // their own environment or settings file is not this command's to do, and a
+    // placeholder that silently cleared `api_key` would break the next session.
+    registry.register(SlashCommand::local(
+        "logout",
+        "Explain that there is no session login to end",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "Nothing to log out of: this build keeps no account session.\n\
+                 The credential is the provider key in your environment or settings file, and \
+                 this command will not delete it — clearing ANTHROPIC_API_KEY (or the `api_key` \
+                 you configured) is yours to do.",
+            )
+        }),
+    ));
+
+    // /smartphone — a remote client that is not shipped
+    //
+    // `/mobile` already answers the honest version of "is a phone attached",
+    // through `codape bridge`. This name is from another product's command
+    // list; rather than a second half-answer it points at the one that is
+    // real.
+    registry.register(SlashCommand::local(
+        "smartphone",
+        "Point at /mobile for remote-client status",
+        true,
+        true,
+        true,
+        Arc::new(|_ctx: &CommandContext, _args: &[String]| {
+            CommandResult::success(
+                "No smartphone client: Codape ships no mobile app, so there is nothing to pair \
+                 or disconnect here.\n\
+                 A phone reaches a session through `codape bridge`; /mobile reports whether one \
+                 is attached and how.",
+            )
+        }),
+    ));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::TerminalReport;
     use codape_core::types::ModelId;
 
     fn ctx() -> CommandContext {
@@ -799,5 +927,124 @@ mod tests {
         let statusline = settings.statusline.as_ref().unwrap();
         assert!(statusline.format.as_deref().unwrap().contains("[vim]"));
         assert_eq!(statusline.theme.as_deref(), Some("dark"));
+    }
+
+    fn registry() -> CommandRegistry {
+        let mut r = CommandRegistry::new();
+        register(&mut r);
+        r
+    }
+
+    fn reported(
+        disambiguating: bool,
+        supports: bool,
+        override_value: Option<&str>,
+    ) -> TerminalReport {
+        TerminalReport {
+            name: "iTerm.app".into(),
+            kind: "iTerm2".into(),
+            disambiguating,
+            supports_disambiguation: supports,
+            // The CLI fills this from `codape_ui::terminal_profile`; this crate
+            // cannot name that constant, and the string is the contract.
+            override_env: "CODAPE_KEYBOARD_PROTOCOL".into(),
+            override_value: override_value.map(String::from),
+        }
+    }
+
+    /// A host that is not a terminal has no key encoding to report.
+    #[test]
+    fn terminal_setup_without_a_terminal_says_so() {
+        let result = registry().execute("terminal-setup", &ctx(), &[]);
+        assert!(result.output.contains("No terminal"), "{}", result.output);
+    }
+
+    /// The detected terminal and its encoding are what the command prints —
+    /// the same `TerminalProfile` decision the session started with.
+    #[test]
+    fn terminal_setup_reports_the_detected_profile() {
+        let mut c = ctx();
+        c.terminal = Some(reported(true, true, None));
+        let result = registry().execute("terminal-setup", &c, &[]);
+        assert!(result.output.contains("iTerm.app"), "{}", result.output);
+        assert!(result.output.contains("iTerm2"), "{}", result.output);
+        assert!(
+            result.output.contains("disambiguating"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("CODAPE_KEYBOARD_PROTOCOL"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// Under the legacy encoding the command names the keys that collide,
+    /// because that is the reason a binding on them would not work.
+    #[test]
+    fn terminal_setup_under_the_legacy_encoding_names_the_collisions() {
+        let mut c = ctx();
+        c.terminal = Some(reported(false, false, None));
+        let result = registry().execute("terminal-setup", &c, &[]);
+        assert!(result.output.contains("legacy"), "{}", result.output);
+        assert!(
+            result.output.contains("same bytes"),
+            "a legacy terminal did not say which keys collide: {}",
+            result.output
+        );
+    }
+
+    /// The override's current value is reported, whichever way it was set.
+    #[test]
+    fn terminal_setup_reports_the_override_value_when_set() {
+        let mut c = ctx();
+        c.terminal = Some(reported(false, true, Some("legacy")));
+        let result = registry().execute("terminal-setup", &c, &[]);
+        assert!(
+            result.output.contains("Currently set to 'legacy'"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// There is no account flow, and `/login` says so instead of claiming to
+    /// have started one — pointing at the key that actually authenticates.
+    #[test]
+    fn login_explains_the_key_this_build_uses() {
+        let result = registry().execute("login", &ctx(), &[]);
+        assert!(result.output.contains("No login"), "{}", result.output);
+        assert!(
+            result.output.contains("ANTHROPIC_API_KEY"),
+            "{}",
+            result.output
+        );
+        assert!(result.output.contains("/doctor"), "{}", result.output);
+        assert!(!result.state_changed, "/login changed session state");
+    }
+
+    /// `/logout` must not delete the credential it did not create.
+    #[test]
+    fn logout_refuses_to_clear_the_credential() {
+        let result = registry().execute("logout", &ctx(), &[]);
+        assert!(
+            result.output.contains("Nothing to log out"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("will not delete"),
+            "{}",
+            result.output
+        );
+    }
+
+    /// `/smartphone` names no client and points at the one path a phone has.
+    #[test]
+    fn smartphone_points_at_the_bridge() {
+        let result = registry().execute("smartphone", &ctx(), &[]);
+        assert!(result.output.contains("No smartphone"), "{}", result.output);
+        assert!(result.output.contains("codape bridge"), "{}", result.output);
+        assert!(result.output.contains("/mobile"), "{}", result.output);
     }
 }
