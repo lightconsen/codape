@@ -341,7 +341,7 @@ fn stress_export_many_messages() {
     let selector = MessageSelector::new(messages.len());
 
     // Export as plain text
-    let output = export_messages(&messages, &selector, ExportFormat::PlainText);
+    let output = export_messages(&messages, &selector, ExportFormat::Text);
     assert!(output.contains("User"));
 
     // Export as JSON

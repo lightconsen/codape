@@ -18,7 +18,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 - **`CommandHistory`** (`history.rs`) — Ring buffer (max 1000) with JSONL file persistence (`~/.codape/command_history.jsonl`). Tracks `{cmd, args, timestamp}` per entry. Supports `append`, `list(n)`, `search(query)`.
 - **`MacroRegistry`** (`macro_commands.rs`) — User-defined command sequences as `HashMap<String, Vec<String>>` with JSON persistence (`~/.codape/macros.json`). Supports `define`, `delete`, `get`, `list`, `load`.
 
-### Command Inventory (81 commands across 13 registered modules)
+### Command Inventory (82 commands across 13 registered modules)
 
 | Module | Commands | Purpose |
 |--------|----------|---------|
@@ -29,7 +29,7 @@ Implements the `/` slash command system that users type in the REPL. Provides a 
 | `session_extension_commands` | `/resume`, `/rename`, `/rewind` | Session persistence & manipulation |
 | `config_extension_commands` | `/theme`, `/hooks`, `/mcp`, `/plugin`, `/memory`, `/skills`, `/tasks`, `/plan` | Extended configuration |
 | `diagnostic_commands` | `/status`, `/doctor` | System health checks |
-| `context_commands` | `/copy`, `/init`, `/summary`, `/files`, `/context`, `/add-dir` | Context management. `/copy [<n>…]` puts the session's text on the clipboard: no argument copies all of it, numbers copy those messages using `/rewind`'s numbering. Reasoning rows are left out. `ctrl+shift+c` is the same clipboard without a command — it copies the transcript exactly as drawn on screen |
+| `context_commands` | `/copy`, `/export`, `/init`, `/summary`, `/files`, `/context`, `/add-dir` | Context management. `/copy [<n>…]` puts the session's text on the clipboard: no argument copies all of it, numbers copy those messages using `/rewind`'s numbering. Reasoning rows are left out. `ctrl+shift+c` is the same clipboard without a command — it copies the transcript exactly as drawn on screen. `/export [text\|markdown\|json] [<n>…]` writes those same messages to `<session>.{txt,md,json}` in the working directory; markdown is the default, and reasoning rows are left out of every format |
 | `integration_commands` | `/chrome`, `/desktop`, `/mobile`, `/voice`, `/vim`, `/remote-env`, `/remote-setup`, `/statusline-setup` | External integrations |
 | `git_commands` | `/commit`, `/commit-push-pr`, `/review`, `/security-review`, `/autofix-pr`, `/branch` | Git & code review |
 | `debug_commands` | `/debug-tool-call`, `/heapdump`, `/mock-limits`, `/perf-issue`, `/ant-trace`, `/break-cache`, `/reload-plugins` | Debugging tools |

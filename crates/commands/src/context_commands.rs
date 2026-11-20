@@ -13,6 +13,31 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
     codape_core::clipboard::copy_to_clipboard(text)
 }
 
+/// A filename stem for a session: its title, made safe, with the id as a suffix.
+///
+/// The title is what makes the file findable; the id is what keeps two
+/// sessions called "Untitled" from overwriting one another. Everything outside
+/// `[A-Za-z0-9._-]` becomes `-`, so the name is valid on every platform this
+/// builds for — a Windows export must not fail because a title held a `:`.
+fn session_slug(title: &str, id: &str) -> String {
+    let mut out: String = title
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // A title of only punctuation (or an empty one) leaves nothing usable.
+    if out.trim_matches('-').is_empty() {
+        out = "session".to_string();
+    }
+    let short: String = id.chars().take(8).collect();
+    format!("{out}-{short}")
+}
+
 /// Register content & context commands.
 pub fn register(registry: &mut CommandRegistry) {
     // /copy — put transcript text on the clipboard
@@ -54,6 +79,91 @@ pub fn register(registry: &mut CommandRegistry) {
             }
         }),
     ));
+
+    // /export — write the transcript to a file
+    //
+    // The renderer is `codape_core::transcript::export`, the same one `/copy`
+    // and `codape_ui::export` use. It used to live only in `codape-ui`, where
+    // it was tested and unreachable: no command could produce it, so the
+    // feature existed only for a caller that was never written.
+    registry.register(
+        SlashCommand::local(
+            "export",
+            "Write the transcript to a file as text, markdown or json",
+            true,
+            true,
+            true,
+            Arc::new(|ctx: &CommandContext, args: &[String]| {
+                if ctx.transcript.is_empty() {
+                    return CommandResult::error("The session has no messages to export yet.");
+                }
+                // Usage: /export [format] [<n>…]
+                //
+                // The format is recognized by name, so a typo is refused with
+                // the accepted words rather than being taken for a filename
+                // and written somewhere unexpected.
+                let mut rest = args;
+                let format = match rest
+                    .first()
+                    .and_then(|word| codape_core::transcript::ExportFormat::parse(word))
+                {
+                    Some(format) => {
+                        rest = &rest[1..];
+                        format
+                    }
+                    None if rest.first().is_some_and(|word| {
+                        // A bare number is a message selection, not a format.
+                        word.parse::<usize>().is_err()
+                    }) =>
+                    {
+                        return CommandResult::error(format!(
+                            "Unknown format '{}'. Usage: /export [{}] [<n>…]",
+                            rest[0],
+                            codape_core::transcript::ExportFormat::names()
+                        ));
+                    }
+                    None => codape_core::transcript::ExportFormat::Markdown,
+                };
+
+                let selected =
+                    match codape_core::transcript::selected_messages(&ctx.transcript, rest) {
+                        Ok(selected) => selected,
+                        Err(error) => return CommandResult::error(error),
+                    };
+                let body = codape_core::transcript::export(&selected, format);
+                if body.trim().is_empty() {
+                    return CommandResult::error(
+                        "Nothing to export: the selected messages carry no text.",
+                    );
+                }
+
+                // The file goes in `cwd`, named after the session, because that
+                // is the directory the person is already looking at and the one
+                // path they can predict without being told.
+                let slug = session_slug(&ctx.session_title, &ctx.session_id);
+                let path =
+                    std::path::Path::new(&ctx.cwd).join(format!("{slug}.{}", format.extension()));
+                if let Err(error) = std::fs::write(&path, &body) {
+                    return CommandResult::error(format!(
+                        "Could not write {}: {error}",
+                        path.display()
+                    ));
+                }
+                CommandResult::success(format!(
+                    "Exported {} as {} to {} ({} characters).",
+                    if rest.is_empty() {
+                        format!("all {} message(s)", ctx.transcript.len())
+                    } else {
+                        format!("message(s) {}", rest.join(", "))
+                    },
+                    format.name(),
+                    path.display(),
+                    body.chars().count()
+                ))
+            }),
+        )
+        .with_args(CommandArgs::None),
+    );
 
     // /init — initialize project (generate the instruction file)
     //
@@ -576,5 +686,123 @@ mod tests {
         assert!(result.output.contains("Opened src/lib.rs"));
         assert!(result.output.contains("pub fn add"));
         assert!(result.state_changed);
+    }
+
+    // ── /export ──────────────────────────────────────────────────────────────
+
+    fn export_ctx(dir: &std::path::Path) -> CommandContext {
+        CommandContext {
+            cwd: dir.display().to_string(),
+            transcript: vec![
+                codape_core::types::Message::user("the question"),
+                codape_core::types::Message::assistant("the answer"),
+            ],
+            ..ctx()
+        }
+    }
+
+    fn export_registry() -> CommandRegistry {
+        let mut r = CommandRegistry::new();
+        register(&mut r);
+        r
+    }
+
+    #[test]
+    fn export_writes_a_file_and_says_where_it_went() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_registry().execute("export", &export_ctx(tmp.path()), &[]);
+        assert!(!result.output.contains("Could not"), "{}", result.output);
+        // The default format is markdown; the file has to exist, hold the
+        // messages, and be named in the output so the person can open it.
+        let written: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(written.len(), 1, "{written:?}");
+        let path = &written[0];
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("md"));
+        let body = std::fs::read_to_string(path).unwrap();
+        assert!(body.contains("the question"), "{body}");
+        assert!(body.contains("### Assistant"), "{body}");
+        assert!(
+            result.output.contains(&path.display().to_string()),
+            "{}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn export_honours_the_format_word_and_the_message_numbers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_registry().execute(
+            "export",
+            &export_ctx(tmp.path()),
+            &["json".into(), "2".into()],
+        );
+        assert!(!result.output.contains("Could not"), "{}", result.output);
+        let path = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .next()
+            .expect("a file");
+        assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.as_array().expect("an array").len(), 1);
+        assert_eq!(parsed[0]["role"], "assistant");
+        assert_eq!(parsed[0]["content"], "the answer");
+    }
+
+    /// A word that is neither a format nor a number is refused, not treated as
+    /// a filename: silently writing to `hmm.txt` in someone's checkout is worse
+    /// than saying the format was not understood.
+    #[test]
+    fn export_refuses_an_unknown_format_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = export_registry().execute("export", &export_ctx(tmp.path()), &["yaml".into()]);
+        assert!(
+            result.output.contains("Unknown format 'yaml'"),
+            "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("text, markdown, json"),
+            "the error must list what it accepts: {}",
+            result.output
+        );
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "nothing may be written for a rejected format"
+        );
+    }
+
+    #[test]
+    fn export_with_no_transcript_does_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = CommandContext {
+            cwd: tmp.path().display().to_string(),
+            ..ctx()
+        };
+        let result = export_registry().execute("export", &c, &[]);
+        assert!(result.output.contains("no messages"), "{}", result.output);
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    /// A title with characters a filesystem refuses must not make the export
+    /// fail, and two sessions must not overwrite one another.
+    #[test]
+    fn the_export_filename_is_safe_on_every_platform() {
+        assert_eq!(
+            session_slug("Fix: the thing/here", "abcdef123456"),
+            "Fix--the-thing-here-abcdef12"
+        );
+        // An id short enough to be taken whole is not padded; one long enough
+        // is cut, so the name stays a filename and not a paragraph.
+        assert_eq!(session_slug("t", "abc"), "t-abc");
+        // A title with nothing usable falls back rather than producing `-.md`.
+        assert_eq!(session_slug("///", "abc"), "session-abc");
     }
 }
