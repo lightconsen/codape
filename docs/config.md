@@ -234,6 +234,28 @@ appear in `KNOWN_SETTINGS_FIELDS` — a key outside that list rejects the whole
 file (see *Invalid Files and Size Cap*), which would have discarded every other
 setting in a file that named an editor.
 
+### Output Style (`output_style`)
+
+`/style <name>` records the style's **name** here, and a session start applies it
+as appended system instructions:
+
+```json
+{ "output_style": "explanatory" }
+```
+
+The name rather than the prompt text: the text comes from a plugin manifest or
+from the built-in styles, so storing the resolved prompt would pin a copy that a
+later plugin update could not revise. A name this session cannot resolve — the
+plugin that contributed it was removed — is dropped at startup rather than
+applied, which is the same rule `/style` follows when it is typed. An explicit
+`--append-system-prompt` outranks the persisted value, because that flag is a
+request for this run.
+
+The write is a read-modify-write of the whole document, so a style change does
+not drop the file's other keys. `output_style` is in `KNOWN_SETTINGS_FIELDS`
+for the reason given above: without it, the file `/style` itself writes would be
+rejected whole at the next load.
+
 ### Permission Rules (`permissions.allow` / `deny` / `ask`)
 
 Codape reads the Claude-compatible rule block from any settings layer:

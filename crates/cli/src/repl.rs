@@ -4732,6 +4732,54 @@ impl ReplLoop {
         self.ui.settings_statusline_format = statusline_format;
     }
 
+    /// Apply the output style `settings.json` recorded, as the run's default.
+    ///
+    /// Called after the plugin components are installed, because a style name
+    /// may be one a plugin contributes. It sets `append_system_prompt` only
+    /// when nothing else has: `--append-system-prompt` is an explicit request
+    /// for this run and outranks a persisted preference, the same precedence
+    /// `-m` has over a `model` in settings.
+    ///
+    /// A name that resolves to nothing is dropped rather than reported: the
+    /// session is starting, the person is not looking at a command's output,
+    /// and a style installed by a plugin that has since been removed is the
+    /// ordinary way this happens. `handle_output_style_command` is where an
+    /// unresolvable name is worth a sentence, because there it was just typed.
+    pub fn with_startup_output_style(&mut self, style_name: Option<String>) {
+        let Some(name) = style_name else {
+            return;
+        };
+        if self.session.effects.append_system_prompt.is_some() {
+            return;
+        }
+        if let Some(prompt) = self.output_style_prompt(&name) {
+            self.session.effects.append_system_prompt = Some(prompt);
+        }
+    }
+
+    /// The prompt text a style name stands for, plugin copy first.
+    ///
+    /// Shared by `/style` and the startup application so the two cannot
+    /// resolve one name to two different texts.
+    fn output_style_prompt(&self, name: &str) -> Option<String> {
+        if let Some((_, value)) = self
+            .plugins
+            .output_styles
+            .iter()
+            .find(|(style, _)| style == name)
+        {
+            return value.as_str().map(str::to_string).or_else(|| {
+                for key in ["prompt", "content", "text"] {
+                    if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                        return Some(text.to_string());
+                    }
+                }
+                None
+            });
+        }
+        crate::output_styles::built_in(name).map(|style| style.prompt.to_string())
+    }
+
     /// Name the provider the welcome page reports.
     ///
     /// Set by the orchestrator from the same [`codape_core::provider_config::ProviderConfig`]
@@ -7132,6 +7180,36 @@ impl ReplLoop {
     /// machine, rather than to the repository, is kept.
     fn user_settings_path() -> std::path::PathBuf {
         codape_config::config_home().join("settings.json")
+    }
+
+    /// Record the output style `/style` just applied, as `output_style`.
+    ///
+    /// The name, not the prompt text, so a plugin that revises a style reaches
+    /// the next session too. The returned sentence goes on the end of
+    /// `/style`'s own output — the application already succeeded, and a write
+    /// that failed is a footnote to it, not a reason to report the style as
+    /// unapplied.
+    ///
+    /// `output_style` has to be in `KNOWN_SETTINGS_FIELDS`; a key missing from
+    /// that table rejects the whole file at the next load, so writing one that
+    /// is not listed would quietly cost the person every other setting.
+    fn persist_output_style_at(name: &str, path: &std::path::Path) -> String {
+        let mut document = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = document.as_object_mut() {
+            object.insert(
+                "output_style".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        } else {
+            document = serde_json::json!({ "output_style": name });
+        }
+        match write_settings_document(path, &document) {
+            Ok(()) => " Saved to settings.json.".to_string(),
+            Err(error) => format!(" Could not save it to settings.json: {error}."),
+        }
     }
 
     /// Every session this workspace has a transcript for, newest first.
@@ -14661,6 +14739,16 @@ impl ReplLoop {
     /// [`crate::output_styles`] are the fallback, which is what makes `/style`
     /// useful on an install with no plugins at all.
     fn handle_output_style_command(&mut self, args: &[String]) -> String {
+        self.handle_output_style_command_at(args, &Self::user_settings_path())
+    }
+
+    /// `/style` against a given settings file. The seam exists so a test can
+    /// apply a style without writing the real config home.
+    fn handle_output_style_command_at(
+        &mut self,
+        args: &[String],
+        settings_path: &std::path::Path,
+    ) -> String {
         let plugin_names: Vec<String> = self
             .plugins
             .output_styles
@@ -14676,39 +14764,32 @@ impl ReplLoop {
             );
         }
         let name = args[0].as_str();
-        if let Some((style, value)) = self
-            .plugins
-            .output_styles
-            .iter()
-            .find(|(style, _)| style == name)
-        {
-            let prompt = value.as_str().map(str::to_string).or_else(|| {
-                for key in ["prompt", "content", "text"] {
-                    if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                        return Some(text.to_string());
-                    }
-                }
-                None
-            });
-            let Some(prompt) = prompt else {
-                return format!("Output style '{name}' has no prompt text.");
-            };
-            self.session.effects.append_system_prompt = Some(prompt);
-            return format!("Output style '{style}' applied to the system prompt.");
-        }
-        // A built-in is the fallback, not the override: a plugin of the same
-        // name was found above and is what a local install asked for.
-        if let Some(style) = crate::output_styles::built_in(name) {
-            self.session.effects.append_system_prompt = Some(style.prompt.to_string());
+        // A style name a plugin publishes is its own name; a built-in stores
+        // the canonical spelling, so a person typing `/style EXPLANATORY`
+        // persists `explanatory` and the next start resolves the same text.
+        let canonical = if self.plugins.output_styles.iter().any(|(s, _)| s == name) {
+            name.to_string()
+        } else if let Some(style) = crate::output_styles::built_in(name) {
+            style.name.to_string()
+        } else {
+            let names = crate::output_styles::available_names(&plugin_names);
             return format!(
-                "Output style '{}' applied to the system prompt. (built-in)",
-                style.name
+                "No output style named '{name}'. Available: {}",
+                names.join(", ")
             );
-        }
-        let names = crate::output_styles::available_names(&plugin_names);
+        };
+        // A plugin style of this name can exist with no prompt text, which is
+        // the one case where the name resolves and the style still cannot be
+        // applied. Reported as itself rather than as "no such style".
+        let Some(prompt) = self.output_style_prompt(&canonical) else {
+            return format!("Output style '{canonical}' has no prompt text.");
+        };
+        self.session.effects.append_system_prompt = Some(prompt);
+        let persisted = Self::persist_output_style_at(&canonical, settings_path);
+        let built_in = crate::output_styles::built_in(&canonical).is_some();
         format!(
-            "No output style named '{name}'. Available: {}",
-            names.join(", ")
+            "Output style '{canonical}' applied to the system prompt.{}{persisted}",
+            if built_in { " (built-in)" } else { "" }
         )
     }
 
@@ -21433,15 +21514,17 @@ mod tests {
 
     #[test]
     fn a_built_in_output_style_applies_even_with_no_plugins() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         assert!(repl.plugins.output_styles.is_empty());
 
-        let listing = repl.handle_output_style_command(&[]);
+        let listing = repl.handle_output_style_command_at(&[], &settings);
         for name in ["default", "explanatory", "learning"] {
             assert!(listing.contains(name), "{name} missing from: {listing}");
         }
 
-        let applied = repl.handle_output_style_command(&["explanatory".to_string()]);
+        let applied = repl.handle_output_style_command_at(&["explanatory".to_string()], &settings);
         assert!(applied.contains("applied"), "{applied}");
         let prompt = repl
             .session
@@ -21458,26 +21541,141 @@ mod tests {
 
         // An unknown name lists what is available rather than appending.
         repl.session.effects.append_system_prompt = None;
-        let unknown = repl.handle_output_style_command(&["nope".to_string()]);
+        let unknown = repl.handle_output_style_command_at(&["nope".to_string()], &settings);
         assert!(unknown.contains("No output style named"), "{unknown}");
         assert!(repl.session.effects.append_system_prompt.is_none());
     }
 
     #[test]
     fn a_plugin_style_shadows_the_built_in_of_the_same_name() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.plugins.output_styles = vec![(
             "default".to_string(),
             serde_json::json!({ "prompt": "plugin prompt" }),
         )];
 
-        let applied = repl.handle_output_style_command(&["default".to_string()]);
+        let applied = repl.handle_output_style_command_at(&["default".to_string()], &settings);
         assert!(applied.contains("applied"), "{applied}");
         assert_eq!(
             repl.session.effects.append_system_prompt.as_deref(),
             Some("plugin prompt"),
             "the built-in replaced the plugin's copy"
         );
+    }
+
+    /// The name is persisted, not the prompt text: a plugin that revises its
+    /// style then reaches the next session, and a settings file that pinned
+    /// the resolved text could never be updated by anyone but a hand edit.
+    #[test]
+    fn applying_a_style_records_its_name_for_the_next_session() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+
+        let applied = repl.handle_output_style_command_at(&["learning".to_string()], &settings);
+        assert!(applied.contains("Saved to settings.json"), "{applied}");
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings).expect("settings.json was not written"),
+        )
+        .expect("settings.json is not JSON");
+        assert_eq!(written["output_style"], "learning");
+        assert!(
+            !written.to_string().contains("Treat the person as"),
+            "the prompt text was persisted instead of the name: {written}"
+        );
+    }
+
+    /// A name typed in another case resolves to the canonical spelling, so the
+    /// persisted value is one the next start's lookup finds.
+    #[test]
+    fn a_style_applied_in_another_case_persists_its_canonical_name() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+
+        repl.handle_output_style_command_at(&["EXPLANATORY".to_string()], &settings);
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings).expect("settings.json was not written"),
+        )
+        .expect("settings.json is not JSON");
+        assert_eq!(written["output_style"], "explanatory");
+    }
+
+    /// The other settings in the file survive the write. A read-modify-write
+    /// that replaced the document would silently delete them.
+    #[test]
+    fn recording_a_style_leaves_the_other_settings_alone() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::json!({ "model": "opus", "vim_mode": true }).to_string(),
+        )
+        .expect("seed settings.json");
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+
+        repl.handle_output_style_command_at(&["default".to_string()], &settings);
+
+        let written: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&settings).expect("settings.json was not written"),
+        )
+        .expect("settings.json is not JSON");
+        assert_eq!(written["output_style"], "default");
+        assert_eq!(written["model"], "opus", "an unrelated setting was lost");
+        assert_eq!(written["vim_mode"], true, "an unrelated setting was lost");
+    }
+
+    /// The file `/style` writes has to load again: a key outside
+    /// `KNOWN_SETTINGS_FIELDS` rejects the whole file, which would cost the
+    /// person every setting rather than just the redundant one.
+    #[test]
+    fn the_settings_file_style_writes_still_loads() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.handle_output_style_command_at(&["explanatory".to_string()], &settings);
+
+        let loaded = codape_config::settings::ConfigService::new(settings.clone(), None)
+            .load_user_config()
+            .expect("the file /style wrote is rejected at the next load")
+            .expect("the file /style wrote was not read back");
+        assert_eq!(loaded.output_style.as_deref(), Some("explanatory"));
+    }
+
+    #[test]
+    fn a_startup_style_is_applied_as_the_appended_prompt() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_startup_output_style(Some("learning".to_string()));
+        assert_eq!(
+            repl.session.effects.append_system_prompt.as_deref(),
+            crate::output_styles::built_in("learning").map(|style| style.prompt),
+            "the persisted style did not reach the system prompt"
+        );
+    }
+
+    #[test]
+    fn an_explicit_append_prompt_outranks_the_persisted_style() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_append_system_prompt(Some("--append-system-prompt wins".into()));
+        repl.with_startup_output_style(Some("learning".to_string()));
+        assert_eq!(
+            repl.session.effects.append_system_prompt.as_deref(),
+            Some("--append-system-prompt wins")
+        );
+    }
+
+    /// A style a plugin has since removed is the ordinary way a persisted name
+    /// stops resolving. The session starts with no append text rather than
+    /// with a broken one, and nothing is reported.
+    #[test]
+    fn a_persisted_style_that_no_longer_resolves_is_dropped() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_startup_output_style(Some("a-plugin-that-was-uninstalled".to_string()));
+        assert!(repl.session.effects.append_system_prompt.is_none());
     }
 
     #[test]

@@ -77,7 +77,7 @@ pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// document, and they are the person's own machine configuration rather than
 /// something the session merges across layers. Listing them here is not
 /// optional — a key absent from this table rejects the whole file.
-const KNOWN_SETTINGS_FIELDS: [&str; 21] = [
+const KNOWN_SETTINGS_FIELDS: [&str; 22] = [
     "config_version",
     "model",
     "permission_mode",
@@ -99,6 +99,7 @@ const KNOWN_SETTINGS_FIELDS: [&str; 21] = [
     "provider",
     "editor",
     "visual",
+    "output_style",
 ];
 
 /// Permission modes accepted in settings, most restrictive first.
@@ -509,6 +510,15 @@ pub struct Settings {
     /// providers ignore it: they cache automatically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_caching: Option<bool>,
+    /// The output style `/style` applied last (written by `/style <name>`).
+    ///
+    /// The name rather than the prompt text: the prompt comes from a plugin
+    /// manifest or from the CLI's built-in styles, so storing the resolved text
+    /// would pin a copy that a later plugin update could not revise. A name
+    /// the session cannot resolve at startup is dropped rather than applied,
+    /// which is the same rule `/style` follows when typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_style: Option<String>,
 }
 
 impl Settings {
@@ -539,6 +549,7 @@ impl Settings {
             vim_mode: None,
             statusline: None,
             prompt_caching: None,
+            output_style: None,
         }
     }
 
@@ -735,6 +746,10 @@ impl Settings {
             vim_mode: other.vim_mode.or(self.vim_mode),
             statusline: other.statusline.clone().or_else(|| self.statusline.clone()),
             prompt_caching: other.prompt_caching.or(self.prompt_caching),
+            output_style: other
+                .output_style
+                .clone()
+                .or_else(|| self.output_style.clone()),
         }
     }
 
@@ -2016,6 +2031,7 @@ mod tests {
             vim_mode: None,
             statusline: None,
             prompt_caching: None,
+            output_style: None,
         };
         migrate_settings(&mut settings, "test");
         assert_eq!(settings.config_version, CURRENT_SCHEMA_VERSION);
@@ -2049,6 +2065,36 @@ mod tests {
         // that the file still loads. A single file is not merged against the
         // built-in defaults here; that happens in `resolve`.
         assert_eq!(loaded.model, None);
+    }
+
+    #[test]
+    fn the_output_style_key_loads_and_survives_a_merge() {
+        // `/style` writes this key. A key missing from `KNOWN_SETTINGS_FIELDS`
+        // rejects the whole file, so the round trip is the contract: what
+        // `/style` writes, the next start can read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"model":"opus","output_style":"explanatory"}"#).unwrap();
+        let loaded = load_settings_file(&path, "user")
+            .expect("output_style is an allowed key")
+            .expect("the file exists");
+        assert_eq!(loaded.output_style.as_deref(), Some("explanatory"));
+        assert_eq!(loaded.model.as_deref(), Some("opus"));
+
+        // A later layer that names no style must not erase the earlier one.
+        let merged = loaded.merge(&Settings {
+            model: Some("sonnet".into()),
+            ..Settings::defaults()
+        });
+        assert_eq!(merged.output_style.as_deref(), Some("explanatory"));
+        assert_eq!(merged.model.as_deref(), Some("sonnet"));
+
+        // A higher layer that does name one wins.
+        let overridden = merged.merge(&Settings {
+            output_style: Some("learning".into()),
+            ..Settings::defaults()
+        });
+        assert_eq!(overridden.output_style.as_deref(), Some("learning"));
     }
 
     #[test]

@@ -187,12 +187,14 @@ fn settings_json_serde_roundtrip() {
         env: None,
         context_window: None,
         prompt_caching: Some(true),
+        output_style: Some("explanatory".into()),
     };
 
     let json = serde_json::to_string_pretty(&settings).unwrap();
     let decoded: Settings = serde_json::from_str(&json).unwrap();
 
     assert_eq!(decoded.model, settings.model);
+    assert_eq!(decoded.output_style, settings.output_style);
     assert_eq!(decoded.permission_mode, settings.permission_mode);
     assert_eq!(decoded.max_budget_usd, settings.max_budget_usd);
     assert_eq!(decoded.telemetry_enabled, settings.telemetry_enabled);
