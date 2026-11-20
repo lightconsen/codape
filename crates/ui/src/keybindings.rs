@@ -214,7 +214,19 @@ pub enum Action {
     /// was selected, which needs a pointer; `/copy <n>` copies named messages,
     /// which needs the message's number. This is the third case, and the one
     /// with no argument: the answer being read right now.
+    ///
+    /// With a selection made by the `SelectionExtend*` actions this copies
+    /// that instead, so the keyboard can take part of the transcript as well
+    /// as all of it.
     CopyTranscript,
+    /// Take one more transcript row into the selection, upward.
+    SelectionExtendUp,
+    /// Give one transcript row back, downward.
+    SelectionExtendDown,
+    /// Select the whole visible transcript.
+    SelectionExtendAll,
+    /// Go back to the newest line alone.
+    SelectionLast,
 }
 
 impl Action {
@@ -266,6 +278,10 @@ impl Action {
             Self::ListNext => "list:next",
             Self::ListAccept => "list:accept",
             Self::CopyTranscript => "app:copyTranscript",
+            Self::SelectionExtendUp => "selection:extendUp",
+            Self::SelectionExtendDown => "selection:extendDown",
+            Self::SelectionExtendAll => "selection:extendAll",
+            Self::SelectionLast => "selection:last",
         }
     }
 
@@ -282,6 +298,10 @@ impl Action {
             | Self::PaneNextTab
             | Self::TranscriptFullscreen
             | Self::CopyTranscript
+            | Self::SelectionExtendUp
+            | Self::SelectionExtendDown
+            | Self::SelectionExtendAll
+            | Self::SelectionLast
             | Self::CyclePermissionMode => Context::Global,
             Self::ImagePaste
             | Self::VoiceInput
@@ -327,7 +347,7 @@ impl Action {
 
     /// Every action, in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 44] {
+    pub const fn all() -> [Self; 48] {
         ALL_ACTIONS
     }
 
@@ -432,11 +452,19 @@ impl Action {
             // repainting makes unreliable, so taking it here is the fix rather
             // than a collision.
             Self::CopyTranscript => &["ctrl+shift+c"],
+            // The shift+arrow family every text surface has, plus the two
+            // ends. A terminal that does not report SHIFT sends the plain
+            // arrow, which keeps its scroll meaning, so nothing here can be
+            // mistaken for scrolling.
+            Self::SelectionExtendUp => &["shift+up"],
+            Self::SelectionExtendDown => &["shift+down"],
+            Self::SelectionExtendAll => &["shift+home"],
+            Self::SelectionLast => &["shift+end"],
         }
     }
 }
 
-const ALL_ACTIONS: [Action; 44] = [
+const ALL_ACTIONS: [Action; 48] = [
     Action::ToggleToolOutput,
     Action::ToggleThinking,
     Action::ModelPicker,
@@ -481,6 +509,10 @@ const ALL_ACTIONS: [Action; 44] = [
     Action::SendNow,
     Action::SettingsMenu,
     Action::CopyTranscript,
+    Action::SelectionExtendUp,
+    Action::SelectionExtendDown,
+    Action::SelectionExtendAll,
+    Action::SelectionLast,
 ];
 
 /// A named key, for everything that is not a character.

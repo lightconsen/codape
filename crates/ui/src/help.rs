@@ -77,6 +77,10 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::PaneNextTab,
             Action::TranscriptFullscreen,
             Action::CopyTranscript,
+            Action::SelectionExtendUp,
+            Action::SelectionExtendDown,
+            Action::SelectionExtendAll,
+            Action::SelectionLast,
         ],
     ),
     (
@@ -147,6 +151,10 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ListNext => "Next row",
         Action::ListAccept => "Choose the highlighted row",
         Action::CopyTranscript => "Copy the transcript as shown to the clipboard",
+        Action::SelectionExtendUp => "Select another line up, then ctrl+shift+c",
+        Action::SelectionExtendDown => "Give the last line back",
+        Action::SelectionExtendAll => "Select everything on screen",
+        Action::SelectionLast => "Back to the newest line alone",
     }
 }
 
@@ -278,6 +286,10 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::SendNow,
     Action::SettingsMenu,
     Action::CopyTranscript,
+    Action::SelectionExtendUp,
+    Action::SelectionExtendDown,
+    Action::SelectionExtendAll,
+    Action::SelectionLast,
 ];
 
 #[cfg(test)]

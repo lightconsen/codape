@@ -1336,6 +1336,10 @@ fn toggle_transcript_fullscreen(
 /// screen: the prompt, the statusline and any permission bar are drawn around
 /// the answer and are not what someone pressing this key wants to paste.
 ///
+/// A selection made with the keyboard takes precedence over the whole region:
+/// a person who took the trouble to select two paragraphs meant to copy those,
+/// and the notification names which of the two happened.
+///
 /// Says what happened either way. A silent copy is indistinguishable from a
 /// key that did nothing, and the failure that actually occurs — no `pbcopy`,
 /// `xclip` or `clip` on the machine — is one the person can fix only if they
@@ -1344,20 +1348,66 @@ fn copy_transcript_to_clipboard(
     terminal_ui: &codape_ui::terminal::TerminalUi,
     ui_state: &mut codape_ui::state::UiState,
 ) {
-    let region = ui_state.messages.area;
-    let text = terminal_ui.region_text(region);
+    let selected = ui_state.selection.filter(|selection| !selection.is_empty());
+    let (text, what) = match selected {
+        Some(selection) => (terminal_ui.selected_text(&selection), "the selection"),
+        None => (
+            terminal_ui.region_text(ui_state.messages.area),
+            "the transcript",
+        ),
+    };
     if text.trim().is_empty() {
-        ui_state
-            .notifications
-            .warn("Nothing to copy: the transcript is empty on screen");
+        ui_state.notifications.warn(if selected.is_some() {
+            "Nothing to copy: the selection is on blank cells"
+        } else {
+            "Nothing to copy: the transcript is empty on screen"
+        });
         return;
     }
     match codape_ui::export::copy_to_clipboard(&text) {
-        Ok(()) => ui_state.notifications.success(format!(
-            "Copied the transcript ({} characters)",
-            text.chars().count()
-        )),
+        Ok(()) => {
+            ui_state.notifications.success(format!(
+                "Copied {what} ({} characters)",
+                text.chars().count()
+            ));
+            // A successful copy ends the selection: the next `ctrl+shift+c` is
+            // a fresh copy of the answer, not a repeat of two lines already
+            // taken. A failed one keeps it, so the retry copies the same thing.
+            ui_state.selection = None;
+        }
         Err(error) => ui_state.notifications.err(format!("Copy failed: {error}")),
+    }
+}
+
+/// Grow the transcript selection with a `shift`+key.
+///
+/// The first press creates the selection on the newest line, which is where
+/// the eye is: the answer being read. `shift+up` twice selects the last three
+/// lines and `ctrl+shift+c` copies them.
+///
+/// Only while nothing owns the keyboard. A dialog's own keys are matched
+/// before this table is consulted, and the transcript behind a dialog is not
+/// what the person is selecting.
+fn extend_transcript_selection(
+    ui_state: &mut codape_ui::state::UiState,
+    extension: codape_ui::keybindings::Action,
+) {
+    use codape_ui::keybindings::Action as Shortcut;
+    use codape_ui::state::TextSelection;
+
+    let area = ui_state.messages.area;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let selection = ui_state
+        .selection
+        .get_or_insert_with(|| TextSelection::keyboard_origin(area));
+    match extension {
+        Shortcut::SelectionExtendUp => selection.extend_up(area),
+        Shortcut::SelectionExtendDown => selection.extend_down(area),
+        Shortcut::SelectionExtendAll => selection.extend_all(area),
+        Shortcut::SelectionLast => selection.extend_last(area),
+        _ => {}
     }
 }
 
@@ -6914,6 +6964,21 @@ impl ReplLoop {
             {
                 Some(TuiKeyFlow::CopyTranscript)
             }
+            // The keyboard's half of the mouse drag. Guarded like the copy it
+            // leads to: a dialog owns the keyboard, and the transcript behind
+            // it is not what the person is reading.
+            Shortcut::SelectionExtendUp
+            | Shortcut::SelectionExtendDown
+            | Shortcut::SelectionExtendAll
+            | Shortcut::SelectionLast
+                if !ui_state.overlays.is_active()
+                    && live.pending_confirmation.is_none()
+                    && self.mcp.pending_form.is_none()
+                    && self.mcp.pending_elicitation.is_none() =>
+            {
+                extend_transcript_selection(ui_state, shortcut);
+                Some(TuiKeyFlow::Handled)
+            }
             Shortcut::ImagePaste
                 if !ui_state.overlays.is_active()
                     && live.pending_confirmation.is_none()
@@ -8488,6 +8553,10 @@ impl ReplLoop {
                 ui_state.overlays.clear();
             }
             ui_state.active_view = ViewMode::MainRepl;
+            // The cancel key ends a selection too, which is what Esc means in
+            // every other surface: "stop doing that". Otherwise it would take
+            // a copy, or a click somewhere else, to get rid of it.
+            ui_state.selection = None;
             return TuiKeyFlow::Handled;
         }
 
@@ -8516,6 +8585,11 @@ impl ReplLoop {
                 }
             }
             VimAction::Escape => {
+                // Esc ends a transcript selection here too, as it does on the
+                // non-Vim path: in Vim mode the key leaves insert mode as well,
+                // and a highlight that neither that nor an interrupt removed
+                // would need a click somewhere else to get rid of.
+                ui_state.selection = None;
                 if *thinking {
                     self.stop_running_query(
                         ui_state,
@@ -20710,6 +20784,95 @@ mod tests {
             flow,
             TuiKeyFlow::ExternalEditor,
             "the replayed ctrl+x did not reach the editor binding"
+        );
+    }
+
+    /// `shift+up` walks a line at a time up the transcript, and `esc` drops
+    /// what was selected.
+    ///
+    /// The unit tests in `codape_ui::state` pin the arithmetic; this pins that
+    /// the keys are bound to it, reach it through the same table the rest of
+    /// the shortcuts use, and leave the transcript's own keys (the plain
+    /// arrows) alone.
+    #[tokio::test]
+    async fn shift_arrows_select_the_transcript_from_the_newest_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        // The renderer records this in a real frame; a harness has no frame.
+        harness.ui.messages.area = ratatui::layout::Rect {
+            x: 0,
+            y: 2,
+            width: 40,
+            height: 10,
+        };
+
+        let shift = KeyModifiers::SHIFT;
+        let mut live = InteractiveLive::new();
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Up, shift),
+            )
+            .await;
+        let selection = harness
+            .ui
+            .selection
+            .expect("shift+up did not start a selection");
+        assert_eq!(
+            selection.normalized(),
+            ((0, 10), (39, 11)),
+            "the first press selects the newest line upward one row"
+        );
+
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Up, shift),
+            )
+            .await;
+        assert_eq!(
+            harness
+                .ui
+                .selection
+                .expect("the selection was dropped")
+                .normalized(),
+            ((0, 9), (39, 11))
+        );
+        assert!(
+            harness.ui.input.text.is_empty(),
+            "the selection keys typed into the prompt: {:?}",
+            harness.ui.input.text
+        );
+
+        // The plain arrow keeps its own meaning: it scrolls, and it does not
+        // move the selection.
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            )
+            .await;
+        assert_eq!(
+            harness
+                .ui
+                .selection
+                .expect("the selection was dropped")
+                .normalized(),
+            ((0, 9), (39, 11)),
+            "the scroll key moved the selection"
+        );
+
+        // Esc ends it, which is what Esc means everywhere else.
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            )
+            .await;
+        assert!(
+            harness.ui.selection.is_none(),
+            "esc left the selection up: {:?}",
+            harness.ui.selection
         );
     }
 

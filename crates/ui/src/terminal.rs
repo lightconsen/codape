@@ -188,7 +188,11 @@ impl TerminalUi {
         &self.mod_ui_hit_regions
     }
 
-    /// The text covered by a mouse selection, read from the last drawn frame.
+    /// The text covered by a selection, read from the last drawn frame.
+    ///
+    /// Both halves of copying go through this: the mouse path with a dragged
+    /// rectangle, and the keyboard path with a linewise one anchored at the
+    /// bottom of the transcript.
     ///
     /// The buffer is cloned only when a copy is requested, not on every draw.
     #[must_use]
@@ -274,17 +278,22 @@ pub(crate) fn region_text(area: Rect, rows: &[Vec<char>], region: Rect) -> Strin
     lines.join("\n").trim_end().to_string()
 }
 
-/// Extract the text covered by a mouse selection from a frame snapshot.
+/// Extract the text covered by a selection from a frame snapshot.
 ///
 /// Rows between the endpoints are taken whole; the first and last rows are cut
 /// at the selected columns. Trailing blanks on each row and trailing blank
 /// rows are dropped, so choosing a rectangle of screen does not copy a block
 /// of spaces or the interface below the text.
+///
+/// The same loop serves both kinds of selection. A mouse drag reaches it with
+/// a rectangle; the keyboard passes whole rows starting at the left edge, which
+/// this already handles because the first row's start column is the area's.
 pub(crate) fn selection_text(area: Rect, rows: &[Vec<char>], selection: TextSelection) -> String {
     let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
-    // The mouse path keeps its own per-row column logic: the first row starts
-    // at the press column and every later row starts at the left edge, which a
-    // single rectangle cannot express.
+    // Per-row columns rather than one rectangle: the first row starts at the
+    // selection's own column and every later row starts at the left edge,
+    // which is what makes a drag that ends mid-line copy a block and a
+    // keyboard selection copy whole lines.
     let last_col = area.right().saturating_sub(1);
     let mut lines = Vec::new();
     for row in start_row..=end_row {
@@ -720,7 +729,8 @@ fn render_frame(
         render_overlay(frame, area, state);
     }
 
-    // A mouse selection is painted last so it is visible over the transcript.
+    // A selection is painted last so it is visible over the transcript. Both
+    // kinds reach here: the mouse drag's rectangle and the keyboard's lines.
     if let Some(selection) = state.selection {
         paint_selection(frame, area, selection, &state.theme);
     }
@@ -4527,6 +4537,9 @@ mod layout_tests {
     /// The whole point of recording the transcript's rectangle is that the
     /// prompt, the statusline and the input rule are drawn around it. Copying
     /// the frame instead would paste them along with the answer.
+    ///
+    /// The keyboard selection reuses that rectangle as its bounds, so the same
+    /// test pins the region it can never leave.
     #[test]
     fn a_region_copy_takes_the_transcript_without_the_chrome() {
         let mut state = UiState::default();
@@ -4562,6 +4575,58 @@ mod layout_tests {
         assert!(
             whole_frame.len() > text.len(),
             "the transcript region should cover less than the whole frame"
+        );
+    }
+
+    /// A keyboard selection copies whole lines, ending at the newest one.
+    ///
+    /// The point of the linewise origin: `shift+up` on a real frame takes the
+    /// last row and each press above it takes one more whole row, so the text a
+    /// `ctrl+shift+c` then writes has no chrome and no half-lines.
+    #[test]
+    fn a_keyboard_selection_copies_whole_lines_from_the_newest() {
+        let mut state = UiState::default();
+        state.messages.push(Message {
+            role: MessageRole::System,
+            content: "alpha beta\ngamma delta".into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        });
+        let buffer = render_to_buffer(80, 20, &mut state);
+        let rows = capture_rows(&buffer);
+        let area = state.messages.area;
+        assert!(area.height > 0, "the renderer recorded no transcript area");
+
+        let gamma_row = (0..20)
+            .find(|row| row_text(&buffer, *row).contains("gamma delta"))
+            .expect("gamma row");
+
+        // The selection starts on the last drawn row of the transcript, which
+        // is below the text: its rows are blank and trim away.
+        let mut selection = TextSelection::keyboard_origin(area);
+        assert_eq!(
+            selection_text(buffer.area, &rows, selection),
+            "",
+            "a selection on the blank rows below the text copies nothing"
+        );
+        selection.extend_all(area);
+        let everything = selection_text(buffer.area, &rows, selection);
+        assert!(everything.contains("alpha beta"), "{everything:?}");
+        assert!(everything.contains("gamma delta"), "{everything:?}");
+        assert!(
+            !everything.contains('❯'),
+            "the prompt's marker came along: {everything:?}"
+        );
+
+        // Two rows, taken from the row the text is on upward: whole lines,
+        // role marker included, which is what a keyboard selection means.
+        selection.drag_to(0, gamma_row);
+        selection.cursor = (0, gamma_row.saturating_sub(1));
+        assert_eq!(
+            selection_text(buffer.area, &rows, selection),
+            "· alpha beta\n  gamma delta"
         );
     }
 

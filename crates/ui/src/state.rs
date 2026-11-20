@@ -224,16 +224,26 @@ pub struct PermissionDetail {
     pub risk_summary: String,
 }
 
-/// A mouse text selection over the rendered frame.
+/// A text selection over the rendered frame.
 ///
 /// Coordinates are absolute terminal cells `(column, row)`. The anchor is where
-/// the drag started; the cursor follows the pointer. Selection is linear: each
+/// the selection started; the cursor is its free end. Selection is linear: each
 /// row between the two points is copied whole up to the first/last column.
+///
+/// Two things fill it in. A mouse drag starts it at the press and moves the
+/// cursor until the button is released, which copies. The keyboard starts it on
+/// the newest transcript line and grows it upward with `shift`+arrows, so the
+/// transcript can be read and copied without a pointer.
+///
+/// It is a selection over *cells of the frame*, not over messages: scrolling
+/// the transcript moves the content under the highlight, and what is copied is
+/// what the highlight is on. That is what the mouse path has always done, and
+/// the highlight is visible either way, so nothing is copied unseen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextSelection {
-    /// Where the drag began.
+    /// Where the selection began.
     pub anchor: (u16, u16),
-    /// Where the pointer is now.
+    /// The free end of the selection.
     pub cursor: (u16, u16),
 }
 
@@ -247,9 +257,56 @@ impl TextSelection {
         }
     }
 
+    /// The newest line of `area`, which is where a keyboard selection starts.
+    ///
+    /// Whole lines, not cells: the transcript is prose, every row between the
+    /// two ends is copied whole anyway, and the cell-precision case is what
+    /// the mouse drag is for.
+    ///
+    /// The anchor is the bottom row's *right* edge and the free end its left.
+    /// Not the other way round: [`Self::normalized`] orders by row, so once the
+    /// free end has moved up the anchor is the selection's last row, and the
+    /// copy stops that row at the anchor's column. A bottom-left anchor would
+    /// leave the newest line selected up to column zero.
+    #[must_use]
+    pub const fn keyboard_origin(area: ratatui::layout::Rect) -> Self {
+        let bottom = area.bottom().saturating_sub(1);
+        Self {
+            anchor: (area.right().saturating_sub(1), bottom),
+            cursor: (area.left(), bottom),
+        }
+    }
+
     /// Move the free end of the selection.
     pub const fn drag_to(&mut self, column: u16, row: u16) {
         self.cursor = (column, row);
+    }
+
+    /// Take one more row in, upward.
+    ///
+    /// Saturates at the top of the area, so the whole visible transcript is a
+    /// key away rather than one press per row.
+    pub fn extend_up(&mut self, area: ratatui::layout::Rect) {
+        self.cursor = (area.left(), self.cursor.1.saturating_sub(1).max(area.top()));
+    }
+
+    /// Give one row back, downward, undoing [`Self::extend_up`].
+    ///
+    /// The free end moves down; the anchor stays put, so coming back to its
+    /// row restores the whole line the selection began on.
+    pub fn extend_down(&mut self, area: ratatui::layout::Rect) {
+        let bottom = area.bottom().saturating_sub(1);
+        self.cursor = (area.left(), self.cursor.1.saturating_add(1).min(bottom));
+    }
+
+    /// Take the whole visible transcript.
+    pub const fn extend_all(&mut self, area: ratatui::layout::Rect) {
+        self.cursor = (area.left(), area.top());
+    }
+
+    /// Go back to the newest line alone.
+    pub const fn extend_last(&mut self, area: ratatui::layout::Rect) {
+        self.cursor = (area.left(), area.bottom().saturating_sub(1));
     }
 
     /// The selection with its start point before its end point.
@@ -560,6 +617,56 @@ mod tests {
             state.left_pane_title.clone(),
             state.left_pane_content.as_str(),
         )
+    }
+
+    /// The area these tests select in: columns 2..=11, rows 5..=9.
+    const AREA: ratatui::layout::Rect = ratatui::layout::Rect {
+        x: 2,
+        y: 5,
+        width: 10,
+        height: 5,
+    };
+
+    #[test]
+    fn a_keyboard_selection_starts_on_the_newest_line() {
+        let selection = TextSelection::keyboard_origin(AREA);
+        // The last row, whole. The anchor is the row's end because
+        // `normalized` sorts by row and the copy cuts the last row there.
+        assert_eq!(selection.normalized(), ((2, 9), (11, 9)));
+        assert!(!selection.is_empty());
+    }
+
+    #[test]
+    fn shift_up_takes_one_more_row_and_saturates() {
+        let mut selection = TextSelection::keyboard_origin(AREA);
+        selection.extend_up(AREA);
+        assert_eq!(selection.normalized(), ((2, 8), (11, 9)));
+        selection.extend_all(AREA);
+        assert_eq!(selection.normalized(), ((2, 5), (11, 9)));
+        // Another press at the top is not a way to leave the area.
+        selection.extend_up(AREA);
+        assert_eq!(selection.normalized(), ((2, 5), (11, 9)));
+    }
+
+    #[test]
+    fn shift_down_gives_the_rows_back_and_stops_at_the_last_line() {
+        let mut selection = TextSelection::keyboard_origin(AREA);
+        selection.extend_up(AREA);
+        selection.extend_up(AREA);
+        assert_eq!(selection.normalized(), ((2, 7), (11, 9)));
+        selection.extend_down(AREA);
+        assert_eq!(selection.normalized(), ((2, 8), (11, 9)));
+        selection.extend_down(AREA);
+        assert_eq!(
+            selection.normalized(),
+            ((2, 9), (11, 9)),
+            "back on the origin's row is the whole line, not a cell"
+        );
+        // It never grows downward past the last line it began on.
+        selection.extend_down(AREA);
+        assert_eq!(selection.normalized(), ((2, 9), (11, 9)));
+        selection.extend_last(AREA);
+        assert_eq!(selection.normalized(), ((2, 9), (11, 9)));
     }
 
     #[test]
