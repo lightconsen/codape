@@ -214,6 +214,23 @@ impl VimState {
 
     /// Handle keys in insert mode.
     const fn handle_insert(&mut self, event: KeyEvent) -> VimAction {
+        // A control chord is never text. `Ctrl+C` is the only one this table
+        // names, and everything else that reaches here with CONTROL is either a
+        // shortcut handled earlier or — the case that produced a stray `t` —
+        // a coalesced `ESC <byte>` that crossterm read as Alt+<key> and the
+        // catch-all below turned into a literal character. Refusing the chord
+        // here is the rule the UI layer's own `key_event_to_action` already
+        // applies; this path only used to reject control *characters*, which
+        // `'t'` is not.
+        if event.modifiers.contains(KeyModifiers::CONTROL) {
+            return match event.code {
+                KeyCode::Char('c') => {
+                    self.mode = VimMode::Normal;
+                    VimAction::Escape
+                }
+                _ => VimAction::Ignore,
+            };
+        }
         match event.code {
             KeyCode::Esc => {
                 self.mode = VimMode::Normal;
@@ -221,10 +238,6 @@ impl VimState {
                 VimAction::Escape
             }
             KeyCode::Enter => VimAction::Submit,
-            KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.mode = VimMode::Normal;
-                VimAction::Escape
-            }
             _ => VimAction::Insert,
         }
     }
@@ -649,6 +662,32 @@ mod tests {
         let action = state.handle_key(ctrl_c);
         assert_eq!(action, VimAction::Escape);
         assert!(state.is_normal());
+    }
+
+    /// A control chord must never become text.
+    ///
+    /// `Ctrl+T` is the full-screen transcript toggle and is handled long before
+    /// this function, so no insert reaching here carries CONTROL. But a
+    /// coalesced escape sequence can: a lone `Esc` byte followed quickly by
+    /// `Ctrl+T`'s `0x14` arrives as one `Char('t')` with ALT|CONTROL, because
+    /// crossterm reads `ESC <byte>` as Alt+<key> (its own `test_alt_ctrl` pins
+    /// exactly `\x1B\x14`). That chord used to fall into the catch-all arm and
+    /// insert a literal `t` into the prompt, which is what a CI screen showed —
+    /// a lone `❯ t` — while the transcript never went full screen.
+    #[test]
+    fn a_control_chord_is_not_inserted_as_text() {
+        let mut state = VimState::new_insert();
+        let alt_ctrl_t = KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        );
+        assert_eq!(state.handle_key(alt_ctrl_t), VimAction::Ignore);
+
+        // A plain character is still a character, and Alt alone still types:
+        // only CONTROL makes the key a chord rather than text.
+        assert_eq!(state.handle_key(key('t')), VimAction::Insert);
+        let alt_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(state.handle_key(alt_t), VimAction::Insert);
     }
 
     #[test]

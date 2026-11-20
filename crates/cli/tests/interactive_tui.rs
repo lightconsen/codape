@@ -4098,8 +4098,17 @@ fn the_list_surfaces_open_from_their_keys() {
     session.page_down();
     session.page_down();
     session.wait_for_text("Give the transcript the whole screen", SCREEN_TIMEOUT);
+
+    // Wait for the text this page actually ends on, not for the page's first
+    // line. `Keybindings` is the body's first row and the two page-downs above
+    // have scrolled it away, so waiting for *it* to disappear returned before
+    // the `esc` was read: the next byte was written into the same pty read and
+    // crossterm parsed `ESC` followed by `0x14` as Alt+Ctrl+t (its own
+    // `test_alt_ctrl` pins that shape). That chord is `Ctrl+T` with a stray
+    // ALT, so the full-screen toggle never fired and the leftover `t` was typed
+    // into the prompt — the CI screen showed a lone `❯ t`.
     session.esc();
-    session.wait_for_text_absent("Keybindings", SCREEN_TIMEOUT);
+    session.wait_for_text_absent("Give the transcript the whole screen", SCREEN_TIMEOUT);
 
     // Ctrl+T: the transcript takes every row and one footer row says how to
     // get back.

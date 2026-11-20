@@ -20304,6 +20304,19 @@ mod tests {
     /// Run in the `ENV_LOCK` and with `pbcopy` replaced on `PATH`, because a
     /// test that copied to the developer's real clipboard would be another way
     /// of writing to something that is not the test's.
+    ///
+    /// Unix only, and not because the command is Unix only. A PATH shim cannot
+    /// stand in for the helper on Windows: `CreateProcessW` resolves
+    /// `clip` to `%SystemRoot%\System32\clip.exe` before it ever consults
+    /// `PATH`, so a `clip` script on the front of `PATH` is not what runs. This
+    /// test did run there, reached the real `clip.exe`, and wrote the session
+    /// to the runner's clipboard before failing on the missing capture file —
+    /// the exact thing the paragraph above promises it will not do. There is no
+    /// seam to intercept, so the honest fix is to state the platform the
+    /// interception works on rather than leave a test that lies about it. The
+    /// Windows helper is covered by `codape_core::clipboard`'s platform test,
+    /// which reads the table `clip` comes from instead of running it.
+    #[cfg(unix)]
     #[tokio::test]
     #[allow(unsafe_code)] // PATH mutation is unsafe in edition 2024; ENV_LOCK guards it.
     #[allow(clippy::await_holding_lock)] // ENV_LOCK keeps the fake `pbcopy` on PATH across the await, on purpose.
