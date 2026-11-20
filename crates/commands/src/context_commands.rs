@@ -5,44 +5,12 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Copy text to system clipboard.
+///
+/// The implementation moved to `codape_core::clipboard` when `ctrl+shift+c`
+/// needed the same thing: two copies had drifted, and only this one knew about
+/// Windows.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    // Try platform-specific clipboard commands
-    let cmd: &str;
-    let args: &[&str];
-    if cfg!(target_os = "macos") {
-        cmd = "pbcopy";
-        args = &[];
-    } else if cfg!(target_os = "windows") {
-        cmd = "clip";
-        args = &[];
-    } else {
-        cmd = "xclip";
-        args = &["-selection", "clipboard"];
-    }
-
-    let mut child = std::process::Command::new(cmd)
-        .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("clipboard command failed to start: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("failed to write to clipboard: {e}"))?;
-    }
-
-    let status = child
-        .wait()
-        .map_err(|e| format!("clipboard command did not finish: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("clipboard command exited with error".to_string())
-    }
+    codape_core::clipboard::copy_to_clipboard(text)
 }
 
 /// Register content & context commands.

@@ -362,7 +362,7 @@ CLI flags are parsed by clap, stored in `SessionContext` during `StartupOrchestr
 - Settings loading from `~/.codape/settings.json` and `.codape/settings.json`.
 - Tracing setup with JSON formatter option and `--debug-file` file appender.
 - Welcome screen with a block-letter wordmark, the session's provider, model and directory, and a `--continue` / `--resume` tip. Falls back to plain lines when the terminal is too narrow for the card.
-- Ctrl+C interrupt handling.
+- Ctrl+C interrupt handling. The shift variant is not an interrupt: `Ctrl+Shift+C` copies the transcript as drawn on screen to the clipboard, which is the mouse-free counterpart of a drag selection and of `/copy`.
 - Non-interactive headless mode (`--print` or positional prompt): reads input, runs a single turn, prints response, exits.
 - Crash telemetry: SQLite store ingests pending panic hooks at startup.
 - Session resume (`--resume ID` or `--continue`): loads transcript, continues conversation.

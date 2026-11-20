@@ -741,6 +741,7 @@
 
 ### 12.9 内容与上下文命令 (crate: `commands`)
 - [x] 实现 `/copy`：复制消息内容到剪贴板（无参数复制整个会话，带编号复制指定消息，编号与 `/rewind` 一致；思考块不复制）
+- [x] 实现 `ctrl+shift+c`（`app:copyTranscript`）：不选也不输命令，把屏幕上看见的 transcript 原样复制到剪贴板；只取消息区，不含输入框、状态栏与权限条。`ctrl+c` 仍是中断——两者靠 shift 区分
 - [x] 实现 `/init`：初始化项目（生成 `AGENTS.md`，`CLAUDE.md` 同样被读取）
 - [x] 实现 `/summary`：生成当前会话摘要
 - [x] 实现 `/files`：列出项目文件结构

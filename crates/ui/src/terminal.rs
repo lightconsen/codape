@@ -195,6 +195,16 @@ impl TerminalUi {
     pub fn selected_text(&self, selection: &TextSelection) -> String {
         selection_text(self.frame_area, &self.frame_rows, *selection)
     }
+
+    /// The text of `region` from the last drawn frame.
+    ///
+    /// `ctrl+shift+c` passes the transcript area, so what lands on the
+    /// clipboard is the conversation and not the prompt, statusline and
+    /// permission bar drawn around it.
+    #[must_use]
+    pub fn region_text(&self, region: Rect) -> String {
+        region_text(self.frame_area, &self.frame_rows, region)
+    }
 }
 
 /// Snapshot a rendered buffer as one character per cell.
@@ -218,6 +228,52 @@ fn capture_rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<char>> {
         .collect()
 }
 
+/// The text inside `region`, read from a frame snapshot.
+///
+/// The region is clipped to the frame, so a pane partly off-screen copies what
+/// is visible rather than failing. Every row is taken whole; trailing blanks
+/// and trailing blank rows are dropped, which is what makes the result paste
+/// as text rather than as a block of spaces.
+///
+/// A mouse selection is not this function: a drag starts each row at a
+/// different column, which a rectangle cannot express, so [`selection_text`]
+/// keeps its own loop. The trailing-blank rule is shared, and that is the one
+/// part a paste depends on.
+pub(crate) fn region_text(area: Rect, rows: &[Vec<char>], region: Rect) -> String {
+    if region.width == 0 || region.height == 0 {
+        return String::new();
+    }
+    let left = region.left().max(area.left());
+    let right = region
+        .right()
+        .saturating_sub(1)
+        .min(area.right().saturating_sub(1));
+    let top = region.top().max(area.top());
+    let bottom = region
+        .bottom()
+        .saturating_sub(1)
+        .min(area.bottom().saturating_sub(1));
+    if left > right || top > bottom {
+        return String::new();
+    }
+    let mut lines = Vec::new();
+    for row in top..=bottom {
+        let Some(cells) = rows.get((row - area.y) as usize) else {
+            continue;
+        };
+        let mut line = String::new();
+        for column in left..=right {
+            if let Some(character) = cells.get((column - area.left()) as usize)
+                && *character != '\0'
+            {
+                line.push(*character);
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n").trim_end().to_string()
+}
+
 /// Extract the text covered by a mouse selection from a frame snapshot.
 ///
 /// Rows between the endpoints are taken whole; the first and last rows are cut
@@ -226,6 +282,9 @@ fn capture_rows(buffer: &ratatui::buffer::Buffer) -> Vec<Vec<char>> {
 /// of spaces or the interface below the text.
 pub(crate) fn selection_text(area: Rect, rows: &[Vec<char>], selection: TextSelection) -> String {
     let ((start_col, start_row), (end_col, end_row)) = selection.normalized();
+    // The mouse path keeps its own per-row column logic: the first row starts
+    // at the press column and every later row starts at the left edge, which a
+    // single rectangle cannot express.
     let last_col = area.right().saturating_sub(1);
     let mut lines = Vec::new();
     for row in start_row..=end_row {
@@ -1025,6 +1084,10 @@ fn render_messages(
     let viewport_height = area.height as usize;
     let is_compact = area.height < 10;
     state.messages.viewport_height = viewport_height;
+    // Remember the rectangle, not just its height: `ctrl+shift+c` copies the
+    // conversation and nothing else, and this is the only place that knows
+    // where the conversation was drawn.
+    state.messages.area = area;
 
     // Clean up expired notifications
     state.notifications.cleanup();
@@ -4457,6 +4520,89 @@ mod layout_tests {
             // The second line keeps the indent the transcript drew.
             "alpha beta\n  gamma delta"
         );
+    }
+
+    /// `ctrl+shift+c` copies the conversation and leaves the chrome out.
+    ///
+    /// The whole point of recording the transcript's rectangle is that the
+    /// prompt, the statusline and the input rule are drawn around it. Copying
+    /// the frame instead would paste them along with the answer.
+    #[test]
+    fn a_region_copy_takes_the_transcript_without_the_chrome() {
+        let mut state = UiState::default();
+        state.messages.push(Message {
+            role: MessageRole::System,
+            content: "the answer".into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        });
+        let buffer = render_to_buffer(80, 20, &mut state);
+        let rows = capture_rows(&buffer);
+        let region = state.messages.area;
+        assert!(
+            region.height > 0,
+            "the renderer recorded no transcript area"
+        );
+
+        let text = region_text(buffer.area, &rows, region);
+        assert!(text.contains("the answer"), "{text:?}");
+        // Whatever the frame drew below the transcript must not come with it.
+        let whole_frame = region_text(
+            buffer.area,
+            &rows,
+            Rect {
+                x: buffer.area.x,
+                y: buffer.area.y,
+                width: buffer.area.width,
+                height: buffer.area.height,
+            },
+        );
+        assert!(
+            whole_frame.len() > text.len(),
+            "the transcript region should cover less than the whole frame"
+        );
+    }
+
+    /// A region reaching past the frame is clipped rather than refused: a pane
+    /// half off-screen still copies the part someone can see.
+    #[test]
+    fn a_region_outside_the_frame_is_clipped() {
+        let rows = vec![vec!['a', 'b'], vec!['c', 'd']];
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let clipped = Rect {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+        };
+        assert_eq!(region_text(area, &rows, clipped), "d");
+    }
+
+    /// An empty region copies nothing instead of panicking on a zero-width
+    /// rectangle, which is what a frame drawn before any message looks like.
+    #[test]
+    fn an_empty_region_copies_nothing() {
+        let rows = vec![vec!['a']];
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        let none = Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        assert_eq!(region_text(area, &rows, none), "");
     }
 
     /// The selected cells get the theme's selection background and nothing

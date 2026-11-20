@@ -129,54 +129,17 @@ fn format_json(messages: &[&Message]) -> String {
     serde_json::to_string_pretty(&export_msgs).unwrap_or_default()
 }
 
-/// Copy to clipboard — writes to the system clipboard if available.
-#[cfg(target_os = "macos")]
+/// Copy text to the system clipboard.
+///
+/// The platform helpers live in `codape_core::clipboard`, shared with `/copy`.
+/// This used to be a second implementation that knew only macOS and Linux, so
+/// `ctrl+shift+c` would have refused to work on Windows while the command did.
+///
+/// # Errors
+///
+/// What the helper reported, by name.
 pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Command;
-
-    let mut child = Command::new("pbcopy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-
-    child.wait().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Copy to clipboard on Linux using xclip.
-#[cfg(target_os = "linux")]
-pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    use std::io::Write;
-    use std::process::Command;
-
-    let mut child = Command::new("xclip")
-        .arg("-selection")
-        .arg("clipboard")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-
-    child.wait().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Copy to clipboard placeholder for other platforms.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn copy_to_clipboard(_text: &str) -> Result<(), String> {
-    Err("Clipboard not supported on this platform".to_string())
+    codape_core::clipboard::copy_to_clipboard(text)
 }
 
 #[cfg(test)]

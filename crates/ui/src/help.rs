@@ -76,6 +76,7 @@ const SECTIONS: &[(&str, &[Action])] = &[
             Action::PanePreviousTab,
             Action::PaneNextTab,
             Action::TranscriptFullscreen,
+            Action::CopyTranscript,
         ],
     ),
     (
@@ -145,6 +146,7 @@ pub const fn describe(action: Action) -> &'static str {
         Action::ListPrevious => "Previous row",
         Action::ListNext => "Next row",
         Action::ListAccept => "Choose the highlighted row",
+        Action::CopyTranscript => "Copy the transcript as shown to the clipboard",
     }
 }
 
@@ -271,6 +273,7 @@ const ALL_ACTIONS_CONTEXT: &[Action] = &[
     Action::StashInput,
     Action::SendNow,
     Action::SettingsMenu,
+    Action::CopyTranscript,
 ];
 
 #[cfg(test)]

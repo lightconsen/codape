@@ -1064,6 +1064,14 @@ enum TuiKeyFlow {
     /// the state, not the `TerminalUi`. Reporting the intent keeps the
     /// handover in the one place that can perform it.
     ExternalEditor,
+    /// Ctrl+Shift+C: put the transcript as drawn on the clipboard.
+    ///
+    /// A fourth answer for the same reason as [`Self::ExternalEditor`]: the
+    /// bytes to copy live in the `TerminalUi`'s frame snapshot, and
+    /// `handle_key_event` is handed the state, not the terminal. Reporting the
+    /// intent keeps the read — and the notification that says it worked —
+    /// where the frame is reachable.
+    CopyTranscript,
 }
 
 /// Run the configured transcription command and return what it heard.
@@ -1309,6 +1317,37 @@ fn toggle_transcript_fullscreen(
     // output; leaving the old scroll offset would open on a message they had
     // already read.
     ui_state.messages.scroll_to_bottom();
+}
+
+/// Put the transcript as drawn on the clipboard.
+///
+/// Reads the transcript rectangle recorded by the last frame, not the whole
+/// screen: the prompt, the statusline and any permission bar are drawn around
+/// the answer and are not what someone pressing this key wants to paste.
+///
+/// Says what happened either way. A silent copy is indistinguishable from a
+/// key that did nothing, and the failure that actually occurs — no `pbcopy`,
+/// `xclip` or `clip` on the machine — is one the person can fix only if they
+/// are told.
+fn copy_transcript_to_clipboard(
+    terminal_ui: &codape_ui::terminal::TerminalUi,
+    ui_state: &mut codape_ui::state::UiState,
+) {
+    let region = ui_state.messages.area;
+    let text = terminal_ui.region_text(region);
+    if text.trim().is_empty() {
+        ui_state
+            .notifications
+            .warn("Nothing to copy: the transcript is empty on screen");
+        return;
+    }
+    match codape_ui::export::copy_to_clipboard(&text) {
+        Ok(()) => ui_state.notifications.success(format!(
+            "Copied the transcript ({} characters)",
+            text.chars().count()
+        )),
+        Err(error) => ui_state.notifications.err(format!("Copy failed: {error}")),
+    }
 }
 
 /// Scroll one page, in whichever pane is being read.
@@ -7453,7 +7492,26 @@ impl ReplLoop {
         if self.mcp.pending_form.is_some() && self.handle_mcp_form_key(&key, ui_state) {
             return TuiKeyFlow::Handled;
         }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Shift is the difference between the two meanings the letter has
+        // grown: plain ctrl+c interrupts, and ctrl+shift+c is the transcript
+        // copy below. Asking the binding table rather than testing the
+        // modifier means an unbound (or rebound) copy action falls back to the
+        // interrupt instead of typing a literal `c` into the prompt; a
+        // terminal that reports neither SHIFT nor an uppercase letter sends
+        // the same event for both, and there the interrupt is the safe
+        // reading. The interrupt itself stays hardcoded on purpose — stopping
+        // a running turn must not depend on a binding being configured.
+        //
+        // The guards repeat the copy arm's own, so the key can never be taken
+        // for the copy here and then declined there: with a dialog or a
+        // pending permission open, ctrl+shift+c is still the way out.
+        let copy_key = !ui_state.overlays.is_active()
+            && live.pending_confirmation.is_none()
+            && self.shortcut(ShortcutContext::Chat, &key) == Some(Shortcut::CopyTranscript);
+        if key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !copy_key
+        {
             if let Some(request) = live.pending_confirmation.take() {
                 self.respond_to_confirmation(
                     request,
@@ -7908,6 +7966,14 @@ impl ReplLoop {
                 {
                     toggle_transcript_fullscreen(ui_state, &self.ui.keybindings);
                     return TuiKeyFlow::Handled;
+                }
+                // The keyboard counterpart of a mouse drag: the caller reads
+                // the frame and writes the clipboard, because neither is
+                // reachable from here.
+                Shortcut::CopyTranscript
+                    if !ui_state.overlays.is_active() && live.pending_confirmation.is_none() =>
+                {
+                    return TuiKeyFlow::CopyTranscript;
                 }
                 Shortcut::ImagePaste
                     if !ui_state.overlays.is_active()
@@ -9251,6 +9317,9 @@ impl ReplLoop {
                                     &mut ui_state,
                                     &editor_pause,
                                 );
+                            }
+                            if flow == TuiKeyFlow::CopyTranscript {
+                                copy_transcript_to_clipboard(&terminal_ui, &mut ui_state);
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -20235,6 +20304,19 @@ mod tests {
     /// Run in the `ENV_LOCK` and with `pbcopy` replaced on `PATH`, because a
     /// test that copied to the developer's real clipboard would be another way
     /// of writing to something that is not the test's.
+    ///
+    /// Unix only, and not because the command is Unix only. A PATH shim cannot
+    /// stand in for the helper on Windows: `CreateProcessW` resolves
+    /// `clip` to `%SystemRoot%\System32\clip.exe` before it ever consults
+    /// `PATH`, so a `clip` script on the front of `PATH` is not what runs. This
+    /// test did run there, reached the real `clip.exe`, and wrote the session
+    /// to the runner's clipboard before failing on the missing capture file —
+    /// the exact thing the paragraph above promises it will not do. There is no
+    /// seam to intercept, so the honest fix is to state the platform the
+    /// interception works on rather than leave a test that lies about it. The
+    /// Windows helper is covered by `codape_core::clipboard`'s platform test,
+    /// which reads the table `clip` comes from instead of running it.
+    #[cfg(unix)]
     #[tokio::test]
     #[allow(unsafe_code)] // PATH mutation is unsafe in edition 2024; ENV_LOCK guards it.
     #[allow(clippy::await_holding_lock)] // ENV_LOCK keeps the fake `pbcopy` on PATH across the await, on purpose.
@@ -20326,6 +20408,133 @@ mod tests {
         assert!(
             !written.contains("(last message content)"),
             "/copy still writes its old placeholder: {written:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_shift_c_reports_the_copy_instead_of_doing_it_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // The handler cannot reach the frame snapshot or the clipboard, so it
+        // reports the intent and the event loop performs it. This pins that
+        // contract: the key resolves, and it does not fall through to the
+        // prompt as a literal character.
+        let flow = {
+            let mut live = InteractiveLive::new();
+            let mut vim = codape_ui::vim::VimState::new_insert();
+            harness
+                .repl
+                .handle_key_event(
+                    crossterm::event::KeyEvent::new(
+                        KeyCode::Char('c'),
+                        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                    ),
+                    &mut harness.ui,
+                    &mut live,
+                    &mut vim,
+                    &mut harness.thinking,
+                    &mut harness.query_done_rx,
+                    &mut harness.elicit_rx,
+                    &mut harness.tui_elicit_rx,
+                    &mut harness.queued,
+                )
+                .await
+        };
+
+        assert_eq!(
+            flow,
+            TuiKeyFlow::CopyTranscript,
+            "ctrl+shift+c did not ask the loop to copy the transcript"
+        );
+        assert!(
+            harness.ui.input.text.is_empty(),
+            "the copy key typed into the prompt: {:?}",
+            harness.ui.input.text
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_shift_c_is_still_the_way_out_of_a_dialog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // With something modal up, the copy action declines (the key table is
+        // not what has the keyboard), and the interrupt has to catch the key
+        // instead of letting it type a `c` behind the dialog or do nothing.
+        harness
+            .ui
+            .overlays
+            .push(codape_ui::overlay::Overlay::Detail {
+                title: "Help".to_string(),
+                body: "keys".to_string(),
+                scroll: 0,
+            });
+
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let flow = harness
+            .repl
+            .handle_key_event(
+                crossterm::event::KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                &mut harness.ui,
+                &mut live,
+                &mut vim,
+                &mut harness.thinking,
+                &mut harness.query_done_rx,
+                &mut harness.elicit_rx,
+                &mut harness.tui_elicit_rx,
+                &mut harness.queued,
+            )
+            .await;
+
+        assert_eq!(flow, TuiKeyFlow::Handled, "the dialog was left open");
+        assert!(
+            !harness.ui.overlays.is_active(),
+            "ctrl+shift+c did not close the dialog, and did not copy either"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_ctrl_c_still_interrupts_rather_than_copying() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+
+        // The two meanings share a letter. This pins which one wins without
+        // shift: with a line typed, ctrl+c clears it, exactly as before the
+        // copy key existed.
+        harness.ui.input.text = "half a prompt".to_string();
+        harness.ui.input.cursor = harness.ui.input.text.len();
+
+        let mut live = InteractiveLive::new();
+        let mut vim = codape_ui::vim::VimState::new_insert();
+        let flow = harness
+            .repl
+            .handle_key_event(
+                crossterm::event::KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &mut harness.ui,
+                &mut live,
+                &mut vim,
+                &mut harness.thinking,
+                &mut harness.query_done_rx,
+                &mut harness.elicit_rx,
+                &mut harness.tui_elicit_rx,
+                &mut harness.queued,
+            )
+            .await;
+
+        assert_eq!(
+            flow,
+            TuiKeyFlow::Handled,
+            "plain ctrl+c asked for a copy instead of interrupting"
+        );
+        assert!(
+            harness.ui.input.text.is_empty(),
+            "plain ctrl+c left the cleared line behind: {:?}",
+            harness.ui.input.text
         );
     }
 
