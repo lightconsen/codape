@@ -108,12 +108,12 @@ fn every_non_interactive_slash_command_runs() {
         .filter(|command| command.supports_non_interactive)
         .map(|command| command.name.to_string())
         .collect();
-    // 81 commands, 77 of which declare non-interactive support. Pin both so a
+    // 82 commands, 78 of which declare non-interactive support. Pin both so a
     // command that loses the flag (or a new one that forgets it) fails here
     // instead of silently dropping out of the sweep.
     assert_eq!(
         names.len(),
-        77,
+        78,
         "the sweep no longer covers the registry: {names:?}"
     );
     for excluded in ["heapdump", "mock-limits", "voice", "stickers"] {

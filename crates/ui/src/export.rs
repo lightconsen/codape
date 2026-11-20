@@ -1,21 +1,22 @@
 //! Message export — export selected messages in various formats.
+//!
+//! The rendering itself lives in [`codape_core::transcript`], because `/export`
+//! in `codape-commands` has to reach it and this crate is not on its dependency
+//! path. What stays here is the piece that is about *selection*: an interactive
+//! `MessageSelector` decides which messages by focus, where the command names
+//! them by number, and both then render through the same functions. A second
+//! renderer here would drift from the command's the way the two clipboard
+//! implementations did.
 
 use crate::selector::MessageSelector;
+pub use codape_core::transcript::ExportFormat;
 use codape_core::types::Message;
-use std::fmt::Write as _;
 
-/// Export format for messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportFormat {
-    /// Plain text format.
-    PlainText,
-    /// Markdown format.
-    Markdown,
-    /// JSON format.
-    Json,
-}
-
-/// Export selected messages as a formatted string.
+/// Export the messages a [`MessageSelector`] has selected.
+///
+/// An empty selection means "all of them": in the selector an empty selection
+/// is the state you start in, not a deliberate request for nothing, and an
+/// export of nothing is never what the person meant.
 #[must_use]
 pub fn export_messages(
     messages: &[Message],
@@ -23,110 +24,12 @@ pub fn export_messages(
     format: ExportFormat,
 ) -> String {
     let indices = selector.selected_indices();
-    if indices.is_empty() {
-        // Export all messages if none selected
-        let refs: Vec<&Message> = messages.iter().collect();
-        format_messages(&refs, format)
+    let selected: Vec<&Message> = if indices.is_empty() {
+        messages.iter().collect()
     } else {
-        // Export only selected messages
-        let selected: Vec<&Message> = indices.iter().filter_map(|&i| messages.get(i)).collect();
-        format_messages(&selected, format)
-    }
-}
-
-const fn role_label(role: codape_core::types::Role) -> &'static str {
-    // One label table, shared with the plain-text transcript: the Markdown
-    // export and `/copy` name a role the same way.
-    codape_core::transcript::role_label(role)
-}
-
-const fn role_json(role: codape_core::types::Role) -> &'static str {
-    use codape_core::types::Role;
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-        Role::Tool => "tool",
-        _ => "unknown",
-    }
-}
-
-fn content_text(content: &codape_core::types::MessageContent) -> String {
-    // Shared with `/copy`: a tool result, an image and a provider block read
-    // the same way in a JSON export as on the clipboard. A reasoning block has
-    // no text of its own, which `message_text` says with `None`.
-    codape_core::transcript::message_text(content).unwrap_or_default()
-}
-
-/// Whether an exported transcript should show this message at all.
-const fn is_displayable(msg: &Message) -> bool {
-    !matches!(msg.content, codape_core::types::MessageContent::Thinking(_))
-}
-
-fn format_messages(messages: &[&Message], format: ExportFormat) -> String {
-    match format {
-        ExportFormat::PlainText => format_plain(messages),
-        ExportFormat::Markdown => format_markdown(messages),
-        ExportFormat::Json => format_json(messages),
-    }
-}
-
-fn format_plain(messages: &[&Message]) -> String {
-    // One implementation, shared with `/copy`: `codape-commands` cannot depend
-    // on this crate, so the plain-text shape lives in `codape-core` and both
-    // callers read it from there.
-    codape_core::transcript::plain_text(messages)
-}
-
-fn format_markdown(messages: &[&Message]) -> String {
-    let mut out = String::new();
-    for msg in messages.iter().filter(|m| is_displayable(m)) {
-        let _ = write!(out, "\n### {}\n\n", role_label(msg.role));
-        match &msg.content {
-            codape_core::types::MessageContent::Text(text) => {
-                out.push_str(text);
-                out.push('\n');
-            }
-            codape_core::types::MessageContent::ToolCall(tc) => {
-                // Serialize rather than interpolate: a tool name or id with a
-                // quote or newline must not produce invalid JSON in the fence.
-                let payload = serde_json::json!({"tool": tc.name, "id": tc.id});
-                let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
-                let _ = writeln!(out, "```json\n{json}\n```");
-            }
-            codape_core::types::MessageContent::ToolResult(tr) => {
-                let payload = serde_json::json!({"result": tr.output, "id": tr.tool_call_id});
-                let json = serde_json::to_string_pretty(&payload).unwrap_or_default();
-                let _ = writeln!(out, "```json\n{json}\n```");
-            }
-            // Provider state, not conversation.
-            codape_core::types::MessageContent::Thinking(_) => {}
-            codape_core::types::MessageContent::Image(image) => {
-                let _ = writeln!(out, "![image]({})", image.media_type);
-            }
-            _ => out.push_str("[unknown]\n"),
-        }
-    }
-    out
-}
-
-fn format_json(messages: &[&Message]) -> String {
-    #[derive(serde::Serialize)]
-    struct ExportMessage {
-        role: String,
-        content: String,
-    }
-
-    let export_msgs: Vec<ExportMessage> = messages
-        .iter()
-        .filter(|m| is_displayable(m))
-        .map(|m| ExportMessage {
-            role: role_json(m.role).into(),
-            content: content_text(&m.content),
-        })
-        .collect();
-
-    serde_json::to_string_pretty(&export_msgs).unwrap_or_default()
+        indices.iter().filter_map(|&i| messages.get(i)).collect()
+    };
+    codape_core::transcript::export(&selected, format)
 }
 
 /// Copy text to the system clipboard.
@@ -155,7 +58,7 @@ mod tests {
     fn export_all_as_plain_text() {
         let msgs = test_messages();
         let selector = MessageSelector::new(msgs.len());
-        let output = export_messages(&msgs, &selector, ExportFormat::PlainText);
+        let output = export_messages(&msgs, &selector, ExportFormat::Text);
         assert!(output.contains("User"));
         assert!(output.contains("Hello"));
         assert!(output.contains("Assistant"));
@@ -194,7 +97,7 @@ mod tests {
     fn empty_selection_exports_all() {
         let msgs = test_messages();
         let selector = MessageSelector::new(msgs.len());
-        let output = export_messages(&msgs, &selector, ExportFormat::PlainText);
+        let output = export_messages(&msgs, &selector, ExportFormat::Text);
         assert!(output.contains("Hello"));
         assert!(output.contains("Hi there!"));
     }
@@ -203,7 +106,7 @@ mod tests {
     fn empty_messages() {
         let msgs: Vec<Message> = Vec::new();
         let selector = MessageSelector::new(0);
-        let output = export_messages(&msgs, &selector, ExportFormat::PlainText);
+        let output = export_messages(&msgs, &selector, ExportFormat::Text);
         assert!(output.is_empty());
     }
 
@@ -211,7 +114,7 @@ mod tests {
     fn plain_text_format_labels() {
         let msgs = test_messages();
         let selector = MessageSelector::new(msgs.len());
-        let output = export_messages(&msgs, &selector, ExportFormat::PlainText);
+        let output = export_messages(&msgs, &selector, ExportFormat::Text);
         assert!(output.contains("--- User ---"));
         assert!(output.contains("--- Assistant ---"));
     }

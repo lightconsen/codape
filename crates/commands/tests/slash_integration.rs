@@ -60,7 +60,7 @@ fn register_all_commands_populates_registry() {
     // Pin the number so removing a command is a failing test rather than a
     // quiet drift. Adding one is a deliberate change and updates this number
     // with it. The count is the registry's real size, not a target.
-    assert_eq!(reg.len(), 81, "expected 81 commands, got {}", reg.len());
+    assert_eq!(reg.len(), 82, "expected 82 commands, got {}", reg.len());
 }
 
 #[test]
