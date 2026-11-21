@@ -194,10 +194,18 @@ impl TerminalUi {
     /// rectangle, and the keyboard path with a linewise one anchored at the
     /// bottom of the transcript.
     ///
+    /// `transcript` bounds a keyboard selection to the rectangle the
+    /// transcript occupies, for the same reason the highlight is bounded: its
+    /// rows can outlive the pane they were taken from.
+    ///
     /// The buffer is cloned only when a copy is requested, not on every draw.
     #[must_use]
-    pub fn selected_text(&self, selection: &TextSelection) -> String {
-        selection_text(self.frame_area, &self.frame_rows, *selection)
+    pub fn selected_text(&self, selection: &TextSelection, transcript: Rect) -> String {
+        selection_text(
+            self.frame_area,
+            &self.frame_rows,
+            selection.clipped_to(transcript),
+        )
     }
 
     /// The text of `region` from the last drawn frame.
@@ -731,8 +739,19 @@ fn render_frame(
 
     // A selection is painted last so it is visible over the transcript. Both
     // kinds reach here: the mouse drag's rectangle and the keyboard's lines.
+    //
+    // A keyboard selection is trimmed to the transcript as it is drawn *now*.
+    // Its rows were the transcript's when it was made, and the panes below it
+    // can take one back between frames — a wrapped prompt, a notification, the
+    // todo panel. Painted untrimmed it would tint the input rule and copy the
+    // prompt underneath, so the highlight and the copy both stop at this edge.
     if let Some(selection) = state.selection {
-        paint_selection(frame, area, selection, &state.theme);
+        paint_selection(
+            frame,
+            area,
+            selection.clipped_to(state.messages.area),
+            &state.theme,
+        );
     }
 }
 
@@ -4521,10 +4540,7 @@ mod layout_tests {
         let alpha_col = column_of(alpha_row, "alpha");
         let delta_col = column_of(gamma_row, "delta") + 4;
 
-        let selection = TextSelection {
-            anchor: (alpha_col, alpha_row),
-            cursor: (delta_col, gamma_row),
-        };
+        let selection = TextSelection::dragged((alpha_col, alpha_row), (delta_col, gamma_row));
         assert_eq!(
             selection_text(buffer.area, &rows, selection),
             // The second line keeps the indent the transcript drew.
@@ -4675,10 +4691,7 @@ mod layout_tests {
     #[test]
     fn a_selection_is_highlighted() {
         let mut state = UiState {
-            selection: Some(TextSelection {
-                anchor: (1, 1),
-                cursor: (5, 2),
-            }),
+            selection: Some(TextSelection::dragged((1, 1), (5, 2))),
             ..UiState::default()
         };
         let buffer = render_to_buffer(80, 20, &mut state);
@@ -4691,6 +4704,82 @@ mod layout_tests {
         // second row's column.
         assert_eq!(buffer.cell((10, 1)).unwrap().bg, selected);
         assert_ne!(buffer.cell((10, 2)).unwrap().bg, selected);
+    }
+
+    /// A selection never paints or copies the chrome around the transcript.
+    ///
+    /// The selection is stored in screen rows, and those rows are only
+    /// meaningful as long as the transcript keeps the ones it had. A prompt
+    /// that grows to three lines takes two of them back, and a selection made
+    /// a moment earlier then sits over the input rule and the input itself.
+    /// The transcript's rectangle is what bounds both the highlight and the
+    /// copy, so what is highlighted is always what the answer occupies.
+    #[test]
+    fn a_selection_never_reaches_past_the_transcript() {
+        let mut state = UiState::default();
+        state.messages.push(Message {
+            role: MessageRole::System,
+            content: "the answer".into(),
+            tool_name: None,
+            streaming: false,
+            folded: false,
+            image: None,
+        });
+        render_to_buffer(80, 24, &mut state);
+        let area = state.messages.area;
+        assert!(area.height > 2, "no transcript to select in: {area:?}");
+
+        // The whole transcript, selected the way `shift+home` selects it.
+        let mut selection = TextSelection::keyboard_origin(area);
+        selection.extend_all(area);
+        state.selection = Some(selection);
+
+        // A prompt long enough to grow the input pane and take rows from the
+        // transcript above it.
+        state.input.text = "one\ntwo\nthree".into();
+        let buffer = render_to_buffer(80, 24, &mut state);
+        let area = state.messages.area;
+
+        let selected = crate::themes::Theme::dark().selection_bg;
+        for y in 0..24u16 {
+            for x in 0..80u16 {
+                let inside = x >= area.x && x < area.right() && y >= area.y && y < area.bottom();
+                if inside {
+                    continue;
+                }
+                let cell = buffer.cell((x, y)).expect("cell");
+                assert_ne!(
+                    cell.bg, selected,
+                    "the selection painted the chrome at ({x}, {y}), outside {area:?}"
+                );
+            }
+        }
+
+        // The copy stops at the same edge: a row of the prompt is not part of
+        // the answer because the highlight happened to be over it.
+        //
+        // `TerminalUi::selected_text` is this same call with the transcript
+        // rectangle, so the assertion exercises the production path rather
+        // than a copy of it. The stale selection itself is checked first: it
+        // still names rows the transcript has given up, which is the defect
+        // this pins.
+        let ((_, first_row), (_, last_row)) = selection.normalized();
+        assert!(
+            last_row >= area.bottom(),
+            "the stale selection ({first_row}..={last_row}) no longer reaches past {area:?}, so this test no longer proves anything"
+        );
+        let rows = capture_rows(&buffer);
+        let text = selection_text(buffer.area, &rows, selection.clipped_to(area));
+        let unclipped = selection_text(buffer.area, &rows, selection);
+        assert!(
+            unclipped.len() > text.len(),
+            "the unclipped copy is not longer, so the chrome is not what was excluded: \
+             unclipped={unclipped:?} clipped={text:?}"
+        );
+        assert!(
+            text.contains("the answer"),
+            "the answer was trimmed away with the chrome: {text:?}"
+        );
     }
 
     /// A long provider error in the detail overlay must be readable, not

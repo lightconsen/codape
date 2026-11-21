@@ -1363,7 +1363,10 @@ fn copy_transcript_to_clipboard(
 ) {
     let selected = ui_state.selection.filter(|selection| !selection.is_empty());
     let (text, what) = match selected {
-        Some(selection) => (terminal_ui.selected_text(&selection), "the selection"),
+        Some(selection) => (
+            terminal_ui.selected_text(&selection, ui_state.messages.area),
+            "the selection",
+        ),
         None => (
             terminal_ui.region_text(ui_state.messages.area),
             "the transcript",
@@ -1412,9 +1415,15 @@ fn extend_transcript_selection(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // A selection made before the transcript moved still holds the rows it
+    // was given. Growing it from those would walk up from a row the pane no
+    // longer has — one press would take a row two above the newest line — so
+    // it is trimmed to the pane drawn now before the key adds to it. This is
+    // also what keeps the highlight and the copy inside the transcript.
     let selection = ui_state
         .selection
         .get_or_insert_with(|| TextSelection::keyboard_origin(area));
+    *selection = selection.clipped_to(area);
     match extension {
         Shortcut::SelectionExtendUp => selection.extend_up(area),
         Shortcut::SelectionExtendDown => selection.extend_down(area),
@@ -9822,7 +9831,8 @@ impl ReplLoop {
                                 MouseEventKind::Up(MouseButton::Left) => {
                                     if let Some(selection) = ui_state.selection.take()
                                         && !selection.is_empty() {
-                                            let text = terminal_ui.selected_text(&selection);
+                                            let text = terminal_ui
+                                                .selected_text(&selection, ui_state.messages.area);
                                             if !text.is_empty() {
                                                 match codape_ui::export::copy_to_clipboard(&text)
                                                 {
@@ -21218,6 +21228,69 @@ mod tests {
             harness.ui.selection.is_none(),
             "esc left the selection up: {:?}",
             harness.ui.selection
+        );
+    }
+
+    /// A selection follows the transcript's rectangle, not the screen's.
+    ///
+    /// The keys remember rows, and a row only means the newest line while the
+    /// transcript still reaches it. A wrapped prompt gives rows back to the
+    /// chrome below, and an extension pressed after that has to walk up from
+    /// where the transcript now ends — otherwise one press takes a row above
+    /// the newest line, and a copy takes the input rule with it.
+    #[tokio::test]
+    async fn an_extension_walks_from_where_the_transcript_now_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut harness = TuiHarness::new(tmp.path(), tmp.path());
+        harness.ui.messages.area = ratatui::layout::Rect {
+            x: 0,
+            y: 2,
+            width: 40,
+            height: 10,
+        };
+
+        let shift = KeyModifiers::SHIFT;
+        let mut live = InteractiveLive::new();
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Up, shift),
+            )
+            .await;
+        assert_eq!(
+            harness.ui.selection.expect("no selection").normalized(),
+            ((0, 10), (39, 11))
+        );
+
+        // The input grows by three rows, so the transcript ends at row 8.
+        harness.ui.messages.area = ratatui::layout::Rect {
+            height: 7,
+            ..harness.ui.messages.area
+        };
+        harness
+            .press_with(
+                &mut live,
+                crossterm::event::KeyEvent::new(KeyCode::Up, shift),
+            )
+            .await;
+
+        assert_eq!(
+            harness
+                .ui
+                .selection
+                .expect("the selection was dropped")
+                .normalized(),
+            ((0, 7), (39, 8)),
+            "the extension walked from the row the transcript no longer has"
+        );
+        assert_eq!(
+            harness
+                .ui
+                .selection
+                .expect("the selection was dropped")
+                .transcript(),
+            Some(harness.ui.messages.area),
+            "the selection did not adopt the transcript it was extended in"
         );
     }
 
