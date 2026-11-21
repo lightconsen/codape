@@ -4818,6 +4818,21 @@ impl ReplLoop {
         }
     }
 
+    /// Add text to the end of the appended system prompt.
+    ///
+    /// Used for a note the session owes the model regardless of what else is
+    /// there — the headless operating note is the only caller today. It
+    /// appends rather than assigns so it cannot displace a persisted output
+    /// style that was applied first, which is a person's preference and not
+    /// this run's business to drop.
+    pub fn with_system_note(&mut self, note: String) {
+        self.session.effects.append_system_prompt =
+            Some(match self.session.effects.append_system_prompt.take() {
+                Some(existing) => format!("{existing}\n\n{note}"),
+                None => note,
+            });
+    }
+
     /// The prompt text a style name stands for, plugin copy first.
     ///
     /// Shared by `/style` and the startup application so the two cannot
@@ -22345,6 +22360,49 @@ mod tests {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_startup_output_style(Some("a-plugin-that-was-uninstalled".to_string()));
         assert!(repl.session.effects.append_system_prompt.is_none());
+    }
+
+    /// Headless used to assign the operating note to the append slot *before*
+    /// the persisted style was applied, so the guard in
+    /// `with_startup_output_style` saw a value and dropped the style on every
+    /// non-interactive run. The note is now appended afterwards, which keeps
+    /// both.
+    #[test]
+    fn a_system_note_appends_after_the_startup_style() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_startup_output_style(Some("learning".to_string()));
+        repl.with_system_note("Operating mode: non-interactive.".to_string());
+
+        let text = repl
+            .session
+            .effects
+            .append_system_prompt
+            .as_deref()
+            .expect("neither the style nor the note survived");
+        assert!(
+            text.starts_with(
+                crate::output_styles::built_in("learning")
+                    .map(|style| style.prompt)
+                    .expect("learning is a built-in")
+            ),
+            "the note displaced the style: {text}"
+        );
+        assert!(
+            text.ends_with("Operating mode: non-interactive."),
+            "the note was not appended: {text}"
+        );
+    }
+
+    /// With no style to keep, the note is the whole appended prompt — and it
+    /// must not arrive wrapped in a separator.
+    #[test]
+    fn a_system_note_alone_is_the_whole_appended_prompt() {
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_system_note("Operating mode: non-interactive.".to_string());
+        assert_eq!(
+            repl.session.effects.append_system_prompt.as_deref(),
+            Some("Operating mode: non-interactive.")
+        );
     }
 
     #[test]

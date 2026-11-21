@@ -251,6 +251,10 @@ applied, which is the same rule `/style` follows when it is typed. An explicit
 `--append-system-prompt` outranks the persisted value, because that flag is a
 request for this run.
 
+Both modes apply it. A headless run (`-p`) adds the operating note — the
+"non-interactive, do not ask" paragraph — to the same appended text, after the
+style rather than in place of it, so the two arrive together.
+
 The write is a read-modify-write of the whole document, so a style change does
 not drop the file's other keys. `output_style` is in `KNOWN_SETTINGS_FIELDS`
 for the reason given above: without it, the file `/style` itself writes would be
