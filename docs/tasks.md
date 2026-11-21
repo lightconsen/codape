@@ -697,7 +697,7 @@
 - [x] 实现 `/config`：显示/编辑配置
 - [x] 实现 `/model`：切换模型
 - [x] 实现 `/permissions`：查看/设置权限模式
-- [x] 实现 `/style`：列出或应用输出风格（`default`/`explanatory`/`learning`，插件同名风格优先）。应用时把风格的**名字**写进 `settings.json` 的 `output_style`，下次启动就作为追加系统指令生效；落的是名字不是解析后的 prompt，所以插件改过的文案下次还能读到。写盘是整份文档的 read-modify-write，其他键不动；`output_style` 已进 `KNOWN_SETTINGS_FIELDS`，否则下次加载会因未知键拒绝整个文件。启动时解析不到的名字直接丢弃不应用，显式 `--append-system-prompt` 对本次运行仍然优先。
+- [x] 实现 `/style`：列出或应用输出风格（`default`/`explanatory`/`learning`，插件同名风格优先）。应用时把风格的**名字**写进 `settings.json` 的 `output_style`，下次启动就作为追加系统指令生效；落的是名字不是解析后的 prompt，所以插件改过的文案下次还能读到。写盘是整份文档的 read-modify-write，其他键不动；`output_style` 已进 `KNOWN_SETTINGS_FIELDS`，否则下次加载会因未知键拒绝整个文件。启动时解析不到的名字直接丢弃不应用，显式 `--append-system-prompt` 对本次运行仍然优先。**交互和 headless 两种模式都生效**：headless 的"非交互"操作说明是追加在风格文本之后，不占风格要用的那个槽位——早先是先占槽再应用风格，导致持久化的风格在每次 `-p` 运行里被静默丢弃。
 - **测试**：配置变更后生效的集成测试
 - **依赖**：12.1, 1.1
 

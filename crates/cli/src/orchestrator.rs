@@ -3035,15 +3035,13 @@ impl StartupOrchestrator {
         // replacement stays authoritative for the base and the append text is
         // applied as an extra instruction on top of it. The headless path
         // folds both into the user prompt (`build_headless_prompt`), so
-        // applying them here as well would send them twice.
+        // applying them here as well would send them twice — and leaves the
+        // append slot free for the operating note, which is added after the
+        // persisted output style below so that it appends rather than
+        // occupying the slot the style needs.
         if interactive {
             repl.with_system_prompt(self.ctx.system_prompt.clone());
             repl.with_append_system_prompt(self.ctx.append_system_prompt.clone());
-        } else {
-            // The user's prompt flags are folded into the headless prompt;
-            // the operating note goes on the system prompt instead, so the
-            // model cannot read it as an optional part of the task prose.
-            repl.with_append_system_prompt(Some(Self::HEADLESS_OPERATING_NOTE.to_string()));
         }
         repl.with_chrome_enabled(self.ctx.chrome && !self.ctx.no_chrome);
         repl.with_agent(self.ctx.agent.clone());
@@ -3053,13 +3051,30 @@ impl StartupOrchestrator {
         }
         // After the plugin components, because the persisted style may be one
         // a plugin contributes. It declines to overwrite an explicit
-        // `--append-system-prompt`, which is a request for this run.
-        let output_style = self
-            .ctx
-            .settings
-            .as_ref()
-            .and_then(|settings| settings.output_style.clone());
+        // `--append-system-prompt`, which is a request for this run and
+        // outranks a persisted preference. Interactive hands the flag to the
+        // repl, where that guard sees it; headless folds the flag into the
+        // user prompt instead, so the slot stays empty and the precedence has
+        // to be applied here.
+        let output_style = if self.ctx.append_system_prompt.is_some() {
+            None
+        } else {
+            self.ctx
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.output_style.clone())
+        };
         repl.with_startup_output_style(output_style);
+        if !interactive {
+            // The user's prompt flags are folded into the headless prompt;
+            // the operating note goes on the system prompt instead, so the
+            // model cannot read it as an optional part of the task prose. It
+            // is appended after the style rather than assigned in the branch
+            // above, because assigning there filled the slot
+            // `with_startup_output_style` checks and the persisted style was
+            // silently dropped on every headless run.
+            repl.with_system_note(Self::HEADLESS_OPERATING_NOTE.to_string());
+        }
         repl.with_explicit_model_override(self.ctx.model_explicit);
         repl.with_worktree(self.ctx.worktree);
         repl.with_fork_session(self.ctx.fork_session.clone());
@@ -6146,6 +6161,84 @@ mod tests {
         let appended = appended.expect("headless must append the operating note");
         assert!(appended.contains("non-interactive"), "{appended}");
         assert!(appended.contains("verification commands"), "{appended}");
+    }
+
+    /// The operating note fills the append slot, and the persisted style is
+    /// applied through that same slot when it is empty. Assigning the note
+    /// first therefore made `with_startup_output_style` return early on every
+    /// headless run: the style was applied at `/style` time, written to
+    /// settings.json, and then never used headless again.
+    #[test]
+    fn headless_keeps_the_persisted_style_beside_the_operating_note() {
+        let mut orch = StartupOrchestrator::new();
+        orch.ctx.settings = Some(codape_config::settings::Settings {
+            output_style: Some("explanatory".into()),
+            ..Default::default()
+        });
+
+        let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        orch.configure_repl(&mut repl, false);
+
+        let (_, appended) = repl.system_prompt_effects_for_test();
+        let appended = appended.expect("headless must have an appended prompt");
+        let style = crate::output_styles::built_in("explanatory")
+            .map(|style| style.prompt)
+            .expect("explanatory is a built-in");
+        assert!(
+            appended.starts_with(style),
+            "the persisted style was dropped headless: {appended}"
+        );
+        assert!(
+            appended.contains("non-interactive"),
+            "the operating note was dropped: {appended}"
+        );
+    }
+
+    /// `--append-system-prompt` is a request for this run. Headless folds it
+    /// into the user prompt rather than the append slot, so the precedence the
+    /// interactive guard implements has to be reproduced in the caller.
+    #[test]
+    fn headless_leaves_out_the_persisted_style_when_append_is_explicit() {
+        let mut orch = StartupOrchestrator::new();
+        orch.ctx.append_system_prompt = Some("be terse".into());
+        orch.ctx.settings = Some(codape_config::settings::Settings {
+            output_style: Some("explanatory".into()),
+            ..Default::default()
+        });
+
+        let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        orch.configure_repl(&mut repl, false);
+
+        let (_, appended) = repl.system_prompt_effects_for_test();
+        let appended = appended.expect("the operating note still belongs there");
+        let style = crate::output_styles::built_in("explanatory")
+            .map(|style| style.prompt)
+            .expect("explanatory is a built-in");
+        assert!(
+            !appended.contains(style),
+            "an explicit --append-system-prompt was not allowed to outrank the style: {appended}"
+        );
+        assert!(appended.contains("non-interactive"), "{appended}");
+    }
+
+    /// The interactive path keeps its own guard, but it needs settings to
+    /// reach it at all — the same assignment order applies to both modes.
+    #[test]
+    fn interactive_keeps_the_persisted_style_when_no_flag_is_given() {
+        let mut orch = StartupOrchestrator::new();
+        orch.ctx.settings = Some(codape_config::settings::Settings {
+            output_style: Some("learning".into()),
+            ..Default::default()
+        });
+
+        let mut repl = crate::repl::ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        orch.configure_repl(&mut repl, true);
+
+        let (_, appended) = repl.system_prompt_effects_for_test();
+        assert_eq!(
+            appended,
+            crate::output_styles::built_in("learning").map(|style| style.prompt)
+        );
     }
 
     #[test]
