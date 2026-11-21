@@ -239,21 +239,54 @@ pub struct PermissionDetail {
 /// the transcript moves the content under the highlight, and what is copied is
 /// what the highlight is on. That is what the mouse path has always done, and
 /// the highlight is visible either way, so nothing is copied unseen.
+///
+/// The keyboard path is narrower than that, and has to be. Its rows are only
+/// the transcript's as long as the transcript is where it was: a prompt that
+/// wraps to three lines, a notification, or the todo panel gives rows back to
+/// the chrome below, and the stored rows would then sit on the input rule.
+/// So a keyboard selection remembers that it belongs to the transcript, and
+/// [`Self::clipped_to`] trims it to the rectangle drawn now — a drag has no
+/// such origin and keeps meaning exactly the cells it covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextSelection {
     /// Where the selection began.
     pub anchor: (u16, u16),
     /// The free end of the selection.
     pub cursor: (u16, u16),
+    /// The transcript this selection belongs to, when it is one of its own.
+    ///
+    /// `Some` for the keyboard's linewise selection, `None` for a mouse drag.
+    /// The rectangle is kept as the record of *what* the selection is for; the
+    /// bound applied is the transcript as it is drawn now, which is the one a
+    /// person is looking at.
+    transcript: Option<ratatui::layout::Rect>,
 }
 
 impl TextSelection {
     /// Start a selection at a cell.
+    ///
+    /// A mouse drag's selection: it is a rectangle over the frame and means
+    /// the cells under it, wherever they are.
     #[must_use]
     pub const fn new(column: u16, row: u16) -> Self {
         Self {
             anchor: (column, row),
             cursor: (column, row),
+            transcript: None,
+        }
+    }
+
+    /// A selection dragged between two cells: the mouse's kind.
+    ///
+    /// Its rectangle is its own and is copied exactly as covered. There is no
+    /// transcript to be trimmed to, because a drag follows the pointer: it
+    /// means whatever it spans on the screen the person dragged over.
+    #[must_use]
+    pub const fn dragged(anchor: (u16, u16), cursor: (u16, u16)) -> Self {
+        Self {
+            anchor,
+            cursor,
+            transcript: None,
         }
     }
 
@@ -274,7 +307,59 @@ impl TextSelection {
         Self {
             anchor: (area.right().saturating_sub(1), bottom),
             cursor: (area.left(), bottom),
+            transcript: Some(area),
         }
+    }
+
+    /// This selection as it applies to a transcript drawn at `area`.
+    ///
+    /// A mouse drag is its own rectangle and comes back unchanged. A keyboard
+    /// selection is *of the transcript*, and the transcript is not always
+    /// where it was when the selection was made: a prompt that grows, a
+    /// notification, or the todo panel gives rows back to the chrome below,
+    /// and splitting the pane narrows it to one side. Rows and columns held on
+    /// from before would highlight the input rule or the diff pane and copy
+    /// them. Trimming to `area` keeps the promise the two ends imply — what is
+    /// highlighted and what is copied are the transcript.
+    ///
+    /// Both axes matter. The trailing row is what moves most often, because
+    /// the bottom of the pane is where the newest line is; the right edge
+    /// moves when a split opens beside the transcript, and a keyboard anchor
+    /// stopped at the old right edge would copy the first cells of the pane
+    /// next door. An origin pushed above the top of a shrunken pane collapses
+    /// to that pane's first row rather than becoming empty, which is the
+    /// reading a person would make: the transcript grew shorter from the
+    /// bottom and the selection still holds what is left of it. A pane with no
+    /// rows at all leaves nothing to hold, and the selection comes back empty
+    /// so nothing is painted or copied.
+    #[must_use]
+    pub fn clipped_to(&self, area: ratatui::layout::Rect) -> Self {
+        if self.transcript.is_none() {
+            return *self;
+        }
+        if area.width == 0 || area.height == 0 {
+            let collapsed = (area.left(), area.y);
+            return Self {
+                anchor: collapsed,
+                cursor: collapsed,
+                transcript: Some(area),
+            };
+        }
+        let last_row = area.bottom().saturating_sub(1);
+        let last_column = area.right().saturating_sub(1);
+        let clamp_row = |row: u16| row.clamp(area.top(), last_row);
+        let clamp_column = |column: u16| column.clamp(area.left(), last_column);
+        Self {
+            anchor: (clamp_column(self.anchor.0), clamp_row(self.anchor.1)),
+            cursor: (clamp_column(self.cursor.0), clamp_row(self.cursor.1)),
+            transcript: Some(area),
+        }
+    }
+
+    /// The transcript this selection belongs to, if it is a keyboard one.
+    #[must_use]
+    pub const fn transcript(&self) -> Option<ratatui::layout::Rect> {
+        self.transcript
     }
 
     /// Move the free end of the selection.
@@ -286,7 +371,13 @@ impl TextSelection {
     ///
     /// Saturates at the top of the area, so the whole visible transcript is a
     /// key away rather than one press per row.
+    ///
+    /// Every `extend_*` records `area` as this selection's transcript: growing
+    /// a selection by the row is a statement about the transcript, and the
+    /// clipping in [`Self::clipped_to`] is what keeps that statement true when
+    /// the pane moves between two presses.
     pub fn extend_up(&mut self, area: ratatui::layout::Rect) {
+        self.transcript = Some(area);
         self.cursor = (area.left(), self.cursor.1.saturating_sub(1).max(area.top()));
     }
 
@@ -295,17 +386,20 @@ impl TextSelection {
     /// The free end moves down; the anchor stays put, so coming back to its
     /// row restores the whole line the selection began on.
     pub fn extend_down(&mut self, area: ratatui::layout::Rect) {
+        self.transcript = Some(area);
         let bottom = area.bottom().saturating_sub(1);
         self.cursor = (area.left(), self.cursor.1.saturating_add(1).min(bottom));
     }
 
     /// Take the whole visible transcript.
     pub const fn extend_all(&mut self, area: ratatui::layout::Rect) {
+        self.transcript = Some(area);
         self.cursor = (area.left(), area.top());
     }
 
     /// Go back to the newest line alone.
     pub const fn extend_last(&mut self, area: ratatui::layout::Rect) {
+        self.transcript = Some(area);
         self.cursor = (area.left(), area.bottom().saturating_sub(1));
     }
 
@@ -642,6 +736,71 @@ mod tests {
         // `normalized` sorts by row and the copy cuts the last row there.
         assert_eq!(selection.normalized(), ((2, 9), (11, 9)));
         assert!(!selection.is_empty());
+        assert_eq!(selection.transcript(), Some(AREA));
+    }
+
+    /// The rows a keyboard selection holds are the transcript's, not the
+    /// screen's: when the pane below grows and takes a row back, the
+    /// selection gives that row back too.
+    ///
+    /// Without this the newest line's row would end up on the input rule: the
+    /// highlight would tint the prompt and `ctrl+shift+c` would copy it. The
+    /// mouse's rectangle is unaffected — it was drawn where the pointer went.
+    #[test]
+    fn a_keyboard_selection_follows_the_transcript_when_it_shrinks() {
+        let mut selection = TextSelection::keyboard_origin(AREA);
+        selection.extend_up(AREA);
+        assert_eq!(selection.normalized(), ((2, 8), (11, 9)));
+
+        // The input grew by two rows, so the transcript now ends at row 7.
+        let shrunk = ratatui::layout::Rect { height: 3, ..AREA };
+        assert_eq!(
+            selection.clipped_to(shrunk).normalized(),
+            ((2, 7), (11, 7)),
+            "the selection kept rows the transcript no longer has"
+        );
+
+        // A drag is left alone: it covers the cells it covers.
+        let dragged = TextSelection::dragged((0, 1), (5, 9));
+        assert_eq!(
+            dragged.clipped_to(shrunk).normalized(),
+            ((0, 1), (5, 9)),
+            "a drag was trimmed to a transcript it never belonged to"
+        );
+    }
+
+    /// A transcript with no rows has nothing to select, so a keyboard
+    /// selection collapses to nothing rather than clamping onto one cell that
+    /// would still be painted.
+    #[test]
+    fn a_selection_in_an_empty_transcript_copies_nothing() {
+        let mut selection = TextSelection::keyboard_origin(AREA);
+        selection.extend_all(AREA);
+        let gone = ratatui::layout::Rect {
+            width: 0,
+            height: 0,
+            ..AREA
+        };
+        let clipped = selection.clipped_to(gone);
+        assert!(clipped.is_empty(), "{clipped:?}");
+    }
+
+    /// Opening a pane beside the transcript narrows it, and a keyboard
+    /// selection stops at the narrowed right edge rather than copying the
+    /// first cells of the pane next door.
+    #[test]
+    fn a_keyboard_selection_stops_at_the_narrowed_right_edge() {
+        let mut selection = TextSelection::keyboard_origin(AREA);
+        selection.extend_up(AREA);
+        assert_eq!(selection.normalized(), ((2, 8), (11, 9)));
+
+        // A split takes the right half: the transcript is now 2..=5.
+        let narrowed = ratatui::layout::Rect { width: 4, ..AREA };
+        assert_eq!(
+            selection.clipped_to(narrowed).normalized(),
+            ((2, 8), (5, 9)),
+            "the selection still names columns of the pane that moved in"
+        );
     }
 
     #[test]
