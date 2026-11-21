@@ -69,7 +69,11 @@ async fn respond(socket: &mut TcpStream) {
 
 /// Run a headless session whose settings file records `output_style`, and
 /// return every request body the provider saw.
-fn run_with_persisted_style(cwd: &Path, base_url: &str) -> std::process::Output {
+fn run_with_persisted_style(
+    cwd: &Path,
+    base_url: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
     let config_home = tempfile::tempdir().expect("config home");
     std::fs::write(
         config_home.path().join("settings.json"),
@@ -78,7 +82,9 @@ fn run_with_persisted_style(cwd: &Path, base_url: &str) -> std::process::Output 
     .expect("seed config");
 
     Command::new(env!("CARGO_BIN_EXE_codape"))
-        .args(["-p", "hi"])
+        .args(["-p"])
+        .args(extra_args)
+        .arg("hi")
         .current_dir(cwd)
         .env("ANTHROPIC_API_KEY", "test")
         .env("ANTHROPIC_BASE_URL", base_url)
@@ -118,7 +124,7 @@ async fn a_persisted_style_reaches_a_headless_run() {
 
     let server = tokio::spawn(serve_until_idle(listener));
     let output =
-        tokio::task::spawn_blocking(move || run_with_persisted_style(dir.path(), &base_url))
+        tokio::task::spawn_blocking(move || run_with_persisted_style(dir.path(), &base_url, &[]))
             .await
             .expect("join");
 
@@ -137,5 +143,49 @@ async fn a_persisted_style_reaches_a_headless_run() {
     assert!(
         text.contains("Operating mode: non-interactive"),
         "the headless operating note was lost: {text}"
+    );
+}
+
+/// `--append-system-prompt` is a request for the run in front of the person,
+/// so it outranks a persisted style. Headless folds the flag into the user
+/// prompt rather than the append slot, which is why the precedence is decided
+/// by the caller — a guard inside the repl would never see it.
+#[tokio::test]
+async fn an_explicit_append_flag_outranks_the_persisted_style_headless() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+    let dir = tempfile::tempdir().expect("workspace");
+
+    let server = tokio::spawn(serve_until_idle(listener));
+    let output = tokio::task::spawn_blocking(move || {
+        run_with_persisted_style(
+            dir.path(),
+            &base_url,
+            &["--append-system-prompt", "RUN-SPECIFIC-MARKER"],
+        )
+    })
+    .await
+    .expect("join");
+
+    let bodies = server.await.expect("server task");
+    assert!(
+        output.status.success(),
+        "codape failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = serde_json::to_string(&bodies).expect("bodies");
+    assert!(
+        text.contains("RUN-SPECIFIC-MARKER"),
+        "the flag text is missing: {text}"
+    );
+    assert!(
+        !text.contains("explain the reasoning behind non-obvious decisions"),
+        "the persisted style was applied over an explicit flag: {text}"
+    );
+    assert!(
+        text.contains("Operating mode: non-interactive"),
+        "the operating note was lost: {text}"
     );
 }
