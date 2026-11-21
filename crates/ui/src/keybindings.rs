@@ -75,6 +75,19 @@ impl Context {
         }
     }
 
+    /// Whether a chord may be bound in this context.
+    ///
+    /// A chord needs somewhere to hold its first half between presses, and the
+    /// only such place is the session's `ChordTracker` — fed by the Chat
+    /// dispatch in `handle_key_event`. Every other context resolves one key at
+    /// a time, so a chord there would be stored, printed by `/keybindings`,
+    /// and then never fire. `Global` is chorded because the Chat dispatch
+    /// checks it first.
+    #[must_use]
+    pub const fn is_chorded(self) -> bool {
+        matches!(self, Self::Global | Self::Chat)
+    }
+
     /// Parse a context name from a file.
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
@@ -1392,6 +1405,21 @@ impl KeyBindings {
             ));
             return;
         }
+        // A chord needs a tracker to hold its first half, and only the Chat
+        // dispatch (through `handle_key_event`) has one. Every other context
+        // asks `resolve`, which cannot be given a second keystroke: it would
+        // answer the first half with `None` forever. Loading it would put a
+        // binding in the table that never fires, so it is refused here, in the
+        // same place a chord that can never complete is.
+        if chord.len() > 1 && !context.is_chorded() {
+            notes.push(format!(
+                "{}: {} cannot be chorded — only the Chat context has a tracker \
+                 to hold its first half, so bind a single keystroke here",
+                context.as_str(),
+                chord.display()
+            ));
+            return;
+        }
         match value {
             serde_json::Value::Null => {
                 let removed = self.unbind(context, chord.clone());
@@ -1791,6 +1819,70 @@ mod tests {
         // The only note is the prefix warning the next test pins: `ctrl+x`
         // alone is the editor's, so the chord takes its first half.
         assert_eq!(loaded.notes.len(), 1, "{:?}", loaded.notes);
+    }
+
+    /// A chord in a context with no tracker is refused instead of loaded dead.
+    ///
+    /// Only `handle_key_event`'s Chat dispatch feeds presses through
+    /// `ChordTracker`. Every other context — `Confirmation`, `PermissionDialog`,
+    /// `Autocomplete`, `FileMention`, `HistorySearch`, `List` — asks
+    /// [`KeyBindings::resolve`] for one keystroke, and that answers `None` for
+    /// a chord's first half because it is a prefix, not a binding. Loaded, the
+    /// binding would look fine in `/keybindings` and never fire once.
+    ///
+    /// `ctrl+x ctrl+e` is deliberately typed with a first half that is *also*
+    /// unbound in `Confirmation`: the point is that the chord is refused, not
+    /// that it shadowed something.
+    #[test]
+    fn a_chord_in_a_context_without_a_tracker_is_refused() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Confirmation",
+                "bindings": { "ctrl+x ctrl+e": "confirm:yes" }
+            }]),
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("cannot be chorded")),
+            "a chord no tracker can complete was accepted: {notes:?}"
+        );
+        // Nothing was bound, so the defaults stay and no half of the chord
+        // reaches the field.
+        assert_eq!(
+            bindings.strokes(Action::ConfirmYes),
+            KeyBindings::default().strokes(Action::ConfirmYes)
+        );
+        assert!(
+            bindings
+                .table()
+                .iter()
+                .all(|(_, chords)| chords.iter().all(|c| !c.contains(' '))),
+            "the refused chord reached the table: {:?}",
+            bindings.table()
+        );
+    }
+
+    /// A one-keystroke binding in a trackerless context still works, so the
+    /// refusal above is about chords and not about the context.
+    #[test]
+    fn a_single_keystroke_in_a_context_without_a_tracker_is_still_bound() {
+        let mut bindings = KeyBindings::default();
+        let notes = apply(
+            &mut bindings,
+            serde_json::json!([{
+                "context": "Confirmation",
+                "bindings": { "ctrl+y": "confirm:yes" }
+            }]),
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            bindings.resolve(
+                Context::Confirmation,
+                &key(KeyCode::Char('y'), KeyModifiers::CONTROL)
+            ),
+            Some(Action::ConfirmYes)
+        );
     }
 
     /// The longer chord takes the first key away from whatever held it, and
