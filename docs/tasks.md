@@ -856,7 +856,7 @@
 
 ### 13.6 UI 增强功能 (crate: `ui`)
 - [x] 键绑定可配置 — `ui::keybindings` 持有动作表、键位解析和合并逻辑;`keybindings.json`(配置目录,然后 `.codape/`)可以移动绑定,`null` 解除绑定,保留键、未知动作/上下文、拼错的修饰键逐个报错但不影响启动。`repl.rs` 只通过 `KeyBindings::resolve` 查表,不再散落字面量按键比较;`/keybindings` 打印当前表、来源文件与问题列表。(更早的一份 `ui::keybindings` 是无人使用的死表,已删除;现在的这份由 REPL 真正读取。)
-- [x] 键位支持 chord — 绑定值可以是空格分隔的一串按键（`"ctrl+k ctrl+s"`），表里存 `Chord` 而不是单个 `KeyStroke`；`KeyStroke::parse` 仍拒绝空格，但会指向 `Chord::parse`。`ChordTracker` 在首键上**挂起**不动作，下一键到来时解析整个前缀；`CHORD_TIMEOUT`（1.5 s）内没等到后半就把首键按它单独的含义重放，所以 `ctrl+x` 仍能开编辑器。含保留键的 chord 在加载时被拒绝（永远无法完成），长 chord 抢走某键前缀时加载器会点名那条绑定。
+- [x] 键位支持 chord — 绑定值可以是空格分隔的一串按键（`"ctrl+k ctrl+s"`），表里存 `Chord` 而不是单个 `KeyStroke`；`KeyStroke::parse` 仍拒绝空格，但会指向 `Chord::parse`。`ChordTracker` 在首键上**挂起**不动作，下一键到来时解析整个前缀；`CHORD_TIMEOUT`（1.5 s）内没等到后半就把首键按它单独的含义重放，所以 `ctrl+x` 仍能开编辑器。含保留键的 chord 在加载时被拒绝（永远无法完成），长 chord 抢走某键前缀时加载器会点名那条绑定。chord 只在 `Global`/`Chat` 两个上下文有效——只有 Chat 的派发喂了 `ChordTracker`，其余六个上下文一次只解析一个按键，写在那里的 chord 加载时就被拒绝并说明原因，而不是变成一条永远不触发的绑定
 - [x] 实现搜索高亮（终端内文本搜索、匹配结果高亮显示）
 - [x] 实现消息选择器（多消息选择、用于 copy/export）
 - [x] 补齐可交互的面板 — 一个 `Picker`(`ui::picker`)承担六种「可按类型筛选的列表」:agents 名册(`ctrl+g`)、rewind 选点(`alt+r`)、主题(`ctrl+y`)、插件与 marketplace(`alt+p`)、附件浏览器(`alt+v`)、本工作区的历史会话(`alt+s`);帮助页(`alt+h`,`ui::help`)由按键表生成而不是手写;transcript 全屏(`ctrl+t`)是布局开关而不是视图模式,footer 文本由 session 按当前键表写入;diff 面板用 `alt+up`/`alt+down` 在 `diff --git` 文件头之间跳转。`/rewind`、`/theme`、`/plugin`、`/resume` 的无参数形式打开同一个列表,命令与按键不再各有一套界面。
