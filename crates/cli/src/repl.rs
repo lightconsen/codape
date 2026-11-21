@@ -50,6 +50,19 @@ struct SessionEffects {
     prompt_profiles: Vec<PromptProfile>,
     /// Additional system prompt text appended by commands.
     append_system_prompt: Option<String>,
+    /// A note the session owes the model every turn — the headless operating
+    /// note is the only writer. Kept apart from `append_system_prompt` so a
+    /// later `/style` cannot erase it and so the order is deterministic.
+    system_note: Option<String>,
+    /// The output style's prompt text, kept apart from the append slot.
+    ///
+    /// `/style` used to assign `append_system_prompt`, which meant applying a
+    /// style mid-session erased whatever was there: a `--append-system-prompt`
+    /// flag, or the headless operating note. They are independent requests —
+    /// a style is a preference, the flag is this run's instruction, the note
+    /// is how a non-interactive run must behave — so they get their own slot
+    /// and are joined at submit time instead of overwriting each other.
+    output_style_text: Option<String>,
     /// Full system prompt override (replaces base prompt).
     override_system_prompt: Option<String>,
     /// Allowed tools override (None = use defaults).
@@ -4595,8 +4608,8 @@ impl ReplLoop {
     /// The list is what the model is told about: a skill nobody names is a
     /// tool the model only calls by guessing, and a guess that misses costs a
     /// round trip to learn what was available all along. Kept here rather than
-    /// folded into `append_system_prompt` so `/style` and a mode command
-    /// cannot overwrite it by assignment.
+    /// folded into `append_system_prompt` because it answers "what did this
+    /// session discover" — per-turn information, rendered at submit time.
     pub fn with_skills(&mut self, skills: Vec<codape_plugins::skills::Skill>) {
         self.skills = skills;
     }
@@ -4796,10 +4809,13 @@ impl ReplLoop {
     /// Apply the output style `settings.json` recorded, as the run's default.
     ///
     /// Called after the plugin components are installed, because a style name
-    /// may be one a plugin contributes. It sets `append_system_prompt` only
-    /// when nothing else has: `--append-system-prompt` is an explicit request
-    /// for this run and outranks a persisted preference, the same precedence
-    /// `-m` has over a `model` in settings.
+    /// may be one a plugin contributes. It fills its own slot, so it cannot
+    /// displace a `--append-system-prompt` for this run; that flag outranks
+    /// the style, the same precedence `-m` has over a `model` in settings, and
+    /// the caller decides it (see `configure_repl`) because only there is a
+    /// headless run's flag visible — headless folds the flag into the user
+    /// prompt instead of the append slot, so the guard that lives here would
+    /// never see it.
     ///
     /// A name that resolves to nothing is dropped rather than reported: the
     /// session is starting, the person is not looking at a command's output,
@@ -4810,27 +4826,51 @@ impl ReplLoop {
         let Some(name) = style_name else {
             return;
         };
-        if self.session.effects.append_system_prompt.is_some() {
-            return;
-        }
         if let Some(prompt) = self.output_style_prompt(&name) {
-            self.session.effects.append_system_prompt = Some(prompt);
+            self.session.effects.output_style_text = Some(prompt);
         }
     }
 
-    /// Add text to the end of the appended system prompt.
+    /// Add a note the session owes the model on every turn.
     ///
-    /// Used for a note the session owes the model regardless of what else is
-    /// there — the headless operating note is the only caller today. It
-    /// appends rather than assigns so it cannot displace a persisted output
-    /// style that was applied first, which is a person's preference and not
-    /// this run's business to drop.
+    /// Used for the headless operating note. It has its own slot rather than
+    /// sharing `append_system_prompt`: a `/style` typed during the run assigns
+    /// that slot, and before this it erased the note, silently dropping a
+    /// non-interactive run's "do not ask the user" instruction.
     pub fn with_system_note(&mut self, note: String) {
-        self.session.effects.append_system_prompt =
-            Some(match self.session.effects.append_system_prompt.take() {
-                Some(existing) => format!("{existing}\n\n{note}"),
-                None => note,
-            });
+        self.session.effects.system_note = Some(match self.session.effects.system_note.take() {
+            Some(existing) => format!("{existing}\n\n{note}"),
+            None => note,
+        });
+    }
+
+    /// The system prompt additions from every source, in the order they are
+    /// owed: an explicit flag or command first, then the output style, then
+    /// the note.
+    ///
+    /// The three used to share one slot, so whichever was applied last won —
+    /// `/style` mid-session discarded an `--append-system-prompt`, and the
+    /// headless note discarded a persisted style. Joining them here is what
+    /// makes "independent" true rather than a comment.
+    fn composed_append_prompt(&self) -> Option<String> {
+        let parts = [
+            self.session.effects.append_system_prompt.as_deref(),
+            self.session.effects.output_style_text.as_deref(),
+            self.session.effects.system_note.as_deref(),
+        ]
+        .into_iter()
+        .flatten();
+        let mut composed: Option<String> = None;
+        for part in parts {
+            match composed.as_mut() {
+                Some(text) => {
+                    text.push_str("\n\n");
+                    text.push_str(part);
+                }
+                None => composed = Some(part.to_string()),
+            }
+        }
+        composed
     }
 
     /// The prompt text a style name stands for, plugin copy first.
@@ -4887,14 +4927,17 @@ impl ReplLoop {
         self.session.effects.append_system_prompt = prompt;
     }
 
-    /// Test accessor for the two system-prompt effects.
+    /// The system-prompt effects, as the request will carry them.
     ///
-    /// Returns `(replacement, appended)`.
+    /// Returns `(replacement, appended)`. The appended side is the composed
+    /// text — flag/command, style, then note — because that is what a turn
+    /// actually sends; reporting only one slot would let a test pass on a
+    /// combination the provider never sees.
     #[cfg(test)]
-    pub(crate) fn system_prompt_effects_for_test(&self) -> (Option<&str>, Option<&str>) {
+    pub(crate) fn system_prompt_effects_for_test(&self) -> (Option<&str>, Option<String>) {
         (
             self.session.effects.override_system_prompt.as_deref(),
-            self.session.effects.append_system_prompt.as_deref(),
+            self.composed_append_prompt(),
         )
     }
 
@@ -11418,7 +11461,7 @@ impl ReplLoop {
             user_prompt: String::new(), // filled at submit time
             // If override is set, it replaces the base prompt; otherwise None
             custom_system_prompt: self.session.effects.override_system_prompt.clone(),
-            append_system_prompt: self.session.effects.append_system_prompt.clone(),
+            append_system_prompt: self.composed_append_prompt(),
             prompt_profile: self
                 .session
                 .effects
@@ -11455,8 +11498,8 @@ impl ReplLoop {
                     &self.session.effects.prompt_profiles,
                 ));
             }
-            if let Some(ref prompt) = self.session.effects.append_system_prompt {
-                opts.append_system_prompt = Some(prompt.clone());
+            if let Some(prompt) = self.composed_append_prompt() {
+                opts.append_system_prompt = Some(prompt);
             }
             if let Some(ref tools) = self.session.effects.allowed_tools_override {
                 opts.allowed_tools_override = Some(tools.clone());
@@ -11469,9 +11512,9 @@ impl ReplLoop {
         };
 
         // Name the skills this session found. The advert rides on the
-        // per-turn append rather than on `SessionEffects` so that `/style`,
-        // which assigns to `append_system_prompt`, cannot drop it, and so a
-        // skill found at startup still reaches a turn submitted through the
+        // per-turn append rather than on `SessionEffects` because it answers
+        // "what did this session discover", which is not session state, and so
+        // a skill found at startup still reaches a turn submitted through the
         // orchestrator path. `render_skill_adverts` returns an empty string
         // when there is nothing to say, which leaves the prompt untouched.
         let adverts = codape_plugins::skills::render_skill_adverts(&self.skills);
@@ -15171,8 +15214,10 @@ impl ReplLoop {
 
     /// `/style [name]` — list or apply an output style.
     ///
-    /// An output style is assigned to `append_system_prompt`, so the style's
-    /// instructions are added to the base prompt rather than replacing it.
+    /// The style's text goes into its own `output_style_text` slot and is
+    /// joined with the other append sources at submit time, so applying one
+    /// adds to the base prompt without erasing a `--append-system-prompt` or
+    /// the headless operating note.
     /// Values may be a string or an object with `prompt`/`content`/`text`.
     /// A plugin style is consulted first; the built-ins in
     /// [`crate::output_styles`] are the fallback, which is what makes `/style`
@@ -15223,7 +15268,7 @@ impl ReplLoop {
         let Some(prompt) = self.output_style_prompt(&canonical) else {
             return format!("Output style '{canonical}' has no prompt text.");
         };
-        self.session.effects.append_system_prompt = Some(prompt);
+        self.session.effects.output_style_text = Some(prompt);
         let persisted = Self::persist_output_style_at(&canonical, settings_path);
         let built_in = crate::output_styles::built_in(&canonical).is_some();
         format!(
@@ -22213,9 +22258,9 @@ mod tests {
         let prompt = repl
             .session
             .effects
-            .append_system_prompt
+            .output_style_text
             .clone()
-            .expect("no prompt was appended");
+            .expect("no prompt was applied");
         assert_eq!(
             prompt,
             crate::output_styles::built_in("explanatory")
@@ -22223,11 +22268,11 @@ mod tests {
                 .prompt
         );
 
-        // An unknown name lists what is available rather than appending.
-        repl.session.effects.append_system_prompt = None;
+        // An unknown name lists what is available rather than applying.
+        repl.session.effects.output_style_text = None;
         let unknown = repl.handle_output_style_command_at(&["nope".to_string()], &settings);
         assert!(unknown.contains("No output style named"), "{unknown}");
-        assert!(repl.session.effects.append_system_prompt.is_none());
+        assert!(repl.session.effects.output_style_text.is_none());
     }
 
     #[test]
@@ -22243,7 +22288,7 @@ mod tests {
         let applied = repl.handle_output_style_command_at(&["default".to_string()], &settings);
         assert!(applied.contains("applied"), "{applied}");
         assert_eq!(
-            repl.session.effects.append_system_prompt.as_deref(),
+            repl.session.effects.output_style_text.as_deref(),
             Some("plugin prompt"),
             "the built-in replaced the plugin's copy"
         );
@@ -22335,49 +22380,58 @@ mod tests {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_startup_output_style(Some("learning".to_string()));
         assert_eq!(
-            repl.session.effects.append_system_prompt.as_deref(),
+            repl.session.effects.output_style_text.as_deref(),
             crate::output_styles::built_in("learning").map(|style| style.prompt),
             "the persisted style did not reach the system prompt"
         );
     }
 
+    /// A style and a `--append-system-prompt` are independent, so both reach
+    /// the turn. The precedence between them is the caller's decision, not a
+    /// property of the storage: `/style` typed mid-session applies regardless.
     #[test]
-    fn an_explicit_append_prompt_outranks_the_persisted_style() {
+    fn a_style_and_an_append_flag_both_reach_the_request() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
-        repl.with_append_system_prompt(Some("--append-system-prompt wins".into()));
+        repl.with_append_system_prompt(Some("--append-system-prompt text".into()));
         repl.with_startup_output_style(Some("learning".to_string()));
-        assert_eq!(
-            repl.session.effects.append_system_prompt.as_deref(),
-            Some("--append-system-prompt wins")
+
+        let composed = repl.composed_append_prompt().expect("nothing composed");
+        let style = crate::output_styles::built_in("learning")
+            .map(|style| style.prompt)
+            .expect("learning is a built-in");
+        assert!(
+            composed.starts_with("--append-system-prompt text"),
+            "the explicit flag must come first: {composed}"
+        );
+        assert!(
+            composed.contains(style),
+            "the style was dropped: {composed}"
         );
     }
 
     /// A style a plugin has since removed is the ordinary way a persisted name
-    /// stops resolving. The session starts with no append text rather than
-    /// with a broken one, and nothing is reported.
+    /// stops resolving. The session starts with no style text rather than with
+    /// a broken one, and nothing is reported.
     #[test]
     fn a_persisted_style_that_no_longer_resolves_is_dropped() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_startup_output_style(Some("a-plugin-that-was-uninstalled".to_string()));
-        assert!(repl.session.effects.append_system_prompt.is_none());
+        assert!(repl.session.effects.output_style_text.is_none());
     }
 
     /// Headless used to assign the operating note to the append slot *before*
     /// the persisted style was applied, so the guard in
     /// `with_startup_output_style` saw a value and dropped the style on every
-    /// non-interactive run. The note is now appended afterwards, which keeps
-    /// both.
+    /// non-interactive run. The two now live in separate slots and are joined
+    /// at submit time.
     #[test]
-    fn a_system_note_appends_after_the_startup_style() {
+    fn a_system_note_and_a_style_both_reach_the_request() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_startup_output_style(Some("learning".to_string()));
         repl.with_system_note("Operating mode: non-interactive.".to_string());
 
         let text = repl
-            .session
-            .effects
-            .append_system_prompt
-            .as_deref()
+            .composed_append_prompt()
             .expect("neither the style nor the note survived");
         assert!(
             text.starts_with(
@@ -22393,14 +22447,39 @@ mod tests {
         );
     }
 
-    /// With no style to keep, the note is the whole appended prompt — and it
-    /// must not arrive wrapped in a separator.
+    /// `/style` typed mid-session used to assign the append slot, erasing an
+    /// `--append-system-prompt` the run had been started with.
+    #[test]
+    fn applying_a_style_mid_session_keeps_the_append_flag() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = tmp.path().join("settings.json");
+        let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
+        repl.with_append_system_prompt(Some("EXPLICIT-FLAG-TEXT".into()));
+        repl.handle_output_style_command_at(&["learning".to_string()], &settings);
+
+        let composed = repl.composed_append_prompt().expect("nothing composed");
+        assert!(
+            composed.contains("EXPLICIT-FLAG-TEXT"),
+            "the explicit flag was erased by /style: {composed}"
+        );
+        assert!(
+            composed.contains(
+                crate::output_styles::built_in("learning")
+                    .map(|style| style.prompt)
+                    .expect("learning is a built-in")
+            ),
+            "the style was not applied: {composed}"
+        );
+    }
+
+    /// With nothing else to keep, the note is the whole appended prompt — and
+    /// it must not arrive wrapped in a separator.
     #[test]
     fn a_system_note_alone_is_the_whole_appended_prompt() {
         let mut repl = ReplLoop::new("/tmp".into(), ModelId::sonnet());
         repl.with_system_note("Operating mode: non-interactive.".to_string());
         assert_eq!(
-            repl.session.effects.append_system_prompt.as_deref(),
+            repl.composed_append_prompt().as_deref(),
             Some("Operating mode: non-interactive.")
         );
     }

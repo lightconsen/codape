@@ -251,9 +251,15 @@ applied, which is the same rule `/style` follows when it is typed. An explicit
 `--append-system-prompt` outranks the persisted value, because that flag is a
 request for this run.
 
-Both modes apply it. A headless run (`-p`) adds the operating note — the
-"non-interactive, do not ask" paragraph — to the same appended text, after the
-style rather than in place of it, so the two arrive together.
+Both modes apply it. The style's text occupies its own slot in the session,
+separate from the appended prompt, and the three sources are joined in a fixed
+order at submit time: an explicit `--append-system-prompt` (or one a command
+added), then the style, then the session note. Keeping them apart is what makes
+them additive: applying a style mid-session used to overwrite the append slot
+outright, discarding the flag, and a headless run's operating note — the
+"non-interactive, do not ask" paragraph — used to fill that slot before the
+style was applied, so a persisted style was silently dropped on every `-p`
+run.
 
 The write is a read-modify-write of the whole document, so a style change does
 not drop the file's other keys. `output_style` is in `KNOWN_SETTINGS_FIELDS`

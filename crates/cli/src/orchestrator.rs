@@ -3050,12 +3050,17 @@ impl StartupOrchestrator {
             self.configure_plugin_components(repl, manager);
         }
         // After the plugin components, because the persisted style may be one
-        // a plugin contributes. It declines to overwrite an explicit
-        // `--append-system-prompt`, which is a request for this run and
-        // outranks a persisted preference. Interactive hands the flag to the
-        // repl, where that guard sees it; headless folds the flag into the
-        // user prompt instead, so the slot stays empty and the precedence has
-        // to be applied here.
+        // a plugin contributes. An explicit `--append-system-prompt` is a
+        // request for this run and outranks a persisted preference — the same
+        // precedence `-m` has over a `model` in settings — so the style is not
+        // applied at all when that flag is given.
+        //
+        // The check lives here rather than in `with_startup_output_style`
+        // because only this caller can see both modes' flags: headless folds
+        // `--append-system-prompt` into the user prompt instead of the append
+        // slot, so a guard inside the repl would never fire for it. A `/style`
+        // typed during the run still applies, because there the person asked
+        // for it directly.
         let output_style = if self.ctx.append_system_prompt.is_some() {
             None
         } else {
@@ -3069,10 +3074,10 @@ impl StartupOrchestrator {
             // The user's prompt flags are folded into the headless prompt;
             // the operating note goes on the system prompt instead, so the
             // model cannot read it as an optional part of the task prose. It
-            // is appended after the style rather than assigned in the branch
-            // above, because assigning there filled the slot
-            // `with_startup_output_style` checks and the persisted style was
-            // silently dropped on every headless run.
+            // is appended to whatever is already there, which used to be the
+            // persisted style's slot: assigning here filled it before
+            // `with_startup_output_style` ran, and the style was silently
+            // dropped on every headless run.
             repl.with_system_note(Self::HEADLESS_OPERATING_NOTE.to_string());
         }
         repl.with_explicit_model_override(self.ctx.model_explicit);
@@ -6236,7 +6241,7 @@ mod tests {
 
         let (_, appended) = repl.system_prompt_effects_for_test();
         assert_eq!(
-            appended,
+            appended.as_deref(),
             crate::output_styles::built_in("learning").map(|style| style.prompt)
         );
     }
@@ -6252,7 +6257,7 @@ mod tests {
 
         let (replacement, appended) = repl.system_prompt_effects_for_test();
         assert_eq!(replacement, Some("replace the base"));
-        assert_eq!(appended, Some("add this"));
+        assert_eq!(appended.as_deref(), Some("add this"));
     }
 
     #[test]
@@ -6268,7 +6273,7 @@ mod tests {
             replacement.is_none(),
             "an append flag alone must not replace the base prompt"
         );
-        assert_eq!(appended, Some("only additive"));
+        assert_eq!(appended.as_deref(), Some("only additive"));
     }
 
     #[test]
