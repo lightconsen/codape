@@ -443,7 +443,13 @@ gitignored.
   while `usage`/`total_cost_usd` are *session* totals at the moment the frame
   was written and the **last** one carrying them is the whole run. This is what
   turns "Codape is slower" into "2 312 s waiting on the provider, 187 s in
-  tools". A binary older than `v0.2.2` reports none of it, and the runners then
+  tools". `duration_ms` also covers context building, hooks, compaction and the
+  gaps between turns, and that remainder is not small: measured against the
+  static provider a two-turn tool run spent 14 ms on the provider, 33 ms in the
+  tool and 41 ms in neither. The SWE-bench summary prints it as `other` and
+  `summary.json` carries it as `timing.unattributed_ms`, so a reader comparing
+  two of the three does not mistake a minority for the whole. A binary older
+  than `v0.2.2` reports none of it, and the runners then
   print `unavailable` rather than inventing numbers.
 - **Scored vs. pass@1.** Terminal-Bench reports both: `accuracy` is
   resolved/attempted, the harness definition, while `scored` excludes trials

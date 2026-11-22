@@ -458,6 +458,16 @@ transcript carried them, with the count of such trials. `duration_ms` is larger
 than the two sums together: it also covers context building, hooks, compaction
 and the gaps between turns, which are not attributable to either.
 
+That remainder is not a rounding term, and the SWE-bench summary prints it as
+`other` beside the two. Measured on 2026-11-22 against the local static
+provider, a tool-free turn spent 7 ms on the provider and 21 ms elsewhere; a
+two-turn turn that ran one `Bash` command spent 14 ms on the provider, 33 ms in
+the tool, and **41 ms in neither**. So `model=14s tools=33s` describes less than
+half of that run, and a reader comparing only those two would conclude the tools
+dominate. `other` is the term to look at first when a run is slower than its
+model and its tools account for — at roughly 20 ms per turn here it scales with
+the turn count, not with the work.
+
 ## SWE-bench run history
 
 The runner is exercised end-to-end, but only on named subsets. None of the

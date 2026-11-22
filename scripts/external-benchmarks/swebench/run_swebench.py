@@ -1295,10 +1295,38 @@ def summarize(
     # `recorded_instances` is how many that was, so a partial sum cannot read
     # as a whole-run figure.
     timed = [record for record in records if record.get("model_ms") is not None]
+    # The part of the run neither number covers: context building, hooks,
+    # compaction and the gaps between turns. It is not a remainder to be
+    # waved away — measured against the static provider, a two-turn tool run
+    # spent ~41 ms here against 14 ms waiting on the provider, so reporting
+    # only `model_ms` and `tool_ms` invites the reader to conclude the tools
+    # dominate when neither explains half the run. Summed only over records
+    # that carry all three, so a partially recorded instance cannot make the
+    # three disagree with the clock they came from.
+    accounted = [
+        record
+        for record in timed
+        if record.get("tool_ms") is not None and record.get("agent_duration_ms") is not None
+    ]
+
+    def _unattributed() -> int | None:
+        if not accounted:
+            return None
+        total = 0
+        for record in accounted:
+            turn = record["agent_duration_ms"]
+            spent = (record["model_ms"] or 0) + (record["tool_ms"] or 0)
+            # Saturating: more attributable time than wall clock would be a
+            # measurement bug, and a negative remainder would hide it inside
+            # a number that reads as a plausible figure.
+            total += max(turn - spent, 0)
+        return total
+
     timing = {
         "model_ms": sum(record.get("model_ms") or 0 for record in timed) if timed else None,
         "tool_ms": sum(record.get("tool_ms") or 0 for record in timed) if timed else None,
         "agent_duration_ms": sum(record.get("agent_duration_ms") or 0 for record in timed) if timed else None,
+        "unattributed_ms": _unattributed(),
         "num_turns": sum(record.get("num_turns") or 0 for record in timed) if timed else None,
         "recorded_instances": len(timed),
     }
@@ -1342,6 +1370,7 @@ def summarize(
         "notes": [
             "pass@1 is resolved trials / total trials over the official reports; with --n-attempts N that is the sum of N reports, and with one attempt it is the report's own counts.",
             "token_usage and timing are summed over the instances whose result frames carried them; null means the binary did not report it.",
+            "timing.unattributed_ms is agent_duration_ms minus model_ms and tool_ms, summed over instances that recorded all three: context building, hooks, compaction and inter-turn gaps. It is often the largest of the three.",
         ],
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -1378,10 +1407,19 @@ def print_summary(summary: dict[str, Any]) -> None:
         print(f"tokens/cost : {json.dumps(summary['token_usage'])}")
     timing = summary.get("timing") or {}
     if timing.get("model_ms") is not None:
+        unattributed = timing.get("unattributed_ms")
+        # Printed beside the two attributable figures, because on its own
+        # "model=14s tools=33s" reads as the whole story when more than half
+        # the run was neither.
         print(
             f"time        : model={timing['model_ms'] / 1000:.1f}s "
             f"tools={timing['tool_ms'] / 1000:.1f}s "
-            f"turns={timing['num_turns'] or 0} "
+            + (
+                f"other={unattributed / 1000:.1f}s "
+                if unattributed is not None
+                else ""
+            )
+            + f"turns={timing['num_turns'] or 0} "
             f"({timing['recorded_instances']} of {summary['total_instances']} {unit} recorded)"
         )
     else:
@@ -1398,7 +1436,8 @@ def print_summary(summary: dict[str, Any]) -> None:
         f"elapsed_sec={summary['total_elapsed_sec']:.1f} "
         f"tokens={'na' if summary['token_usage'] is None else 'present'} "
         f"model_sec={(timing['model_ms'] / 1000) if timing.get('model_ms') is not None else 'na'} "
-        f"tool_sec={(timing['tool_ms'] / 1000) if timing.get('tool_ms') is not None else 'na'}"
+        f"tool_sec={(timing['tool_ms'] / 1000) if timing.get('tool_ms') is not None else 'na'} "
+        f"other_sec={(timing['unattributed_ms'] / 1000) if timing.get('unattributed_ms') is not None else 'na'}"
     )
 
 

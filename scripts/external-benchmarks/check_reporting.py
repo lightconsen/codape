@@ -366,7 +366,6 @@ def check_swebench_attempt_aggregation(runner) -> None:
             len(summary["evaluation"]["attempts"]) == 2,
             "swe: each attempt's report must be listed in summary.json",
         )
-
         # One attempt must produce exactly what it produced before repeats
         # existed: resolved / total straight from the report.
         single = root / "single.json"
@@ -382,6 +381,79 @@ def check_swebench_attempt_aggregation(runner) -> None:
             one["pass_at_1"] is not None and abs(one["pass_at_1"] - 0.875) < 1e-9,
             f"swe: a single attempt must still be 21/24, got {one['pass_at_1']}",
         )
+        check_swebench_unattributed_time(runner, args, selected, root)
+
+
+def check_swebench_unattributed_time(runner, args_type, selected, root) -> None:
+    """The part of a run that is neither provider time nor tool time.
+
+    Measured against the static provider, a two-turn tool run spent ~41 ms
+    outside both figures against 14 ms waiting on the provider. A summary that
+    prints only `model_ms` and `tool_ms` therefore reports the smaller half of
+    the run and invites the reader to think the tools dominate. The remainder
+    is reported for the same reason `scored` is: a number a reader would
+    otherwise compute inconsistently.
+    """
+    del args_type
+    args = types.SimpleNamespace(
+        dataset="verified",
+        run_id="check",
+        model_name="model",
+        _dataset={"revision": "r", "repo": "o"},
+    )
+    # model 10 + tool 5 out of a 100 ms turn: 85 ms unattributed.
+    records = [
+        {
+            "instance_id": "A",
+            "model_ms": 10,
+            "tool_ms": 5,
+            "agent_duration_ms": 100,
+            "num_turns": 2,
+        }
+    ]
+    summary = runner.summarize(args, root, records, None, {}, root / "p.jsonl", selected)
+    timing = summary["timing"]
+    check(
+        timing["unattributed_ms"] == 85,
+        "swe: the time neither the provider nor the tools account for must be "
+        f"reported, got {timing.get('unattributed_ms')}",
+    )
+
+    # An instance missing the turn clock contributes nothing to the remainder,
+    # and one whose numbers exceed the clock cannot produce a negative figure
+    # that reads as a plausible measurement.
+    partial = [
+        {"instance_id": "A", "model_ms": 10, "tool_ms": 5, "num_turns": 2},
+        {
+            "instance_id": "B",
+            "model_ms": 90,
+            "tool_ms": 60,
+            "agent_duration_ms": 100,
+            "num_turns": 2,
+        },
+    ]
+    timing = runner.summarize(args, root, partial, None, {}, root / "p.jsonl", selected)["timing"]
+    check(
+        timing["unattributed_ms"] == 0,
+        "swe: attributable time greater than the turn clock must clamp at zero, got "
+        f"{timing.get('unattributed_ms')}",
+    )
+
+    # No turn clock anywhere: unavailable, not zero. Same rule as the other
+    # timing fields — a missing measurement is not a measured zero.
+    bare = runner.summarize(
+        args,
+        root,
+        [{"instance_id": "A", "model_ms": 10, "tool_ms": 5, "num_turns": 2}],
+        None,
+        {},
+        root / "p.jsonl",
+        selected,
+    )["timing"]
+    check(
+        bare["unattributed_ms"] is None,
+        f"swe: an unmeasured remainder must be None, got {bare.get('unattributed_ms')}",
+    )
 
 
 def check_programbench_runner() -> None:

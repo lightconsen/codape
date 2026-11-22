@@ -135,7 +135,11 @@ this run slow because the model was slow or because its tools were" — the
 question a benchmark is asking when two harnesses finish the same task in
 different wall clocks. They are subsets of `duration_ms`, not slices of it:
 context building, hooks, compaction and the gaps between turns belong to
-neither, so the two do not add up to the total. Where tool calls execute
+neither, so the two do not add up to the total. That is not a rounding gap: a
+two-turn turn measured against the local static provider spent 14 ms on the
+provider, 33 ms in its one tool, and 41 ms in neither, so the unattributed part
+was the largest of the three. The SWE-bench summary reports it as `other` for
+that reason. Where tool calls execute
 during the stream (`streaming_tool_execution`), the tool's time is removed
 from the stream's before it is counted as provider time, so the same seconds
 are not reported twice.
