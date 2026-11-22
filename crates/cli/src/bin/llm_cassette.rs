@@ -505,28 +505,46 @@ fn system_digest(system: Option<&serde_json::Value>) -> Option<String> {
 ///
 /// What remains is the instruction text: the static and dynamic blocks. A
 /// change there does change the digest, which is the change worth refusing.
+///
+/// The request now carries the snapshot as its own trailing block, so a
+/// recorded body drops that whole block; a body recorded before the split has
+/// it fused onto the end of the last block, and is truncated. Both shapes must
+/// reduce to the same bytes, or every existing recording would look stale the
+/// moment the split shipped.
 fn strip_system_context(system: &serde_json::Value) -> serde_json::Value {
-    const MARKER: &str = "\n\n## System Context\n\n";
-    let truncate = |text: &str| text.split(MARKER).next().unwrap_or(text).to_string();
+    let marker = codape_core::prompt::PromptCompiler::SYSTEM_CONTEXT_MARKER;
+    let body_marker = format!("\n\n{marker}");
+    let truncate = |text: &str| match text.find(&body_marker) {
+        Some(at) => text[..at].to_string(),
+        // A block that *starts* with the marker is the snapshot alone; strip
+        // it entirely. This is the split shape.
+        None if text.starts_with(marker) => String::new(),
+        None => text.to_string(),
+    };
     match system {
         serde_json::Value::String(text) => serde_json::Value::String(truncate(text)),
         serde_json::Value::Array(items) => {
-            let mut out = items.clone();
-            // The context is appended to the prompt, so only the last text
-            // block can carry it.
-            for item in out.iter_mut().rev() {
-                let Some(text) = item
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-                else {
-                    continue;
-                };
-                let truncated = truncate(&text);
-                if truncated.len() != text.len() {
-                    item["text"] = serde_json::Value::String(truncated);
-                }
-                break;
+            let mut out: Vec<serde_json::Value> = items
+                .iter()
+                .filter_map(|item| {
+                    let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
+                        return Some(item.clone());
+                    };
+                    let truncated = truncate(text);
+                    if truncated.is_empty() && text.starts_with(marker) {
+                        // The snapshot block contributes nothing to the digest.
+                        return None;
+                    }
+                    let mut item = item.clone();
+                    if truncated.len() != text.len() {
+                        item["text"] = serde_json::Value::String(truncated);
+                    }
+                    Some(item)
+                })
+                .collect();
+            if out.is_empty() {
+                // Nothing but a snapshot was recorded: the prompt is empty.
+                out.push(serde_json::json!({"type": "text", "text": ""}));
             }
             serde_json::Value::Array(out)
         }
@@ -1205,6 +1223,39 @@ mod tests {
             system_digest(Some(&with_context)),
             system_digest(Some(&without))
         );
+    }
+
+    /// A body recorded before the snapshot got its own block and one recorded
+    /// after must produce the same digest, or shipping the split would make
+    /// every existing cassette look stale and force a full re-record.
+    #[test]
+    fn the_split_and_fused_shapes_digest_the_same() {
+        let fused = serde_json::json!([{
+            "type": "text",
+            "text": "You are Codape.\n\n## System Context\n\nCurrent branch: `main`\n",
+        }]);
+        let split = serde_json::json!([
+            {"type": "text", "text": "You are Codape.", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "## System Context\n\nCurrent branch: `main`\n"},
+        ]);
+        assert_eq!(system_digest(Some(&fused)), system_digest(Some(&split)));
+
+        // A different branch is still ignored.
+        let other_branch = serde_json::json!([
+            {"type": "text", "text": "You are Codape.", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "## System Context\n\nCurrent branch: `feature`\n"},
+        ]);
+        assert_eq!(
+            system_digest(Some(&split)),
+            system_digest(Some(&other_branch))
+        );
+
+        // The instruction text is still compared.
+        let changed = serde_json::json!([
+            {"type": "text", "text": "You are Codape. Answer in French."},
+            {"type": "text", "text": "## System Context\n\nCurrent branch: `main`\n"},
+        ]);
+        assert_ne!(system_digest(Some(&split)), system_digest(Some(&changed)));
     }
 
     #[test]

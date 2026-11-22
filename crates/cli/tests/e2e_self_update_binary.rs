@@ -222,15 +222,63 @@ fn tarball(member: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn run_update(binary: &Path, server: &FakeServer, args: &[&str]) -> std::process::Output {
+    let config_home = tempfile::tempdir().expect("config home");
     Command::new(binary)
         .arg("update")
         .args(args)
         .env("CODAPE_API_BASE_URL", &server.base)
         .env("CODAPE_RELEASE_BASE_URL", server.asset_base())
         .env("CODAPE_DISABLE_UPDATE_CHECK", "1")
+        .env("CLAUDE_CONFIG_DIR", config_home.path())
         .env("CODAPE_LOG", "off")
         .output()
         .expect("run codape update")
+}
+
+/// The check-time marker belongs to the installation, not to a directory.
+///
+/// It used to be written to `<cwd>/.codape/.last_version_check`, so running
+/// `codape update` inside a repository created a `.codape/` there — and the
+/// next session's working-tree snapshot reported it as uncommitted work.
+#[test]
+fn update_records_its_check_time_outside_the_working_directory() {
+    let (tag_name, asset) = payload();
+    let release = FakeRelease::new("v99.0.0", &tag_name, asset);
+    let server = FakeServer::start(release);
+    let (_dir, binary) = copied_binary();
+    let worktree = tempfile::tempdir().expect("worktree");
+    let config_home = worktree.path().join("config-home");
+
+    // The switch is *not* set: this test is about the path the check writes.
+    let output = Command::new(&binary)
+        .arg("update")
+        .arg("--check")
+        .current_dir(worktree.path())
+        .env("CODAPE_API_BASE_URL", &server.base)
+        .env("CODAPE_RELEASE_BASE_URL", server.asset_base())
+        .env("CLAUDE_CONFIG_DIR", &config_home)
+        .env("CODAPE_LOG", "off")
+        .output()
+        .expect("run codape update");
+
+    assert!(
+        output.status.success(),
+        "update --check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written: Vec<_> = std::fs::read_dir(worktree.path())
+        .expect("read the worktree")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        written,
+        vec![std::ffi::OsString::from("config-home")],
+        "the working directory gained files other than the config home"
+    );
+    assert!(
+        config_home.join("last_version_check").exists(),
+        "the check time should be in the config home"
+    );
 }
 
 #[test]
