@@ -300,6 +300,8 @@ pub enum ToolTier {
 - Browser: `ChromeListTabsTool`, `ChromeNavigateTool`, `ChromeExecuteJsTool`, `ChromeScreenshotTool`, `ChromeGetContentTool`
 - Meta: `ToolSearchTool`, `EnterPlanModeTool`, `ExitPlanModeTool`
 
+**The tool listing is a wire format.** `all_descriptors()` sorts by name because the registry holds tools in `HashMap`s, whose iteration order is randomised per map instance — so the same 56 tools used to reach the provider in a different order on every run. Since `tools` is the first section of the prompt and hashed byte-exactly, a reordering invalidates the entire cached prefix: every fresh process, and so every `--resume`, paid for the whole conversation again. Sort at the source rather than at each caller so the model-facing listing, `ToolSearch` results, and the cassette layer all see one order.
+
 ### 6.2 Tool Execution Pipeline
 
 ```
