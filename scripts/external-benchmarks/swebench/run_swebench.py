@@ -1758,8 +1758,8 @@ def main(argv: list[str] | None = None) -> int:
 
         # Grade each attempt's predictions separately: the official harness keys
         # a file by instance_id, so a single file can hold one trial per
-        # instance. pass@1 is then the mean over attempts, which is the same
-        # definition as one attempt graded once.
+        # instance. `summarize` then adds the reports up as trials, which is the
+        # same quantity one attempt graded once produces.
         eval_dir = run_dir / "eval"
         report_dir = eval_dir / "reports"
         if not attempt_paths:
