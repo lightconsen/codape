@@ -32,7 +32,7 @@ ADAPTER_DIR = Path(__file__).resolve().parent
 TERMINAL_BENCH_VERSION = "0.2.18"
 TERMINAL_BENCH_PYTHON = "3.12"
 DATASET = "terminal-bench-core==0.1.1"
-CODAPE_VERSION = "v0.2.0"
+CODAPE_VERSION = "v0.2.2"
 ADAPTER_IMPORT_PATH = "codape_agent:CodapeAgent"
 CLAUDE_ADAPTER_IMPORT_PATH = "claude_agent:ClaudeAgent"
 CLAUDE_CODE_VERSION = "2.1.318"
@@ -40,6 +40,14 @@ CLAUDE_CODE_VERSION = "2.1.318"
 DEFAULT_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 200
 DEFAULT_N_CONCURRENT = 1
+DEFAULT_N_ATTEMPTS = 1
+
+# Harness outcomes that are not verdicts on the agent: the grading test never
+# produced one (it timed out, its own bootstrap died, or never parsed), or the
+# agent was never installed. `docs/terminal-bench.md` carries the same table.
+# Everything else — including `unknown_agent_error`, which is what a Codape
+# result frame reporting an error maps to — is a scored run.
+PLUMBING_FAILURE_MODES = {"test_timeout", "parse_error", "agent_installation_failed"}
 
 API_KEY_ENV = (
     "ANTHROPIC_API_KEY",
@@ -226,6 +234,8 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         args.run_id,
         "--n-concurrent",
         str(args.n_concurrent),
+        "--n-attempts",
+        str(args.n_attempts),
         "--agent-import-path",
         ADAPTER_IMPORT_PATH if args.agent == "codape" else CLAUDE_ADAPTER_IMPORT_PATH,
         "--agent-kwarg",
@@ -284,6 +294,7 @@ def dry_run(args: argparse.Namespace, cache_dir: Path, output_dir: Path) -> None
         print(f"adapter install: Claude Code {args.claude_version} (nvm + npm inside each task container)")
     if args.codape_binary:
         print(f"codape binary : {args.codape_binary}")
+    print(f"attempts       : {args.n_attempts} per task, {args.n_concurrent} concurrent")
     print(f"venv cache     : {venv_dir(cache_dir)}")
     print(f"output         : {output_dir / args.run_id}")
     print(f"results        : {output_dir / args.run_id / 'results.json'}")
@@ -334,27 +345,99 @@ def parse_results(path: Path) -> dict:
     return data
 
 
-def summarize_results(data: dict) -> dict:
+def read_trial_record(run_dir: Path, trial: dict) -> dict | None:
+    """Read the adapter's per-trial telemetry, if the adapter wrote one.
+
+    The harness's `results.json` carries tokens but not where a turn's time
+    went, and it cannot be extended from here. The adapter writes
+    `/logs/codape-run.json` inside the container, which the harness mounts to
+    `<task>/<trial>/sessions/`, so the file is on the host after the trial.
+    """
+    task_id = trial.get("task_id")
+    trial_name = trial.get("trial_name")
+    if not task_id or not trial_name:
+        return None
+    path = run_dir / str(task_id) / str(trial_name) / "sessions" / "codape-run.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def summarize_results(data: dict, run_dir: Path | None = None) -> dict:
     trials = data.get("results", [])
     resolved = [trial for trial in trials if trial.get("is_resolved")]
+    total = len(trials)
     input_tokens = sum(trial.get("total_input_tokens") or 0 for trial in trials)
     output_tokens = sum(trial.get("total_output_tokens") or 0 for trial in trials)
-    total = len(trials)
-    accuracy = len(resolved) / total if total else 0.0
     failure_modes = {
         str(trial.get("failure_mode"))
         for trial in trials
         if trial.get("failure_mode") not in (None, "none", "unset", "None")
     }
-    return {
+    # A plumbing failure is the harness or the task's own bootstrap failing, so
+    # the trial never produced a verdict on the agent. Counting those in the
+    # denominator makes a score depend on the network. `pass_at_1` stays the
+    # harness definition (resolved / attempted) so it is comparable with other
+    # published runs; `scored` and `scored_accuracy` are the honest pair.
+    scored_trials = [
+        trial for trial in trials if trial.get("failure_mode") not in PLUMBING_FAILURE_MODES
+    ]
+    plumbing = [
+        str(trial.get("failure_mode"))
+        for trial in trials
+        if trial.get("failure_mode") in PLUMBING_FAILURE_MODES
+    ]
+    summary = {
         "total": total,
         "resolved": len(resolved),
-        "accuracy": accuracy,
+        "accuracy": len(resolved) / total if total else 0.0,
+        "scored": len(scored_trials),
+        "scored_resolved": sum(1 for trial in scored_trials if trial.get("is_resolved")),
+        "scored_accuracy": (
+            sum(1 for trial in scored_trials if trial.get("is_resolved")) / len(scored_trials)
+            if scored_trials
+            else None
+        ),
+        "plumbing_failures": sorted(plumbing),
         "resolved_ids": [trial.get("task_id") for trial in resolved],
         "failure_modes": sorted(failure_modes),
         "input_tokens": input_tokens or None,
         "output_tokens": output_tokens or None,
     }
+    if run_dir is None:
+        return summary
+    records = [
+        record
+        for trial in trials
+        if (record := read_trial_record(run_dir, trial)) is not None
+    ]
+    summary["timing_records"] = len(records)
+
+    def total_of(key: str) -> int | None:
+        values = [record.get(key) for record in records if record.get(key) is not None]
+        return sum(int(value) for value in values) if values else None
+
+    def usage_of(key: str) -> int | None:
+        values = [
+            (record.get("usage") or {}).get(key)
+            for record in records
+            if (record.get("usage") or {}).get(key) is not None
+        ]
+        return sum(int(value) for value in values) if values else None
+
+    summary["model_ms"] = total_of("model_ms")
+    summary["tool_ms"] = total_of("tool_ms")
+    summary["duration_ms"] = total_of("duration_ms")
+    summary["num_turns"] = total_of("num_turns")
+    summary["input_tokens_stream"] = usage_of("input_tokens")
+    summary["output_tokens_stream"] = usage_of("output_tokens")
+    summary["cache_read_input_tokens"] = usage_of("cache_read_input_tokens")
+    summary["cache_creation_input_tokens"] = usage_of("cache_creation_input_tokens")
+    costs = [record.get("total_cost_usd") for record in records if record.get("total_cost_usd") is not None]
+    summary["total_cost_usd"] = sum(costs) if costs else None
+    summary["priced_instances"] = len(costs)
+    return summary
 
 
 def positive_int(value: str) -> int:
@@ -443,7 +526,15 @@ Notes:
         "a slow link can exceed it and score a correct answer as test_timeout "
         "(default: the task's own value)",
     )
-    parser.add_argument("--n-concurrent", type=positive_int, default=DEFAULT_N_CONCURRENT, help=f"Concurrent tasks (default: {DEFAULT_N_CONCURRENT})")
+    parser.add_argument("--n-concurrent", type=positive_int, default=DEFAULT_N_CONCURRENT, help=f"Concurrent tasks (default: {DEFAULT_N_CONCURRENT}; each trial holds a container, so raise it only as far as RAM allows)")
+    parser.add_argument(
+        "--n-attempts",
+        type=positive_int,
+        default=DEFAULT_N_ATTEMPTS,
+        help="Attempts per task. Repeated attempts are what separates a stable "
+        "verdict from a lucky one, and the harness averages them into one "
+        f"accuracy (default: {DEFAULT_N_ATTEMPTS})",
+    )
     parser.add_argument("--codape-version", default=CODAPE_VERSION, help=f"Codape release installed in containers (default: {CODAPE_VERSION})")
     parser.add_argument("--codape-binary", type=Path, help="Linux x86_64 ELF Codape binary to copy into containers")
     parser.add_argument(
@@ -556,26 +647,59 @@ def main(argv: list[str] | None = None) -> int:
         results_path = output_dir / args.run_id / "results.json"
         summary = None
         if results_path.exists():
-            summary = summarize_results(parse_results(results_path))
+            summary = summarize_results(parse_results(results_path), results_path.parent)
         print("\n=== Terminal-Bench summary ===")
         print(f"dataset  : {args.dataset}")
         print(f"run id   : {args.run_id}")
         print(f"model    : {args.model or model_label()}")
+        print(f"agent    : {args.agent} {args.codape_version if args.agent == 'codape' else args.claude_version}")
         if summary:
             print(
                 f"accuracy : {summary['accuracy']:.4f} "
-                f"({summary['resolved']}/{summary['total']} resolved)"
+                f"({summary['resolved']}/{summary['total']} resolved, pass@1 over every attempt)"
             )
+            if summary["scored_accuracy"] is not None:
+                print(
+                    f"scored   : {summary['scored_accuracy']:.4f} "
+                    f"({summary['scored_resolved']}/{summary['scored']} scored trials; "
+                    "plumbing failures excluded)"
+                )
             if summary["resolved_ids"]:
                 print(f"resolved : {', '.join(summary['resolved_ids'])}")
             if summary["failure_modes"]:
                 print(f"failures : {', '.join(summary['failure_modes'])}")
-            if summary["input_tokens"] is None and summary["output_tokens"] is None:
-                print("tokens   : unavailable (Codape did not emit usage in stream-json)")
+            if summary["plumbing_failures"]:
+                print(f"plumbing : {', '.join(summary['plumbing_failures'])} (not scored)")
+            stream_input = summary.get("input_tokens_stream")
+            stream_output = summary.get("output_tokens_stream")
+            if stream_input is None and stream_output is None:
+                if summary["input_tokens"] is None and summary["output_tokens"] is None:
+                    print("tokens   : unavailable (no usage in the run's result frames)")
+                else:
+                    print(
+                        f"tokens   : input={summary['input_tokens'] or 0} "
+                        f"output={summary['output_tokens'] or 0}"
+                    )
             else:
                 print(
-                    f"tokens   : input={summary['input_tokens'] or 0} "
-                    f"output={summary['output_tokens'] or 0}"
+                    f"tokens   : input={stream_input or 0} "
+                    f"output={stream_output or 0} "
+                    f"cache_read={summary.get('cache_read_input_tokens') or 0} "
+                    f"cache_write={summary.get('cache_creation_input_tokens') or 0}"
+                )
+            if summary.get("model_ms") is not None:
+                # Wall clock, model time, tool time: the three numbers that
+                # separate "the model is slow" from "the tools are slow".
+                print(
+                    f"time     : model={summary['model_ms'] / 1000:.1f}s "
+                    f"tools={summary['tool_ms'] / 1000:.1f}s "
+                    f"turns={summary['num_turns'] or 0} "
+                    f"({summary.get('timing_records') or 0} of {summary['total']} trials recorded)"
+                )
+            if summary.get("total_cost_usd") is not None:
+                print(
+                    f"cost     : ${summary['total_cost_usd']:.4f} "
+                    f"({summary.get('priced_instances') or 0} of {summary['total']} trials priced)"
                 )
         else:
             print(f"results  : not written ({results_path})")
@@ -584,14 +708,26 @@ def main(argv: list[str] | None = None) -> int:
         accuracy = f"{summary['accuracy']:.4f}" if summary else "na"
         resolved = summary["resolved"] if summary else "na"
         total = summary["total"] if summary else "na"
+        scored = f"{summary['scored']}" if summary else "na"
+        scored_accuracy = (
+            f"{summary['scored_accuracy']:.4f}"
+            if summary and summary["scored_accuracy"] is not None
+            else "na"
+        )
         tokens = (
             "present"
-            if summary and (summary["input_tokens"] or summary["output_tokens"])
+            if summary
+            and (
+                summary["input_tokens"]
+                or summary["output_tokens"]
+                or summary.get("input_tokens_stream")
+            )
             else "na"
         )
         print(
             f"TERMINAL_BENCH_SUMMARY run_id={args.run_id} accuracy={accuracy} "
-            f"resolved={resolved} total={total} elapsed_sec={elapsed:.1f} tokens={tokens}"
+            f"resolved={resolved} total={total} scored={scored} "
+            f"scored_accuracy={scored_accuracy} elapsed_sec={elapsed:.1f} tokens={tokens}"
         )
         return result.returncode
     except BenchError as exc:

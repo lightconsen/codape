@@ -410,11 +410,45 @@ locations in the external README.
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` |
 | ProgramBench harness | `programbench==1.2.5` |
 | ProgramBench cleanroom image | `task_cleanroom_v6` |
-| Codape in containers | `v0.2.0` (`x86_64-unknown-linux-musl`) |
+| Codape in containers | `v0.2.2` (`x86_64-unknown-linux-musl`) |
+
+`v0.2.2` is the first release whose `result` frames carry `usage`,
+`total_cost_usd`, `model_ms` and `tool_ms`. Every score above was recorded on
+`v0.2.0`, which reported none of them — so the wall-clock figures in the run
+histories below say how long a task took but not where the time went, and the
+first thing a new run should buy is that split. See *How a run is scored*.
 
 Do not compare runs that differ in model ID, harness version, or dataset
 revision. Re-running the same named subset is the only variance measurement
 worth quoting.
+
+## How a run is scored
+
+Two numbers, because they answer different questions.
+
+- **`accuracy` (pass@1)** — resolved trials over attempted trials. This is the
+  harness's own definition and stays comparable with any published score.
+- **`scored`** — the same ratio over the trials whose grading test actually
+  produced a verdict. Terminal-Bench marks a trial `test_timeout` when the test
+  itself ran out of budget (several tasks `apt-get install` inside it) and
+  `parse_error` when no summary was parsed at all; SWE-bench has the equivalent
+  case when the evaluation container fails. Neither is a verdict on the agent,
+  and folding them into the denominator makes the score depend on the network
+  speed that day.
+
+Quote `scored` when the question is what the agent can do, and `accuracy` (with
+the plumbing count beside it) when the question is what a published number
+means. A run whose plumbing failures are zero reports the same value for both.
+
+Attempts are not averaged into separate scores: `--n-attempts N` gives N trials
+per task, and both ratios above are computed over those trials. A task that
+passes 2 of 3 attempts is 0.67, not 1 — the point of repeating is to see that.
+
+Alongside the ratio, each runner reports `model_ms` (waiting on the provider),
+`tool_ms` (executing tools) and `num_turns`, summed over the trials whose
+transcript carried them, with the count of such trials. `duration_ms` is larger
+than the two sums together: it also covers context building, hooks, compaction
+and the gaps between turns, which are not attributable to either.
 
 ## SWE-bench run history
 

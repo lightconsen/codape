@@ -43,7 +43,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 PROGRAMBENCH_VERSION = "1.2.5"
-CODAPE_VERSION = "v0.2.0"
+CODAPE_VERSION = "v0.2.2"
 CODAPE_TARGET = "x86_64-unknown-linux-musl"
 CLEANROOM_TAG = "task_cleanroom_v6"
 DEFAULT_INSTANCE = "abishekvashok__cmatrix.5c082c6"
@@ -613,6 +613,13 @@ def run_agent(container: str, timeout: int, max_turns: int, agent: str, context_
 
 
 def summarize_stream(path: Path) -> str:
+    """One line summarising a stream-json transcript, plus a JSON sidecar.
+
+    The line is for the log. The sidecar (``<stem>.summary.json`` beside the
+    transcript) is what makes a run comparable later: after the container is
+    gone, the transcript is the only record of what the run spent and where
+    its time went.
+    """
     if not path.exists():
         return "stream missing"
     lines = [line for line in path.read_text(errors="replace").splitlines() if line.strip()]
@@ -626,27 +633,70 @@ def summarize_stream(path: Path) -> str:
             continue
     results = [frame for frame in frames if frame.get("type") == "result"]
     if results:
-        # Codape emits one result frame per continuation segment; summing them
-        # is the only way to recover the whole run's turns and wall clock.
+        # Codape emits one result frame per continuation segment. Sum the
+        # per-submit fields (turns, wall clock, model/tool time); take the last
+        # frame's session totals, because `usage` and `total_cost_usd` are
+        # cumulative and summing them would count a segment once per segment.
         turns = sum(frame.get("num_turns") or 0 for frame in results)
         duration = sum(frame.get("duration_ms") or 0 for frame in results)
+        model_ms = sum(frame.get("model_ms") or 0 for frame in results)
+        tool_ms = sum(frame.get("tool_ms") or 0 for frame in results)
         last = results[-1]
         message = (
             f"result frames={len(results)} subtype={last.get('subtype', '?')} "
             f"is_error={any(frame.get('is_error') for frame in results)} "
             f"turns={turns} duration_ms={duration}"
         )
-        # Claude Code reports token usage and cost; Codape does not.
-        usage = last.get("usage") or {}
-        if usage:
+        usage: dict[str, int] | None = None
+        cost: float | None = None
+        for frame in results:
+            frame_usage = frame.get("usage")
+            if isinstance(frame_usage, dict):
+                # Both cache spellings: the reference uses the long form, an
+                # older producer may use the short one.
+                usage = {
+                    "input_tokens": int(frame_usage.get("input_tokens") or 0),
+                    "output_tokens": int(frame_usage.get("output_tokens") or 0),
+                    "cache_read_input_tokens": int(
+                        frame_usage.get("cache_read_input_tokens")
+                        or frame_usage.get("cache_read_tokens")
+                        or 0
+                    ),
+                    "cache_creation_input_tokens": int(
+                        frame_usage.get("cache_creation_input_tokens")
+                        or frame_usage.get("cache_creation_tokens")
+                        or 0
+                    ),
+                }
+            if frame.get("total_cost_usd") is not None:
+                cost = float(frame["total_cost_usd"])
+        if usage is not None:
             message += (
-                f" input_tokens={usage.get('input_tokens', 0)}"
-                f" output_tokens={usage.get('output_tokens', 0)}"
-                f" cache_read={usage.get('cache_read_input_tokens', 0)}"
-                f" cache_write={usage.get('cache_creation_input_tokens', 0)}"
+                f" input_tokens={usage['input_tokens']}"
+                f" output_tokens={usage['output_tokens']}"
+                f" cache_read={usage['cache_read_input_tokens']}"
+                f" cache_write={usage['cache_creation_input_tokens']}"
             )
-        if last.get("total_cost_usd") is not None:
-            message += f" cost_usd={last['total_cost_usd']:.4f}"
+        if cost is not None:
+            message += f" cost_usd={cost:.4f}"
+        if model_ms or tool_ms:
+            message += f" model_ms={model_ms} tool_ms={tool_ms}"
+        record = {
+            "result_frames": len(results),
+            "subtype": last.get("subtype"),
+            "is_error": any(frame.get("is_error") for frame in results),
+            "num_turns": turns,
+            "duration_ms": duration,
+            "model_ms": model_ms,
+            "tool_ms": tool_ms,
+            "usage": usage,
+            "total_cost_usd": cost,
+        }
+        sidecar = path.with_suffix(".summary.json")
+        try:
+            sidecar.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            message += f" (could not write {sidecar.name}: {exc})"
         return message
     if not frames:
         return f"no JSON frames; last line: {lines[-1][:400]}"

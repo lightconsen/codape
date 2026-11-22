@@ -21,8 +21,16 @@ Every trial writes these to
 | `results.json` | `accuracy`, per-task `parser_results`, and `failure_mode` |
 | `<task>/*/sessions/agent.log` | the last lines of Codape's stream-json transcript |
 | `<task>/*/sessions/tests.log` | the grading test's real output, including the assertion text |
+| `<task>/*/sessions/codape-run.json` | what the adapter read off the `result` frames: `usage`, `model_ms`, `tool_ms`, `num_turns`, `result_frames` |
 | `<task>/*/panes/post-agent.txt` | the terminal state when the agent stopped |
 | `/logs/codape-stream.jsonl` (in-container) | the **full** transcript, copied there by the adapter |
+
+`codape-run.json` exists because `results.json` cannot hold it: the harness's
+`TrialResults` has fields for tokens and for its own three timestamps, and
+nothing for where a turn's time went. The adapter writes the file through the
+container's `/logs` mount, the runner sums it, and `model_ms`/`tool_ms` in the
+summary come from there. A run recorded before the adapter wrote it has no
+timing, which is every run up to and including `v0.2.0`.
 
 `failure_mode` is the first thing to check, because it says whether the agent
 ever got a fair test:
@@ -43,6 +51,13 @@ nothing about the agent.
 A trial with `failure_mode: unset` and `accuracy: 0` is a **model or prompt
 result**. A trial with any other mode is a **plumbing result** and says nothing
 about the model until the plumbing is fixed.
+
+The runner enforces that split rather than leaving it to the reader: besides
+`accuracy` (resolved/attempted, the harness definition) it prints `scored
+(x/y)` — the same ratio with `test_timeout`, `parse_error` and
+`agent_installation_failed` taken out of the denominator — and lists the
+plumbing failures it removed. A run with none prints the same value twice. See
+`docs/benchmark.md` → *How a run is scored*.
 
 One shape the table does not cover is `unknown_agent_error` with
 `parser_results: null` and every timestamp null. That row never reached the
