@@ -73,8 +73,20 @@ pub enum BlockKind {
 /// Assembled system prompt and context messages for a turn.
 #[derive(Debug, Clone)]
 pub struct AssembledContext {
-    /// The full system prompt string (static + dynamic blocks + system context).
+    /// The stable system prompt: static + dynamic blocks, boundary marker.
+    ///
+    /// Every byte here is fixed for the session, which is what lets the
+    /// provider's cache treat it as a reusable prefix.
     pub system_prompt: String,
+    /// The working-tree snapshot (branch, `git status`), or empty.
+    ///
+    /// Kept apart from [`Self::system_prompt`] because it is the one part of
+    /// the prompt that changes as a session does work, and the cache hashes
+    /// `system` byte-exactly: a caller that folds it into the stable text
+    /// puts a moving byte ahead of fixed ones and misses the prefix. Send it
+    /// after everything stable — including any base instructions the caller
+    /// adds as its own system message.
+    pub system_context: String,
     /// Context messages to prepend (CLAUDE.md in `<system-reminder>`, etc.).
     pub context_messages: Vec<Message>,
     /// Estimated token count of the assembled context.
@@ -425,6 +437,16 @@ impl PromptCompiler {
     pub const BOUNDARY_MARKER: &'static str =
         "\n\n=== BOUNDARY MARKER - DO NOT MOVE OR REMOVE ===\n\n";
 
+    /// Heading of the working-tree snapshot section.
+    ///
+    /// The snapshot is the one part of the system prompt that changes while a
+    /// session does work, so the request builder must be able to find it and
+    /// keep it out of the cached prefix. It is a named constant rather than a
+    /// literal at each site because two places depend on spotting the same
+    /// bytes: the Anthropic client's cache-breakpoint placement, and the
+    /// cassette digest that deliberately excludes it.
+    pub const SYSTEM_CONTEXT_MARKER: &'static str = "## System Context\n\n";
+
     /// Create a new prompt compiler with default configuration.
     #[must_use]
     pub fn new(config: CompactConfig) -> Self {
@@ -464,6 +486,16 @@ impl PromptCompiler {
     }
 
     /// Assemble the full system prompt and context messages.
+    ///
+    /// The working-tree snapshot is returned **separately** rather than
+    /// appended here. The provider hashes `tools` and `system` byte-exactly
+    /// before `messages`, so a change anywhere in `system` invalidates the
+    /// cache for the system prompt and every message after it. The snapshot is
+    /// the only part of the prompt that changes as a session does work, so the
+    /// caller must place it after every stable byte — including the base
+    /// instructions, which are a *separate* system message this method never
+    /// sees. Folding it in here put it ahead of them and re-wrote the prefix
+    /// on the first tool call that touched the tree.
     #[must_use]
     pub fn assemble(&self, ctx: &PromptContext) -> AssembledContext {
         let mut context_messages = Vec::new();
@@ -482,12 +514,9 @@ impl PromptCompiler {
         system_prompt.push_str(&static_part);
         system_prompt.push_str(Self::BOUNDARY_MARKER);
         system_prompt.push_str(&dynamic_part);
-        if !system_context.is_empty() {
-            system_prompt.push_str("\n\n## System Context\n\n");
-            system_prompt.push_str(&system_context);
-        }
 
         let estimated_tokens = Self::estimate_tokens(&system_prompt)
+            + Self::estimate_tokens(&system_context)
             + context_messages
                 .iter()
                 .map(|m| Self::estimate_message_content_tokens(&m.content))
@@ -495,6 +524,7 @@ impl PromptCompiler {
 
         AssembledContext {
             system_prompt,
+            system_context,
             context_messages,
             estimated_tokens,
         }
