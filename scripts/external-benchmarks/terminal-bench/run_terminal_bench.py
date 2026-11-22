@@ -38,8 +38,20 @@ CLAUDE_ADAPTER_IMPORT_PATH = "claude_agent:ClaudeAgent"
 CLAUDE_CODE_VERSION = "2.1.318"
 
 DEFAULT_TIMEOUT = 1800
-DEFAULT_MAX_TURNS = 200
+DEFAULT_MAX_TURNS = 300
 DEFAULT_N_CONCURRENT = 1
+
+# The grading phase has to fit the dependencies the test installs itself. The
+# tasks declare 20-600 s and 56 of the 80 declare 60 s, which is less than
+# `pip install torch` (283 MB) or an `apt-get install` on a slow link — so a
+# correct answer is scored `test_timeout` before the test it is meant to run
+# starts. Measured: `pytorch-model-cli.easy` r2 never reached pytest (`pip
+# install` of torch and torchvision consumed the whole 120 s), and
+# `cartpole-rl-training` declares 60 s around its own torch install. 900 s is
+# above every value the dataset declares, so as a global override this only
+# ever raises one. A genuinely hung test now burns 900 s instead of 60, which
+# is the price of never mistaking a slow install for a failed task.
+DEFAULT_TEST_TIMEOUT = 900
 DEFAULT_N_ATTEMPTS = 1
 
 # Harness outcomes that are not verdicts on the agent: the grading test never
@@ -247,11 +259,11 @@ def build_tb_command(args: argparse.Namespace, cache_dir: Path, output_dir: Path
         "--global-agent-timeout-sec",
         str(args.timeout + 180),
     ]
-    # The default test budget comes from each task's `max_test_timeout_sec`,
-    # and several tasks install packages inside it — `apt-get update` on a slow
-    # link alone can exceed the 60 s these tasks declare, which scores a correct
-    # answer as `test_timeout`. Raising it changes nothing for a test that
-    # finishes early.
+    # The test budget has to fit the dependencies the test installs itself. The
+    # tasks' own `max_test_timeout_sec` values are shorter than `pip install
+    # torch` on several of them, which scores a correct answer as
+    # `test_timeout` before pytest is ever reached. Raising it changes nothing
+    # for a test that finishes early; `--test-timeout 0` defers to each task.
     if args.test_timeout:
         command += ["--global-test-timeout-sec", str(args.test_timeout)]
     if args.model:
@@ -460,6 +472,17 @@ def positive_float(value: str) -> float:
     return parsed
 
 
+def floor_float(value: str) -> float:
+    """A timeout where 0 means "leave the task's own value alone"."""
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Codape on a pinned Terminal-Bench dataset through the official tb harness.",
@@ -519,12 +542,13 @@ Notes:
     parser.add_argument("--max-turns", type=positive_int, default=DEFAULT_MAX_TURNS, help=f"Codape --max-turns (default: {DEFAULT_MAX_TURNS})")
     parser.add_argument(
         "--test-timeout",
-        type=positive_float,
-        default=None,
+        type=floor_float,
+        default=DEFAULT_TEST_TIMEOUT,
         help="Grading timeout in seconds, overriding each task's "
-        "max_test_timeout_sec. Several tasks run apt-get inside this budget; "
-        "a slow link can exceed it and score a correct answer as test_timeout "
-        "(default: the task's own value)",
+        "max_test_timeout_sec. The declared budgets are shorter than the "
+        "dependencies the tests install themselves, so the default is a floor "
+        "that only ever raises one; pass 0 to use each task's own value "
+        f"(default: {DEFAULT_TEST_TIMEOUT})",
     )
     parser.add_argument("--n-concurrent", type=positive_int, default=DEFAULT_N_CONCURRENT, help=f"Concurrent tasks (default: {DEFAULT_N_CONCURRENT}; each trial holds a container, so raise it only as far as RAM allows)")
     parser.add_argument(

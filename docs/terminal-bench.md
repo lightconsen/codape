@@ -244,6 +244,16 @@ recorded, then `test_timeout`). **Treat any `test_timeout` as an environment
 result, not a task result, and re-grade with a larger budget before drawing a
 conclusion.**
 
+The runner now defaults `--test-timeout` to **900 s**, so this is the behaviour
+without a flag rather than a step a person has to remember. The dataset's own
+values run 20–600 s and 56 of the 80 tasks declare 60 s, which is less than
+`pip install torch` — `pytorch-model-cli.easy` r2 spent its entire 120 s budget
+in `pip install` of torch and torchvision and never reached pytest, and
+`cartpole-rl-training` declares 60 s around the same install. 900 s is above
+every declared value, so as a global override it only ever raises one;
+`--test-timeout 0` restores each task's own number for a run that wants the
+dataset's definition.
+
 ### 2026-11-02 — first 5-task batch, **4/5 resolved**
 
 Five of the twelve `easy` tasks, chosen because they need no network at grading
@@ -2455,6 +2465,16 @@ all — the fixture caps the test phase at 120 s (`max_test_timeout_sec`), and
 a complete test run. The failure mode is consistent across all three; the
 harness scored one of the three.
 
+**That verdict stands, and the fixture it read is now reproducible.** The
+`.easy` variant is the one every recorded run used, and it needed exactly the
+same two edits as the non-`.easy` variant — the weights are `model.pth`, not the
+`simple_mnist.pth` the instruction names, and the `p/255` scaling the test
+scores has to be stated. Those edits were in `0.1.1-analysis` by hand but had
+never appeared in the table below, so the repair could not be rebuilt; they are
+in it now, and `fixture_patches.py` applies both. That matters for reading the
+0/3: the repeats read `p/255` and still wrote `x = 2·pixel/255 − 1`, which is
+instruction adherence, not a fixture gap.
+
 **`swe-bench-fsspec` is a deterministic fixture defect, not an agent
 failure.** All three repeats ended in `test_timeout`. The cause is the same in
 each: the fixture's `run-tests.sh` applies the gold patch with
@@ -2541,7 +2561,7 @@ Earlier versions of this scoreboard listed the unresolved tasks by failure
 class: dataset defects (an instruction that contradicted or omitted what the
 test checked), stale fixtures, unreachable dependencies, model behaviour,
 provider errors and harness plumbing. The three tasks above are what remains of
-those classes. The fixture defects the campaign did repair — 26 files across 22
+those classes. The fixture defects the campaign did repair — 31 files across 27
 tasks — are listed in [Local fixture patches](#local-fixture-patches).
 
 A cross-benchmark table of every recorded failure — Terminal-Bench, SWE-bench,
@@ -3144,15 +3164,43 @@ Two cached copies matter:
 
 - `~/.cache/terminal-bench/terminal-bench-core/0.1.1` — the pristine cache.
 - `~/.cache/terminal-bench/terminal-bench-core/0.1.1-analysis` — the copy every
-  run from the twenty-sixth batch on grades against. **26 files across 22
-  tasks** are edited there, and each edited file has a `.orig` sibling holding
-  the pristine version. Some of the edits repair a test that cannot pass
-  anything, some supply a fact the instruction omitted but the test requires,
-  and two unbreak images that no longer build.
+  run from the twenty-sixth batch on grades against. It is built from the
+  pristine cache by `fixture_patches.py build` below, which is also the record
+  of the mechanical half of the edits. **31 files across 27 tasks** are edited
+  there, and each edited file has a `.orig` sibling holding the pristine
+  version. Some of the edits repair a test that cannot pass anything, some
+  supply a fact the instruction omitted but the test requires, some stop a
+  grading step from waiting on an answer nobody will type, and two unbreak
+  images that no longer build.
 
-The table lists all 26. A task appearing here was measured against a patched
-fixture; the underlying defect and its evidence are in the batch sections that
-follow.
+The table lists all 28 rows — 31 files, because one row covers the four
+`swe-bench` grading scripts. A task appearing here was measured against a
+patched fixture; the underlying defect and its evidence are in the batch
+sections that follow.
+
+**Fourteen of the 31 files are edited by a script**, so
+they cannot be lost the next time the cache is refreshed:
+
+```bash
+python3 -I scripts/external-benchmarks/fixture_patches.py build
+python3 -I scripts/external-benchmarks/fixture_patches.py verify   # what a copy carries
+python3 -I scripts/external-benchmarks/fixture_patches.py self-test
+```
+
+`build` copies the pristine cache to `0.1.1-analysis`, writes a `.orig` sibling
+for every file it touches, and applies each anchor only if it matches **exactly
+once** — a fixture that has drifted fails loudly rather than being silently
+half-patched. The rest are prose rewrites of an instruction, which no
+script can invent; they are still applied by hand, and `docs/benchmark.md`
+remains the record of why each one exists.
+
+`self-test` is the part that keeps the table honest. It runs the anchor rules
+on synthetic fixtures, and it also re-establishes the reason for the `-N` flag
+by running `patch` on both an already-applied patch and a clean one **inside a
+real PTY**. That detail matters: with stdin at end-of-file `patch` answers its
+own `Assume -R?` question and exits, so every test that did not allocate a
+terminal concluded the flag was unnecessary. It is unnecessary there, and
+mandatory in the tmux pane the harness actually uses.
 
 | File (relative to `0.1.1-analysis/`) | Change | Defect it repairs |
 |---|---|---|
@@ -3163,6 +3211,8 @@ follow.
 | `conda-env-conflict-resolution/tests/test_outputs.py` | strips `#` comment lines before grepping pins; drops the numpy/scipy assertion | an agent that quotes the removed pin in a comment (`# removed cudatoolkit=11.2`) fails a test its working environment passes; and the numpy/scipy assertion enforced the false premise above |
 | `hf-model-inference/tests/test_outputs.py` | accepts `tokenizer.json` **or** `vocab.txt`, and `model.safetensors` **or** `pytorch_model.bin` | `save_pretrained` writes the fast tokenizer's `tokenizer.json` and not `vocab.txt`; the instruction never prescribes a serialization, and the API tests already prove the directory loads |
 | `pytorch-model-cli/task.yaml` | names `model.pth` (not `simple_mnist.pth`); states `p/255` with **no** normalization | the test's `TRUE_PRED_CLASSES` are the reference's `x/255` predictions, including 15 of its mistakes; an agent that normalized would be *more* accurate (43/50 vs 35/50) and still fail |
+| `pytorch-model-cli.easy/task.yaml` | the same two changes | the `.easy` variant ships the same `model.pth` and the same `TRUE_PRED_CLASSES`, so it had the same missing file and the same unstated scaling — but it is the variant every recorded run used, and it was missing from this table until the script was written |
+| `swe-bench-fsspec/run-tests.sh`, `swe-bench-langcodes/run-tests.sh`, `swe-bench-astropy-1/run-tests.sh`, `swe-bench-astropy-2/run-tests.sh` | `patch --fuzz=5 -N -p1` | without `-N`, `patch` asks `Reversed (or previously applied) patch detected!` and waits on a terminal nobody is typing into; that is the whole `test_timeout` class this benchmark keeps recording |
 | `configure-git-webserver/task.yaml` | fixes the example (`hello.html`, `master`, `http`, `localhost`) and states the layout | the instruction cloned `user@server`, added `index.html` after creating `hello.html`, pushed `webserver` on an empty repo, and curled `https`, while the test checks exactly one layout |
 | `cron-broken-network/tests/test_outputs.py` | asserts `Example Domain` instead of comparing to the captured page | example.com was redesigned, so the 90 %-line comparison fails for any correct agent |
 | `decommissioning-service-with-sensitive-data/task.yaml` | requires the archive to keep the `opt/sensitive_service_data/...` path | the test extracts the archive and looks for the full path; `tar -C /opt -czf ... sensitive_service_data` is a legal reading of the old text and fails |
@@ -3356,20 +3406,36 @@ so the runner passes exactly one.
 export ANTHROPIC_API_KEY=...            # or CODAPE_API_KEY
 export ANTHROPIC_BASE_URL=http://host.docker.internal:8317
 export ANTHROPIC_MODEL=...
-export CODAPE_CONTEXT_WINDOW=131072    # only while the 32K guess is unfixed
+
+# The fixture edits are reproducible; do not grade against the pristine cache
+python3 -I scripts/external-benchmarks/fixture_patches.py build
+python3 -I scripts/external-benchmarks/fixture_patches.py verify \
+  --dataset ~/.cache/terminal-bench/terminal-bench-core/0.1.1-analysis
 
 scripts/external-benchmarks/terminal-bench/run.sh \
   --task <task-id> \
-  --dataset-path ~/.cache/terminal-bench/terminal-bench-core/0.1.1 \
+  --dataset-path ~/.cache/terminal-bench/terminal-bench-core/0.1.1-analysis \
   --codape-binary /tmp/codape-musl-target/aarch64-unknown-linux-musl/release/codape \
-  --timeout 2700 --max-turns 200 --test-timeout 900 \
-  --run-id <run-id>
+  --timeout 2700 --max-turns 300 \
+  --run-id <run-id> --n-attempts 3
 ```
 
-`--test-timeout` is not optional in practice on this machine: the tasks'
-own 60 s budgets are shorter than an `apt-get update` here.
+The 900 s grading budget and 300 turns are the runner's defaults now, so they
+are not in the command. `--n-attempts 3` is: a single pass is not a reliable
+pass, and the harness averages the attempts into one accuracy, which is the only
+form of that statement a reader can compare.
 
 `--no-rebuild` reuses task images between runs; `--n-concurrent N` runs several
 tasks at once. Each task still needs its own container — the tasks conflict
 (package installs, `/etc`, ports like 8080), and the grading tests attribute
 results to a container's final state.
+
+### Still to measure
+
+`pytorch-model-cli.easy` is the one recorded failure whose score the new
+budgets change without any fixture work: r1 and r2 of the reliability repeats
+died in `pip install`, not in the test, so two of the three attempts were never
+graded. With `--test-timeout 900` all three reach pytest, and the model's
+`[-1,1]` scaling should fail all three the same way — which would turn a 0/3
+with one scored attempt into a 0/3 with three, the first clean capability number
+for this task. It needs Docker and paid tokens, so it has not been run.

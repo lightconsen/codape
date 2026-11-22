@@ -65,7 +65,7 @@ LOGS_RECORD_PATH = f"{LOGS_DIR}/{LOGS_RECORD_NAME}"
 NO_PROXY = "localhost,127.0.0.1,::1,host.docker.internal"
 
 DEFAULT_VERSION = "v0.2.2"
-DEFAULT_MAX_TURNS = 200
+DEFAULT_MAX_TURNS = 300
 DEFAULT_TIMEOUT_SEC = 1800
 
 # Host variables forwarded into the container. Codape itself applies this

@@ -19,6 +19,7 @@ These are research instruments, **not CI checks**. See [Why this is not in CI](#
 scripts/external-benchmarks/
 ├── README.md
 ├── check_reporting.py      # transcript parsing, no Docker: the one part CI can run
+├── fixture_patches.py      # rebuilds the Terminal-Bench grading fixtures, no Docker
 ├── swebench/
 │   ├── run.sh              # thin wrapper; --help/--dry-run need only stdlib
 │   └── run_swebench.py     # per-instance containers, patch extraction, official eval
@@ -43,6 +44,29 @@ wrong frame went unnoticed for months. This script feeds the same functions
 synthetic `result` frames — several continuation segments, both cache spellings,
 a binary that reports nothing — and runs in CI (`Benchmark reporting`). Change a
 runner's reporting and run it first.
+
+`fixture_patches.py` is the other half of the same problem. Terminal-Bench
+grading is only meaningful against a dataset whose fixtures have been repaired,
+and those repairs used to live in a hand-built `0.1.1-analysis` copy that could
+not be rebuilt. The script now applies every mechanical one — fourteen anchors
+in ten files, chiefly `patch -N` in the four `swe-bench` grading scripts and the
+missing `p/255` scaling the two `pytorch-model-cli` tasks need — from the
+pristine `0.1.1` cache. Each edit names an anchor and a marker that must not
+already be present; an anchor that is missing or ambiguous raises instead of
+silently half-patching. `docs/terminal-bench.md` lists the rest as prose
+rewrites.
+
+```bash
+python3 -I scripts/external-benchmarks/fixture_patches.py build    # edit a copy
+python3 -I scripts/external-benchmarks/fixture_patches.py verify   # check it
+python3 -I scripts/external-benchmarks/fixture_patches.py self-test
+```
+
+`self-test` runs in CI (`Benchmark fixtures`) and needs no Docker: it builds a
+synthetic dataset, applies the edits twice, and asserts that a drifted or
+ambiguous anchor raises. It also re-establishes *why* `-N` is there by forking a
+PTY and showing that an unpatched `patch` prompts for a reverse, which is the
+only context the harness runs it in.
 
 ## Prerequisites
 
@@ -269,6 +293,26 @@ Options mirror the SWE-bench runner: `--limit`, repeatable `--task`,
 bootstraps `venv-terminal-bench-0.2.18` in the cache directory and runs the
 pinned `tb` from it, with `PYTHONPATH` pointing at the adapter directory.
 
+Two defaults encode what a run has to survive rather than what is cheap:
+
+- `--max-turns 300`. This is the turn count `docs/benchmark.md` records for the
+  published runs, so a runner default below it measured a different protocol.
+  The histories show turns past 200 are real work, not runaway loops:
+  `play-zork` used 239 turns against a 3 600 s timeout and 442 turns in the
+  rerun that solved it.
+- `--test-timeout 900`. The dataset declares 20–600 s for grading — 56 of the 80
+  tasks declare 60 s — and a test that installs its own dependencies does not
+  fit in that on a slow link: `pip install torch` alone is 283 MB. A
+  `test_timeout` is a plumbing failure, not a wrong answer, so the default is
+  above every declared value and only ever raises one. Pass `--test-timeout 0`
+  to grade exactly as the dataset declares (each task's own number), which is
+  what a comparison against a published Terminal-Bench score wants.
+
+`--n-concurrent` (default 1) is a throughput knob, not a scoring one: each trial
+holds a container, so raise it only as far as RAM allows. `--n-attempts` (default
+1) is the opposite — it is the only way to tell a stable verdict from a lucky
+one, and the harness averages the attempts into one accuracy.
+
 `--extra-instructions` appends a frame to every task instruction — for
 example, that the container is the target machine and no user is available.
 The adapter also sets `CODAPE_SANDBOX=off` inside the task container: the
@@ -443,17 +487,24 @@ tools for release notes and research; keep them out of required checks.
 The reporting check above is the exception, and only because it is a different
 kind of thing: it does not run a benchmark, it runs the functions that read a
 benchmark's output, against fixtures. That is deterministic, key-free, and takes
-a second.
+a second. `fixture_patches.py self-test` is the second exception for the same
+reason: it edits synthetic files, not a dataset.
 
 ## What was verified locally
 
 - `bash -n` and `shellcheck` on both wrappers; `python -m py_compile` on all
-  three Python files.
+  four Python files.
 - `python3 -I scripts/external-benchmarks/check_reporting.py` on every change to
   a runner's reporting, and once against the code it replaced: there it fails
   with five named gaps (no `result_frames`, no `model_ms`/`tool_ms`, a runner
   that could not take the run directory, and a ProgramBench line that reported
   the *last* frame's usage rather than the run's).
+- `python3 -I scripts/external-benchmarks/fixture_patches.py self-test`, and
+  `verify` against the pristine `0.1.1` cache, where it correctly reports that
+  none of the fourteen edits are present. Two rounds of that test found real
+  bugs in the matcher: a *prefix* of an anchor (GiB vs MiB) matched, and an
+  insertion edit's anchor survives its own application, so "the old text is
+  gone" could not signal applied-ness. That is why every edit names a marker.
 - `--help`, `--dry-run`, and argument validation (`--instance` together with
   `--limit`, missing binaries, non-ELF binaries, bad run IDs, `--extra-arg`
   containing `=`).
