@@ -284,16 +284,32 @@ impl ToolRegistry {
         names
     }
 
-    /// Get all registered tools as descriptors.
+    /// Get all registered tools as descriptors, ordered by name.
+    ///
+    /// The order is part of the wire contract, not a detail. The registry
+    /// stores tools in `HashMap`s whose iteration order is randomised per map
+    /// instance, so this used to vary between processes: three consecutive
+    /// `codape -p` runs on the same machine produced three different orders of
+    /// the same 56 tools. The provider hashes `tools` first and byte-exactly,
+    /// so every fresh process missed the whole prompt cache — which matters
+    /// most for `--resume`, where a new process re-sends a conversation whose
+    /// prefix the previous one had already paid to cache.
+    ///
+    /// Sorting here rather than at each caller fixes every consumer at once:
+    /// the model-facing listing, the `ToolSearch` results, and the cassette
+    /// layer, which sorts by name for the same reason and so is unaffected.
     #[must_use]
     pub fn all_descriptors(&self) -> Vec<ToolDescriptor> {
         let mcp = self.dynamic_mcp.read();
-        self.baseline
+        let mut descriptors: Vec<ToolDescriptor> = self
+            .baseline
             .values()
             .map(|t| t.descriptor())
             .chain(self.gated.values().map(|t| t.descriptor()))
             .chain(mcp.values().map(|t| t.descriptor()))
-            .collect()
+            .collect();
+        descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+        descriptors
     }
 
     /// Check if a tool name is denied in the given context.
@@ -607,6 +623,42 @@ mod tests {
         let names: Vec<_> = descriptors.iter().map(|d| &d.name).collect();
         assert!(names.contains(&&"echo".to_string()));
         assert!(names.contains(&&"noop".to_string()));
+    }
+
+    /// The listing is a wire format, and the provider hashes it byte-exactly.
+    ///
+    /// Tools live in `HashMap`s, whose iteration order is randomised per map
+    /// instance, so the listing used to differ between processes: three
+    /// consecutive runs produced three orders of the same set, and every fresh
+    /// process — every `--resume` — missed the whole prompt cache because
+    /// `tools` is hashed first.
+    ///
+    /// A single registry in a single process cannot detect this by comparing
+    /// two listings: its maps keep one order for their lifetime. So the check
+    /// is against the sorted order, which is the only order a fresh process
+    /// can be guaranteed to reproduce. With enough tools that an unsorted map
+    /// walk would have to land in order by luck, a missing sort fails reliably.
+    #[test]
+    fn the_tool_listing_is_ordered_by_name_so_a_new_process_reuses_the_cache() {
+        let mut registry = ToolRegistry::new();
+        // The built-ins, not a hand-made pair: the list has to be long enough
+        // that a random map walk landing in sorted order is not plausible.
+        crate::builtins::register_builtin_tools(&mut registry);
+
+        let names: Vec<String> = registry
+            .all_descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+
+        assert!(names.len() > 20, "the registry should be populated");
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(
+            names, sorted,
+            "the tool listing must be name-ordered; a hash-map order would \
+             vary between processes and invalidate the cached prefix"
+        );
     }
 
     /// A path rule is a glob over the whole path. Looking for the pattern as a
