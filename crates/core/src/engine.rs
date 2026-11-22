@@ -5261,6 +5261,25 @@ impl QueryEngine {
             turn.messages.push(Message::system(instruction));
         }
 
+        // The working-tree snapshot goes last of the system messages.
+        //
+        // Two things depend on that placement. The request builder splits the
+        // joined `system` string at [`PromptCompiler::SYSTEM_CONTEXT_MARKER`]
+        // and puts the cache breakpoint on the stable block *before* the
+        // snapshot, so only the snapshot's own bytes are re-written when a
+        // tool touches the tree — that is what keeps the cached prefix stable
+        // across the turns of a session. And the cassette digest strips the
+        // same tail, so a recording is not pinned to one working tree. The
+        // marker is last here, and the snapshot must stay last, or the split
+        // would leave volatile text inside the marked block.
+        if !assembled.system_context.is_empty() {
+            turn.messages.push(Message::system(format!(
+                "{}{}",
+                PromptCompiler::SYSTEM_CONTEXT_MARKER,
+                assembled.system_context
+            )));
+        }
+
         // Replay user messages if provided (for session resume)
         if let Some(ref replay) = options.replay_user_messages {
             for msg in replay {
@@ -8759,6 +8778,99 @@ mod tests {
         assert_eq!(
             after_first, after_second,
             "rebuilding context must be idempotent per turn, not append"
+        );
+    }
+
+    /// The working-tree snapshot is the last system message.
+    ///
+    /// The request builder joins every system message into one `system` string
+    /// and then, in the Anthropic client, splits that string at
+    /// [`PromptCompiler::SYSTEM_CONTEXT_MARKER`] so the cache breakpoint lands
+    /// on the stable text ahead of the snapshot. That split only excludes the
+    /// snapshot if the marker is genuinely last: anything stable pushed *after*
+    /// it would land in the uncached block instead, and stability would be
+    /// lost from the other side. This pins the placement the split depends on.
+    ///
+    /// It used to sit second — `assemble` folded it into the prompt it returns,
+    /// and `build_context` pushes that *before* the caller's own system
+    /// messages. Measured on the wire, the snapshot was at byte 53 of a
+    /// 7 394-byte system string with ~7.2 KB of stable instructions after it.
+    #[test]
+    fn the_working_tree_snapshot_is_the_last_system_message() {
+        // A real repository, because the snapshot comes from git: a fixed
+        // path such as `make_test_engine`'s `/tmp/test` is not a repository,
+        // so the compiler emits no snapshot and the ordering would go
+        // untested.
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed, so there is no repository to snapshot"
+            );
+        };
+        git(&["init", "-q"]);
+        // An untracked file, so `git status --short` reports something and
+        // the snapshot is non-empty on the first turn too.
+        std::fs::write(repo.path().join("work-in-progress.rs"), "// edited\n").unwrap();
+
+        let (mut engine, _rx, mut session) = make_test_engine();
+        engine.session.cwd = repo.path().to_path_buf();
+        session.messages.push(Message::user("hello"));
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        let options = SubmitOptions {
+            custom_system_prompt: Some("BASE INSTRUCTIONS".to_string()),
+            ..SubmitOptions::default()
+        };
+
+        engine.build_context(&mut turn, &options);
+
+        let system: Vec<String> = turn
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, crate::types::Role::System))
+            .filter_map(|m| match &m.content {
+                crate::types::MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        let last = system.last().expect("at least one system message");
+        assert!(
+            last.starts_with(PromptCompiler::SYSTEM_CONTEXT_MARKER),
+            "the snapshot must be the last system message, not {last:.80}"
+        );
+        assert!(
+            last.contains("work-in-progress.rs"),
+            "the last system message must be the working-tree snapshot: {last:?}"
+        );
+        assert!(
+            !system[0].contains("work-in-progress.rs"),
+            "the snapshot must not sit in the stable prompt: {:?}",
+            system[0]
+        );
+
+        // The property the cache depends on: everything before the snapshot is
+        // byte-identical to what the next turn sends.
+        let stable_prefix = system[..system.len() - 1].join("\n\n");
+        turn.reset();
+        engine.build_context(&mut turn, &options);
+        let rebuilt: Vec<String> = turn
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, crate::types::Role::System))
+            .filter_map(|m| match &m.content {
+                crate::types::MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rebuilt[..rebuilt.len() - 1].join("\n\n"),
+            stable_prefix,
+            "the cached prefix changed between turns"
         );
     }
 

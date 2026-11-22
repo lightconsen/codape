@@ -55,15 +55,17 @@ pub struct PromptCompiler {
 }
 ```
 
-**Why the boundary marker matters:** Anthropic's API caches the prefix of the prompt. By placing static blocks before `BOUNDARY_MARKER` and dynamic blocks after it, the static portion hits the prompt cache on subsequent turns, reducing latency and cost.
+**Why the boundary marker matters:** Anthropic's API caches the prompt as a byte-exact prefix, hashed in a fixed order — `tools`, then `system`, then `messages`. A change anywhere in that order misses the cache for that level and everything after it. Static blocks come before `BOUNDARY_MARKER` and dynamic blocks after, so the static portion is reusable. But that only helps if nothing volatile follows the static blocks: the marker is an *intention*, not a mechanism.
+
+**The working-tree snapshot is split out of the cached prefix.** The snapshot (branch + `git status`) is the one part of the system prompt that changes while a session does work. `assemble()` therefore returns it separately as `AssembledContext::system_context`, and `build_context` pushes it as the **last** system message, headed by `PromptCompiler::SYSTEM_CONTEXT_MARKER`. The Anthropic client then splits the joined `system` string at that marker and sends it as **two blocks**: the stable text with `cache_control`, and the snapshot after it unmarked. That split is what does the work — the cache hash is cumulative up to the breakpoint, so a snapshot inside the marked block would change the hash no matter where in the block it sat; putting the breakpoint at the end of the stable text leaves only the snapshot's own bytes re-sent when a tool edits a file. The cassette digest strips the same tail, so a recording is not pinned to one working tree.
 
 **Assembly flow:**
 
 1. Register static blocks (base settings, tool guidelines, output style)
 2. Register dynamic renderers (session guidance, memory, denied tools, git status)
-3. `assemble()` produces `AssembledContext { system_prompt, context_messages, estimated_tokens }`
+3. `assemble()` produces `AssembledContext { system_prompt, system_context, context_messages, estimated_tokens }`
 4. Instruction files are loaded and wrapped as a `<system-reminder>` user message: `AGENTS.md` and `CLAUDE.md` from cwd and its parents (`AGENTS.md` first, so a project file overrides the generic one), then the user-level file at `<config home>/CLAUDE.md` — and its `AGENTS.md` sibling — appended after them, so a personal preference applies in every repository and outlives a project's own file
-5. Git branch + status are injected as system context
+5. Git branch + status are appended as `system_context`, last of the system messages, and the Anthropic client sends them as a trailing unmarked block
 
 ### 2.2 Feature Prompts (`crates/core/src/prompts/features/`)
 
