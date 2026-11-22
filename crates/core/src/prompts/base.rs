@@ -647,15 +647,48 @@ impl PromptCompiler {
             && output.status.success()
         {
             let status = String::from_utf8_lossy(&output.stdout);
-            let status = status.trim();
+            let status = Self::without_tool_state(status.trim());
             if !status.is_empty() {
                 out.push_str("\nGit status:\n```\n");
-                out.push_str(status);
+                out.push_str(&status);
                 out.push_str("\n```\n");
             }
         }
 
         out
+    }
+
+    /// Remove the entries Codape writes about itself from a `git status
+    /// --short` listing.
+    ///
+    /// A session keeps its transcripts and `sessions.db` under `<cwd>/.codape`
+    /// so that `--resume` works per workspace, which means every repository
+    /// gained a `?? .codape/` the moment a session ran in it. Reporting that
+    /// back as *uncommitted work* describes a change the model did not make,
+    /// in the section that exists to tell it what the user has in flight —
+    /// and it is the first thing a model sees in a clean repository.
+    ///
+    /// Filtering here rather than in `.gitignore` is deliberate: the directory
+    /// is a real, user-visible artifact of the tool, not something to hide
+    /// from git. It just is not part of the work in progress.
+    fn without_tool_state(status: &str) -> String {
+        status
+            .lines()
+            .filter(|line| {
+                // `XY path`: the status codes and the separating space are the
+                // first three bytes. A rename reads `old -> new`, so the arrow
+                // is split on too — either side can be the directory.
+                //
+                // Only `/` and the arrow separate segments. A path may contain
+                // spaces (`my .codape notes.md`), and git quotes such a path,
+                // so splitting on whitespace would drop a user's own file.
+                let path = line.get(3..).unwrap_or(line);
+                !path
+                    .split(['/', '>'])
+                    .any(|segment| segment.trim() == ".codape")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Estimate token count for a string (chars / 4 heuristic).
@@ -1013,6 +1046,90 @@ mod tests {
             assembled.estimated_tokens,
             system_tokens,
             context_tokens
+        );
+    }
+
+    /// Codape's own bookkeeping is not uncommitted work.
+    ///
+    /// Every session writes `<cwd>/.codape/sessions.db` and transcripts so
+    /// `--resume` is per workspace, and the first prompt in a fresh repository
+    /// therefore reported `?? .codape/` — a change the model did not make,
+    /// presented in the one section that says what the user has in flight.
+    #[test]
+    fn the_tools_own_state_is_not_reported_as_uncommitted_work() {
+        let status =
+            "?? .codape/\n M src/lib.rs\n?? notes.md\nA  .codape/transcripts/x.jsonl\n M .codape\n";
+        assert_eq!(
+            PromptCompiler::without_tool_state(status.trim()),
+            " M src/lib.rs\n?? notes.md",
+            "only the user's own changes should survive"
+        );
+    }
+
+    /// A path that merely *contains* the name is not the directory.
+    #[test]
+    fn a_path_that_merely_names_the_directory_is_kept() {
+        let status =
+            "?? .codape-cache/\n?? src/.codape.rs\n?? docs/codape.md\n?? \"my .codape notes.md\"";
+        assert_eq!(PromptCompiler::without_tool_state(status), status);
+    }
+
+    /// Rename entries read `XY old -> new`; either side can be the directory.
+    #[test]
+    fn a_rename_that_involves_the_directory_is_dropped() {
+        let status = "R  src/a.rs -> .codape/a.rs\n M keep.rs";
+        assert_eq!(PromptCompiler::without_tool_state(status), " M keep.rs");
+    }
+
+    /// The real end-to-end shape: a git repository whose only change is the
+    /// directory the tool created has nothing to report.
+    #[test]
+    fn a_repository_whose_only_change_is_the_tools_own_state_reports_a_clean_tree() {
+        let repo = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        std::fs::write(repo.path().join("a.txt"), "hi\n").unwrap();
+        assert!(run(&["add", "a.txt"]).status.success());
+        assert!(
+            run(&[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-qm",
+                "init"
+            ])
+            .status
+            .success()
+        );
+
+        let compiler = PromptCompiler::new(CompactConfig::default());
+        let before = compiler.get_system_context(repo.path());
+        assert!(
+            !before.contains(".codape"),
+            "a clean tree should not mention the directory: {before}"
+        );
+
+        // What a session in this repository creates.
+        std::fs::create_dir_all(repo.path().join(".codape/transcripts")).unwrap();
+        std::fs::write(repo.path().join(".codape/sessions.db"), b"db").unwrap();
+        std::fs::write(repo.path().join(".codape/transcripts/s.jsonl"), "{}\n").unwrap();
+
+        let after = compiler.get_system_context(repo.path());
+        assert_eq!(
+            before, after,
+            "creating its own state must not change the snapshot"
+        );
+        assert!(
+            after.contains("Current branch:"),
+            "the branch is still reported: {after}"
         );
     }
 }

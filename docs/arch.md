@@ -76,7 +76,7 @@ LoadSkills -> InitPlugins -> ReconcileMarketplaces -> InitMcp
 InitMemory -> InitRemoteServices -> Ready
     |             |
     |             +-- Bridge transport (if CODAPE_BRIDGE_URL set)
-    +-- .codape/ directory setup
+    +-- mark the memory subsystem ready (creates no directories)
 ```
 
 ## 4. Key Abstractions

@@ -935,19 +935,15 @@ impl StartupOrchestrator {
         self.run_phase(StartupPhase::Ready, &args).await?;
 
         // Non-blocking update check (once per 24h)
-        {
-            let cwd = self.ctx.cwd.clone();
-            tokio::spawn(async move {
-                use crate::version;
-                let cwd_path = std::path::Path::new(&cwd);
-                if version::should_check(cwd_path) {
-                    if let Some(msg) = version::check_for_updates().await {
-                        tracing::info!("{msg}");
-                    }
-                    version::record_check_time(cwd_path);
+        tokio::spawn(async move {
+            use crate::version;
+            if version::should_check() {
+                if let Some(msg) = version::check_for_updates().await {
+                    tracing::info!("{msg}");
                 }
-            });
-        }
+                version::record_check_time();
+            }
+        });
 
         #[cfg(unix)]
         {
@@ -2582,12 +2578,14 @@ impl StartupOrchestrator {
     // task, and removing it cascades into unnecessary_wraps/unused_self.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn phase_init_memory(&mut self) -> Result<()> {
+        // Deliberately creates nothing. Every writer under `<cwd>/.codape`
+        // makes its own directory on first write — the transcript store, the
+        // session index, and the memory stores all `mkdir -p` before they
+        // open a file — so doing it here bought nothing except that *every*
+        // invocation, `codape update` and `--help` included, left a `.codape/`
+        // in the working directory. In a repository that shows up as `?? .codape/`
+        // in the next session's working-tree snapshot.
         let memory_dir = std::path::Path::new(&self.ctx.cwd).join(".codape");
-
-        if !memory_dir.exists() {
-            std::fs::create_dir_all(&memory_dir)?;
-        }
-
         tracing::info!("memory subsystem initialized at {memory_dir:?}");
         self.ctx.memory_ready = true;
         Ok(())
@@ -4100,7 +4098,6 @@ impl StartupOrchestrator {
 
     async fn run_update(&self, check: bool) -> Result<()> {
         use crate::{self_update, version};
-        let cwd = self.ctx.cwd.clone();
         let report =
             match self_update::update(self_update::UpdateOptions { check_only: check }).await {
                 Ok(report) => report,
@@ -4128,7 +4125,7 @@ impl StartupOrchestrator {
                 (false, None) => println!("Codape is up to date."),
             },
         }
-        version::record_check_time(std::path::Path::new(&cwd));
+        version::record_check_time();
         Ok(())
     }
 
@@ -5766,12 +5763,27 @@ mod tests {
         // Should succeed even without remote client
     }
 
+    /// Starting a session must not leave anything in the working directory.
+    ///
+    /// The phase used to `mkdir -p <cwd>/.codape`, so `codape update` — which
+    /// runs the same startup phases before dispatching — created a `.codape/`
+    /// in whatever repository it was run from. The stores beneath it create
+    /// their own subdirectories when they first write, so the eager mkdir was
+    /// pure residue.
     #[tokio::test]
-    async fn init_memory_creates_directory() {
+    async fn init_memory_touches_nothing_in_the_working_directory() {
+        let worktree = tempfile::tempdir().unwrap();
         let mut orch = StartupOrchestrator::new();
-        orch.ctx.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        orch.ctx.cwd = worktree.path().to_string_lossy().to_string();
+
         orch.phase_init_memory().await.unwrap();
+
         assert!(orch.ctx.memory_ready);
+        assert_eq!(
+            std::fs::read_dir(worktree.path()).unwrap().count(),
+            0,
+            "the phase created something in the working directory"
+        );
     }
 
     #[tokio::test]
