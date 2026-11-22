@@ -63,6 +63,15 @@ fn start_static_provider() -> (Child, String) {
 /// given, which is the only supported way to tell the binary what a model
 /// costs.
 fn result_frame(model: &str, pricing: Option<&str>) -> serde_json::Value {
+    result_frame_for(model, pricing, "hello")
+}
+
+/// The same, for a prompt the static provider answers with a given trace.
+///
+/// The prompt is what selects the provider's reply, so it is also what selects
+/// whether the run calls a tool. A tool turn is a second request and a real
+/// subprocess, which is the only way to observe tool time at all.
+fn result_frame_for(model: &str, pricing: Option<&str>, prompt: &str) -> serde_json::Value {
     let (mut provider, base_url) = start_static_provider();
     let workspace = tempfile::tempdir().expect("workspace");
     let config_home = tempfile::tempdir().expect("config home");
@@ -75,7 +84,13 @@ fn result_frame(model: &str, pricing: Option<&str>) -> serde_json::Value {
         std::fs::write(config_home.path().join("pricing.json"), pricing).expect("pricing");
     }
 
-    let output = run_stream_json(workspace.path(), config_home.path(), &base_url, model);
+    let output = run_stream_json(
+        workspace.path(),
+        config_home.path(),
+        &base_url,
+        model,
+        prompt,
+    );
     let _ = provider.kill();
     let _ = provider.wait();
 
@@ -93,6 +108,7 @@ fn run_stream_json(
     config_home: &Path,
     base_url: &str,
     model: &str,
+    prompt: &str,
 ) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_codape"))
         .args([
@@ -113,12 +129,12 @@ fn run_stream_json(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn codape");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(b"hello\n")
-        .expect("write prompt");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(prompt.as_bytes()).expect("write prompt");
+    stdin.write_all(b"\n").expect("write newline");
+    // Close stdin: headless mode reads the prompt to end-of-file, so a stdin
+    // that stays open is a run that never starts.
+    drop(stdin);
     child.wait_with_output().expect("wait")
 }
 
@@ -202,6 +218,40 @@ fn a_result_frame_splits_the_run_time_between_model_and_tools() {
     assert!(
         model_ms <= duration_ms,
         "model time {model_ms}ms exceeded the turn's {duration_ms}ms: {frame}"
+    );
+}
+
+/// A run that actually calls a tool charges that call's time to the tools.
+///
+/// The sibling above asserts `tool_ms == 0` for a turn with no tool, which is
+/// also what a tool-time measurement that never runs would report. That makes
+/// "the tools are fast" and "tool time is not being measured" the same number,
+/// so a run reading `tool_ms` to decide where to optimise could conclude the
+/// tools are free. This is the same frame with one real `Bash` call in it.
+#[test]
+fn a_tool_call_is_charged_to_tool_time_not_model_time() {
+    let frame = result_frame_for("claude-sonnet-4-6", None, "show git status");
+
+    let model_ms = frame
+        .get("model_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("no model_ms on the result frame: {frame}"));
+    let tool_ms = frame
+        .get("tool_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("no tool_ms on the result frame: {frame}"));
+    let duration_ms = frame["duration_ms"].as_u64().expect("duration_ms");
+
+    // A subprocess was spawned and reaped inside this run. Its time is
+    // non-zero, and it is not the provider's time.
+    assert!(
+        tool_ms > 0,
+        "a run that called a tool reported no tool time: {frame}"
+    );
+    // Both are still subsets of the turn.
+    assert!(
+        model_ms.saturating_add(tool_ms) <= duration_ms,
+        "model {model_ms}ms + tool {tool_ms}ms exceeded the turn's {duration_ms}ms: {frame}"
     );
 }
 

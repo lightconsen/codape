@@ -444,11 +444,32 @@ Attempts are not averaged into separate scores: `--n-attempts N` gives N trials
 per task, and both ratios above are computed over those trials. A task that
 passes 2 of 3 attempts is 0.67, not 1 — the point of repeating is to see that.
 
+SWE-bench is the exception in how the trials are produced, not in how they are
+counted. The official harness keys a predictions file by `instance_id`, so N
+attempts cannot share one file: each attempt gets its own predictions file and
+its own evaluation, under a distinct run id (`<run-id>-a1`, `-a2`, …). The score
+is still resolved trials over total trials, and the summary prints the trial
+count beside it (`5/6`), so `pass@1` and the fraction cannot read as a
+contradiction.
+
 Alongside the ratio, each runner reports `model_ms` (waiting on the provider),
 `tool_ms` (executing tools) and `num_turns`, summed over the trials whose
 transcript carried them, with the count of such trials. `duration_ms` is larger
 than the two sums together: it also covers context building, hooks, compaction
 and the gaps between turns, which are not attributable to either.
+
+That remainder is not a rounding term, and the SWE-bench summary prints it as
+`other` beside the two. Measured on 2026-11-22 against the **local** static
+provider, a tool-free turn spent 7 ms on the provider and 21 ms elsewhere; a
+two-turn turn that ran one `Bash` command spent 14 ms on the provider, 33 ms in
+the tool, and 41 ms in neither — so `model=14s tools=33s` would describe less
+than half of that run. Read the mix with the provider's speed in mind: a local
+provider answers in milliseconds, so here the remainder dominated, while
+against a real provider the provider term grows to seconds and usually does.
+The point is not that `other` is always largest but that a reader comparing
+only `model_ms` and `tool_ms` cannot tell. It runs at roughly 20 ms per turn
+here, which means it scales with the turn count, not with the work — the first
+thing to look at when a run is slower than its model and its tools account for.
 
 ## SWE-bench run history
 
@@ -744,9 +765,13 @@ What these runs do **not** establish:
 - Contamination resistance. All selected issues are public, so their fixes may
   be in the model's training data.
 - Scale. The full 500-instance Verified set and the 300-instance Lite and
-  Multilingual sets were not attempted. The runner generates instances
-  serially, images are 1–5 GB each, and this 50 GB host had to delete every
-  batch's images before pulling the next batch's.
+  Multilingual sets were not attempted. Images are 1–5 GB each and this 50 GB
+  host had to delete every batch's images before pulling the next batch's.
+  Generation used to be strictly serial — one container at a time — which is
+  why 24 instances took 2.6 h; `--n-concurrent N` now runs independent
+  instances at once, at the cost of N images and N model streams resident.
+  Nothing in that number limits the runner to 24 except the host's RAM and
+  disk, so the first large run wants a host with both.
 
 ## SWE-bench variants: an alias, not a runner
 
