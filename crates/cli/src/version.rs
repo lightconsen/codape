@@ -1,7 +1,16 @@
 //! Update check — compare local version against GitHub releases.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Name of the marker that records the last check, under the config home.
+///
+/// The update check asks a question about *this installation* — is the binary
+/// older than the latest release — so the answer is the same in every
+/// directory the user opens. Keeping the marker beside `settings.json` rather
+/// than in the working directory is what makes that true, and what keeps a
+/// session from creating `.codape/` in a repository that never asked for one.
+const LAST_CHECK_FILE: &str = "last_version_check";
 
 /// Current compiled version.
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,14 +99,25 @@ pub fn update_check_disabled(value: Option<&str>) -> bool {
     })
 }
 
-/// Check if we should perform an update check (less than 24h since last).
+/// Whether an update check is due, reading the marker from the config home.
+///
+/// See [`should_check_in`] for the testable form.
 #[must_use]
-pub fn should_check(cwd: &Path) -> bool {
+pub fn should_check() -> bool {
+    should_check_in(&config_home())
+}
+
+/// Whether an update check is due, with the config home passed in.
+///
+/// A missing or unreadable marker counts as due: the check costs one request
+/// and reporting staleness matters more than saving it.
+#[must_use]
+pub fn should_check_in(config_home: &Path) -> bool {
     let disabled = std::env::var(DISABLE_UPDATE_CHECK_ENV).ok();
     if update_check_disabled(disabled.as_deref()) {
         return false;
     }
-    let marker = cwd.join(".codape/.last_version_check");
+    let marker = config_home.join(LAST_CHECK_FILE);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
@@ -117,17 +137,34 @@ pub fn should_check(cwd: &Path) -> bool {
 }
 
 /// Record that an update check was performed.
-pub fn record_check_time(cwd: &Path) {
-    let marker = cwd.join(".codape/.last_version_check");
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
+pub fn record_check_time() {
+    record_check_time_in(&config_home());
+}
+
+/// Record that an update check was performed, into a given config home.
+///
+/// Failures are ignored: a read-only or missing home must not turn a
+/// once-a-day nicety into a startup error, and the next launch simply checks
+/// again.
+pub fn record_check_time_in(config_home: &Path) {
+    let marker = config_home.join(LAST_CHECK_FILE);
+    if let Err(error) = std::fs::create_dir_all(config_home) {
+        tracing::debug!(%error, home = %config_home.display(), "could not create the config home");
+        return;
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
         .to_string();
-    let _ = std::fs::write(&marker, now);
+    if let Err(error) = std::fs::write(&marker, now) {
+        tracing::debug!(%error, path = %marker.display(), "could not record the check time");
+    }
+}
+
+/// The config home: `CLAUDE_CONFIG_DIR` when set, else `$HOME/.codape`.
+fn config_home() -> PathBuf {
+    codape_config::config_home()
 }
 
 #[cfg(test)]
@@ -193,24 +230,52 @@ mod tests {
         );
     }
 
+    /// The marker used to live at `<cwd>/.codape/.last_version_check`, so
+    /// opening a clean repository for the first time wrote `.codape/` into it
+    /// — and the first prompt's working-tree snapshot showed `?? .codape/`
+    /// before the user had done anything.
+    #[test]
+    fn the_check_marker_lives_in_the_config_home_and_not_the_working_directory() {
+        let config_home = tempfile::tempdir().unwrap();
+        let worktree = tempfile::tempdir().unwrap();
+
+        record_check_time_in(config_home.path());
+
+        assert!(
+            config_home.path().join(LAST_CHECK_FILE).exists(),
+            "the marker should be in the config home"
+        );
+        assert!(
+            !worktree.path().join(".codape").exists(),
+            "nothing should be written into the working directory"
+        );
+        assert_eq!(
+            std::fs::read_dir(worktree.path()).unwrap().count(),
+            0,
+            "the working directory is left exactly as it was"
+        );
+        assert!(
+            !should_check_in(config_home.path()),
+            "the marker that was just written should suppress the next check"
+        );
+    }
+
     #[test]
     fn should_check_with_no_file() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(should_check(tmp.path()));
+        assert!(should_check_in(tmp.path()));
     }
 
     #[test]
     fn should_check_with_fresh_file() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".codape")).unwrap();
-        record_check_time(tmp.path());
-        assert!(!should_check(tmp.path()));
+        record_check_time_in(tmp.path());
+        assert!(!should_check_in(tmp.path()));
     }
 
     #[test]
     fn should_check_with_old_file() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".codape")).unwrap();
         // Write an old timestamp
         let old = SystemTime::now()
             .checked_sub(Duration::from_hours(48))
@@ -218,18 +283,29 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        std::fs::write(
-            tmp.path().join(".codape/.last_version_check"),
-            old.to_string(),
-        )
-        .unwrap();
-        assert!(should_check(tmp.path()));
+        std::fs::write(tmp.path().join(LAST_CHECK_FILE), old.to_string()).unwrap();
+        assert!(should_check_in(tmp.path()));
+    }
+
+    #[test]
+    fn an_unparseable_marker_is_treated_as_due() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(LAST_CHECK_FILE), "not a timestamp").unwrap();
+        assert!(should_check_in(tmp.path()));
+    }
+
+    #[test]
+    fn record_check_time_creates_the_home_when_it_does_not_exist_yet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("nested/config");
+        record_check_time_in(&home);
+        assert!(home.join(LAST_CHECK_FILE).exists());
     }
 
     #[test]
     fn record_check_time_creates_file() {
         let tmp = tempfile::tempdir().unwrap();
-        record_check_time(tmp.path());
-        assert!(tmp.path().join(".codape/.last_version_check").exists());
+        record_check_time_in(tmp.path());
+        assert!(tmp.path().join(LAST_CHECK_FILE).exists());
     }
 }

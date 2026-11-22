@@ -4,6 +4,12 @@
 --check` only reports whether one exists. The once-a-day startup check and the
 `/update-check` command keep reporting; they never install anything.
 
+The check-time marker is `last_version_check` in the **config home**
+(`CLAUDE_CONFIG_DIR`, else `$HOME/.codape`), not the working directory. Whether
+the binary is stale is a property of the installation, so it has one answer per
+machine rather than one per repository — and running `codape update` inside a
+repository no longer leaves a `.codape/` there.
+
 ```bash
 codape update --check     # "New version available: 0.2.0 (current: 0.1.0)"
 codape update             # download, verify, replace this binary

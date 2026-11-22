@@ -212,6 +212,61 @@ async fn an_empty_system_prompt_is_not_marked() {
     assert_eq!(body["system"], "");
 }
 
+/// The working-tree snapshot goes out as an unmarked trailing block, so the
+/// bytes the breakpoint covers are the same on every turn of a session.
+///
+/// This is the property the cache depends on, checked on the wire: the
+/// scenario is a turn that edits a file — the first request carries a clean
+/// tree, the second the `M src/lib.rs` the edit produced — and the marked
+/// block must be byte-identical between them.
+#[tokio::test]
+async fn a_working_tree_edit_does_not_change_the_cached_prefix() {
+    let stable = "You are Codape.\n\n=== BOUNDARY MARKER ===\n\nBe brief.";
+    let snapshot = |status: &str| {
+        format!("## System Context\n\nCurrent branch: `main`\n\nGit status:\n```\n{status}```\n")
+    };
+
+    let before = send_anthropic(
+        vec![message("user", "change something")],
+        &tools(),
+        &format!("{stable}\n\n{}", snapshot("")),
+        true,
+    )
+    .await;
+    let after = send_anthropic(
+        vec![
+            message("user", "change something"),
+            message("assistant", "done"),
+        ],
+        &tools(),
+        &format!("{stable}\n\n{}", snapshot("M src/lib.rs\n")),
+        true,
+    )
+    .await;
+
+    let blocks = before["system"].as_array().expect("a block array");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "stable text and snapshot split: {before:#}"
+    );
+    assert!(blocks[0]["cache_control"].is_object(), "{before:#}");
+    assert!(
+        blocks[1].get("cache_control").is_none(),
+        "the snapshot must sit outside the cached prefix: {before:#}"
+    );
+
+    let after_blocks = after["system"].as_array().expect("a block array");
+    assert_eq!(
+        after_blocks[0]["text"], blocks[0]["text"],
+        "the cached prefix changed when the tree did"
+    );
+    assert_ne!(
+        after_blocks[1]["text"], blocks[1]["text"],
+        "the snapshot should have changed: {after:#}"
+    );
+}
+
 #[tokio::test]
 async fn the_openai_protocol_never_receives_cache_control() {
     let (base_url, handle) = capture(serde_json::json!({
