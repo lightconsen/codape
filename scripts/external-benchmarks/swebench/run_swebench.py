@@ -1370,7 +1370,7 @@ def summarize(
         "notes": [
             "pass@1 is resolved trials / total trials over the official reports; with --n-attempts N that is the sum of N reports, and with one attempt it is the report's own counts.",
             "token_usage and timing are summed over the instances whose result frames carried them; null means the binary did not report it.",
-            "timing.unattributed_ms is agent_duration_ms minus model_ms and tool_ms, summed over instances that recorded all three: context building, hooks, compaction and inter-turn gaps. It is often the largest of the three.",
+            "timing.unattributed_ms is agent_duration_ms minus model_ms and tool_ms, summed over instances that recorded all three: context building, hooks, compaction and inter-turn gaps. Against a local provider it dominated, because model time was milliseconds; against a real provider, read it before concluding the tools dominate.",
         ],
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

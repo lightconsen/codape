@@ -445,8 +445,11 @@ gitignored.
   turns "Codape is slower" into "2 312 s waiting on the provider, 187 s in
   tools". `duration_ms` also covers context building, hooks, compaction and the
   gaps between turns, and that remainder is not small: measured against the
-  static provider a two-turn tool run spent 14 ms on the provider, 33 ms in the
-  tool and 41 ms in neither. The SWE-bench summary prints it as `other` and
+  **local** static provider a two-turn tool run spent 14 ms on the provider,
+  33 ms in the tool and 41 ms in neither — the remainder dominated only because
+  a local provider answers in milliseconds. Against a real provider the
+  provider term grows to seconds; the remainder is the term to read before
+  concluding the tools are slow. The SWE-bench summary prints it as `other` and
   `summary.json` carries it as `timing.unattributed_ms`, so a reader comparing
   two of the three does not mistake a minority for the whole. A binary older
   than `v0.2.2` reports none of it, and the runners then
