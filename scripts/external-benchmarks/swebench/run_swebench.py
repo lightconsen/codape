@@ -27,9 +27,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -151,6 +153,13 @@ DEFAULT_AGENT_TIMEOUT = 1800
 DEFAULT_EVAL_TIMEOUT = 1800
 DEFAULT_MAX_TURNS = 300
 DEFAULT_CONTEXT_TOKENS = 131072
+# Generation is one container per instance and the instances are independent,
+# so this is pure throughput. It is 1 by default because each container is a
+# full repository image plus a model conversation — a 24-instance run at 4 is
+# four model streams and four multi-GB images resident at once. Raise it with
+# --n-concurrent as far as RAM and the provider's rate limit allow.
+DEFAULT_N_CONCURRENT = 1
+DEFAULT_N_ATTEMPTS = 1
 
 CONTAINER_WORKDIR = "/testbed"
 CONTAINER_CONFIG_DIR = "/tmp/codape-config"
@@ -934,9 +943,16 @@ def run_one_instance(
     run_dir: Path,
     args: argparse.Namespace,
     predictions_path: Path,
+    attempt: int = 1,
+    write_lock: threading.Lock | None = None,
 ) -> dict[str, Any]:
     instance_id = instance["instance_id"]
-    instance_dir = run_dir / "instances" / safe_name(instance_id)
+    # An attempt gets its own directory: a repeat re-runs the same instance from
+    # a fresh container, so `prompt.txt`, the transcript and the extracted patch
+    # must not overwrite the earlier attempt's. With one attempt the path keeps
+    # the old shape, so existing run directories still read the same way.
+    instance_root = run_dir / "instances" / safe_name(instance_id)
+    instance_dir = instance_root if args.n_attempts == 1 else instance_root / f"attempt-{attempt}"
     instance_dir.mkdir(parents=True, exist_ok=True)
     image = instance.get("image")
     if not image:
@@ -946,12 +962,16 @@ def run_one_instance(
         raise BenchError(f"{instance_id}: dataset row has an unexpected base_commit: {base_commit!r}")
     prompt = build_prompt(instance, args.extra_instructions)
     (instance_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    print(f"\n=== {instance_id} ===", flush=True)
+    print(f"\n=== {instance_id}" + (f" (attempt {attempt} of {args.n_attempts})" if args.n_attempts > 1 else "") + " ===", flush=True)
     print(f"image: {image}", flush=True)
 
+    # `docker pull` and the container name are both per-image/per-attempt, so
+    # two threads on different instances never collide; the same instance is
+    # never in flight twice.
     ensure_image(image)
     prefix = "codape" if args.agent == "codape" else "claude"
-    container = f"{prefix}-swebench-{args.run_id}-{safe_name(instance_id)}"[:120]
+    suffix = safe_name(instance_id) if args.n_attempts == 1 else f"{safe_name(instance_id)}-a{attempt}"
+    container = f"{prefix}-swebench-{args.run_id}-{suffix}"[:120]
     subprocess.run(["docker", "rm", "-f", container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     # Match the official harness: root and SYS_ADMIN, because some repository
     # test suites need an unprivileged user namespace.
@@ -1003,13 +1023,27 @@ def run_one_instance(
         "model_name_or_path": args.model_name,
         "model_patch": patch,
     }
-    with predictions_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(prediction) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    # Instances run concurrently, and a JSONL line has to be whole: two threads
+    # appending to the same handle would otherwise interleave. The lock is
+    # per-run, so a single-threaded run takes it uncontended.
+    line = json.dumps(prediction) + "\n"
+    if write_lock is None:
+        handle = predictions_path.open("a", encoding="utf-8")
+        try:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            handle.close()
+    else:
+        with write_lock, predictions_path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     record = {
         "instance_id": instance_id,
+        "attempt": attempt,
         "agent": args.agent,
         "image": image,
         "language": language_for(instance, args.dataset),
@@ -1029,11 +1063,99 @@ def run_one_instance(
     }
     (instance_dir / "record.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(
-        f"{instance_id}: patch={record['patch_bytes']} bytes agent_exit={record['agent_returncode']} "
+        f"{instance_id}{'' if args.n_attempts == 1 else f' (attempt {attempt})'}: "
+        f"patch={record['patch_bytes']} bytes agent_exit={record['agent_returncode']} "
         f"elapsed={record['elapsed_sec']}s",
         flush=True,
     )
     return record
+
+
+def attempt_predictions_path(run_dir: Path, args: argparse.Namespace, attempt: int) -> Path:
+    """Where one attempt's predictions go.
+
+    The official harness keys a predictions file by `instance_id`, so N
+    attempts cannot share one: the second would overwrite the first and the
+    evaluation would see one trial. Each attempt therefore gets its own file
+    and is graded on its own; `summary.json` adds the reports up.
+    """
+    if args.predictions:
+        base = Path(args.predictions).expanduser().resolve()
+    else:
+        base = run_dir / "predictions.jsonl"
+    if args.n_attempts == 1:
+        return base
+    return base.with_name(f"{base.stem}.attempt-{attempt}{base.suffix}")
+
+
+def run_attempts(
+    selected: list[dict[str, Any]],
+    run_dir: Path,
+    args: argparse.Namespace,
+    predictions_paths: dict[int, Path],
+) -> list[dict[str, Any]]:
+    """Run every (instance, attempt) pair, `--n-concurrent` at a time.
+
+    Each instance is independent — its own container, its own image, its own
+    conversation — so the only shared state is the predictions file (written
+    under a lock) and the console. A failure in one attempt raises as it
+    would sequentially; the instances already running are allowed to finish
+    and their predictions stay on disk, which is what makes `--resume` useful
+    after a provider outage rather than after nothing.
+    """
+    jobs = [(row, attempt) for attempt in sorted(predictions_paths) for row in selected]
+    if not jobs:
+        return []
+    lock = threading.Lock() if args.n_concurrent > 1 else None
+    records: list[dict[str, Any]] = []
+    if args.n_concurrent == 1:
+        for row, attempt in jobs:
+            records.append(
+                run_one_instance(row, run_dir, args, predictions_paths[attempt], attempt, lock)
+            )
+        return records
+
+    print(
+        f"generation: {len(jobs)} trial(s) over {len(selected)} instance(s), "
+        f"{args.n_concurrent} at a time",
+        flush=True,
+    )
+    pending = iter(jobs)
+    in_flight: dict[Any, tuple[dict[str, Any], int]] = {}
+    with ThreadPoolExecutor(max_workers=args.n_concurrent) as pool:
+        def submit_next() -> bool:
+            try:
+                row, attempt = next(pending)
+            except StopIteration:
+                return False
+            future = pool.submit(
+                run_one_instance, row, run_dir, args, predictions_paths[attempt], attempt, lock
+            )
+            in_flight[future] = (row, attempt)
+            return True
+
+        for _ in range(args.n_concurrent):
+            if not submit_next():
+                break
+        try:
+            while in_flight:
+                done, _ = wait(list(in_flight), return_when=FIRST_COMPLETED)
+                for future in done:
+                    in_flight.pop(future)
+                    records.append(future.result())
+                    submit_next()
+        except BaseException:
+            # A failed attempt must not leave its siblings' containers behind:
+            # the per-call `finally` only runs for calls that started.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+
+    # Records are appended as attempts finish, so the summary lists them in
+    # completion order. Sort so `summary.json` reads the same as a sequential
+    # run of the same jobs.
+    order = {row["instance_id"]: index for index, row in enumerate(selected)}
+    records.sort(key=lambda record: (order.get(record["instance_id"], 0), record.get("attempt") or 1))
+    return records
 
 
 def build_eval_command(
@@ -1110,21 +1232,55 @@ def summarize(
     timings: dict[str, Any],
     predictions_path: Path,
     selected: list[dict[str, Any]],
+    attempt_reports: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    report = None
-    if report_path is not None:
+    """Turn the run's artifacts into `summary.json`.
+
+    With `--n-attempts N` there are N reports, one per attempt, each over the
+    same instances. pass@1 is resolved trials over total trials — the sum of
+    the reports' numerators over the sum of their denominators — which is why
+    the single-attempt case needs no special case: it sums one report.
+    """
+    def load(path: str | None) -> dict[str, Any] | None:
+        if not path:
+            return None
         try:
-            report = json.loads(report_path.read_text(encoding="utf-8"))
+            return json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            report = None
+            return None
+
+    reports = [load(entry.get("report")) for entry in (attempt_reports or [])]
+    reports = [report for report in reports if report]
+    if not reports and report_path is not None:
+        single = load(str(report_path))
+        reports = [single] if single else []
     total = None
     resolved = None
     pass_at_1 = None
-    if report:
-        total = report.get("total_instances")
-        resolved = report.get("resolved_instances")
-        if total:
-            pass_at_1 = resolved / total if resolved is not None else None
+    if reports:
+        # Counted over trials, not over instances: with two attempts, an
+        # instance resolved once is 1 of 2, and reporting "1/1 resolved" beside
+        # a pass@1 of 0.5 would read as a contradiction. `total` is the sum of
+        # the per-attempt instance counts, so pass@1 = resolved / total and the
+        # two numbers in the summary agree.
+        per_attempt = [
+            (report.get("resolved_instances"), report.get("total_instances"))
+            for report in reports
+        ]
+        if all(r is not None and t for r, t in per_attempt):
+            resolved = sum(r for r, _ in per_attempt)
+            total = sum(t for _, t in per_attempt)
+            pass_at_1 = resolved / total
+        else:
+            ratios = [
+                report["resolved_instances"] / report["total_instances"]
+                for report in reports
+                if report.get("total_instances") and report.get("resolved_instances") is not None
+            ]
+            pass_at_1 = sum(ratios) / len(ratios) if ratios else None
+            if len(reports) == 1:
+                total = reports[0].get("total_instances")
+                resolved = reports[0].get("resolved_instances")
 
     usages = [record["usage"] for record in records if record.get("usage")]
     token_usage = None
@@ -1157,6 +1313,7 @@ def summarize(
         "run_id": args.run_id,
         "model_name_or_path": args.model_name,
         "instances": [record["instance_id"] for record in records],
+        "attempts": max((record.get("attempt") or 1) for record in records) if records else 1,
         "resolved_instances": resolved,
         "total_instances": total,
         "pass_at_1": pass_at_1,
@@ -1168,13 +1325,22 @@ def summarize(
             "elapsed_sec": timings.get("evaluation_elapsed_sec"),
             "returncode": timings.get("evaluation_returncode"),
             "report": str(report_path) if report_path else None,
+            "attempts": [
+                {
+                    "attempt": entry.get("attempt"),
+                    "predictions": entry.get("path"),
+                    "report": entry.get("report"),
+                    "returncode": entry.get("returncode"),
+                }
+                for entry in (attempt_reports or [])
+            ],
         },
         "total_elapsed_sec": timings.get("total_elapsed_sec"),
         "token_usage": token_usage,
         "timing": timing,
         "predictions": str(predictions_path),
         "notes": [
-            "pass@1 is resolved_instances / total_instances from the official report.",
+            "pass@1 is resolved trials / total trials over the official reports; with --n-attempts N that is the sum of N reports, and with one attempt it is the report's own counts.",
             "token_usage and timing are summed over the instances whose result frames carried them; null means the binary did not report it.",
         ],
     }
@@ -1189,11 +1355,15 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"model       : {summary['model_name_or_path']}")
     if summary.get("languages"):
         print(f"languages   : {', '.join(summary['languages'])}")
-    print(f"instances   : {', '.join(summary['instances']) or '(none)'}")
+    print(f"instances   : {', '.join(dict.fromkeys(summary['instances'])) or '(none)'}")
+    # With `--n-attempts` the denominator is trials, not distinct instances, and
+    # a line that called it "instances" would look like a count of the list
+    # printed above it.
+    unit = "trials" if (summary.get("attempts") or 1) > 1 else "instances"
     if summary["pass_at_1"] is not None:
         print(
             f"pass@1      : {summary['pass_at_1']:.4f} "
-            f"({summary['resolved_instances']}/{summary['total_instances']} resolved)"
+            f"({summary['resolved_instances']}/{summary['total_instances']} {unit} resolved)"
         )
     else:
         print("pass@1      : unavailable (official report missing or incomplete)")
@@ -1212,7 +1382,7 @@ def print_summary(summary: dict[str, Any]) -> None:
             f"time        : model={timing['model_ms'] / 1000:.1f}s "
             f"tools={timing['tool_ms'] / 1000:.1f}s "
             f"turns={timing['num_turns'] or 0} "
-            f"({timing['recorded_instances']} of {summary['total_instances']} instances recorded)"
+            f"({timing['recorded_instances']} of {summary['total_instances']} {unit} recorded)"
         )
     else:
         print("time        : unavailable (no model_ms/tool_ms in the run's result frames)")
@@ -1290,6 +1460,7 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
         print("# 3. Generation skipped: --eval-only")
         print(f"# predictions: {prediction_path}")
         instance_ids = list(read_predictions(prediction_path))
+        attempt_paths = {0: prediction_path}
     else:
         if args.instances:
             instance_ids = list(args.instances)
@@ -1298,8 +1469,24 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
             limit = 1 if args.limit is None else args.limit
             instance_ids = ["<selected-instance-ids>"]
             print(f"# 3. Generation for the first {limit} instance(s), sorted by instance_id")
+        attempt_paths = {
+            attempt: attempt_predictions_path(args.output_dir / args.run_id, args, attempt)
+            for attempt in range(1, args.n_attempts + 1)
+        }
+        predictions = attempt_paths[1]
+        if args.n_concurrent > 1:
+            print(f"#    {args.n_concurrent} instance(s) in flight at a time")
+        if args.n_attempts > 1:
+            print(
+                f"#    {args.n_attempts} attempts per instance, each with its own "
+                "predictions file and evaluation:"
+            )
+            for attempt, path in sorted(attempt_paths.items()):
+                print(f"#      attempt {attempt}: {path}")
         prefix = "codape" if args.agent == "codape" else "claude"
         container = f"{prefix}-swebench-{args.run_id}-<instance>"
+        if args.n_attempts > 1:
+            container += "-a<attempt>"
         print(f"+ docker pull --platform linux/amd64 <image from dataset row>")
         print(f"+ docker run -d --name {container} --user root --cap-add SYS_ADMIN --platform linux/amd64 -w {CONTAINER_WORKDIR} <image> sleep infinity")
         if args.agent == "codape":
@@ -1326,17 +1513,24 @@ def dry_run(args: argparse.Namespace, spec: dict[str, str], cache_dir: Path) -> 
         print()
 
     print("# 4. Official evaluation harness")
-    eval_command = build_eval_command(
-        parquet,
-        predictions,
-        args.run_id,
-        args.output_dir / args.run_id / "eval" / "reports",
-        instance_ids,
-        args.max_workers,
-        args.eval_timeout,
-        python=str(venv_python(cache_dir)),
-    )
-    print("+ " + " ".join(eval_command))
+    for attempt, path in sorted(attempt_paths.items()):
+        label = args.run_id if len(attempt_paths) == 1 else f"{args.run_id}-a{attempt}"
+        reports = args.output_dir / args.run_id / "eval" / "reports"
+        if len(attempt_paths) > 1:
+            reports = reports / f"attempt-{attempt}"
+        eval_command = build_eval_command(
+            parquet,
+            path,
+            label,
+            reports,
+            instance_ids,
+            args.max_workers,
+            args.eval_timeout,
+            python=str(venv_python(cache_dir)),
+        )
+        if len(attempt_paths) > 1:
+            print(f"# attempt {attempt}")
+        print("+ " + " ".join(eval_command))
     print(f"# cwd: {args.output_dir / args.run_id / 'eval'}")
     print()
     print("# 5. Report pass@1 from the official report JSON and write summary.json")
@@ -1424,6 +1618,23 @@ Notes:
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target" / "external-benchmarks" / "swebench", help="Root for run artifacts (default: target/external-benchmarks/swebench)")
     parser.add_argument("--cache-dir", type=Path, help="Cache root for the venv and dataset (default: $CODAPE_BENCH_CACHE or ~/.cache/codape-external-benchmarks)")
     parser.add_argument("--max-workers", type=positive_int, default=1, help="Official harness evaluation workers (default: 1)")
+    parser.add_argument(
+        "--n-concurrent",
+        type=positive_int,
+        default=DEFAULT_N_CONCURRENT,
+        help="Instances generated at once (default: %(default)s). Instances are "
+        "independent, so this is pure throughput; each one holds a repository "
+        "image and a model stream, so raise it as far as RAM and the provider "
+        "allow",
+    )
+    parser.add_argument(
+        "--n-attempts",
+        type=positive_int,
+        default=DEFAULT_N_ATTEMPTS,
+        help="Attempts per instance (default: %(default)s). Repeats are what "
+        "separate a stable result from a lucky one; pass@1 stays resolved / "
+        "total over every attempt, which is the harness definition",
+    )
     parser.add_argument("--keep-containers", action="store_true", help="Leave per-instance agent containers running for debugging")
     parser.add_argument("--resume", action="store_true", help="Reuse existing predictions and skip completed instance IDs")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without downloading, installing, or running anything")
@@ -1502,49 +1713,96 @@ def main(argv: list[str] | None = None) -> int:
             all_selected = selected
             generation_records: list[dict[str, Any]] = []
             generation_elapsed = None
+            attempt_paths = {}
         else:
             selected = select_instances(rows, args.instances, args.limit)
             validate_instances(selected, args.dataset)
             all_selected = selected
             instance_ids = [row["instance_id"] for row in selected]
+            attempt_paths = {
+                attempt: attempt_predictions_path(run_dir, args, attempt)
+                for attempt in range(1, args.n_attempts + 1)
+            }
             if args.resume:
-                existing = read_predictions(predictions_path) if predictions_path.exists() else {}
-                selected = [row for row in selected if row["instance_id"] not in existing]
-                print(f"resuming: {len(existing)} prediction(s) already present, {len(selected)} to run", flush=True)
+                # Resume is per attempt: a repeat is a separate trial, so the
+                # second attempt is not satisfied by the first one's
+                # prediction. Instance IDs are the same set in every file.
+                remaining = []
+                for row in selected:
+                    if all(
+                        path.exists() and row["instance_id"] in read_predictions(path)
+                        for path in attempt_paths.values()
+                        if path.exists()
+                    ) and all(path.exists() for path in attempt_paths.values()):
+                        continue
+                    remaining.append(row)
+                done = len(selected) - len(remaining)
+                selected = remaining
+                print(
+                    f"resuming: {done} instance(s) have every attempt, "
+                    f"{len(selected)} to run",
+                    flush=True,
+                )
             else:
-                existing = {}
-                predictions_path.write_text("", encoding="utf-8")
+                for path in attempt_paths.values():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("", encoding="utf-8")
             print(
                 f"pinned dataset: {spec['repo']} @ {spec['revision']} ({len(rows)} instances)",
                 flush=True,
             )
             print(f"selected {len(selected)} instance(s): {', '.join(row['instance_id'] for row in selected)}", flush=True)
             generation_started = time.monotonic()
-            generation_records = [
-                run_one_instance(row, run_dir, args, predictions_path) for row in selected
-            ]
+            generation_records = run_attempts(selected, run_dir, args, attempt_paths)
             generation_elapsed = time.monotonic() - generation_started
 
-        predictions = read_predictions(predictions_path)
-        instance_ids = [iid for iid in instance_ids if iid in predictions]
-        if not instance_ids:
-            raise BenchError(f"no predictions found in {predictions_path}")
-
+        # Grade each attempt's predictions separately: the official harness keys
+        # a file by instance_id, so a single file can hold one trial per
+        # instance. pass@1 is then the mean over attempts, which is the same
+        # definition as one attempt graded once.
         eval_dir = run_dir / "eval"
         report_dir = eval_dir / "reports"
-        command = build_eval_command(
-            parquet,
-            predictions_path,
-            args.run_id,
-            report_dir,
-            instance_ids,
-            args.max_workers,
-            args.eval_timeout,
-        )
+        if not attempt_paths:
+            attempt_paths = {0: Path(args.eval_only).expanduser().resolve()}
         eval_started = time.monotonic()
-        returncode = run_evaluation(eval_dir, report_dir, command, eval_dir / "evaluation.log")
+        attempt_reports: list[dict[str, Any]] = []
+        returncodes: list[int] = []
+        predictions: dict[str, dict[str, Any]] = {}
+        for index, (attempt, path) in enumerate(sorted(attempt_paths.items())):
+            attempt_predictions = read_predictions(path) if path.exists() else {}
+            predictions.update(attempt_predictions)
+            ids = [iid for iid in instance_ids if iid in attempt_predictions]
+            if not ids:
+                if args.eval_only:
+                    raise BenchError(f"no predictions found in {path}")
+                print(f"warning: {path} has no predictions for the selected instances", file=sys.stderr)
+                attempt_reports.append({"attempt": attempt, "path": str(path), "report": None, "returncode": None})
+                continue
+            # A repeat's evaluation must not share the harness's run_id, or the
+            # second attempt's report overwrites the first.
+            label = args.run_id if len(attempt_paths) == 1 else f"{args.run_id}-a{attempt}"
+            sub_reports = report_dir if len(attempt_paths) == 1 else report_dir / f"attempt-{attempt}"
+            command = build_eval_command(parquet, path, label, sub_reports, ids, args.max_workers, args.eval_timeout)
+            log_path = eval_dir / ("evaluation.log" if len(attempt_paths) == 1 else f"evaluation-attempt-{attempt}.log")
+            returncode = run_evaluation(eval_dir, sub_reports, command, log_path)
+            returncodes.append(returncode)
+            attempt_reports.append(
+                {
+                    "attempt": attempt,
+                    "path": str(path),
+                    "report": str(found) if (found := find_report(sub_reports, args.model_name, label)) else None,
+                    "returncode": returncode,
+                }
+            )
         eval_elapsed = time.monotonic() - eval_started
-        report_path = find_report(report_dir, args.model_name, args.run_id)
+        returncode = max(returncodes) if returncodes else 0
+        report_path = (
+            Path(attempt_reports[0]["report"])
+            if len(attempt_reports) == 1 and attempt_reports[0]["report"]
+            else None
+        )
+        if not predictions:
+            raise BenchError(f"no predictions found in {', '.join(str(p) for p in attempt_paths.values())}")
 
         if not generation_records:
             generation_records = [
@@ -1568,7 +1826,16 @@ def main(argv: list[str] | None = None) -> int:
             "evaluation_returncode": returncode,
             "total_elapsed_sec": (generation_elapsed or 0.0) + eval_elapsed,
         }
-        summary = summarize(args, run_dir, generation_records, report_path, timings, predictions_path, all_selected)
+        summary = summarize(
+            args,
+            run_dir,
+            generation_records,
+            report_path,
+            timings,
+            next(iter(attempt_paths.values())),
+            all_selected,
+            attempt_reports=attempt_reports,
+        )
         print_summary(summary)
         if returncode != 0:
             print("warning: the official harness exited non-zero; inspect evaluation.log", file=sys.stderr)

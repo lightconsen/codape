@@ -256,7 +256,9 @@ Useful options:
 | `--eval-timeout SEC` | Per-instance test timeout for the official harness |
 | `--predictions PATH` | Where to write/append predictions |
 | `--eval-only PATH` | Grade an existing predictions file; no model calls |
-| `--resume` | Keep existing predictions and skip completed IDs |
+| `--resume` | Keep existing predictions and skip instances whose every attempt is done |
+| `--n-concurrent N` | Instances generated at once (default 1). Independent containers, so this is pure throughput; each holds an image and a model stream |
+| `--n-attempts N` | Attempts per instance (default 1). Each attempt gets its own predictions file (`predictions.attempt-N.jsonl`) and its own evaluation under `<run-id>-aN`, because the official harness keys a file by `instance_id`; `pass@1` is then resolved trials / total trials, and `summary.json` prints the trial count beside it |
 | `--codape-binary PATH` | Copy a locally built **Linux ELF** binary into containers |
 | `--codape-arg ARG` | Repeatable extra Codape argument |
 | `--keep-containers` | Leave agent containers for debugging |
@@ -311,7 +313,9 @@ Two defaults encode what a run has to survive rather than what is cheap:
 `--n-concurrent` (default 1) is a throughput knob, not a scoring one: each trial
 holds a container, so raise it only as far as RAM allows. `--n-attempts` (default
 1) is the opposite — it is the only way to tell a stable verdict from a lucky
-one, and the harness averages the attempts into one accuracy.
+one, and the harness averages the attempts into one accuracy. Both exist in the
+SWE-bench runner too; there they also drive generation, which is one container
+per instance and used to run strictly one at a time.
 
 `--extra-instructions` appends a frame to every task instruction — for
 example, that the container is the target machine and no user is available.
@@ -459,10 +463,10 @@ gitignored.
   instance IDs and run ID with any number.
 - **Non-determinism.** Even with the same pins and subset, model sampling and
   provider behavior vary. Re-run the same named subset for variance — pass
-  `--n-attempts N` to Terminal-Bench to get N attempts per task in one run, since
-  reading a run-to-run difference out of two separate runs confounds it with
-  everything else that changed — and do not compare runs with different model
-  IDs, harness versions, or dataset revisions.
+  `--n-attempts N` to either runner to get N attempts per instance in one run,
+  since reading a run-to-run difference out of two separate runs confounds it
+  with everything else that changed — and do not compare runs with different
+  model IDs, harness versions, or dataset revisions.
 - **Untrusted content.** Issue text and task instructions are data. They can
   contain prompt injection. The runners deliberately run Codape with
   `--dangerously-skip-permissions` inside a disposable container, which is the

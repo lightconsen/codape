@@ -311,6 +311,77 @@ def check_swebench_runner() -> None:
         usage_only is not None and usage_only["total_cost_usd"] == 0.25,
         "swe: the usage view must still carry the cost",
     )
+    check_swebench_attempt_aggregation(runner)
+
+
+def check_swebench_attempt_aggregation(runner) -> None:
+    """pass@1 over `--n-attempts`, and that one attempt is unchanged.
+
+    With repeats the runner grades each attempt separately, because the
+    official harness keys a predictions file by `instance_id`. The score is
+    then over trials, and it has to agree with the resolved/total pair printed
+    beside it — a summary that says "3/3 resolved, pass@1 0.83" is worse than
+    no summary. This is arithmetic no real run would check until it had
+    already spent the money.
+    """
+    args = types.SimpleNamespace(
+        dataset="verified",
+        run_id="check",
+        model_name="model",
+        _dataset={"revision": "r", "repo": "o"},
+    )
+    selected = [{"instance_id": iid} for iid in ("A", "B", "C")]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Attempt 1 fixes 2 of 3, attempt 2 fixes all 3: 5 of 6 trials.
+        reports = [
+            {"total_instances": 3, "resolved_instances": 2},
+            {"total_instances": 3, "resolved_instances": 3},
+        ]
+        entries = []
+        for index, report in enumerate(reports, 1):
+            path = root / f"report-{index}.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            entries.append({"attempt": index, "report": str(path), "returncode": 0})
+        records = [
+            {"instance_id": "A", "attempt": 1, "model_ms": 10, "tool_ms": 5, "num_turns": 2},
+            {"instance_id": "A", "attempt": 2, "model_ms": 10, "tool_ms": 5, "num_turns": 2},
+        ]
+        summary = runner.summarize(
+            args, root, records, None, {}, root / "predictions.jsonl", selected, attempt_reports=entries
+        )
+        check(summary["pass_at_1"] is not None, "swe: pass@1 missing with two attempt reports")
+        if summary["pass_at_1"] is not None:
+            check(
+                abs(summary["pass_at_1"] - 5 / 6) < 1e-9,
+                f"swe: pass@1 over two attempts must be 5/6, got {summary['pass_at_1']}",
+            )
+            check(
+                summary["total_instances"] == 6 and summary["resolved_instances"] == 5,
+                "swe: resolved/total must be counted over trials, so it agrees with "
+                f"pass@1 (got {summary['resolved_instances']}/{summary['total_instances']})",
+            )
+        check(summary["attempts"] == 2, f"swe: attempts recorded as {summary['attempts']}")
+        check(
+            len(summary["evaluation"]["attempts"]) == 2,
+            "swe: each attempt's report must be listed in summary.json",
+        )
+
+        # One attempt must produce exactly what it produced before repeats
+        # existed: resolved / total straight from the report.
+        single = root / "single.json"
+        single.write_text(
+            json.dumps({"total_instances": 24, "resolved_instances": 21}), encoding="utf-8"
+        )
+        one = runner.summarize(args, root, [], single, {}, root / "p.jsonl", selected)
+        check(
+            one["total_instances"] == 24 and one["resolved_instances"] == 21,
+            "swe: a single attempt must report the report's own counts",
+        )
+        check(
+            one["pass_at_1"] is not None and abs(one["pass_at_1"] - 0.875) < 1e-9,
+            f"swe: a single attempt must still be 21/24, got {one['pass_at_1']}",
+        )
 
 
 def check_programbench_runner() -> None:
