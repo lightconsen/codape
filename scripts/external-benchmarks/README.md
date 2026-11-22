@@ -18,6 +18,7 @@ These are research instruments, **not CI checks**. See [Why this is not in CI](#
 ```
 scripts/external-benchmarks/
 ├── README.md
+├── check_reporting.py      # transcript parsing, no Docker: the one part CI can run
 ├── swebench/
 │   ├── run.sh              # thin wrapper; --help/--dry-run need only stdlib
 │   └── run_swebench.py     # per-instance containers, patch extraction, official eval
@@ -30,6 +31,18 @@ scripts/external-benchmarks/
     ├── run.sh              # thin wrapper; --dry-run needs only stdlib
     └── run_programbench.py # cleanroom container, allowlisted proxy, official eval
 ```
+
+```bash
+python3 -I scripts/external-benchmarks/check_reporting.py
+```
+
+Every number a runner prints comes from parsing Codape's stream-json
+transcript, and that parsing is the part that rots silently: it is exercised
+only by a run that costs Docker, hours and paid tokens, so a runner that read the
+wrong frame went unnoticed for months. This script feeds the same functions
+synthetic `result` frames — several continuation segments, both cache spellings,
+a binary that reports nothing — and runs in CI (`Benchmark reporting`). Change a
+runner's reporting and run it first.
 
 ## Prerequisites
 
@@ -84,23 +97,28 @@ Change these only on purpose: they define what a recorded score means.
 | SWE-bench Verified revision | `78f471bf655a3137b2e8a75af1501690ec009ec3` | same |
 | SWE-bench Lite revision | `b0dde1093fe417d83b7184254edf8199c1f0dff5` | same |
 | SWE-bench Multilingual revision | `846e647b9f33c0b51b739d005d13d85493c9af09` | same |
-| Codape in SWE-bench containers | `v0.2.0`, `x86_64-unknown-linux-musl` | same |
+| Codape in SWE-bench containers | `v0.2.2`, `x86_64-unknown-linux-musl` | same |
 | Terminal-Bench harness | `0.2.18` | `terminal-bench/run_terminal_bench.py` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` | same |
-| Codape in Terminal-Bench containers | `v0.2.0` | same and `codape_agent.py` |
+| Codape in Terminal-Bench containers | `v0.2.2` | same and `codape_agent.py` |
 | ProgramBench harness | `1.2.5` | `programbench/run_programbench.py` |
 | ProgramBench cleanroom tag | `task_cleanroom_v6` | same |
-| Codape in ProgramBench containers | `v0.2.0`, `x86_64-unknown-linux-musl` | same |
+| Codape in ProgramBench containers | `v0.2.2`, `x86_64-unknown-linux-musl` | same |
 
 The Codape release downloaded inside containers is verified against the
 release's `SHA256SUMS`; a missing entry or checksum mismatch aborts that
 instance rather than running an unverified binary.
 
-`v0.2.0` is the oldest pin that works: it is the first release published under
-the `codape-*` asset names. `v0.1.3` and earlier still ship `coderex-*`
-archives, while the installers ask for `codape-<target>.tar.gz`, so pinning one
-of those fails with a 404 at container setup — before any model call, which is
-why it went unnoticed until a run was actually attempted.
+`v0.2.2` is the oldest pin that reports what a run spent. Before it, a `result`
+frame carried `duration_ms` and `num_turns` but no `usage`, `total_cost_usd`,
+`model_ms` or `tool_ms` — so the runners could report how long a task took and
+not one thing about where the time went. Any score recorded against `v0.2.0`
+predates that, which is why the pins moved together.
+
+It also still publishes `codape-*` assets: `v0.1.3` and earlier ship
+`coderex-*`, while the installers ask for `codape-<target>.tar.gz`, so pinning
+one of those fails with a 404 at container setup — before any model call, which
+is why it went unnoticed until a run was actually attempted.
 
 ## Quick start: verify locally, then smoke-test
 
@@ -367,12 +385,24 @@ gitignored.
   task and also needs network inside the container to download Codape.
   ProgramBench pulls a multi-gigabyte cleanroom image (4.19 GB for `cmatrix`)
   and its evaluator may build additional test images.
-- **Token/cost reporting.** Codape 0.2.0 exits 0 and emits a `result` frame but
-  does **not** populate `usage` or `total_cost_usd` in headless stream-json. The
-  runners therefore print `tokens/cost: unavailable`, and where a
-  `summary.json` exists it records `null`; they do not invent numbers. The
-  parsers already read those fields if a future Codape release emits them.
-  Estimate spend from the provider's billing dashboard.
+- **Token/cost/timing reporting.** From `v0.2.2` a `result` frame carries
+  `usage` (billed input and output, plus both cache spellings),
+  `total_cost_usd` when the model has a known price, `model_ms` and `tool_ms`
+  for that submit, and `duration_ms`/`num_turns`. Codape writes one frame per
+  continuation segment, and the two families are counted differently:
+  `duration_ms`/`num_turns`/`model_ms`/`tool_ms` describe their own submit and
+  are **summed** (reading the last frame alone understates a compacted run),
+  while `usage`/`total_cost_usd` are *session* totals at the moment the frame
+  was written and the **last** one carrying them is the whole run. This is what
+  turns "Codape is slower" into "2 312 s waiting on the provider, 187 s in
+  tools". A binary older than `v0.2.2` reports none of it, and the runners then
+  print `unavailable` rather than inventing numbers.
+- **Scored vs. pass@1.** Terminal-Bench reports both: `accuracy` is
+  resolved/attempted, the harness definition, while `scored` excludes trials
+  whose `failure_mode` is a plumbing failure (`test_timeout`, `parse_error`,
+  `agent_installation_failed`) — a grading test that never produced a verdict is
+  not a verdict on the agent. Read `scored` when asking what the agent did and
+  `accuracy` when comparing with a published number.
 - **Contamination.** All three benchmarks are public. Their instructions and,
   for SWE-bench, the reference patches are on the internet and may be present
   in model training data. SWE-bench Verified is human-validated and
@@ -384,9 +414,11 @@ gitignored.
   slightly less coarse. Both validate the pipeline, not capability. Report the
   instance IDs and run ID with any number.
 - **Non-determinism.** Even with the same pins and subset, model sampling and
-  provider behavior vary. Re-run the same named subset for variance; do not
-  compare runs with different model IDs, harness versions, or dataset
-  revisions.
+  provider behavior vary. Re-run the same named subset for variance — pass
+  `--n-attempts N` to Terminal-Bench to get N attempts per task in one run, since
+  reading a run-to-run difference out of two separate runs confounds it with
+  everything else that changed — and do not compare runs with different model
+  IDs, harness versions, or dataset revisions.
 - **Untrusted content.** Issue text and task instructions are data. They can
   contain prompt injection. The runners deliberately run Codape with
   `--dangerously-skip-permissions` inside a disposable container, which is the
@@ -408,10 +440,20 @@ The repository's existing benchmark job (`scripts/test-code-agent-benchmark.sh`)
 is intentionally cassette-based and key-free. These external runners are manual
 tools for release notes and research; keep them out of required checks.
 
+The reporting check above is the exception, and only because it is a different
+kind of thing: it does not run a benchmark, it runs the functions that read a
+benchmark's output, against fixtures. That is deterministic, key-free, and takes
+a second.
+
 ## What was verified locally
 
 - `bash -n` and `shellcheck` on both wrappers; `python -m py_compile` on all
   three Python files.
+- `python3 -I scripts/external-benchmarks/check_reporting.py` on every change to
+  a runner's reporting, and once against the code it replaced: there it fails
+  with five named gaps (no `result_frames`, no `model_ms`/`tool_ms`, a runner
+  that could not take the run directory, and a ProgramBench line that reported
+  the *last* frame's usage rather than the run's).
 - `--help`, `--dry-run`, and argument validation (`--instance` together with
   `--limit`, missing binaries, non-ELF binaries, bad run IDs, `--extra-arg`
   containing `=`).

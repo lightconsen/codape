@@ -37,6 +37,7 @@ this table is what they check):
 |---|---|
 | `fmt` | `cargo fmt --all --check` |
 | `cassettes` | `python3 scripts/cassette_tool.py check --strict` (metadata, size, staleness, credentials; runs in seconds) |
+| `benchmark-reporting` | `python3 -I scripts/external-benchmarks/check_reporting.py` — the three external runners' transcript parsing, on synthetic `result` frames. The runners themselves need Docker, network and paid tokens and are not in CI, so this is the only thing that would catch one of them reading the wrong frame |
 | `unsafe-allowlist` | `python3 scripts/check-unsafe.py` — every file that opts out of the workspace `unsafe_code` deny has a reviewed line in `scripts/unsafe_allowlist.txt` |
 | `cross-check-musl` | `cargo check --workspace --target x86_64-unknown-linux-musl` — the release matrix's musl target, whose libc differs from glibc in ways a gnu build cannot see |
 | `ssh-integration` | a throwaway `sshd` on a high port, then `cargo test -p codape-bridge --test ssh_spawn` — the SSH spawn path against a real server |

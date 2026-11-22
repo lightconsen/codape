@@ -97,10 +97,11 @@ MULTILINGUAL_LANGUAGE_BY_PARSER = {
 MULTILINGUAL_LANGUAGES = tuple(sorted(set(MULTILINGUAL_LANGUAGE_BY_PARSER.values())))
 
 # Codape release installed inside the container when no --codape-binary is
-# given. v0.2.0 is the first release published under the codape asset names;
-# v0.1.3 and older still ship `coderex-*` archives, so the installer below
-# (which asks for `codape-<target>.tar.gz`) 404s on them.
-CODAPE_RELEASE_VERSION = "v0.2.0"
+# given. v0.2.2 is the first release that reports usage and where a turn's
+# time went in its `result` frames (v0.2.0 and v0.2.1 predate both), and it
+# still publishes `codape-*` archives — v0.1.3 and older ship `coderex-*`, so
+# the installer below (which asks for `codape-<target>.tar.gz`) 404s on them.
+CODAPE_RELEASE_VERSION = "v0.2.2"
 CODAPE_TARGET = "x86_64-unknown-linux-musl"
 
 # Variables forwarded from the host into Codape inside the container. The
@@ -364,13 +365,30 @@ commits. Do not try to look up the issue or its reference patch online.
     return prompt
 
 
-def parse_stream_json_usage(text: str) -> dict[str, Any] | None:
-    """Extract cumulative usage/cost from Codape stream-json output, if any.
+def parse_stream_json_summary(text: str) -> dict[str, Any]:
+    """Aggregate a Codape stream-json transcript.
 
-    Codape 0.2.0 does not put ``usage`` or ``total_cost_usd`` in
-    its result frame, so the normal answer is ``None``. The parser is
-    forward-compatible: it reads the result frame rather than inventing data.
+    Codape writes one ``result`` frame per continuation segment. The two
+    families of fields are counted differently, so this is not a plain sum of
+    everything:
+
+    * ``duration_ms``, ``num_turns``, ``model_ms`` and ``tool_ms`` describe the
+      submit that wrote the frame — summed over the run.
+    * ``usage`` and ``total_cost_usd`` are session totals at the moment the
+      frame was written (`attach_usage_to_frame` in `crates/cli/src/repl.rs`),
+      so the last frame carrying them is the whole run. Summing those would
+      count the first segment once per segment.
+
+    Nothing here is invented: a field is ``None`` when no frame carried it,
+    which is what an older binary's transcript looks like.
     """
+    duration_ms = 0
+    num_turns = 0
+    model_ms = 0
+    tool_ms = 0
+    usage: dict[str, int] | None = None
+    cost: float | None = None
+    frames = 0
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -381,16 +399,49 @@ def parse_stream_json_usage(text: str) -> dict[str, Any] | None:
             continue
         if not isinstance(frame, dict) or frame.get("type") != "result":
             continue
-        usage = frame.get("usage")
-        if isinstance(usage, dict):
-            return {
-                "input_tokens": usage.get("input_tokens"),
-                "output_tokens": usage.get("output_tokens"),
-                "cache_read_input_tokens": usage.get("cache_read_input_tokens", usage.get("cache_read_tokens")),
-                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", usage.get("cache_creation_tokens")),
-                "total_cost_usd": frame.get("total_cost_usd", frame.get("cost_usd")),
+        frames += 1
+        duration_ms += int(frame.get("duration_ms") or 0)
+        num_turns += int(frame.get("num_turns") or 0)
+        model_ms += int(frame.get("model_ms") or 0)
+        tool_ms += int(frame.get("tool_ms") or 0)
+        frame_usage = frame.get("usage")
+        if isinstance(frame_usage, dict):
+            usage = {
+                "input_tokens": int(frame_usage.get("input_tokens") or 0),
+                "output_tokens": int(frame_usage.get("output_tokens") or 0),
+                "cache_read_input_tokens": int(
+                    frame_usage.get("cache_read_input_tokens")
+                    or frame_usage.get("cache_read_tokens")
+                    or 0
+                ),
+                "cache_creation_input_tokens": int(
+                    frame_usage.get("cache_creation_input_tokens")
+                    or frame_usage.get("cache_creation_tokens")
+                    or 0
+                ),
             }
-    return None
+        if frame.get("total_cost_usd") is not None:
+            cost = float(frame["total_cost_usd"])
+    return {
+        "result_frames": frames,
+        "usage": usage,
+        "total_cost_usd": cost,
+        "duration_ms": duration_ms,
+        "num_turns": num_turns,
+        "model_ms": model_ms,
+        "tool_ms": tool_ms,
+    }
+
+
+def parse_stream_json_usage(text: str) -> dict[str, Any] | None:
+    """Extract cumulative usage/cost from Codape stream-json output, if any."""
+    summary = parse_stream_json_summary(text)
+    usage = summary["usage"]
+    if usage is None:
+        return None
+    usage = dict(usage)
+    usage["total_cost_usd"] = summary["total_cost_usd"]
+    return usage
 
 
 def result_frame(text: str) -> dict[str, Any] | None:
@@ -835,13 +886,14 @@ def run_agent(
         stderr = _as_text(exc.stderr) + "\nrunner timed out while waiting for docker exec"
         returncode = None
     elapsed = time.monotonic() - started
+    transcript = parse_stream_json_summary(_as_text(stdout))
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "agent-stream.jsonl").write_text(stdout, encoding="utf-8")
     (log_dir / "agent-stderr.log").write_text(stderr, encoding="utf-8")
     return {
         "returncode": returncode,
         "elapsed_sec": round(elapsed, 3),
-        "usage": parse_stream_json_usage(stdout),
+        **transcript,
         "result": result_frame(stdout),
         "stderr_tail": stderr[-2000:],
     }
@@ -969,6 +1021,11 @@ def run_one_instance(
         "agent_failed": bool(agent["result"] and agent["result"].get("is_error")) or agent["returncode"] not in (0, 124),
         "agent_result_subtype": (agent["result"] or {}).get("subtype"),
         "usage": agent["usage"],
+        "result_frames": agent["result_frames"],
+        "agent_duration_ms": agent["duration_ms"],
+        "num_turns": agent["num_turns"],
+        "model_ms": agent["model_ms"],
+        "tool_ms": agent["tool_ms"],
     }
     (instance_dir / "record.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(
@@ -1078,6 +1135,18 @@ def summarize(
         }
         token_usage["total_cost_usd"] = sum((usage.get("total_cost_usd") or 0.0) for usage in usages)
 
+    # Where the time went, summed over the instances whose binary recorded it.
+    # `recorded_instances` is how many that was, so a partial sum cannot read
+    # as a whole-run figure.
+    timed = [record for record in records if record.get("model_ms") is not None]
+    timing = {
+        "model_ms": sum(record.get("model_ms") or 0 for record in timed) if timed else None,
+        "tool_ms": sum(record.get("tool_ms") or 0 for record in timed) if timed else None,
+        "agent_duration_ms": sum(record.get("agent_duration_ms") or 0 for record in timed) if timed else None,
+        "num_turns": sum(record.get("num_turns") or 0 for record in timed) if timed else None,
+        "recorded_instances": len(timed),
+    }
+
     summary = {
         "benchmark": "swebench",
         "dataset": args.dataset,
@@ -1102,10 +1171,11 @@ def summarize(
         },
         "total_elapsed_sec": timings.get("total_elapsed_sec"),
         "token_usage": token_usage,
+        "timing": timing,
         "predictions": str(predictions_path),
         "notes": [
             "pass@1 is resolved_instances / total_instances from the official report.",
-            "Codape 0.2.0 does not expose usage/total_cost_usd in headless stream-json; token_usage is null unless the binary emits it.",
+            "token_usage and timing are summed over the instances whose result frames carried them; null means the binary did not report it.",
         ],
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -1133,9 +1203,19 @@ def print_summary(summary: dict[str, Any]) -> None:
         print(f"evaluation  : {summary['evaluation']['elapsed_sec']:.1f}s")
     print(f"total       : {summary['total_elapsed_sec']:.1f}s")
     if summary["token_usage"] is None:
-        print("tokens/cost : unavailable (Codape did not emit usage in stream-json)")
+        print("tokens/cost : unavailable (no usage in the run's result frames)")
     else:
         print(f"tokens/cost : {json.dumps(summary['token_usage'])}")
+    timing = summary.get("timing") or {}
+    if timing.get("model_ms") is not None:
+        print(
+            f"time        : model={timing['model_ms'] / 1000:.1f}s "
+            f"tools={timing['tool_ms'] / 1000:.1f}s "
+            f"turns={timing['num_turns'] or 0} "
+            f"({timing['recorded_instances']} of {summary['total_instances']} instances recorded)"
+        )
+    else:
+        print("time        : unavailable (no model_ms/tool_ms in the run's result frames)")
     print(f"predictions : {summary['predictions']}")
     if summary["evaluation"]["report"]:
         print(f"report      : {summary['evaluation']['report']}")
@@ -1146,7 +1226,9 @@ def print_summary(summary: dict[str, Any]) -> None:
         f"resolved={summary['resolved_instances'] if summary['resolved_instances'] is not None else 'na'} "
         f"total={summary['total_instances'] if summary['total_instances'] is not None else 'na'} "
         f"elapsed_sec={summary['total_elapsed_sec']:.1f} "
-        f"tokens={'na' if summary['token_usage'] is None else 'present'}"
+        f"tokens={'na' if summary['token_usage'] is None else 'present'} "
+        f"model_sec={(timing['model_ms'] / 1000) if timing.get('model_ms') is not None else 'na'} "
+        f"tool_sec={(timing['tool_ms'] / 1000) if timing.get('tool_ms') is not None else 'na'}"
     )
 
 

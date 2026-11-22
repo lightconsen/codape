@@ -19,7 +19,7 @@ Usage with ``tb`` (see run_terminal_bench.py for the wrapper):
     tb run \
       --dataset terminal-bench-core==0.1.1 \
       --agent-import-path codape_agent:CodapeAgent \
-      --agent-kwarg version=v0.2.0 \
+      --agent-kwarg version=v0.2.2 \
       --model claude-sonnet-4-5-20250929
 """
 
@@ -52,6 +52,11 @@ LOCAL_BINARY_PATH = "/tmp/codape-local-binary"
 # transcript is copied there before the container is removed.
 LOGS_DIR = "/logs"
 LOGS_STREAM_PATH = f"{LOGS_DIR}/codape-stream.jsonl"
+# Per-trial telemetry, aggregated by run_terminal_bench.py. The harness's own
+# `results.json` cannot carry it: `TrialResults` has fields for tokens and for
+# the three harness timestamps, but nothing for where a turn's time went.
+LOGS_RECORD_NAME = "codape-run.json"
+LOGS_RECORD_PATH = f"{LOGS_DIR}/{LOGS_RECORD_NAME}"
 
 # Hosts that must bypass the optional task proxy when one is configured.
 # `host.docker.internal` because a container on Linux may need to reach the
@@ -59,7 +64,7 @@ LOGS_STREAM_PATH = f"{LOGS_DIR}/codape-stream.jsonl"
 # container itself and polls it over loopback.
 NO_PROXY = "localhost,127.0.0.1,::1,host.docker.internal"
 
-DEFAULT_VERSION = "v0.2.0"
+DEFAULT_VERSION = "v0.2.2"
 DEFAULT_MAX_TURNS = 200
 DEFAULT_TIMEOUT_SEC = 1800
 
@@ -396,12 +401,51 @@ class CodapeAgent(AbstractInstalledAgent):
             )
         ):
             failure_mode = FailureMode.UNKNOWN_AGENT_ERROR
+        self._write_run_record(
+            session,
+            {
+                "version": self._version,
+                "model": self._model_name,
+                "exit_code": exit_code,
+                "subtype": subtype,
+                "is_error": (summary or {}).get("is_error"),
+                "failure_mode": failure_mode.value,
+                "num_turns": (summary or {}).get("num_turns"),
+                "duration_ms": (summary or {}).get("duration_ms"),
+                "model_ms": (summary or {}).get("model_ms"),
+                "tool_ms": (summary or {}).get("tool_ms"),
+                "result_frames": (summary or {}).get("result_frames"),
+                "usage": usage,
+                "total_cost_usd": (summary or {}).get("total_cost_usd"),
+            },
+        )
         return AgentResult(
             total_input_tokens=(usage or {}).get("input_tokens") or 0,
             total_output_tokens=(usage or {}).get("output_tokens") or 0,
             failure_mode=failure_mode,
             timestamped_markers=result.timestamped_markers,
         )
+
+    def _write_run_record(self, session, record: dict) -> None:
+        """Write the per-trial telemetry beside the transcript, on the host.
+
+        ``AgentResult`` is the harness's model and has four fields, none of
+        which can carry where a turn's time went. ``/logs`` is bind-mounted to
+        the trial directory, so a file there survives the container and the
+        runner can aggregate it afterwards. A failure to write it must not turn
+        a finished trial into a crashed one, so this only warns.
+        """
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                local = Path(tmp) / LOGS_RECORD_NAME
+                local.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+                session.copy_to_container(
+                    [local],
+                    container_dir=str(Path(LOGS_RECORD_PATH).parent),
+                    container_filename=LOGS_RECORD_NAME,
+                )
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            print(f"warning: could not write {LOGS_RECORD_PATH}: {exc}")
 
     def _read_exit_code(self, session) -> int | None:
         try:
@@ -430,13 +474,31 @@ class CodapeAgent(AbstractInstalledAgent):
 
 
 def parse_result_summary(text: str) -> dict | None:
-    """Return error status and usage from the last Codape result frame.
+    """Return the last Codape result frame, and totals over every frame.
 
-    Codape 0.2.0 does not populate usage in headless stream-json today, so
-    ``usage`` is normally ``None``. ``is_error`` is meaningful now: the CLI
-    exits 0 after an API failure but sets it on the result frame.
+    Codape writes one result frame per continuation segment, and the two
+    families of fields are counted differently:
+
+    * ``duration_ms``, ``num_turns``, ``model_ms`` and ``tool_ms`` describe the
+      submit that wrote the frame, so a whole run is their **sum**. Reading
+      only the last frame understates a compacted run; that was the bug this
+      replaces.
+    * ``usage`` and ``total_cost_usd`` are the *session* totals at the moment
+      the frame was written (see `attach_usage_to_frame` in `repl.rs`), so the
+      last frame that carries them already is the whole run. Summing those
+      would count the first segment's tokens once per segment.
+
+    ``subtype``/``is_error`` stay the last frame's: they answer "how did the
+    run end". A run whose earlier segment errored still ended successfully and
+    is scored as such, which is what the harness does with any agent.
     """
     last_result = None
+    result_frames = 0
+    usage_total: dict[str, int] | None = None
+    total_cost: float | None = None
+    timing_totals = dict.fromkeys(
+        ("duration_ms", "num_turns", "model_ms", "tool_ms"), 0
+    )
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -445,19 +507,40 @@ def parse_result_summary(text: str) -> dict | None:
             frame = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(frame, dict) and frame.get("type") == "result":
-            last_result = frame
+        if not isinstance(frame, dict) or frame.get("type") != "result":
+            continue
+        last_result = frame
+        result_frames += 1
+        usage = frame.get("usage")
+        if isinstance(usage, dict):
+            # Both cache spellings are accepted: the reference uses the long
+            # form, and an older producer may use the short one.
+            usage_total = {
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "cache_read_input_tokens": int(
+                    usage.get("cache_read_input_tokens")
+                    or usage.get("cache_read_tokens")
+                    or 0
+                ),
+                "cache_creation_input_tokens": int(
+                    usage.get("cache_creation_input_tokens")
+                    or usage.get("cache_creation_tokens")
+                    or 0
+                ),
+            }
+        for key in timing_totals:
+            timing_totals[key] += int(frame.get(key) or 0)
+        if frame.get("total_cost_usd") is not None:
+            # Cumulative as well: keep the latest, do not add.
+            total_cost = float(frame["total_cost_usd"])
     if last_result is None:
         return None
-    usage = last_result.get("usage")
-    parsed_usage = None
-    if isinstance(usage, dict):
-        parsed_usage = {
-            "input_tokens": int(usage.get("input_tokens") or 0),
-            "output_tokens": int(usage.get("output_tokens") or 0),
-        }
     return {
         "is_error": bool(last_result.get("is_error")),
         "subtype": last_result.get("subtype"),
-        "usage": parsed_usage,
+        "result_frames": result_frames,
+        "usage": usage_total,
+        "total_cost_usd": total_cost,
+        **timing_totals,
     }
