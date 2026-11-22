@@ -1,5 +1,6 @@
 //! Anthropic API client with retry and model routing.
 
+use crate::prompt::PromptCompiler;
 use crate::provider::{ProviderApiStyle, ReasoningEffortSupport, ResolvedProviderProfile};
 use crate::tool_executor::ToolInfo;
 use crate::types::{ModelId, ThinkingBlock, ThinkingEncoding, ToolCall, UsageSummary};
@@ -2052,16 +2053,15 @@ fn apply_cache_breakpoints(body: &mut serde_json::Value) {
     if let Some(system) = object.get_mut("system") {
         match system {
             serde_json::Value::String(text) if !text.trim().is_empty() => {
-                let text = std::mem::take(text);
-                *system = serde_json::json!([{
-                    "type": "text",
-                    "text": text,
-                    "cache_control": cache_control(),
-                }]);
-                breakpoints += 1;
+                let mut blocks = system_blocks(&std::mem::take(text));
+                if mark_stable_system_block(&mut blocks) {
+                    *system = serde_json::Value::Array(blocks);
+                    breakpoints += 1;
+                }
             }
             serde_json::Value::Array(blocks) => {
-                if mark_last_block(blocks) {
+                split_trailing_system_context(blocks);
+                if mark_stable_system_block(blocks) {
                     breakpoints += 1;
                 }
             }
@@ -2090,6 +2090,96 @@ fn apply_cache_breakpoints(body: &mut serde_json::Value) {
             let _ = mark_message(second_to_last);
         }
     }
+}
+
+/// Split a system string at the working-tree snapshot, when it has one.
+///
+/// The separator newlines ahead of the heading belong to the `"\n\n"` join the
+/// engine uses, not to the stable text, so they are trimmed off the end of the
+/// first block rather than carried into the cache hash.
+fn system_blocks(system: &str) -> Vec<serde_json::Value> {
+    let Some(at) = system.rfind(PromptCompiler::SYSTEM_CONTEXT_MARKER) else {
+        return vec![text_block(system)];
+    };
+    let (stable, snapshot) = system.split_at(at);
+    let stable = stable.trim_end();
+    if stable.trim().is_empty() {
+        // The string is only a snapshot: there is nothing stable to cache.
+        return vec![text_block(snapshot)];
+    }
+    vec![text_block(stable), text_block(snapshot)]
+}
+
+/// One `type: "text"` block, with no breakpoint attached.
+fn text_block(text: &str) -> serde_json::Value {
+    serde_json::json!({"type": "text", "text": text})
+}
+
+/// Replace a trailing snapshot block with its own block, if it is still fused.
+///
+/// A caller that builds the block array itself may have put the snapshot in
+/// the same block as the stable text. Splitting it here means the breakpoint
+/// is placed correctly regardless of how the array was assembled.
+fn split_trailing_system_context(blocks: &mut Vec<serde_json::Value>) {
+    let Some(text) = blocks
+        .last()
+        .and_then(|block| block.get("text"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let Some(at) = text.rfind(PromptCompiler::SYSTEM_CONTEXT_MARKER) else {
+        return;
+    };
+    let (stable, snapshot) = text.split_at(at);
+    let stable = stable.trim_end();
+    if stable.trim().is_empty() {
+        // The block is only the snapshot: nothing to separate.
+        return;
+    }
+    *blocks.last_mut().expect("just read") = text_block(stable);
+    blocks.push(text_block(snapshot));
+}
+
+/// Mark the last block that is *not* the working-tree snapshot.
+///
+/// This is the block the cached prefix ends at. When the snapshot is the only
+/// block, it is marked as before: the request has nothing else to cache, and
+/// leaving the prefix unmarked would cost more than the occasional miss.
+fn mark_stable_system_block(blocks: &mut [serde_json::Value]) -> bool {
+    let snapshot_index = blocks
+        .iter()
+        .position(|block| {
+            block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| {
+                    text.trim_start()
+                        .starts_with(PromptCompiler::SYSTEM_CONTEXT_MARKER)
+                })
+        })
+        .unwrap_or(blocks.len());
+    let index = if snapshot_index == 0 {
+        0
+    } else {
+        snapshot_index.saturating_sub(1)
+    };
+    let Some(block) = blocks.get_mut(index) else {
+        return false;
+    };
+    if block
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| text.trim().is_empty())
+    {
+        return false;
+    }
+    let Some(block) = block.as_object_mut() else {
+        return false;
+    };
+    block.insert("cache_control".to_string(), cache_control());
+    true
 }
 
 /// Mark the last cacheable block of a block array.
@@ -2615,10 +2705,110 @@ mod tests {
         assert_eq!(count_cache_markers(&body), 4);
     }
 
+    /// The working-tree snapshot is not part of the cached prefix.
+    ///
+    /// This is the defect that made every working turn re-write tens of
+    /// kilobytes: the system string carried `git status` inside the one block
+    /// the breakpoint covered, so the cumulative hash changed the moment a tool
+    /// touched the tree. Splitting the snapshot into a trailing block puts the
+    /// breakpoint ahead of it, and the prefix stays byte-identical across turns
+    /// while only the snapshot is re-sent uncached.
+    #[test]
+    fn the_working_tree_snapshot_is_split_out_of_the_cached_prefix() {
+        let stable = "You are Codape.\n\n=== BOUNDARY MARKER ===\n\nBe brief.";
+        let snapshot =
+            "## System Context\n\nCurrent branch: `main`\n\nGit status:\n```\nM src/lib.rs\n```";
+        let mut body = serde_json::json!({
+            "system": format!("{stable}\n\n{snapshot}"),
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        apply_cache_breakpoints(&mut body);
+
+        let blocks = body["system"].as_array().expect("a block array");
+        assert_eq!(
+            blocks.len(),
+            2,
+            "stable text and snapshot are separate: {blocks:?}"
+        );
+        assert_eq!(blocks[0]["text"], stable);
+        assert_eq!(blocks[1]["text"], snapshot);
+        assert!(
+            blocks[0]["cache_control"].is_object(),
+            "the breakpoint ends the stable block: {blocks:?}"
+        );
+        assert!(
+            blocks[1].get("cache_control").is_none(),
+            "the snapshot must not be inside the cached prefix: {blocks:?}"
+        );
+
+        // The property that matters: editing the tree changes only the tail.
+        let mut next = serde_json::json!({
+            "system": format!("{stable}\n\n## System Context\n\nCurrent branch: `main`\n\nGit status:\n```\nM src/lib.rs\nM src/main.rs\n```"),
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        apply_cache_breakpoints(&mut next);
+        let next_blocks = next["system"].as_array().expect("a block array");
+        assert_eq!(
+            next_blocks[0]["text"], blocks[0]["text"],
+            "the cached prefix changed when the working tree did"
+        );
+        assert_ne!(next_blocks[1]["text"], blocks[1]["text"]);
+    }
+
+    /// A system prompt with no snapshot still becomes a single marked block,
+    /// and does not gain a block from the split.
+    #[test]
+    fn a_system_prompt_without_a_snapshot_stays_one_block() {
+        let mut body = serde_json::json!({
+            "system": "You are Codape.",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        apply_cache_breakpoints(&mut body);
+
+        let blocks = body["system"].as_array().expect("a block array");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert_eq!(blocks[0]["text"], "You are Codape.");
+        assert!(blocks[0]["cache_control"].is_object());
+    }
+
+    /// A system prompt that is *only* a snapshot is still marked: there is
+    /// nothing to protect, and an unmarked prefix would cost more than the
+    /// occasional miss.
+    #[test]
+    fn a_snapshot_only_system_prompt_is_still_marked() {
+        let mut body = serde_json::json!({
+            "system": "## System Context\n\nCurrent branch: `main`",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        apply_cache_breakpoints(&mut body);
+
+        let blocks = body["system"].as_array().expect("a block array");
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert!(blocks[0]["cache_control"].is_object(), "{blocks:?}");
+    }
+
+    /// The split also applies to an array whose last block still fuses the
+    /// snapshot onto the stable text.
+    #[test]
+    fn a_fused_array_block_is_split_before_marking() {
+        let mut body = serde_json::json!({
+            "system": [{
+                "type": "text",
+                "text": "You are Codape.\n\n## System Context\n\nCurrent branch: `main`",
+            }],
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        apply_cache_breakpoints(&mut body);
+
+        let blocks = body["system"].as_array().expect("a block array");
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        assert_eq!(blocks[0]["text"], "You are Codape.");
+        assert!(blocks[0]["cache_control"].is_object(), "{blocks:?}");
+        assert!(blocks[1].get("cache_control").is_none(), "{blocks:?}");
+    }
+
     /// A system prompt already sent as a block array is marked on its last
-    /// block only. The engine joins system messages into one string today, so
-    /// nothing in the binary reaches this branch; it exists because the API
-    /// accepts the array form and a caller that sends one must not get two
+    /// block only, so a caller that builds the array itself never gets two
     /// markers.
     #[test]
     fn an_array_system_prompt_is_marked_on_its_last_block_only() {

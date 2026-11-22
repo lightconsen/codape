@@ -479,6 +479,7 @@ def cmd_self_test(_args: argparse.Namespace) -> int:
             print("note: patch not installed; skipped the prompt check")
         elif patch_blocks_without_flag(probe):
             (probe / "f.txt").write_text("a\nNEW\nb\nc\n", encoding="utf-8")
+            before = (probe / "f.txt").read_text(encoding="utf-8")
             with_flag = subprocess.run(
                 ["patch", "--fuzz=5", "-N", "-p1", "-i", "p.diff"],
                 cwd=probe,
@@ -488,9 +489,21 @@ def cmd_self_test(_args: argparse.Namespace) -> int:
                 timeout=20,
                 check=False,
             )
+            # What matters is what `-N` does, not what one implementation calls
+            # it. The unprompted form blocked a moment ago; this one returned,
+            # and it must have returned having left the file alone. Asserting
+            # the notice's exact sentence is what broke: Apple's patch says
+            # "Ignoring previously applied (or reversed) patch." and GNU's says
+            # "Reversed (or previously applied) patch detected!" — so the check
+            # passed on the machine it was written on and failed on Linux CI.
             check(
-                "Ignoring previously applied" in with_flag.stdout,
-                "-N must skip an applied patch, not ask",
+                (probe / "f.txt").read_text(encoding="utf-8") == before,
+                "-N must leave an already-patched file untouched",
+            )
+            notice = (with_flag.stdout + with_flag.stderr).lower()
+            check(
+                "previously applied" in notice,
+                f"-N must report the skip, got: {(with_flag.stdout + with_flag.stderr).strip()!r}",
             )
         else:
             print("note: patch did not block on a PTY here; skipped the -N check")
