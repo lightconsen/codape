@@ -84,7 +84,7 @@ The remaining recorded failures, by batch:
 
 | Task | Status | Class | Why it failed |
 |---|---|---|---|
-| `pytorch-model-cli.easy` | 0/3 repeats (two test timeouts, one 5/6) | model | Replaced the documented `p/255` scaling with `[-1,1]`. The test's expected classes are the reference's raw-pixel predictions, including its mistakes. |
+| `pytorch-model-cli.easy` | 0/3 repeats (two test timeouts, one 5/6) | model | Replaced the documented `p/255` scaling with `[-1,1]`. The test's expected classes are the reference's raw-pixel predictions, including its mistakes. The repeats read the repaired `0.1.1-analysis` instruction, which states `p/255` explicitly, so this is instruction adherence rather than a fixture gap. |
 | `swe-bench-fsspec` | 0/3, not scored | fixture | The official test patch hits an already-modified file, prompts for a reverse, and waits out the 900 s test budget in a PTY. |
 | `sqlite-with-gcov` | resolved later (3/3 at 1 800 s) | budget | Killed at 902 s of a 900 s agent budget before building. |
 | `extract-safely` | resolved later (3/3) | Codape defect | The piped prompt was truncated at its first line, so the model never saw the sentence naming `/app/solution.txt`. Fixed with `read_to_string`. |
@@ -97,7 +97,7 @@ The remaining recorded failures, by batch:
 | `cron-broken-network` | resolved after patch | fixture | The test compared the served page to example.com's 2017 body; the site has been redesigned. |
 | `tmux-advanced-workflow` | not scored | plumbing | The test died in its own `apt-get update` (`parse_error`). |
 
-The 26 fixture edits across 22 tasks are listed in
+The 31 fixture edits across 27 tasks are listed in
 [Local fixture patches](terminal-bench.md#local-fixture-patches); the
 best-of-runs table is in
 [Scoreboard so far](terminal-bench.md#scoreboard-so-far).

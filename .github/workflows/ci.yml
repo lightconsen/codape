@@ -105,6 +105,20 @@ jobs:
       - name: Check the runners' transcript parsing
         run: python3 -I scripts/external-benchmarks/check_reporting.py
 
+  benchmark-fixtures:
+    name: Benchmark fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # Terminal-Bench scores only mean something against repaired fixtures, and
+      # those repairs used to live in a hand-built dataset copy that could not be
+      # rebuilt. This checks the script that applies them: every anchor matches
+      # exactly once, a second apply is a no-op, and a drifted or ambiguous
+      # anchor raises instead of half-patching. No Docker, no network, no keys.
+      - name: Check the Terminal-Bench fixture edits
+        run: python3 -I scripts/external-benchmarks/fixture_patches.py self-test
+
   unsafe-allowlist:
     name: Unsafe allowlist
     runs-on: ubuntu-latest
