@@ -45,6 +45,18 @@ synthetic `result` frames — several continuation segments, both cache spelling
 a binary that reports nothing — and runs in CI (`Benchmark reporting`). Change a
 runner's reporting and run it first.
 
+It also drives the terminal-bench adapter's **reader**, not just the parser the
+reader feeds. That distinction is the whole point of one of the checks: the
+parser is correct on any text it is handed, so a check that only calls it passes
+however little text the container was asked to return. The adapter used to read
+a fixed `tail -c 262144` window, and the protocol writes one frame per streamed
+delta — about 160 bytes per handful of characters — so a verbose answer is
+roughly 125 KiB and two of them pushed a run's first `result` frame out of the
+window. On a 1.1 MiB transcript with two continuation segments the tail saw one
+frame, and the run reported 20 turns instead of 30 and 2 000 ms instead of
+3 000. It now greps the result frames out of the whole transcript, which is
+also a smaller transfer than the tail was.
+
 `fixture_patches.py` is the other half of the same problem. Terminal-Bench
 grading is only meaningful against a dataset whose fixtures have been repaired,
 and those repairs used to live in a hand-built `0.1.1-analysis` copy that could

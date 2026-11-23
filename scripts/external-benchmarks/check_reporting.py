@@ -189,6 +189,94 @@ def check_agent_module() -> None:
     check(legacy["usage"] is None, "agent: an unreported usage must be None, not a zeroed object")
     check(legacy["total_cost_usd"] is None, "agent: an unreported cost must be None")
 
+    check_result_frame_read_keeps_every_segment(agent)
+
+
+def check_result_frame_read_keeps_every_segment(agent) -> None:
+    """The reader must return every result frame, however large the transcript.
+
+    `parse_result_summary` is correct on any text it is given; the defect this
+    guards against is upstream of it, in how much text the container was asked
+    to hand over. A fixed byte window (`tail -c 262144`) sees only the frames
+    near the end, and the protocol writes one frame per streamed delta, so a
+    verbose run pushes its earlier segments out of it. The runner then reports
+    fewer turns and a shorter duration than the run actually took.
+
+    Measured on the synthetic transcript below (1.1 MiB, two segments): the
+    tail saw one result frame, and the summary it produced was short by one
+    segment. Driving the real `_read_result_summary` over a fake session is
+    what catches that; asserting on `parse_result_summary` cannot, because the
+    parser never chooses how much text to read.
+    """
+    segments = [
+        {"type": "result", "subtype": "error_max_turns", "is_error": True,
+         "duration_ms": 1000, "num_turns": 10, "session_id": "s"},
+        {"type": "result", "subtype": "success", "is_error": False,
+         "duration_ms": 2000, "num_turns": 20, "session_id": "s"},
+    ]
+    delta = json.dumps(
+        {"type": "stream_event",
+         "event": {"type": "content_block_delta",
+                   "delta": {"type": "text_delta", "text": "abcdefghi "}},
+         "parent_tool_use_id": None, "session_id": "s"},
+        separators=(",", ":"),
+    )
+    # Compact separators, as the producer writes them: `to_line` serializes
+    # with `serde_json::to_string`, so a frame reads `{"type":"result",...}`
+    # with no space. A fixture with default separators is not the transcript
+    # the reader will meet, and would make the grep look broken.
+    def frame(segment: dict) -> str:
+        return json.dumps(segment, separators=(",", ":"))
+
+    lines = [delta] * 4000 + [frame(segments[0])]
+    lines += [delta] * 3000 + [frame(segments[1])]
+    transcript_text = "\n".join(lines) + "\n"
+
+    class FakeSession:
+        # `_read_result_summary` reads the path off the agent, but the method
+        # is called on a stand-in here so the path travels with it.
+        _stream_path = "/tmp/codape-stream.jsonl"
+
+        class container:  # noqa: N801 - named for the real attribute
+            @staticmethod
+            def exec_run(argv):
+                # Answer the way a container would: honour whatever bounds the
+                # command puts on the read, so a `tail -c N` really is short.
+                shell = argv[-1]
+                if "tail -c" in shell:
+                    size = int(shell.split("tail -c")[1].split()[0])
+                    return types.SimpleNamespace(
+                        exit_code=0,
+                        output=transcript_text[-size:].encode() if size < len(transcript_text) else transcript_text.encode(),
+                    )
+                if "grep" in shell:
+                    kept = [line for line in transcript_text.splitlines() if '"type":"result"' in line]
+                    return types.SimpleNamespace(
+                        exit_code=0 if kept else 1, output=("\n".join(kept) + "\n").encode()
+                    )
+                return types.SimpleNamespace(exit_code=2, output=b"")
+
+    reader = agent.CodapeAgent.__dict__.get("_read_result_summary")
+    if reader is None:  # pragma: no cover - the method is the point of the check
+        FAILURES.append("agent: _read_result_summary is missing")
+        return
+    session = FakeSession()
+    summary = reader(session, session)
+    assert summary is not None
+    check(
+        summary["result_frames"] == 2,
+        f"agent: the reader saw {summary['result_frames']} of 2 result frames "
+        "(a bounded byte window drops the earlier segments)",
+    )
+    check(
+        summary["num_turns"] == 30,
+        f"agent: turns from the frames it read: {summary['num_turns']} of 30",
+    )
+    check(
+        summary["duration_ms"] == 3000,
+        f"agent: duration from the frames it read: {summary['duration_ms']} of 3000",
+    )
+
 
 def check_terminal_bench_runner() -> None:
     runner = load(
