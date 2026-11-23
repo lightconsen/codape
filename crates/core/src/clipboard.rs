@@ -65,21 +65,48 @@ fn copy_through(program: &str, args: &[&str], text: &str) -> Result<(), String> 
         .spawn()
         .map_err(|error| format!("`{program}` could not be started: {error}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| format!("could not write to `{program}`: {error}"))?;
-    }
-    // Dropping the handle above closes the pipe, which is what tells `pbcopy`
-    // the text is complete; without the wait it would still be reading.
+    // The `stdin` handle is consumed here, so it is dropped as soon as the
+    // write finishes — closing the pipe, which is what tells `pbcopy` the text
+    // is complete. Without that it would still be reading.
+    let write_error = child
+        .stdin
+        .take()
+        .and_then(|mut stdin| stdin.write_all(text.as_bytes()).err());
 
     let status = child
         .wait()
         .map_err(|error| format!("`{program}` did not finish: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("`{program}` exited with {status}"))
+    let failure = (!status.success()).then(|| format!("`{program}` exited with {status}"));
+    verdict(program, failure, write_error)
+}
+
+/// Decide whether a finished helper copied the text.
+///
+/// Split out so every combination can be tested without arranging a real
+/// clipboard race. A helper is free to stop reading before the last byte
+/// arrives, and then the write fails with `EPIPE` whether or not anything is
+/// wrong: `xclip` returns to its shell once it holds the selection, and a
+/// helper that rejects its input exits without draining it. Failing on the
+/// write alone therefore reports a write error for a run that worked — and
+/// hides the exit status that says why a run that did not work failed.
+///
+/// The exit status is the authority. A helper that failed is reported as
+/// failed whatever the write did; only a helper that succeeded leaves the write
+/// error meaningful, and only because a broken pipe at that point is the helper
+/// having decided it had enough.
+fn verdict(
+    program: &str,
+    failure: Option<String>,
+    write_error: Option<std::io::Error>,
+) -> Result<(), String> {
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
+    match write_error {
+        Some(error) if error.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(format!("could not write to `{program}`: {error}"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -107,12 +134,99 @@ mod tests {
 
     /// A helper that exits non-zero is a failure, not a silent success. This is
     /// the branch that only reads the exit status.
+    ///
+    /// The helper here exits *without reading its standard input*, so the write
+    /// races into `EPIPE`. That is not incidental to the test — it is the
+    /// reason the test exists. `sh -c "exit 3"` on a loaded CI runner usually
+    /// exits before the write lands, and the module used to fail on the write
+    /// then, reporting ``could not write to `sh`: Broken pipe`` instead of the
+    /// exit status. Whether the helper read or did not read decides which error
+    /// surfaced, so this test passed or failed depending on machine load:
+    /// observed failing in the Coverage job while passing in Test on the same
+    /// commit.
+    ///
+    /// The payload is oversized so the pipe buffer cannot absorb it and the
+    /// broken pipe is certain rather than likely.
     #[cfg(unix)]
     #[test]
     fn a_helper_that_fails_is_reported() {
-        let error = copy_through("sh", &["-c", "exit 3"], "text")
+        let text = "x".repeat(1 << 20);
+        let error = copy_through("sh", &["-c", "exit 3"], &text)
             .expect_err("a failing helper must not succeed");
-        assert!(error.contains("exited with"), "{error}");
+        assert!(
+            error.contains("exited with"),
+            "the exit status is what went wrong, so that is what to report: {error}"
+        );
+    }
+
+    /// A helper that exits successfully after closing the pipe did its job.
+    ///
+    /// `xclip` takes the selection and returns; a writer still pushing bytes
+    /// then sees `EPIPE` for a copy that worked. Reporting that as a failure
+    /// would tell a Linux user their copy failed every time.
+    ///
+    /// The helper here exits *without reading anything*, and the payload is
+    /// larger than the pipe buffer, so `write_all` cannot complete before the
+    /// read end closes and the broken pipe is certain. A `cat`-based helper
+    /// would drain the input and never fail, which is how an earlier version of
+    /// this test passed while exercising nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_closed_the_pipe_after_succeeding_is_not_a_failure() {
+        let text = "x".repeat(1 << 20);
+        copy_through("sh", &["-c", "exit 0"], &text)
+            .expect("a helper that took the text and succeeded is a successful copy");
+    }
+
+    /// A write error that is not a broken pipe is still a real error, even when
+    /// the helper exits zero. Widening the ignored case to every write error
+    /// would silently accept a lost copy.
+    ///
+    /// Tested on the decision rather than through a live pipeline: a pipe's
+    /// write error cannot be made to be anything but `EPIPE` from the writing
+    /// side. `/dev/full` fails inside the helper, not at our `write_all`, so a
+    /// pipeline version of this test passed without exercising the branch.
+    #[test]
+    fn a_write_error_that_is_not_a_broken_pipe_is_still_reported() {
+        let error = verdict(
+            "sh",
+            None,
+            Some(std::io::Error::from_raw_os_error(28)), // ENOSPC
+        )
+        .expect_err("a write that failed for space is a lost copy");
+        assert!(error.contains("could not write to `sh`"), "{error}");
+    }
+
+    /// A helper that failed is reported as failed even when the write also
+    /// failed. The exit status is what says *why*, so it is the message that
+    /// has to survive.
+    #[test]
+    fn a_failing_helper_is_reported_even_when_the_write_broke() {
+        let error = verdict(
+            "sh",
+            Some("`sh` exited with exit status: 3".to_string()),
+            Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        )
+        .expect_err("a failing helper must not succeed");
+        assert_eq!(error, "`sh` exited with exit status: 3", "{error}");
+    }
+
+    /// A broken pipe from a helper that succeeded is not a failure: it stopped
+    /// reading because it already had the text.
+    #[test]
+    fn a_broken_pipe_from_a_successful_helper_is_a_success() {
+        verdict(
+            "xclip",
+            None,
+            Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        )
+        .expect("the helper took the selection and returned");
+    }
+
+    /// Nothing went wrong at all.
+    #[test]
+    fn a_clean_run_is_a_success() {
+        verdict("pbcopy", None, None).expect("a clean copy succeeds");
     }
 
     /// The text is written to the helper's stdin, which is verified without a
