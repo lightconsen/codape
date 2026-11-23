@@ -10781,6 +10781,48 @@ fn usage_json(usage: &codape_core::types::UsageSummary) -> serde_json::Value {
     })
 }
 
+/// Build the one closing `result` for a turn that never reached its normal exit.
+///
+/// Two paths write such a frame: a signal that stops the turn mid-flight, and
+/// a turn task that ended without handing its engine back. Both are the one
+/// place the run's spend can still be reported, and both used to report none
+/// of it — along with a hardcoded `num_turns: 1`. Building the frame here
+/// keeps the two from drifting: the second path was fixed only because it
+/// differed from the first, and a third copy would differ again.
+///
+/// The turn count is passed as the counter and its starting value rather than
+/// as a finished number, so that no call site *can* supply a literal. The
+/// hardcoded `1` was not a slip at one site — it was a shape that invited one,
+/// and the same frame was written twice with the same wrong number.
+#[allow(clippy::too_many_arguments)]
+fn unfinished_result_frame(
+    session_id: &str,
+    subtype: &str,
+    elapsed: std::time::Duration,
+    turn_counter: &codape_core::engine::TurnCounter,
+    turns_before: u32,
+    cost_tracker: Option<&codape_core::cost::SharedCostTracker>,
+    message: &str,
+) -> codape_events::ResultFrame {
+    let mut frame = codape_events::ResultFrame::error(
+        session_id.to_string(),
+        subtype,
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        turn_counter.consumed_since(turns_before),
+    );
+    frame.data.insert(
+        "error".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+    // The turn in progress has no history entry, so `timing_since` alone
+    // reports zero for a run that had been going for half an hour.
+    if let Some(tracker) = cost_tracker {
+        attach_usage_to_frame(&mut frame, tracker);
+        attach_timing_to_frame(&mut frame, tracker, turns_before);
+    }
+    frame
+}
+
 /// Write the one closing `result` for a turn a signal cut short.
 ///
 /// The turn never reaches its normal exit, so nothing else will write this
@@ -10792,31 +10834,24 @@ fn write_interrupted_result(
     protocol: &mut Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>>,
     session_id: &str,
     elapsed: std::time::Duration,
-    num_turns: u32,
-    cost_tracker: Option<&codape_core::cost::SharedCostTracker>,
+    turn_counter: &codape_core::engine::TurnCounter,
     turns_before: u32,
+    cost_tracker: Option<&codape_core::cost::SharedCostTracker>,
     message: &str,
 ) {
     let Some(sink) = protocol.as_mut() else {
         return;
     };
     let turn = sink.begin_turn(session_id.to_string());
-    let mut frame = codape_events::ResultFrame::error(
-        session_id.to_string(),
+    let frame = unfinished_result_frame(
+        session_id,
         codape_events::protocol::result_subtype::INTERRUPTED,
-        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-        num_turns,
+        elapsed,
+        turn_counter,
+        turns_before,
+        cost_tracker,
+        message,
     );
-    frame.data.insert(
-        "error".to_string(),
-        serde_json::Value::String(message.to_string()),
-    );
-    // A run stopped from outside still spent the time it spent, and the frame
-    // that reports how it ended is the only place that time can be reported.
-    if let Some(tracker) = cost_tracker {
-        attach_usage_to_frame(&mut frame, tracker);
-        attach_timing_to_frame(&mut frame, tracker, turns_before);
-    }
     if let Err(error) = turn.emit_turn_complete(frame) {
         tracing::warn!("could not write the interrupted result: {error}");
     }
@@ -12813,7 +12848,9 @@ impl ReplLoop {
         //
         // The handle is taken before the engine crosses into its task: from
         // there on `engine` is owned by that task and the REPL cannot ask it
-        // anything, including when a SIGTERM cuts the turn short.
+        // anything, including when a SIGTERM cuts the turn short. The two
+        // frames for a turn that never finished are built from this handle
+        // rather than from a number, so that neither can report a literal.
         let turn_counter = engine.turn_counter();
         let turns_before = turn_counter.value();
         // Where the spend is, captured before the engine crosses into its
@@ -12887,9 +12924,9 @@ impl ReplLoop {
                     &mut protocol,
                     &session_id,
                     turn_started.elapsed(),
-                    turn_counter.consumed_since(turns_before),
-                    Some(&cost_tracker),
+                    &turn_counter,
                     turns_before,
+                    Some(&cost_tracker),
                     message,
                 );
                 if let Some(handle) = permission_forwarder.take() {
@@ -12984,19 +13021,23 @@ impl ReplLoop {
                     // stream-json consumer still needs exactly one
                     // `result`, and the sink has to survive for the next
                     // turn instead of being dropped with this task.
+                    //
+                    // Reporting `1` here was the same defect the SIGTERM
+                    // branch had: a turn that panicked on its thirtieth model
+                    // call told the host it made one, and carried no cost at
+                    // all. The counter and the tracker both outlive the task,
+                    // so both are readable here even though the engine is not.
                     let message = "the query task ended without returning its engine";
                     if let Some(mut sink) = protocol.take() {
                         let turn = sink.begin_turn(session_id.clone());
-                        let mut frame = codape_events::ResultFrame::error(
-                            session_id.clone(),
+                        let frame = unfinished_result_frame(
+                            &session_id,
                             codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
-                            u64::try_from(turn_started.elapsed().as_millis())
-                                .unwrap_or(u64::MAX),
-                            1,
-                        );
-                        frame.data.insert(
-                            "error".to_string(),
-                            serde_json::Value::String(message.to_string()),
+                            turn_started.elapsed(),
+                            &turn_counter,
+                            turns_before,
+                            Some(&cost_tracker),
+                            message,
                         );
                         if let Err(error) = turn.emit_turn_complete(frame) {
                             tracing::warn!("could not close the protocol turn: {error}");
@@ -18607,14 +18648,20 @@ mod tests {
             Some(codape_events::MessageSink::new(
                 Box::new(buffer.clone()) as Box<dyn std::io::Write + Send + Sync>
             ));
+        // A session already three turns in: the counter's absolute value is 3
+        // and this turn starts there, so the frame must report 0 for *this*
+        // turn rather than echoing the session's total. That distinction is
+        // what a literal `1` never got right.
+        let counter = codape_core::engine::TurnCounter::testing_at(3);
+        let before = counter.value();
 
         write_interrupted_result(
             &mut sink,
             "session-1",
             std::time::Duration::from_millis(42),
-            3,
+            &counter,
+            before,
             None,
-            0,
             "SIGTERM ended the run before the turn finished",
         );
 
@@ -18630,8 +18677,8 @@ mod tests {
         assert_eq!(parsed["session_id"], "session-1");
         assert_eq!(parsed["duration_ms"], 42);
         assert_eq!(
-            parsed["num_turns"], 3,
-            "the interrupted run's turns are reported"
+            parsed["num_turns"], 0,
+            "the interrupted run's turns are what it consumed, not the session total: {parsed}"
         );
         assert_eq!(
             parsed["error"],
@@ -18683,9 +18730,9 @@ mod tests {
             &mut sink,
             "session-1",
             std::time::Duration::from_millis(42),
-            3,
-            Some(&tracker),
+            &codape_core::engine::TurnCounter::testing_at(3),
             0,
+            Some(&tracker),
             "SIGTERM ended the run before the turn finished",
         );
 
@@ -18703,6 +18750,68 @@ mod tests {
              reports 0 here: {parsed}"
         );
         assert_eq!(parsed["tool_ms"], 4_000, "{parsed}");
+    }
+
+    /// A turn that died before handing its engine back still reports what it spent.
+    ///
+    /// `engine_rx` yielding `None` means the turn task is gone — a panic
+    /// inside `submit_streaming`, most plausibly. That branch wrote its closing
+    /// frame with a literal `1` for `num_turns` and no accounting at all, which
+    /// is the same defect the SIGTERM branch had, in the one other place a turn
+    /// can end early. A run that panicked on its thirtieth model call reported
+    /// one turn and zero cost, so the most expensive failure was the one that
+    /// looked cheapest.
+    ///
+    /// The turn counter and the cost tracker both outlive the task, which is
+    /// why this frame can be honest even though the engine cannot be read.
+    /// `turns_before` is deliberately nonzero: a fresh turn starts at 0, and a
+    /// frame that reported `turns_before` instead of the difference would agree
+    /// with the expected value by accident.
+    #[test]
+    fn the_frame_for_a_lost_engine_reports_turns_and_spend() {
+        use codape_core::types::{ModelId, UsageSummary};
+
+        let tracker =
+            codape_core::cost::SharedCostTracker::new(codape_core::cost::CostTracker::new());
+        tracker.record_usage(
+            &UsageSummary {
+                input_tokens: 900,
+                output_tokens: 210,
+                ..Default::default()
+            },
+            &ModelId("deepseek/deepseek-v4.1-flash".into()),
+        );
+        tracker.record_model_time(std::time::Duration::from_secs(7));
+        tracker.record_tool_time(std::time::Duration::from_secs(2));
+
+        let frame = unfinished_result_frame(
+            "session-1",
+            codape_events::protocol::result_subtype::ERROR_DURING_EXECUTION,
+            std::time::Duration::from_millis(500),
+            &codape_core::engine::TurnCounter::testing_at(4),
+            0,
+            Some(&tracker),
+            "the query task ended without returning its engine",
+        );
+
+        let parsed = serde_json::to_value(&frame).unwrap();
+        assert_eq!(
+            parsed["num_turns"], 4,
+            "the turns the run consumed are what it reports: {parsed}"
+        );
+        assert_eq!(parsed["duration_ms"], 500, "{parsed}");
+        assert_eq!(
+            parsed["usage"]["input_tokens"], 900,
+            "a turn that never returned its engine still spent what the provider \
+             billed: {parsed}"
+        );
+        assert_eq!(parsed["usage"]["output_tokens"], 210, "{parsed}");
+        assert_eq!(parsed["model_ms"], 7_000, "{parsed}");
+        assert_eq!(parsed["tool_ms"], 2_000, "{parsed}");
+        assert_eq!(
+            parsed["error"], "the query task ended without returning its engine",
+            "{parsed}"
+        );
     }
 
     #[test]

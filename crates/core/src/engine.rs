@@ -2061,6 +2061,19 @@ impl InterruptHandle {
 pub struct TurnCounter(Arc<std::sync::atomic::AtomicU32>);
 
 impl TurnCounter {
+    /// A standalone counter starting at `value`.
+    ///
+    /// Only a test needs this: the production handle always comes from
+    /// [`QueryEngine::turn_counter`] and reads the engine's own atomic. A test
+    /// that builds a frame for a turn that never finished has no engine — that
+    /// is the whole condition being tested — so it would otherwise have to
+    /// drive a live turn just to obtain a number.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn testing_at(value: u32) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU32::new(value)))
+    }
+
     /// The turn number the engine has reached for this session.
     #[must_use]
     pub fn value(&self) -> u32 {
