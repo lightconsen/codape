@@ -115,7 +115,9 @@ impl Tool for EchoTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "echo".into(),
-            tier: ToolTier::Baseline,
+            // Registered for tests, never advertised: a placeholder the model
+            // cannot meaningfully call is paid for in every request.
+            tier: ToolTier::Internal,
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -170,7 +172,9 @@ impl Tool for NoOpTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "noop".into(),
-            tier: ToolTier::Baseline,
+            // Registered for tests, never advertised: a placeholder the model
+            // cannot meaningfully call is paid for in every request.
+            tier: ToolTier::Internal,
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -377,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn echo_tool_descriptor_is_baseline() {
+    fn echo_tool_descriptor_is_internal() {
         let desc = EchoTool.descriptor();
         assert_eq!(desc.name, "echo");
-        assert!(matches!(desc.tier, ToolTier::Baseline));
+        assert!(matches!(desc.tier, ToolTier::Internal));
         assert!(!desc.is_read_only);
         assert!(desc.is_concurrency_safe);
     }
@@ -628,23 +632,27 @@ mod tests {
         );
     }
 
-    /// The registry carries 49 baseline tools and 10 feature-gated tools — the
-    /// 9 Chrome DevTools tools and `WebFetch` (59 in total). Nothing is
-    /// registered that the model cannot use: the former feature-gated stubs
-    /// are gone, and every descriptor is enabled.
+    /// The advertised registry carries 47 baseline tools and 10 feature-gated
+    /// tools — the 9 Chrome DevTools tools and `WebFetch` (57 in total).
+    /// Nothing is advertised that the model cannot use: the former
+    /// feature-gated stubs are gone, and every descriptor is enabled.
+    ///
+    /// `echo` and `noop` are registered too, but as [`ToolTier::Internal`], so
+    /// they are callable without being listed — see
+    /// [`the_test_tools_are_callable_but_not_advertised`].
     #[test]
     fn the_registry_has_no_refusing_stubs() {
         let mut registry = crate::registry::ToolRegistry::new();
         register_builtin_tools(&mut registry);
         let descriptors = registry.all_descriptors();
 
-        assert_eq!(descriptors.len(), 59, "unexpected registration count");
+        assert_eq!(descriptors.len(), 57, "unexpected registration count");
         assert_eq!(
             descriptors
                 .iter()
                 .filter(|d| matches!(d.tier, ToolTier::Baseline))
                 .count(),
-            49,
+            47,
             "unexpected baseline tool count"
         );
         assert_eq!(
@@ -664,6 +672,38 @@ mod tests {
                 .map(|d| d.name.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// `echo` and `noop` are debugging aids, not capabilities.
+    ///
+    /// They stay registered — a test can name one directly — but they must not
+    /// reach the model's `tools` array. That array is hashed as the first block
+    /// of the cached prefix, so a tool a real session cannot meaningfully call
+    /// is paid for on every request of every session.
+    #[test]
+    fn the_test_tools_are_callable_but_not_advertised() {
+        let mut registry = crate::registry::ToolRegistry::new();
+        register_builtin_tools(&mut registry);
+
+        for name in ["echo", "noop"] {
+            assert!(
+                registry.get_tool(name).is_ok(),
+                "{name} must stay callable for tests"
+            );
+            assert!(
+                !registry
+                    .all_descriptors()
+                    .iter()
+                    .any(|descriptor| descriptor.name == name),
+                "{name} must not be advertised"
+            );
+            assert!(
+                !registry
+                    .available_tool_names(crate::context::ExecutionContext::Normal, true)
+                    .contains(&name.to_string()),
+                "{name} must not be listed as available either"
+            );
+        }
     }
 
     /// Registering the shell the platform does not use is still possible — the

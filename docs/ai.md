@@ -300,7 +300,9 @@ pub enum ToolTier {
 - Browser: `ChromeListTabsTool`, `ChromeNavigateTool`, `ChromeExecuteJsTool`, `ChromeScreenshotTool`, `ChromeGetContentTool`
 - Meta: `ToolSearchTool`, `EnterPlanModeTool`, `ExitPlanModeTool`
 
-**The tool listing is a wire format.** `all_descriptors()` sorts by name because the registry holds tools in `HashMap`s, whose iteration order is randomised per map instance — so the same 56 tools used to reach the provider in a different order on every run. Since `tools` is the first section of the prompt and hashed byte-exactly, a reordering invalidates the entire cached prefix: every fresh process, and so every `--resume`, paid for the whole conversation again. Sort at the source rather than at each caller so the model-facing listing, `ToolSearch` results, and the cassette layer all see one order.
+**The tool listing is a wire format.** `all_descriptors()` sorts by name because the registry holds tools in `HashMap`s, whose iteration order is randomised per map instance — so the same set of tools used to reach the provider in a different order on every run. Since `tools` is the first section of the prompt and hashed byte-exactly, a reordering invalidates the entire cached prefix: every fresh process, and so every `--resume`, paid for the whole conversation again. Sort at the source rather than at each caller so the model-facing listing, `ToolSearch` results, and the cassette layer all see one order.
+
+**Listing has a cost, so test aids stay off it.** `echo` and `noop` are registered as `ToolTier::Internal`: `get_tool` finds them, so a test can name one directly, but `all_descriptors()` and `available_tool_names()` leave them out. A tool that only a test can meaningfully call is otherwise paid for in every request of every session — around 70 tokens, every turn, forever.
 
 ### 6.2 Tool Execution Pipeline
 

@@ -1212,6 +1212,33 @@ mod tests {
     use crate::tool::{InterruptBehavior, Tool, ToolDescriptor, ToolTier};
     use std::fmt::Write as _;
 
+    /// `EchoTool`, but advertised.
+    ///
+    /// `EchoTool` itself is [`ToolTier::Internal`] — callable but never listed,
+    /// because every listed tool is paid for in the request's cached prefix.
+    /// Tests that assert on what the listing contains need one that is listed,
+    /// and they want echo's schema and semantics while they are at it.
+    #[derive(Debug)]
+    struct ListedEchoTool;
+
+    #[async_trait::async_trait]
+    impl Tool for ListedEchoTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                tier: ToolTier::Baseline,
+                ..EchoTool.descriptor()
+            }
+        }
+
+        async fn execute(
+            &self,
+            input: ToolInput,
+            ctx: ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            EchoTool.execute(input, ctx).await
+        }
+    }
+
     /// A tool whose schema advertises `run_in_background` without declaring
     /// any backgrounding behaviour, as a copied schema would.
     struct AdvertisesButIgnoresBackground;
@@ -1322,7 +1349,7 @@ mod tests {
 
     fn registry_with_echo() -> Arc<ToolRegistry> {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         Arc::new(registry)
     }
 
@@ -1454,7 +1481,7 @@ mod tests {
     #[tokio::test]
     async fn the_listing_leaves_out_tools_that_would_refuse() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         registry.register(Arc::new(DisabledTool));
         let registry = Arc::new(registry);
 
@@ -1598,7 +1625,7 @@ mod tests {
     #[tokio::test]
     async fn the_listing_leaves_out_denied_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         registry.add_deny_rule(ToolDenyRule::for_tools(vec!["echo".into()]));
         let registry = Arc::new(registry);
 
@@ -1748,7 +1775,7 @@ mod tests {
     #[tokio::test]
     async fn a_path_deny_rule_stops_the_call_it_matches() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         registry.add_deny_rule(ToolDenyRule::for_paths(vec!["**/secrets/**".into()]));
         let registry = Arc::new(registry);
 
@@ -1789,7 +1816,7 @@ mod tests {
     #[tokio::test]
     async fn a_tool_deny_rule_stops_the_tool() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         registry.add_deny_rule(ToolDenyRule::for_tools(vec!["echo".into()]));
         let registry = Arc::new(registry);
 
@@ -2111,7 +2138,7 @@ mod tests {
     #[tokio::test]
     async fn tool_search_finds_a_registered_tool_through_the_dispatcher() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         registry.register(Arc::new(crate::builtins::ToolSearchTool));
         let dispatcher = RegistryToolDispatcher::new(
             Arc::new(registry),
@@ -2139,7 +2166,7 @@ mod tests {
     fn dispatcher_with_webfetch_and_echo() -> RegistryToolDispatcher {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(crate::builtins::WebFetchTool::new()));
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         RegistryToolDispatcher::new(
             Arc::new(registry),
             Arc::new(InnerExecutor::new(ExecutionConfig::default())),
@@ -2233,7 +2260,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(crate::builtins::WebSearchTool::new()));
         registry.register(Arc::new(crate::builtins::WebFetchTool::new()));
-        registry.register(Arc::new(EchoTool));
+        registry.register(Arc::new(ListedEchoTool));
         RegistryToolDispatcher::new(
             Arc::new(registry),
             Arc::new(InnerExecutor::new(ExecutionConfig::default())),

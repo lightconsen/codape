@@ -98,6 +98,8 @@ impl ToolDenyRule {
 pub struct ToolRegistry {
     baseline: HashMap<String, BoxedTool>,
     gated: HashMap<String, BoxedTool>,
+    /// Registered but never advertised. See [`ToolTier::Internal`].
+    internal: HashMap<String, BoxedTool>,
     dynamic_mcp: RwLock<HashMap<String, BoxedTool>>,
     context_allowlists: HashMap<ExecutionContext, HashSet<String>>,
     deny_rules: Vec<ToolDenyRule>,
@@ -116,6 +118,7 @@ impl ToolRegistry {
         Self {
             baseline: HashMap::new(),
             gated: HashMap::new(),
+            internal: HashMap::new(),
             dynamic_mcp: RwLock::new(HashMap::new()),
             context_allowlists: HashMap::new(),
             deny_rules: Vec::new(),
@@ -134,6 +137,10 @@ impl ToolRegistry {
             }
             ToolTier::DynamicMcp => {
                 self.dynamic_mcp.write().insert(descriptor.name, tool);
+            }
+            // Callable, but kept out of every listing below.
+            ToolTier::Internal => {
+                self.internal.insert(descriptor.name, tool);
             }
         }
     }
@@ -160,7 +167,10 @@ impl ToolRegistry {
         self.context_allowlists.insert(context, tools);
     }
 
-    /// Look up a tool by name across baseline and gated tiers.
+    /// Look up a tool by name across baseline, gated and internal tiers.
+    ///
+    /// Internal tools are registered for tests and are findable, but they are
+    /// never advertised — see [`ToolTier::Internal`].
     ///
     /// MCP tools are not returned here (they require the read lock).
     /// Use `get_tool_arc` for a lookup that includes MCP tools.
@@ -169,6 +179,9 @@ impl ToolRegistry {
             return Ok(t.as_ref());
         }
         if let Some(t) = self.gated.get(name) {
+            return Ok(t.as_ref());
+        }
+        if let Some(t) = self.internal.get(name) {
             return Ok(t.as_ref());
         }
         Err(ToolNotFoundError::ToolNotFound(name.to_string()))
@@ -180,6 +193,9 @@ impl ToolRegistry {
             return Some(Arc::clone(t));
         }
         if let Some(t) = self.gated.get(name) {
+            return Some(Arc::clone(t));
+        }
+        if let Some(t) = self.internal.get(name) {
             return Some(Arc::clone(t));
         }
         self.dynamic_mcp.read().get(name).map(Arc::clone)
@@ -409,7 +425,6 @@ pub fn install_rule_exemptions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins::{EchoTool, NoOpTool};
     use crate::context::{ToolError, ToolOutput};
     use crate::tool::{BoxedTool, InterruptBehavior, ToolContext, ToolInput};
     use async_trait::async_trait;
@@ -421,6 +436,59 @@ mod tests {
 
     fn make_tool(tool: impl Tool + 'static) -> BoxedTool {
         Arc::new(tool)
+    }
+
+    /// An ordinary baseline tool, for tests about the registry itself.
+    ///
+    /// These tests used `EchoTool` and `NoOpTool` as stand-ins. Those are now
+    /// [`ToolTier::Internal`] — registered for tests but deliberately absent
+    /// from every listing — so they cannot serve as examples of a tool that is
+    /// advertised. This one can.
+    #[derive(Debug)]
+    struct FixtureTool {
+        name: &'static str,
+        is_read_only: bool,
+    }
+
+    impl FixtureTool {
+        /// The names the tests used to take from the echo/noop pair.
+        const ECHO: Self = Self {
+            name: "echo",
+            is_read_only: false,
+        };
+        const NOOP: Self = Self {
+            name: "noop",
+            is_read_only: true,
+        };
+    }
+
+    #[async_trait]
+    impl Tool for FixtureTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: self.name.into(),
+                tier: ToolTier::Baseline,
+                input_schema: serde_json::json!({ "type": "object" }),
+                output_schema: serde_json::json!({ "type": "object" }),
+                requires_approval: false,
+                is_enabled: true,
+                is_read_only: self.is_read_only,
+                is_concurrency_safe: true,
+                interrupt_behavior: crate::tool::InterruptBehavior::RunToCompletion,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _input: ToolInput,
+            _ctx: ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput {
+                output: String::new(),
+                is_display: false,
+                images: Vec::new(),
+            })
+        }
     }
 
     /// A tool whose answer depends on the call, the way the artifact tool's
@@ -515,7 +583,7 @@ mod tests {
     async fn installed_exemptions_reach_the_engine_per_call() {
         let mut registry = ToolRegistry::new();
         registry.register(make_tool(SplitExemptionsTool));
-        registry.register(make_tool(EchoTool));
+        registry.register(make_tool(FixtureTool::ECHO));
         let registry = Arc::new(registry);
 
         let mut checker = PermissionChecker::new(PermissionMode::Default);
@@ -603,8 +671,8 @@ mod tests {
     #[test]
     fn register_and_get_tool_by_name() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(EchoTool));
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::ECHO));
+        registry.register(make_tool(FixtureTool::NOOP));
 
         assert!(registry.get_tool("echo").is_ok());
         assert!(registry.get_tool("noop").is_ok());
@@ -614,8 +682,8 @@ mod tests {
     #[test]
     fn all_descriptors_returns_all_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(EchoTool));
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::ECHO));
+        registry.register(make_tool(FixtureTool::NOOP));
 
         let descriptors = registry.all_descriptors();
         assert_eq!(descriptors.len(), 2);
@@ -731,8 +799,8 @@ mod tests {
     #[test]
     fn deny_rule_blocks_tool() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(EchoTool));
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::ECHO));
+        registry.register(make_tool(FixtureTool::NOOP));
 
         registry.add_deny_rule(ToolDenyRule::for_tools(vec!["echo".into()]));
 
@@ -747,8 +815,8 @@ mod tests {
     #[test]
     fn context_allowlist_filters_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(EchoTool));
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::ECHO));
+        registry.register(make_tool(FixtureTool::NOOP));
 
         registry.set_context_allowlist(
             ExecutionContext::PlanMode,
@@ -764,10 +832,10 @@ mod tests {
     #[test]
     fn plan_mode_allows_only_read_only_tools() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(EchoTool));
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::ECHO));
+        registry.register(make_tool(FixtureTool::NOOP));
 
-        // EchoTool is not read-only, NoOpTool is read-only
+        // FixtureTool::ECHO is not read-only, FixtureTool::NOOP is
         let names = registry.available_tool_names(ExecutionContext::PlanMode, true);
         assert!(names.contains(&"noop".to_string()));
         assert!(!names.contains(&"echo".to_string()));
@@ -776,9 +844,9 @@ mod tests {
     #[test]
     fn baseline_tools_always_available() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::NOOP));
 
-        // NoOpTool is baseline tier, so it appears regardless of flag
+        // A baseline tool appears regardless of the flag
         let names_disabled = registry.available_tool_names(ExecutionContext::Normal, false);
         assert!(names_disabled.contains(&"noop".to_string()));
 
@@ -789,7 +857,7 @@ mod tests {
     #[test]
     fn interrupt_behavior_returns_correct_value() {
         let mut registry = ToolRegistry::new();
-        registry.register(make_tool(NoOpTool));
+        registry.register(make_tool(FixtureTool::NOOP));
 
         assert_eq!(
             registry.interrupt_behavior("noop"),
