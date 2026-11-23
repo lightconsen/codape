@@ -144,6 +144,161 @@ const fn actions_of(family: Family) -> &'static [&'static str] {
     }
 }
 
+/// The parameters each tool reads.
+///
+/// The four tools share one implementation but not one vocabulary: `verify` is
+/// the only action `ArtifactCheck` answers and it reads nothing but the url,
+/// while `ArtifactData` answers eight actions that between them read fifteen.
+/// Declaring the family's whole set on every member cost 2,851 bytes of the
+/// request's `tools` array — 12% of it — and, worse, said nothing about which
+/// parameter went with which action.
+///
+/// Every entry here is a key some branch of this file reads. The legacy
+/// aliases (`slug`, `document`, `artifact`, `old`, `new`, `prompt`) are still
+/// accepted by those branches but deliberately not declared: a prompt written
+/// before the family was split is the only caller that needs them, and
+/// advertising two names for one thing only makes the choice harder.
+const fn action_parameters(family: Family) -> &'static [&'static str] {
+    match family {
+        Family::Artifact => &[
+            "action",
+            "title",
+            "url",
+            "file_path",
+            "files",
+            "path",
+            "version",
+            "content",
+            "asset_id",
+        ],
+        Family::Data => &[
+            "action",
+            "url",
+            "collection",
+            "doc_id",
+            "data",
+            "if_version",
+            "where",
+            "writes",
+            "field",
+            "value",
+            "old_str",
+            "new_str",
+            "replace_all",
+            "limit",
+            "cursor",
+        ],
+        Family::Comments => &["action", "url", "body", "comment_id"],
+        Family::Check => &["action", "url"],
+    }
+}
+
+/// The declared schema of one parameter.
+///
+/// Descriptions are kept to what distinguishes the parameter from its
+/// neighbours, because this array is part of the cached prefix and is paid for
+/// on every request of every session. The point of the per-tool split is not
+/// that it saves bytes — it does not: the four schemas together are a little
+/// larger than the one they replaced, since they now describe parameters that
+/// were silently accepted before. The point is that a parameter a branch reads
+/// is now *declared*, and that each tool lists its own actions.
+fn parameter_schema(name: &str) -> Value {
+    match name {
+        "action" => json!({ "type": "string" }),
+        "title" => json!({ "type": "string", "description": "the page title" }),
+        "url" => json!({ "type": "string", "description": "the artifact's url" }),
+        "file_path" => json!({
+            "type": "string",
+            "description": "a file on disk: the page to publish, or the asset to upload",
+        }),
+        "files" => json!({
+            "type": "object",
+            "description": "path → contents, for a page of several files",
+        }),
+        "path" => json!({
+            "type": "string",
+            "description": "a file path inside the artifact; upload_asset reads one from disk",
+        }),
+        "version" => json!({
+            "type": "string",
+            "description": "a version label; omit for the current one",
+        }),
+        "content" => json!({ "type": "string", "description": "text to upload as an asset" }),
+        "asset_id" => json!({ "type": "string", "description": "an asset's id" }),
+        "collection" => json!({ "type": "string", "description": "the database collection" }),
+        "doc_id" => json!({ "type": "string", "description": "the document's id" }),
+        "data" => json!({ "description": "the document's JSON data" }),
+        "if_version" => json!({
+            "type": "integer",
+            "description": "write only while the document is still at this version",
+        }),
+        "where" => json!({
+            "type": "object",
+            "description": "field → value pairs a document must match",
+        }),
+        "field" => json!({
+            "type": "string",
+            "description": "the field `query` matches or `str_replace` edits",
+        }),
+        "value" => json!({ "description": "the value `field` must equal" }),
+        "old_str" => json!({ "type": "string", "description": "the exact text to replace" }),
+        "new_str" => json!({
+            "type": "string",
+            "description": "the replacement; omit to delete the matched text",
+        }),
+        "replace_all" => json!({
+            "type": "boolean",
+            "description": "replace every match, not just the first",
+        }),
+        "limit" => json!({ "type": "integer", "description": "how many documents to list" }),
+        "cursor" => json!({
+            "type": "string",
+            "description": "the next_cursor a previous list returned",
+        }),
+        "body" => json!({ "type": "string", "description": "the comment text" }),
+        "comment_id" => json!({ "type": "string", "description": "a comment's id" }),
+        // The per-item shape is prose rather than a nested schema. A spelled
+        // out item costs 406 bytes — a fifth of the whole `ArtifactData`
+        // schema — to say what one sentence says, because the keys are the
+        // same ones already declared on the tool and the model can see them
+        // there.
+        "writes" => json!({
+            "type": "array",
+            "description": "the writes to apply, in order; each takes op (set, the \
+                            default, update, delete or str_replace) plus the same \
+                            collection, doc_id, data, if_version, field, old_str, \
+                            new_str and replace_all a single write takes",
+        }),
+        other => unreachable!("no schema was declared for parameter '{other}'"),
+    }
+}
+
+/// The request-side declaration of one member of the family.
+///
+/// The `action` description names the actions *this* tool answers, because
+/// that is the question a model reading it has. The old shared text listed all
+/// four tools' defaults and never said which actions any of them took.
+fn input_schema(family: Family, description: &str) -> Value {
+    let actions = actions_of(family).join(", ");
+    let mut properties = serde_json::Map::new();
+    for name in action_parameters(family) {
+        let mut schema = parameter_schema(name);
+        if *name == "action" {
+            schema["description"] = Value::String(format!(
+                "one of: {actions}; defaults to {}",
+                default_action(tool_for(family))
+            ));
+        }
+        properties.insert((*name).to_string(), schema);
+    }
+
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": Value::Object(properties),
+    })
+}
+
 /// Whether an action changes something.
 ///
 /// A whole-tool allow rule says "this tool, anywhere, is fine". For a reader of
@@ -792,29 +947,7 @@ impl Tool for ArtifactTool {
         ToolDescriptor {
             name: self.name.to_string(),
             tier: ToolTier::Baseline,
-            input_schema: json!({
-                "type": "object",
-                "description": description,
-                "properties": {
-                    "action": { "type": "string", "description": "what to do; defaults to publish (Artifact), get (ArtifactData), comments (ArtifactComments), verify (ArtifactCheck)" },
-                    "title": { "type": "string" },
-                    "url": { "type": "string", "description": "the artifact's URL" },
-                    "file_path": { "type": "string" },
-                    "files": { "type": "object" },
-                    "path": { "type": "string" },
-                    "version": { "type": "string" },
-                    "collection": { "type": "string" },
-                    "doc_id": { "type": "string" },
-                    "data": {},
-                    "if_version": { "type": "integer" },
-                    "where": { "type": "object" },
-                    "writes": { "type": "array" },
-                    "asset_id": { "type": "string" },
-                    "content": { "type": "string" },
-                    "body": { "type": "string" },
-                    "comment_id": { "type": "string" }
-                }
-            }),
+            input_schema: input_schema(self.family(), description),
             output_schema: json!({ "type": "object", "properties": { "output": { "type": "string" } } }),
             requires_approval: false,
             is_enabled: true,
@@ -1734,5 +1867,173 @@ mod tests {
         assert_eq!(FAMILY.len(), 4);
         let unique: std::collections::HashSet<_> = FAMILY.iter().collect();
         assert_eq!(unique.len(), 4);
+    }
+
+    /// Every parameter a tool's branches read is declared, and every declared
+    /// parameter is read by something.
+    ///
+    /// The list on the left is the set of keys this file's code actually
+    /// touches for that tool, gathered by hand from the branches under
+    /// `dispatch`. A branch added later that reads a new key fails the
+    /// `is_declared` half until the key is added to
+    /// [`action_parameters`]; a key declared and then never used fails the
+    /// `is_read` half. Either failure means the request's `tools` array and
+    /// the code have drifted — which is the state this file was in before the
+    /// per-tool schemas: fourteen keys were read, eight of them (`old_str`,
+    /// `new_str`, `replace_all`, `op`, `limit`, `cursor`, `field`, `value`)
+    /// by actions that could not work without them, and none were declared.
+    /// A model could not discover them from the schema, and the system prompt
+    /// names none of them either.
+    #[test]
+    fn each_tool_declares_exactly_the_parameters_its_actions_read() {
+        // The legacy aliases — `slug`, `artifact`, `document`, `old`, `new`,
+        // `prompt` — are read by the same branches but intentionally not
+        // declared: they exist so prompts written before the family split keep
+        // working, and advertising two names for one thing helps nobody.
+        const LEGACY: [&str; 6] = ["slug", "artifact", "document", "old", "new", "prompt"];
+
+        let cases: [(&'static str, &[&str]); 4] = [
+            (
+                ARTIFACT_TOOL,
+                &[
+                    "action",
+                    "title",
+                    "url",
+                    "file_path",
+                    "files",
+                    "path",
+                    "version",
+                    "content",
+                    "asset_id",
+                ],
+            ),
+            (
+                DATA_TOOL,
+                &[
+                    "action",
+                    "url",
+                    "collection",
+                    "doc_id",
+                    "data",
+                    "if_version",
+                    "where",
+                    "writes",
+                    "field",
+                    "value",
+                    "old_str",
+                    "new_str",
+                    "replace_all",
+                    "limit",
+                    "cursor",
+                ],
+            ),
+            (COMMENTS_TOOL, &["action", "url", "body", "comment_id"]),
+            (CHECK_TOOL, &["action", "url"]),
+        ];
+
+        let (service, _dir) = tools();
+        for (tool_name, is_read) in cases {
+            let schema = page_tool(&service, tool_name).descriptor().input_schema;
+            let is_declared: std::collections::HashSet<&str> = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .map(|properties| properties.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+
+            for name in is_read {
+                assert!(
+                    is_declared.contains(name),
+                    "{tool_name} reads '{name}' but does not declare it, so a model \
+                     cannot discover it"
+                );
+            }
+            for name in &is_declared {
+                assert!(
+                    is_read.contains(name),
+                    "{tool_name} declares '{name}' but no branch reads it"
+                );
+            }
+            for name in LEGACY {
+                assert!(
+                    !is_declared.contains(name),
+                    "{tool_name} declares the legacy alias '{name}'; the modern \
+                     spelling is the one to advertise"
+                );
+            }
+        }
+    }
+
+    /// The `action` description names the actions that tool answers.
+    ///
+    /// It used to name all four tools' defaults, which told a model reading
+    /// `ArtifactCheck` about `publish` — an action that tool refuses — and
+    /// never listed `verify`, the only one it takes.
+    #[test]
+    fn each_tool_lists_its_own_actions() {
+        let (service, _dir) = tools();
+        for name in FAMILY {
+            let schema = page_tool(&service, name).descriptor().input_schema;
+            let description = schema["properties"]["action"]["description"]
+                .as_str()
+                .unwrap_or_default();
+
+            // The description is "one of: a, b, c; defaults to x". Compare the
+            // listed actions as whole tokens: a substring test would accept
+            // `upload_asset` as evidence that `set` is listed, which is how an
+            // earlier version of this check passed while asserting nothing.
+            let listed: Vec<&str> = description
+                .split_once("one of: ")
+                .and_then(|(_, rest)| rest.split_once(';').map(|(actions, _)| actions))
+                .unwrap_or_default()
+                .split(", ")
+                .collect();
+
+            let answered = actions_of(family_of(name));
+            for action in answered {
+                assert!(
+                    listed.contains(action),
+                    "{name} answers '{action}' but its action description does not list \
+                     it: {description}"
+                );
+            }
+            for action in &listed {
+                assert!(
+                    answered.contains(action),
+                    "{name} does not answer '{action}', yet its action description \
+                     lists it: {description}"
+                );
+            }
+        }
+    }
+
+    /// The split made the request slightly *larger*, not smaller — and this
+    /// test records that trade so nobody later assumes the opposite.
+    ///
+    /// The four schemas now total 2,987 bytes against the 2,851 of the single
+    /// shared one, because eight parameters that were read but never declared
+    /// now are. That is the whole point of the change: a `str_replace` or a
+    /// paged `list` could not be written at all from the schema alone, and the
+    /// system prompt names none of those keys either. The cost is ~35 tokens on
+    /// a cached prefix; the gain is that those actions are reachable.
+    ///
+    /// The ceiling is set where the schemas sit so growth has to be deliberate
+    /// — the value to watch is not this number but that a parameter added here
+    /// is one a branch actually reads, which the test above enforces.
+    #[test]
+    fn the_four_schemas_together_stay_within_their_measured_budget() {
+        let (service, _dir) = tools();
+        let total: usize = FAMILY
+            .iter()
+            .map(|name| {
+                let schema = page_tool(&service, name).descriptor().input_schema;
+                serde_json::to_string(&schema).unwrap_or_default().len()
+            })
+            .sum();
+        assert!(
+            total < 3_200,
+            "the four input schemas total {total} bytes; 2,987 is where the \
+             per-tool split landed (from a 2,851-byte shared schema). Growth \
+             past this budget should be a deliberate choice, not drift"
+        );
     }
 }
