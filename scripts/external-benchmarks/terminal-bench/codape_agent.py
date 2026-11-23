@@ -460,15 +460,25 @@ class CodapeAgent(AbstractInstalledAgent):
             return None
 
     def _read_result_summary(self, session) -> dict | None:
-        # The result frame is the last line; read a bounded tail rather than a
-        # potentially large transcript.
+        # Every result frame, not a tail of them. A continuation segment writes
+        # one, and the totals are a sum — but a fixed window of bytes sees only
+        # the frames near the end. The protocol writes one frame per line and
+        # one frame per streamed delta, so a verbose answer is a few hundred
+        # bytes per handful of characters: a 4 000-character answer is roughly
+        # 125 KiB, and two of them push the run's first result frame out of a
+        # 256 KiB tail. Measured on a 1.1 MiB synthetic transcript: two result
+        # frames in the file, one inside the tail. That understates `num_turns`
+        # and `duration_ms` on exactly the long runs the benchmark is for.
+        #
+        # Grep keeps the same bounded transfer as the tail did — the result
+        # frames are a few hundred bytes each however long the transcript is.
         try:
             exec_result = session.container.exec_run(
-                ["sh", "-c", f"tail -c 262144 {self._stream_path} 2>/dev/null"]
+                ["sh", "-c", f"grep -a '\"type\":\"result\"' {self._stream_path} 2>/dev/null"]
             )
         except Exception:
             return None
-        if exec_result.exit_code != 0:
+        if exec_result.exit_code not in (0, 1):
             return None
         return parse_result_summary(exec_result.output.decode("utf-8", errors="replace"))
 
