@@ -21,7 +21,7 @@ use crate::api_client::{
 use crate::budget::TokenBudget;
 use crate::compact::{self, CompactResult, CompactStrategy};
 use crate::confirmation_bus::{ConfirmationBus, ConfirmationRequest, ConfirmationResponse};
-use crate::cost::CostTracker;
+use crate::cost::{CostTracker, SharedCostTracker};
 use crate::elicitation::{ElicitationHandler, ElicitationResult, ReplElicitationHandler};
 use crate::hook_events;
 use crate::hook_executor::{HookExecutor, HookFireResult, NoOpHookExecutor};
@@ -2106,8 +2106,13 @@ pub struct QueryEngine {
     reasoning_effort: Option<ReasoningEffort>,
     /// Session state for the current conversation.
     session: SessionState,
-    /// Cost tracker for billing.
-    cost_tracker: CostTracker,
+    /// Cost tracker for billing, shared so a caller can read it after the
+    /// engine has been handed to a task.
+    ///
+    /// The turn task owns `&mut self` for the duration of a submit, so a plain
+    /// field would be unreachable to the REPL — and the frame that reports how
+    /// a SIGTERM-ended turn spent its time is exactly the one that needs it.
+    cost_tracker: SharedCostTracker,
     /// Whether the running turn has been asked to stop.
     interrupt: InterruptHandle,
     /// Permission engine for tool approval.
@@ -2621,7 +2626,7 @@ impl QueryEngine {
             fallback_model: None,
             reasoning_effort: None,
             session,
-            cost_tracker: CostTracker::new(),
+            cost_tracker: SharedCostTracker::new(CostTracker::new()),
             interrupt: InterruptHandle::default(),
             permission_engine,
             event_tx,
@@ -3777,7 +3782,7 @@ impl QueryEngine {
     /// undercounted every run that answered an elicitation or recovered from a
     /// context overflow.
     #[must_use]
-    pub const fn total_usage(&self) -> UsageSummary {
+    pub fn total_usage(&self) -> UsageSummary {
         self.cost_tracker.session_usage()
     }
 
@@ -3793,7 +3798,7 @@ impl QueryEngine {
     /// The cost stays `None` when the session touched a model with no known
     /// price. Writing `0.0` there would persist "this run was free" into the
     /// session index, where nobody can tell it from a run that really was.
-    const fn sync_session_accounting(&mut self) {
+    fn sync_session_accounting(&mut self) {
         self.session.usage = self.cost_tracker.session_usage();
         self.session.cost_usd = self.cost_tracker.known_total_cost();
     }
@@ -8037,8 +8042,9 @@ impl QueryEngine {
         Ok(Some(result))
     }
 
-    /// Get the current cost tracker (shared reference).
-    pub const fn cost_tracker(&self) -> &CostTracker {
+    /// The session's cost tracker, readable while the engine is elsewhere.
+    #[must_use]
+    pub const fn cost_tracker(&self) -> &SharedCostTracker {
         &self.cost_tracker
     }
 

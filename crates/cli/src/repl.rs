@@ -10713,8 +10713,10 @@ impl ReplLoop {
 /// model has no known price; see [`CostTracker::known_total_cost`].
 ///
 /// [`CostTracker::known_total_cost`]: codape_core::cost::CostTracker::known_total_cost
-fn attach_usage_to_frame(frame: &mut codape_events::ResultFrame, engine: &QueryEngine) {
-    let tracker = engine.cost_tracker();
+fn attach_usage_to_frame(
+    frame: &mut codape_events::ResultFrame,
+    tracker: &codape_core::cost::SharedCostTracker,
+) {
     frame
         .data
         .insert("usage".to_string(), usage_json(&tracker.session_usage()));
@@ -10738,10 +10740,15 @@ fn attach_usage_to_frame(frame: &mut codape_events::ResultFrame, engine: &QueryE
 /// "everything else" figure that is not an attributable cost.
 fn attach_timing_to_frame(
     frame: &mut codape_events::ResultFrame,
-    engine: &QueryEngine,
+    tracker: &codape_core::cost::SharedCostTracker,
     turns_before: u32,
 ) {
-    let (model_ms, tool_ms) = engine.cost_tracker().timing_since(turns_before);
+    // `timing` sums the completed turns' history *and* the turn in progress.
+    // The progress half matters here and nowhere else: this frame is written
+    // for a turn that never reached `end_turn`, so summing history alone
+    // reported `model_ms: 0` / `tool_ms: 0` for a run that had been going for
+    // half an hour.
+    let (model_ms, tool_ms) = tracker.timing(turns_before);
     frame
         .data
         .insert("model_ms".to_string(), serde_json::json!(model_ms));
@@ -10786,7 +10793,7 @@ fn write_interrupted_result(
     session_id: &str,
     elapsed: std::time::Duration,
     num_turns: u32,
-    engine: Option<&QueryEngine>,
+    cost_tracker: Option<&codape_core::cost::SharedCostTracker>,
     turns_before: u32,
     message: &str,
 ) {
@@ -10806,9 +10813,9 @@ fn write_interrupted_result(
     );
     // A run stopped from outside still spent the time it spent, and the frame
     // that reports how it ended is the only place that time can be reported.
-    if let Some(engine) = engine {
-        attach_usage_to_frame(&mut frame, engine);
-        attach_timing_to_frame(&mut frame, engine, turns_before);
+    if let Some(tracker) = cost_tracker {
+        attach_usage_to_frame(&mut frame, tracker);
+        attach_timing_to_frame(&mut frame, tracker, turns_before);
     }
     if let Err(error) = turn.emit_turn_complete(frame) {
         tracing::warn!("could not write the interrupted result: {error}");
@@ -12809,6 +12816,14 @@ impl ReplLoop {
         // anything, including when a SIGTERM cuts the turn short.
         let turn_counter = engine.turn_counter();
         let turns_before = turn_counter.value();
+        // Where the spend is, captured before the engine crosses into its
+        // task. `submit_streaming` takes `&mut self`, so the engine owns its
+        // tracker for the whole turn and the REPL cannot borrow it back — but
+        // the tracker itself is shared, so this handle keeps reading the same
+        // numbers the turn is writing. Without it the closing frame a SIGTERM
+        // writes reported zero tokens and zero milliseconds for a turn that
+        // had run for half an hour.
+        let cost_tracker = engine.cost_tracker().clone();
         // Reapply the session's fallback model: the engine crosses the task
         // boundary below, and an agent selection or `/model` may have rebuilt
         // the engine's model after `configure_repl` ran.
@@ -12873,7 +12888,7 @@ impl ReplLoop {
                     &session_id,
                     turn_started.elapsed(),
                     turn_counter.consumed_since(turns_before),
-                    self.session.engine.as_ref(),
+                    Some(&cost_tracker),
                     turns_before,
                     message,
                 );
@@ -13148,9 +13163,13 @@ impl ReplLoop {
                     frame
                 }
             };
+            // The engine is back at this point — a completed turn hands it
+            // over on `engine_rx` — so its tracker is readable directly. A
+            // turn that did not complete never reaches this block; the
+            // SIGTERM branch above writes its frame instead.
             if let Some(ref engine) = self.session.engine {
-                attach_usage_to_frame(&mut frame, engine);
-                attach_timing_to_frame(&mut frame, engine, turns_before);
+                attach_usage_to_frame(&mut frame, engine.cost_tracker());
+                attach_timing_to_frame(&mut frame, engine.cost_tracker(), turns_before);
             }
             if let Err(error) = turn.emit_turn_complete(frame) {
                 tracing::warn!("could not close the protocol turn: {error}");
@@ -18618,6 +18637,72 @@ mod tests {
             parsed["error"],
             "SIGTERM ended the run before the turn finished"
         );
+    }
+
+    /// A turn cut short still reports what it spent.
+    ///
+    /// The first paid terminal-bench run ended on its 1800 s timeout with 42
+    /// model turns and `duration_ms: 1800610`, and its `result` frame carried
+    /// no `usage`, no `model_ms` and no `tool_ms` — so the runner printed
+    /// `tokens: unavailable` and `model=0.0s tools=0.0s` for the one run that
+    /// most needed a cost figure. The engine had been `take()`n into the turn
+    /// task before the SIGTERM branch read it, so the branch always got
+    /// `None`.
+    ///
+    /// Asserting the keys are *present* is the whole point: the bug produced a
+    /// frame that was valid, just silently empty, and a test that only checked
+    /// for a parseable frame passed before and after.
+    #[test]
+    fn an_interrupted_turn_reports_what_it_spent() {
+        use codape_core::types::{ModelId, UsageSummary};
+
+        let tracker =
+            codape_core::cost::SharedCostTracker::new(codape_core::cost::CostTracker::new());
+        // One request answered and one tool batch run, exactly the state a
+        // turn in flight holds: `record_usage` lands in the session totals,
+        // and the two `record_*_time` calls land in the *current turn*, which
+        // no `end_turn` has moved into history.
+        tracker.record_usage(
+            &UsageSummary {
+                input_tokens: 1200,
+                output_tokens: 340,
+                ..Default::default()
+            },
+            &ModelId("deepseek/deepseek-v4.1-flash".into()),
+        );
+        tracker.record_model_time(std::time::Duration::from_secs(11));
+        tracker.record_tool_time(std::time::Duration::from_secs(4));
+
+        let buffer = SharedBuffer::default();
+        let mut sink: Option<codape_events::MessageSink<Box<dyn std::io::Write + Send + Sync>>> =
+            Some(codape_events::MessageSink::new(
+                Box::new(buffer.clone()) as Box<dyn std::io::Write + Send + Sync>
+            ));
+
+        write_interrupted_result(
+            &mut sink,
+            "session-1",
+            std::time::Duration::from_millis(42),
+            3,
+            Some(&tracker),
+            0,
+            "SIGTERM ended the run before the turn finished",
+        );
+
+        let lines = buffer.lines();
+        assert_eq!(lines.len(), 1, "the interrupted turn wrote {lines:?}");
+        let parsed: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(
+            parsed["usage"]["input_tokens"], 1200,
+            "the interrupted frame carries what the provider billed: {parsed}"
+        );
+        assert_eq!(parsed["usage"]["output_tokens"], 340, "{parsed}");
+        assert_eq!(
+            parsed["model_ms"], 11_000,
+            "the turn in progress has no history entry, so `timing_since` alone \
+             reports 0 here: {parsed}"
+        );
+        assert_eq!(parsed["tool_ms"], 4_000, "{parsed}");
     }
 
     #[test]
