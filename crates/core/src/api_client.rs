@@ -2231,6 +2231,37 @@ fn mark_message(message: &mut serde_json::Value) -> bool {
     }
 }
 
+/// Parse every complete block left in `buffer`, and the unterminated tail
+/// after them.
+///
+/// A block boundary is a blank line, so a provider that closes the body right
+/// after the last event's single newline never produced one. That last block is
+/// then still in the buffer when the stream ends — complete, and carrying
+/// exactly the events a stream has only once: `message_delta` with the stop
+/// reason and the usage. Parsing only up to the last boundary dropped it, and
+/// the turn ended with no stop reason and no cost.
+fn drain_sse_buffer(buffer: &mut String, state: &mut SseParserState) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    while let Some(pos) = crate::stream_utils::find_sse_message_boundary(buffer) {
+        let message = buffer[..pos].to_string();
+        buffer.drain(..=pos);
+        events.extend(parse_sse_message(&message, state));
+    }
+    if !buffer.trim().is_empty() {
+        let message = std::mem::take(buffer);
+        events.extend(parse_sse_message(&message, state));
+    }
+    events
+}
+
+/// Split `events` into the one to yield now and the rest to hand out before
+/// the stream is polled again.
+fn split_first(events: Vec<StreamEvent>) -> Option<(StreamEvent, Vec<StreamEvent>)> {
+    let mut it = events.into_iter();
+    let first = it.next()?;
+    Some((first, it.collect()))
+}
+
 fn parse_sse_stream(
     stream: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
 ) -> impl futures::Stream<Item = StreamEvent> + Send + 'static {
@@ -2246,11 +2277,18 @@ fn parse_sse_stream(
             SseParserState::default(),
             Utf8ChunkDecoder::new(),
             Vec::<StreamEvent>::new(),
+            false,
         ),
-        |(mut inner, mut buffer, mut state, mut decoder, mut outbox)| async move {
+        |(mut inner, mut buffer, mut state, mut decoder, mut outbox, finished)| async move {
             loop {
                 if let Some(event) = (!outbox.is_empty()).then(|| outbox.remove(0)) {
-                    return Some((event, (inner, buffer, state, decoder, outbox)));
+                    return Some((event, (inner, buffer, state, decoder, outbox, finished)));
+                }
+                // The body is over and its last block has been handed out.
+                // Polling a finished stream again is not something a `Stream`
+                // promises to survive.
+                if finished {
+                    return None;
                 }
 
                 if let Some(pos) = crate::stream_utils::find_sse_message_boundary(&buffer) {
@@ -2261,7 +2299,7 @@ fn parse_sse_stream(
                     let mut it = parsed.into_iter();
                     if let Some(first) = it.next() {
                         outbox = it.collect();
-                        return Some((first, (inner, buffer, state, decoder, outbox)));
+                        return Some((first, (inner, buffer, state, decoder, outbox, finished)));
                     }
                     continue;
                 }
@@ -2273,16 +2311,24 @@ fn parse_sse_stream(
                         buffer.push_str(&decoder.push(&chunk));
                     }
                     Some(Err(e)) => {
+                        // The error ends the body, so whatever arrived before
+                        // it is flushed rather than dropped with the buffer —
+                        // a complete block and a half-received one both stay
+                        // useful, and the half-received one parses to nothing.
                         tracing::warn!("SSE stream network error: {e}");
                         buffer.push_str(&decoder.finish());
-                        return Some((
-                            StreamEvent::Error(ApiError::from(e)),
-                            (inner, buffer, state, decoder, outbox),
-                        ));
+                        let mut events = drain_sse_buffer(&mut buffer, &mut state);
+                        events.push(StreamEvent::Error(ApiError::from(e)));
+                        let (first, rest) = split_first(events).expect("the error event");
+                        outbox = rest;
+                        return Some((first, (inner, buffer, state, decoder, outbox, true)));
                     }
                     None => {
                         buffer.push_str(&decoder.finish());
-                        return None;
+                        let events = drain_sse_buffer(&mut buffer, &mut state);
+                        let (first, rest) = split_first(events)?;
+                        outbox = rest;
+                        return Some((first, (inner, buffer, state, decoder, outbox, true)));
                     }
                 }
             }
@@ -3952,5 +3998,101 @@ data: {"type":"message_stop"}
         let events: Vec<StreamEvent> = parse_sse_stream(stream).collect().await;
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], StreamEvent::StreamEnd));
+    }
+
+    /// A body that ends without the blank line after its last event still has
+    /// that event, and the last event is the one that matters: the stop reason
+    /// and the usage arrive once, on `message_delta`.
+    ///
+    /// Every other test in this module ends its payload with `\n\n`, which is
+    /// exactly why this went unseen — the repo's own cassettes come from a
+    /// gateway that terminates its last block.
+    #[tokio::test]
+    async fn parse_sse_stream_keeps_an_unterminated_last_event() {
+        let sse = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":7028,\"output_tokens\":265}}";
+        let stream = futures::stream::iter(vec![Ok(bytes::Bytes::from(sse))]);
+        let events: Vec<StreamEvent> = parse_sse_stream(stream).collect().await;
+
+        assert!(
+            matches!(&events[0], StreamEvent::TextDelta(t) if t == "ok"),
+            "the terminated event was lost too: {events:?}"
+        );
+        assert!(
+            matches!(
+                &events[1],
+                StreamEvent::UsageSummary(u) if u.input_tokens == 7028 && u.output_tokens == 265
+            ),
+            "the unterminated last event was dropped: {events:?}"
+        );
+        assert!(
+            matches!(&events[2], StreamEvent::StopReason(r) if r == "end_turn"),
+            "the stop reason that closes the turn was dropped: {events:?}"
+        );
+        assert!(matches!(events.last(), Some(StreamEvent::StreamEnd)));
+    }
+
+    /// The other half: a body cut off mid-event. Flushing the buffer must not
+    /// invent an event out of half a JSON object — a partial text delta would
+    /// be replayed to the reader as if the provider had said it.
+    #[tokio::test]
+    async fn parse_sse_stream_does_not_invent_an_event_from_a_partial_block() {
+        let sse = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"complete\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"trunc";
+        let stream = futures::stream::iter(vec![Ok(bytes::Bytes::from(sse))]);
+        let events: Vec<StreamEvent> = parse_sse_stream(stream).collect().await;
+
+        let texts: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::TextDelta(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            ["complete"],
+            "a half-received block produced an event: {events:?}"
+        );
+        assert!(matches!(events.last(), Some(StreamEvent::StreamEnd)));
+    }
+
+    /// A network error gets the events that arrived before it, followed by the
+    /// error — dropping the buffer instead would lose a whole turn's cost.
+    #[tokio::test]
+    async fn parse_sse_stream_flushes_before_reporting_a_network_error() {
+        // Unterminated on purpose: a terminated block is drained by the normal
+        // boundary path, so only this shape reaches the error branch with
+        // anything still in the buffer.
+        let good = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":22}}";
+        // A port bound and released: connecting to it is refused at once, so
+        // the test needs no network and no fixed port number.
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr")
+        };
+        let error = reqwest::Client::new()
+            .get(format!("http://{refused}/"))
+            .send()
+            .await
+            .expect_err("a released port refuses the connection");
+        let chunks: Vec<Result<bytes::Bytes, reqwest::Error>> =
+            vec![Ok(bytes::Bytes::from(good)), Err(error)];
+        let stream = futures::stream::iter(chunks);
+        let events: Vec<StreamEvent> = parse_sse_stream(stream).collect().await;
+
+        assert!(
+            matches!(
+                &events[0],
+                StreamEvent::UsageSummary(u) if u.input_tokens == 11 && u.output_tokens == 22
+            ),
+            "the usage that arrived before the error was dropped: {events:?}"
+        );
+        assert!(
+            matches!(&events[1], StreamEvent::StopReason(r) if r == "end_turn"),
+            "the stop reason that arrived before the error was dropped: {events:?}"
+        );
+        assert!(
+            matches!(&events[2], StreamEvent::Error(_)),
+            "the error did not follow the flushed events: {events:?}"
+        );
     }
 }
