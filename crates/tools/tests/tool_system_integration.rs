@@ -467,9 +467,12 @@ fn every_builtin_tool_declares_its_attributes() {
         ("chrome_scroll", false, false, false),
         ("chrome_type", false, false, true),
         ("chrome_wait_for_load", true, false, false),
-        ("echo", false, true, false),
-        ("noop", true, true, false),
     ];
+
+    // Registered for tests and debugging, so never advertised, but still
+    // callable — and still subject to the same flag decisions.
+    const INTERNAL: &[(&str, bool, bool, bool)] =
+        &[("echo", false, true, false), ("noop", true, true, false)];
 
     let registry = test_registry();
     let descriptors = registry.all_descriptors();
@@ -495,6 +498,25 @@ fn every_builtin_tool_declares_its_attributes() {
             seen.contains(&desc.name.as_str()),
             "{} is registered but missing from the attribute matrix",
             desc.name
+        );
+    }
+    for (name, read_only, concurrency_safe, requires_approval) in INTERNAL {
+        let desc = registry
+            .get_tool(name)
+            .unwrap_or_else(|error| panic!("{name} is registered but not callable: {error}"))
+            .descriptor();
+        assert!(
+            !descriptors.iter().any(|listed| listed.name == *name),
+            "{name} is advertised, so it belongs in the matrix above"
+        );
+        assert_eq!(desc.is_read_only, *read_only, "{name}: is_read_only");
+        assert_eq!(
+            desc.is_concurrency_safe, *concurrency_safe,
+            "{name}: is_concurrency_safe"
+        );
+        assert_eq!(
+            desc.requires_approval, *requires_approval,
+            "{name}: requires_approval"
         );
     }
 }

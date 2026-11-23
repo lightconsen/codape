@@ -146,6 +146,14 @@ pub enum ToolTier {
     FeatureGated,
     /// Dynamically discovered via MCP.
     DynamicMcp,
+    /// Registered for tests and debugging, never advertised to a model.
+    ///
+    /// The registry keeps these callable so a test can name one directly, but
+    /// `all_descriptors` — the listing that becomes the request's `tools`
+    /// array — leaves them out. That array is hashed as part of the cached
+    /// prefix, so a placeholder that no user session can meaningfully call is
+    /// paid for on every request of every session.
+    Internal,
 }
 
 /// A graded per-tool cap on how many characters of output a tool may return.
