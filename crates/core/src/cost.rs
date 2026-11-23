@@ -294,6 +294,15 @@ pub struct CostTracker {
     turn_model_ms: u64,
     /// Tool time accumulated in the current turn, in milliseconds.
     turn_tool_ms: u64,
+    /// Whether the turn those two counters belong to has already been closed.
+    ///
+    /// [`end_turn`](Self::end_turn) copies them into `turn_history` but does
+    /// not zero them, because the turn may still be reported in other ways
+    /// before the next one starts. That leaves them double-representable: a
+    /// caller adding [`current_turn_timing`](Self::current_turn_timing) to
+    /// [`timing_since`](Self::timing_since) would count a finished turn twice.
+    /// This flag is what makes the in-progress half mean what it says.
+    turn_closed: bool,
     /// Costs by agent/agent_id.
     agent_costs: HashMap<String, f64>,
     /// Costs by task/task_id.
@@ -337,6 +346,123 @@ pub struct TurnCost {
     pub tool_ms: u64,
 }
 
+/// A [`CostTracker`] shared with the engine that owns it.
+///
+/// The engine hands itself to a task to run a turn, and the REPL cannot ask
+/// that task anything — including how much the turn has spent so far. A plain
+/// field put the numbers out of reach of the one frame that needs them most:
+/// the `result` a SIGTERM writes for a turn that never finished. Sharing the
+/// tracker keeps them reachable, in the same way
+/// [`current_turn`](crate::engine::QueryEngine) lets a caller read the turn
+/// counter after the hand-off.
+///
+/// Every method takes the lock for the duration of one call and returns a
+/// value, never a reference into the tracker, so a holder cannot keep the lock
+/// alive across an `await` by accident.
+#[derive(Debug, Clone)]
+pub struct SharedCostTracker(std::sync::Arc<std::sync::Mutex<CostTracker>>);
+
+impl SharedCostTracker {
+    /// Wrap a tracker for sharing.
+    #[must_use]
+    pub fn new(tracker: CostTracker) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(tracker)))
+    }
+
+    /// Run `f` against the tracker.
+    ///
+    /// A poisoned lock is recovered rather than propagated: the numbers a
+    /// panic left behind are still the best estimate available, and a caller
+    /// reporting why a run ended must not fail because of it.
+    fn with<T>(&self, f: impl FnOnce(&mut CostTracker) -> T) -> T {
+        let mut guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&mut guard)
+    }
+
+    /// End the current turn and record it in history.
+    pub fn end_turn(
+        &self,
+        turn_number: u32,
+        usage: &crate::types::UsageSummary,
+        model: &crate::types::ModelId,
+    ) {
+        self.with(|tracker| tracker.end_turn(turn_number, usage, model));
+    }
+
+    /// Start a new turn, resetting the turn-level cost and timings.
+    pub fn start_turn(&self) {
+        self.with(CostTracker::start_turn);
+    }
+
+    /// Add one request's usage to the session and turn totals.
+    pub fn record_usage(
+        &self,
+        usage: &crate::types::UsageSummary,
+        model: &crate::types::ModelId,
+    ) -> f64 {
+        self.with(|tracker| tracker.record_usage(usage, model))
+    }
+
+    /// Add one request's provider time to the current turn.
+    pub fn record_model_time(&self, elapsed: std::time::Duration) {
+        self.with(|tracker| tracker.record_model_time(elapsed));
+    }
+
+    /// Add one batch of tool execution's time to the current turn.
+    pub fn record_tool_time(&self, elapsed: std::time::Duration) {
+        self.with(|tracker| tracker.record_tool_time(elapsed));
+    }
+
+    /// Provider and tool time for `from_turn` onwards, in milliseconds.
+    ///
+    /// Includes the turn in progress *if there is one*. A turn that already
+    /// reached [`end_turn`](Self::end_turn) is in the history and is not added
+    /// again — which is what makes the completed-turn closing frame report the
+    /// same numbers the finished turn does.
+    #[must_use]
+    pub fn timing(&self, from_turn: u32) -> (u64, u64) {
+        self.with(|tracker| {
+            let (completed_model, completed_tool) = tracker.timing_since(from_turn);
+            let (turn_model, turn_tool) = tracker.in_progress_timing();
+            (
+                completed_model.saturating_add(turn_model),
+                completed_tool.saturating_add(turn_tool),
+            )
+        })
+    }
+
+    /// Provider and tool time for the turn in progress, in milliseconds.
+    ///
+    /// Unlike [`timing`](Self::timing) this does not add the completed turns'
+    /// history, so it is what a caller wants at a point that has already
+    /// recorded the turn. A turn that has closed reports zero here.
+    #[must_use]
+    pub fn current_turn_timing(&self) -> (u64, u64) {
+        self.with(|tracker| tracker.current_turn_timing())
+    }
+
+    /// Tokens billed for the session, summed as they were recorded.
+    #[must_use]
+    pub fn session_usage(&self) -> crate::types::UsageSummary {
+        self.with(|tracker| tracker.session_usage())
+    }
+
+    /// The session's total cost when every model it used has a known price.
+    #[must_use]
+    pub fn known_total_cost(&self) -> Option<f64> {
+        self.with(|tracker| tracker.known_total_cost())
+    }
+
+    /// Format a cost summary for display.
+    #[must_use]
+    pub fn format_summary(&self) -> String {
+        self.with(|tracker| tracker.format_summary())
+    }
+}
+
 impl CostTracker {
     /// Create a new cost tracker.
     ///
@@ -352,6 +478,7 @@ impl CostTracker {
             unpriced_usage: false,
             turn_model_ms: 0,
             turn_tool_ms: 0,
+            turn_closed: false,
             agent_costs: HashMap::new(),
             task_costs: HashMap::new(),
             turn_history: Vec::new(),
@@ -412,6 +539,9 @@ impl CostTracker {
             model_ms: self.turn_model_ms,
             tool_ms: self.turn_tool_ms,
         });
+        // The numbers above are now in history. Leaving them also readable as
+        // "the turn in progress" would put the same turn in both books.
+        self.turn_closed = true;
 
         // Broadcast to team context if present
         if let Some(ref team_ctx) = self.team_context
@@ -425,10 +555,18 @@ impl CostTracker {
     }
 
     /// Start a new turn (reset turn-level cost and timings).
+    ///
+    /// The session totals survive: a caller reading them after a turn was cut
+    /// short still gets what the session spent up to that point. Only the
+    /// *turn* counters, which `end_turn` moves into `turn_history` and
+    /// `timing_since` sums, go back to zero. That is also why an interrupted
+    /// turn's numbers do not appear in `timing_since`: the turn never reached
+    /// `end_turn`, so there is no history entry to sum.
     pub const fn start_turn(&mut self) {
         self.turn_cost = 0.0;
         self.turn_model_ms = 0;
         self.turn_tool_ms = 0;
+        self.turn_closed = false;
     }
 
     /// Add one request's provider time to the current turn.
@@ -453,6 +591,21 @@ impl CostTracker {
     #[must_use]
     pub const fn current_turn_timing(&self) -> (u64, u64) {
         (self.turn_model_ms, self.turn_tool_ms)
+    }
+
+    /// The same pair, but zero once the turn has been closed.
+    ///
+    /// This is the in-progress half of [`SharedCostTracker::timing`]. It is a
+    /// separate method because `current_turn_timing` has a second reader — the
+    /// `turn timing` debug line, which closes the turn and then logs its
+    /// numbers — and that reader wants them after the close.
+    #[must_use]
+    const fn in_progress_timing(&self) -> (u64, u64) {
+        if self.turn_closed {
+            (0, 0)
+        } else {
+            (self.turn_model_ms, self.turn_tool_ms)
+        }
     }
 
     /// Add cost to an agent.
@@ -826,6 +979,54 @@ mod tests {
         assert_eq!(tracker.timing_since(1), (500, 50));
         assert_eq!(tracker.timing_since(3), (0, 0));
         assert_eq!(tracker.timing_since(0), (600, 60));
+    }
+
+    /// A finished turn is in the history and must not be counted again.
+    ///
+    /// `timing` sums `timing_since` (closed turns) and the in-progress
+    /// counters. `end_turn` does not zero those counters, so without the
+    /// closed flag every closing frame would report its last turn twice: a
+    /// one-turn run that spent 100 ms at the provider would say 200 ms, and
+    /// nothing about the frame would look wrong.
+    #[test]
+    fn a_closed_turn_is_not_counted_as_in_progress() {
+        let tracker = SharedCostTracker::new(CostTracker::new());
+        tracker.start_turn();
+        tracker.record_model_time(std::time::Duration::from_millis(100));
+        tracker.record_tool_time(std::time::Duration::from_millis(40));
+        tracker.end_turn(1, &UsageSummary::default(), &ModelId::sonnet());
+
+        assert_eq!(
+            tracker.timing(0),
+            (100, 40),
+            "the closed turn was counted in both books"
+        );
+        // The in-progress pair is still there for the debug line, which reads
+        // it after the close on purpose.
+        assert_eq!(tracker.current_turn_timing(), (100, 40));
+
+        // The next turn starts clean, and its progress is what `timing` adds.
+        tracker.start_turn();
+        tracker.record_model_time(std::time::Duration::from_millis(7));
+        assert_eq!(tracker.timing(0), (107, 40));
+    }
+
+    /// A turn that never reached `end_turn` is only in the in-progress book.
+    ///
+    /// This is the SIGTERM case: no history entry exists, so adding
+    /// `current_turn_timing` is the only way the frame can report anything.
+    #[test]
+    fn a_turn_that_never_closed_reports_its_progress() {
+        let tracker = SharedCostTracker::new(CostTracker::new());
+        tracker.start_turn();
+        tracker.record_model_time(std::time::Duration::from_millis(250));
+        tracker.record_tool_time(std::time::Duration::from_millis(90));
+
+        assert_eq!(
+            tracker.timing(0),
+            (250, 90),
+            "an interrupted turn has no history, so only the progress counted"
+        );
     }
 
     #[test]
