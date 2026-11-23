@@ -1964,6 +1964,24 @@ struct SseParserState {
     /// Input-JSON deltas that arrived before their `content_block_start`.
     /// Buffered and flushed once the mapping is known.
     deferred_deltas: Vec<(usize, String)>,
+    /// Usage reported by `message_start`, held until a later event spends it.
+    ///
+    /// `message_start` opens the message and reports the request's input
+    /// tokens; `message_delta` closes it with the output tokens. Only the
+    /// second is where a billable request becomes final, so the first is kept
+    /// here rather than emitted — a `message_start` on its own is a request
+    /// that has not been billed yet.
+    ///
+    /// It has to be kept at all because `message_delta` is not obliged to
+    /// repeat the input side: the API's `MessageDeltaUsage.input_tokens` is
+    /// optional, while `Usage.input_tokens` on the start event is required. A
+    /// provider that sends only `output_tokens` there is conforming, and
+    /// reading usage from the delta alone billed every such request as zero
+    /// input tokens.
+    start_usage: Option<UsageSummary>,
+    /// Whether `message_delta` already spoke for this message, so the held
+    /// `message_start` usage is not attached to a second one.
+    start_usage_spent: bool,
 }
 
 /// Whether a content-block type belongs to a tool the provider ran itself.
@@ -2293,6 +2311,25 @@ fn parse_sse_stream(
 
 /// Parse a single SSE message block into zero or more `StreamEvent`s.
 ///
+/// Read a usage object into the tracker's shape.
+///
+/// The two events that report usage do not use the same field set:
+/// `message_start` carries the required `input_tokens` and the cache counters,
+/// while `message_delta` is only obliged to carry the cumulative
+/// `output_tokens`. A field absent here reads as zero, which is the right
+/// default for a provider that omitted it — the caller decides what to fall
+/// back to.
+#[allow(clippy::cast_possible_truncation)]
+fn usage_from_json(u: &serde_json::Value) -> UsageSummary {
+    let count = |key: &str| u.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    UsageSummary {
+        input_tokens: count("input_tokens"),
+        output_tokens: count("output_tokens"),
+        cache_read_tokens: count("cache_read_input_tokens"),
+        cache_creation_tokens: count("cache_creation_input_tokens"),
+    }
+}
+
 /// `message_delta` may carry both usage and stop reason; callers consume the
 /// returned events in order.
 fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEvent> {
@@ -2476,32 +2513,64 @@ fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEve
                 input: serde_json::Value::Null,
             }]
         }
+        "message_start" => {
+            // Hold the request's input tokens. Nothing is billable until a
+            // `message_delta` closes the message, so emitting here would
+            // double-count the moment the delta arrives.
+            state.start_usage = value
+                .get("message")
+                .and_then(|m| m.get("usage"))
+                .map(usage_from_json);
+            state.start_usage_spent = false;
+            Vec::new()
+        }
         "message_delta" => {
             #[allow(clippy::cast_possible_truncation)]
-            let usage = value.get("usage").map(|u| UsageSummary {
-                input_tokens: u
-                    .get("input_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
-                output_tokens: u
-                    .get("output_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
-                cache_read_tokens: u
-                    .get("cache_read_input_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
-                cache_creation_tokens: u
-                    .get("cache_creation_input_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as usize,
+            let usage = value.get("usage").map(|u| {
+                let mut reported = usage_from_json(u);
+                // The delta carries the cumulative output side, and the input
+                // side only when the provider chooses to repeat it — the API
+                // declares that field optional. Fall back to what
+                // `message_start` declared, but never overwrite a value the
+                // delta actually sent.
+                if let Some(start) = state
+                    .start_usage
+                    .as_ref()
+                    .filter(|_| !state.start_usage_spent)
+                {
+                    if u.get("input_tokens").is_none() {
+                        reported.input_tokens = start.input_tokens;
+                    }
+                    if u.get("cache_read_input_tokens").is_none() {
+                        reported.cache_read_tokens = start.cache_read_tokens;
+                    }
+                    if u.get("cache_creation_input_tokens").is_none() {
+                        reported.cache_creation_tokens = start.cache_creation_tokens;
+                    }
+                }
+                reported
             });
+            // The held usage belongs to exactly one message.
+            let start_was_spent = state.start_usage_spent;
+            state.start_usage_spent = true;
             let stop_reason = value
                 .get("delta")
                 .and_then(|d| d.get("stop_reason"))
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
+            // A stream that says nothing about usage at all still gets a
+            // summary when it ends, provided `message_start` declared one.
+            // Otherwise the engine's `usage` stays at its zero default and the
+            // run reports zero tokens for work that was certainly billed —
+            // indistinguishable, in the frame, from a provider that really did
+            // charge nothing. The stop reason is what closes a message, so it
+            // is the point at which the fallback is safe to emit.
+            let usage = usage.or_else(|| {
+                let start = state.start_usage.filter(|_| !start_was_spent)?;
+                stop_reason.as_ref()?;
+                Some(start)
+            });
             let mut events = Vec::with_capacity(2);
             if let Some(u) = usage {
                 if u.cache_read_tokens > 0 {
@@ -3765,6 +3834,146 @@ mod tests {
         let events = parse_sse_message(msg, &mut state);
         assert!(
             matches!(events.as_slice(), [StreamEvent::UsageSummary(u), StreamEvent::StopReason(r)] if u.input_tokens == 100 && u.output_tokens == 50 && r == "end_turn")
+        );
+    }
+
+    /// `input_tokens` arrives with `message_start`, and `message_delta` is not
+    /// obliged to repeat it.
+    ///
+    /// The API's own type definitions say so: `Usage.input_tokens` (in
+    /// `message_start.message.usage`) is required, while
+    /// `MessageDeltaUsage.input_tokens` is `Optional`. A provider that fills in
+    /// only the cumulative `output_tokens` there is conforming, and the parser
+    /// used to read usage exclusively from `message_delta` — so every request
+    /// against such a provider was billed as zero input tokens, which is the
+    /// one number a benchmark's cost most depends on.
+    #[test]
+    fn usage_input_tokens_are_read_from_message_start_when_delta_omits_them() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":7028,\"output_tokens\":0}}}\n\n";
+        let delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":265}}\n\n";
+
+        let started = parse_sse_message(start, &mut state);
+        assert!(
+            started.is_empty(),
+            "message_start on its own should not report a billable request yet: {started:?}"
+        );
+
+        let events = parse_sse_message(delta, &mut state);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(*u),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no usage summary: {events:?}"));
+        assert_eq!(
+            usage.input_tokens, 7028,
+            "the input tokens from message_start were lost: {usage:?}"
+        );
+        assert_eq!(usage.output_tokens, 265, "{usage:?}");
+    }
+
+    /// The other direction: when `message_delta` does carry `input_tokens`, its
+    /// value is the cumulative one and must win.
+    #[test]
+    fn usage_input_tokens_from_message_delta_override_the_start() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7000,\"output_tokens\":0}}}\n\n";
+        let delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":7028,\"output_tokens\":265}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let events = parse_sse_message(delta, &mut state);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(*u),
+                _ => None,
+            })
+            .expect("no usage summary");
+        assert_eq!(usage.input_tokens, 7028, "{usage:?}");
+    }
+
+    /// The held usage belongs to one message. A second `message_delta` in the
+    /// same stream — retries and multi-message transports both produce them —
+    /// must not inherit the first message's input tokens.
+    #[test]
+    fn held_message_start_usage_is_spent_by_one_delta_only() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7028}}}\n\n";
+        let first = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":265}}\n\n";
+        let second = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let a = parse_sse_message(first, &mut state)
+            .into_iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(u),
+                _ => None,
+            })
+            .expect("first delta reported no usage");
+        let b = parse_sse_message(second, &mut state)
+            .into_iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(u),
+                _ => None,
+            })
+            .expect("second delta reported no usage");
+
+        assert_eq!(a.input_tokens, 7028, "{a:?}");
+        assert_eq!(
+            b.input_tokens, 0,
+            "the second delta inherited the first message's input tokens: {b:?}"
+        );
+        assert_eq!(b.output_tokens, 7, "{b:?}");
+    }
+
+    /// A delta that carries no usage at all still reports what
+    /// `message_start` declared, once the message is closed.
+    ///
+    /// This is the shape the paid benchmark run produced: no `message_delta`
+    /// usage object to read. Leaving the engine's `usage` at its zero default
+    /// made the run report zero tokens — indistinguishable from a provider
+    /// that really charged nothing.
+    #[test]
+    fn usage_falls_back_to_message_start_when_the_delta_has_none() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5823,\"output_tokens\":0}}}\n\n";
+        let delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let events = parse_sse_message(delta, &mut state);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(*u),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a declared usage was dropped: {events:?}"));
+        assert_eq!(usage.input_tokens, 5823, "{usage:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::StopReason(r) if r == "end_turn")),
+            "the stop reason was lost: {events:?}"
+        );
+    }
+
+    /// A delta with neither usage nor a stop reason closes nothing, so the
+    /// held usage is not spent on it.
+    #[test]
+    fn usage_is_not_emitted_for_a_delta_without_a_stop_reason() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5823}}}\n\n";
+        let mid = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let events = parse_sse_message(mid, &mut state);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::UsageSummary(_))),
+            "usage was emitted before the message closed: {events:?}"
         );
     }
 
