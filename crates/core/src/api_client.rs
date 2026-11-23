@@ -2551,6 +2551,7 @@ fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEve
                 reported
             });
             // The held usage belongs to exactly one message.
+            let start_was_spent = state.start_usage_spent;
             state.start_usage_spent = true;
             let stop_reason = value
                 .get("delta")
@@ -2558,6 +2559,18 @@ fn parse_sse_message(message: &str, state: &mut SseParserState) -> Vec<StreamEve
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
+            // A stream that says nothing about usage at all still gets a
+            // summary when it ends, provided `message_start` declared one.
+            // Otherwise the engine's `usage` stays at its zero default and the
+            // run reports zero tokens for work that was certainly billed —
+            // indistinguishable, in the frame, from a provider that really did
+            // charge nothing. The stop reason is what closes a message, so it
+            // is the point at which the fallback is safe to emit.
+            let usage = usage.or_else(|| {
+                let start = state.start_usage.filter(|_| !start_was_spent)?;
+                stop_reason.as_ref()?;
+                Some(start)
+            });
             let mut events = Vec::with_capacity(2);
             if let Some(u) = usage {
                 if u.cache_read_tokens > 0 {
@@ -3913,6 +3926,55 @@ mod tests {
             "the second delta inherited the first message's input tokens: {b:?}"
         );
         assert_eq!(b.output_tokens, 7, "{b:?}");
+    }
+
+    /// A delta that carries no usage at all still reports what
+    /// `message_start` declared, once the message is closed.
+    ///
+    /// This is the shape the paid benchmark run produced: no `message_delta`
+    /// usage object to read. Leaving the engine's `usage` at its zero default
+    /// made the run report zero tokens — indistinguishable from a provider
+    /// that really charged nothing.
+    #[test]
+    fn usage_falls_back_to_message_start_when_the_delta_has_none() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5823,\"output_tokens\":0}}}\n\n";
+        let delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let events = parse_sse_message(delta, &mut state);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::UsageSummary(u) => Some(*u),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a declared usage was dropped: {events:?}"));
+        assert_eq!(usage.input_tokens, 5823, "{usage:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::StopReason(r) if r == "end_turn")),
+            "the stop reason was lost: {events:?}"
+        );
+    }
+
+    /// A delta with neither usage nor a stop reason closes nothing, so the
+    /// held usage is not spent on it.
+    #[test]
+    fn usage_is_not_emitted_for_a_delta_without_a_stop_reason() {
+        let mut state = SseParserState::default();
+        let start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5823}}}\n\n";
+        let mid = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{}}\n\n";
+
+        parse_sse_message(start, &mut state);
+        let events = parse_sse_message(mid, &mut state);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::UsageSummary(_))),
+            "usage was emitted before the message closed: {events:?}"
+        );
     }
 
     #[test]
