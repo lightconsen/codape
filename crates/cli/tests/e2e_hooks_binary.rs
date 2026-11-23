@@ -24,7 +24,31 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn start_static_provider() -> (Child, String) {
+/// A running `static-anthropic-server`, killed when the test ends.
+///
+/// The guard matters here because nine of this file's tests start a provider
+/// and only some of them end by killing it by hand. A test that returns early,
+/// or panics on an assertion, skips whatever cleanup sits at the end of its
+/// body — and the orphan outlives the run. A previous suite left 96 of them
+/// alive, each holding a port and a thread.
+///
+/// `Drop` runs on the panic path too, which is the case the old arrangement
+/// could not cover. `kill()` on an already-exited child is a harmless error
+/// and is ignored, so an explicit kill and the guard can coexist while the
+/// tests are converted.
+struct StaticProvider {
+    child: Child,
+    base_url: String,
+}
+
+impl Drop for StaticProvider {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn start_static_provider() -> StaticProvider {
     let responses = workspace_root().join("tests/responses.json");
     let mut child = Command::new(env!("CARGO_BIN_EXE_static-anthropic-server"))
         .args([
@@ -52,7 +76,10 @@ fn start_static_provider() -> (Child, String) {
     let address = rx
         .recv_timeout(Duration::from_secs(10))
         .expect("static provider did not announce its address");
-    (child, format!("http://{address}"))
+    StaticProvider {
+        child,
+        base_url: format!("http://{address}"),
+    }
 }
 
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -142,7 +169,8 @@ fn a_failing_pretooluse_hook_denies_the_write() {
         Some("Write(*)"),
         deny.to_str().unwrap(),
     ));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -152,8 +180,6 @@ fn a_failing_pretooluse_hook_denies_the_write() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     assert!(
         output.status.success(),
         "{}",
@@ -176,7 +202,8 @@ fn a_stop_hook_runs_after_a_completed_turn() {
         &format!("printf hit >> {}", marker.display()),
     );
     let home = seed_config(&hook_settings("Stop", None, stop.to_str().unwrap()));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -186,8 +213,6 @@ fn a_stop_hook_runs_after_a_completed_turn() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     assert!(
         output.status.success(),
         "{}",
@@ -209,7 +234,8 @@ fn the_hooks_command_names_a_configured_hook() {
     let dir = tempfile::tempdir().expect("workspace");
     let stop = script(dir.path(), "stop.sh", "exit 0");
     let home = seed_config(&hook_settings("Stop", None, stop.to_str().unwrap()));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -219,8 +245,6 @@ fn the_hooks_command_names_a_configured_hook() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(stdout.contains("Active hooks: 1"), "{stdout}");
@@ -250,7 +274,8 @@ fn a_posttooluse_rewrite_reaches_the_tool_result() {
         Some("Bash(*)"),
         rewrite.to_str().unwrap(),
     ));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -264,8 +289,6 @@ fn a_posttooluse_rewrite_reaches_the_tool_result() {
         ],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     assert!(
         output.status.success(),
         "{}",
@@ -303,7 +326,8 @@ fn the_setup_hook_runs_after_init() {
         &format!("printf hit >> {}", marker.display()),
     );
     let home = seed_config(&hook_settings("Setup", None, setup.to_str().unwrap()));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -313,8 +337,6 @@ fn the_setup_hook_runs_after_init() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     assert!(
         output.status.success(),
         "codape failed: {}",
@@ -517,7 +539,8 @@ fn a_headless_run_fires_sessionend_once_with_its_reason() {
         ),
     );
     let home = seed_config(&hook_settings("SessionEnd", None, end.to_str().unwrap()));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -527,8 +550,6 @@ fn a_headless_run_fires_sessionend_once_with_its_reason() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     assert!(
         output.status.success(),
         "codape failed: {}",
@@ -740,12 +761,11 @@ fn an_http_pretooluse_hook_can_block_the_tool() {
     let output = run(
         dir.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         "add a recursive fibonacci function to src/lib.rs with unit tests",
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = api.0;
     let body = server.body.lock().unwrap().clone();
     assert!(
         output.status.success(),
@@ -788,12 +808,11 @@ fn a_model_backed_pretooluse_hook_can_block_the_tool() {
     let output = run(
         dir.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         "add a recursive fibonacci function to src/lib.rs with unit tests",
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = api.0;
     assert!(
         output.status.success(),
         "codape failed: {}",
@@ -835,11 +854,10 @@ fn an_agent_hook_is_opt_in_and_can_block_the_tool() {
     let skipped = run(
         without.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         prompt,
         &["--dangerously-skip-permissions"],
     );
-    let _ = api.0;
     assert!(skipped.status.success(), "{skipped:?}");
     assert!(
         String::from_utf8_lossy(&skipped.stderr).contains("agent_triggers"),
@@ -865,7 +883,7 @@ fn an_agent_hook_is_opt_in_and_can_block_the_tool() {
     let gated = run(
         with.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         prompt,
         &[
             "--dangerously-skip-permissions",
@@ -873,7 +891,6 @@ fn an_agent_hook_is_opt_in_and_can_block_the_tool() {
             "agent_triggers",
         ],
     );
-    let _ = api.0;
     assert!(
         gated.status.success(),
         "codape failed: {}",
@@ -932,8 +949,7 @@ fn the_session_lifecycle_events_reach_their_hooks() {
         }]
     }));
     let api = start_static_provider();
-    let denied = run(asking.path(), home.path(), &api.1, prompt, &[]);
-    let _ = api.0;
+    let denied = run(asking.path(), home.path(), &api.base_url, prompt, &[]);
     assert!(denied.status.success(), "{denied:?}");
     let events = recorded(&marker);
     for expected in [
@@ -984,11 +1000,10 @@ fn the_session_lifecycle_events_reach_their_hooks() {
     let allowed = run(
         granted.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         prompt,
         &["--dangerously-skip-permissions"],
     );
-    let _ = api.0;
     assert!(allowed.status.success(), "{allowed:?}");
     let events = recorded(&marker);
     for expected in [
@@ -1086,8 +1101,7 @@ fn tool_and_subagent_hooks_reach_their_configured_commands() {
             }]
         }));
         let api = start_static_provider();
-        let output = run(dir.path(), home.path(), &api.1, prompt, args);
-        let _ = api.0;
+        let output = run(dir.path(), home.path(), &api.base_url, prompt, args);
         assert!(
             output.status.success(),
             "codape failed: {}",
@@ -1185,11 +1199,10 @@ fn failure_and_compaction_events_reach_their_hooks() {
     let output = run(
         denied_dir.path(),
         home.path(),
-        &api.1,
+        &api.base_url,
         "run a safe echo",
         &[],
     );
-    let _ = api.0;
     assert!(
         output.status.success(),
         "codape failed: {}",
@@ -1228,7 +1241,7 @@ fn failure_and_compaction_events_reach_their_hooks() {
         .args(["-p", "--dangerously-skip-permissions"])
         .current_dir(compact_dir.path())
         .env("ANTHROPIC_API_KEY", "mock")
-        .env("ANTHROPIC_BASE_URL", &api.1)
+        .env("ANTHROPIC_BASE_URL", &api.base_url)
         .env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
         .env("CLAUDE_CONFIG_DIR", home.path())
         .env("CODAPE_LOG", "off")
@@ -1248,7 +1261,6 @@ fn failure_and_compaction_events_reach_their_hooks() {
         .write_all(b"hello\n")
         .expect("write prompt");
     let output = child.wait_with_output().expect("wait");
-    let _ = api.0;
     let _ = output;
     let events = recorded(&compact_marker);
     for expected in ["PreCompact", "PostCompact"] {
@@ -1285,7 +1297,8 @@ fn the_hooks_test_subcommand_fires_the_installed_hook() {
         None,
         script_path.to_str().unwrap(),
     ));
-    let (mut provider, base_url) = start_static_provider();
+    let provider = start_static_provider();
+    let base_url = provider.base_url.clone();
 
     let output = run(
         dir.path(),
@@ -1295,8 +1308,6 @@ fn the_hooks_test_subcommand_fires_the_installed_hook() {
         &["--dangerously-skip-permissions"],
     );
 
-    let _ = provider.kill();
-    let _ = provider.wait();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{stdout}");
     assert!(
