@@ -884,6 +884,19 @@ pub struct TurnRuntime {
     pub compact_no_progress: u32,
     /// The measured size at which the last no-progress pass ran.
     pub compact_no_progress_tokens: usize,
+    /// Consecutive cache-TTL passes that removed nothing, and the size the most
+    /// recent one ran at.
+    ///
+    /// Kept apart from [`compact_no_progress`](Self::compact_no_progress) on
+    /// purpose. The two triggers ask different questions — "can a pass reach
+    /// the landing line from here" versus "is a tidy-up at this size going to
+    /// do anything at all" — and a maintenance pass below the line says nothing
+    /// about whether a threshold pass above it can work. Sharing one counter
+    /// would let a quiet tidy-up defer a real recovery, which is the failure
+    /// the separate exemption exists to prevent.
+    pub compact_ttl_no_progress: u32,
+    /// The size at which the last cache-TTL pass removed nothing.
+    pub compact_ttl_no_progress_tokens: usize,
     /// The provider rejected this turn's request as over the window.
     ///
     /// Compaction after a rejection is not speculative: the request provably
@@ -947,6 +960,8 @@ impl TurnRuntime {
             tool_schema_tokens: 0,
             compact_no_progress: 0,
             compact_no_progress_tokens: 0,
+            compact_ttl_no_progress: 0,
+            compact_ttl_no_progress_tokens: 0,
             provider_overflowed: false,
             pending_tool_calls: Vec::new(),
             pending_permission: None,
@@ -1091,6 +1106,12 @@ impl TurnRuntime {
         // followed by a heavier one even when the next attempt starts a new
         // turn. Clearing it here made every turn retry the same ineffective
         // strategy, three times, until the circuit breaker ended the run.
+        //
+        // `compact_ttl_no_progress*` survive for the same reason: the cache
+        // goes cold again after the next long tool call, which lands in the
+        // next turn, so a backoff cleared at the turn boundary would never
+        // defer anything. `compact_no_progress*` are already carried for this
+        // reason.
         self.budget.reset_turn();
     }
 
@@ -6015,6 +6036,23 @@ impl QueryEngine {
         let made_progress = Self::context_back_below_line(tokens_before, tokens_after, line);
         let maintenance = trigger == CompactTrigger::CacheTtl;
         let last_resort = matches!(result.effective, CompactStrategy::LastResort);
+        if maintenance {
+            // A maintenance pass is exempt from the retry budget and the
+            // failure breaker — it spends no model call and must not starve a
+            // real recovery — but "exempt from the breaker" is not "free to
+            // repeat". A tidy-up that removed nothing will remove nothing at
+            // the same size, and the cache goes cold again on the very next
+            // long tool turn, so without this the pass re-ran and re-emitted
+            // its frame every turn for the rest of the session. Recording the
+            // no-op is what lets `maybe_compact_on_cache_ttl` stand down.
+            if made_progress {
+                turn.compact_ttl_no_progress = 0;
+                turn.compact_ttl_no_progress_tokens = 0;
+            } else {
+                turn.compact_ttl_no_progress = turn.compact_ttl_no_progress.saturating_add(1);
+                turn.compact_ttl_no_progress_tokens = measured_tokens;
+            }
+        }
         if !maintenance {
             // The backoff state outlives the pass and the turn: it is what
             // stops the next turn from repeating arithmetic that just failed.
@@ -6045,7 +6083,6 @@ impl QueryEngine {
             // must not add to the count it is trying to clear; if it fails,
             // the caller decides what a still-blocked context means.
         }
-
         let messages_remaining = result.messages.len();
         let strategy = result.strategy;
         let effective = result.effective;
@@ -6056,6 +6093,16 @@ impl QueryEngine {
         // estimate is flat — the engine and the session must agree on what the
         // turn actually carries.
         let changed = result.tokens_removed > 0 || result.messages.len() != turn.history().len();
+        // The maintenance backoff is a statement about *this* history. A
+        // threshold pass just replaced it, so whatever the tidy-up concluded
+        // about the old one no longer holds — and with a smaller history the
+        // recorded size would sit above it, standing the tidy-up down for the
+        // rest of the session. A pass that did not change the history leaves
+        // the record alone.
+        if trigger == CompactTrigger::TokenThreshold && changed {
+            turn.compact_ttl_no_progress = 0;
+            turn.compact_ttl_no_progress_tokens = 0;
+        }
         if changed {
             // Check if compact boundary was inserted
             if result.boundary_inserted {
@@ -6807,6 +6854,38 @@ impl QueryEngine {
             };
             self.emit_compaction(compaction_event_from_outcome(&outcome));
             return Some(outcome);
+        }
+
+        // A cold cache is a moment to tidy up, and a tidy-up that just came
+        // away with nothing will come away with nothing again at the same
+        // size. The cache goes cold again after every long tool call, so
+        // without this the same empty pass ran on every turn of a session:
+        // both compaction hooks, a clone of the whole history, a token
+        // estimate over it, and a `compaction` frame in the stream, once per
+        // turn, forever. The wait is the same rule the threshold path uses —
+        // real growth, not merely a new turn — and it is measured against the
+        // history rather than the request, since a tidy-up's size has nothing
+        // to do with the fixed prompt.
+        if turn.compact_ttl_no_progress > 0 {
+            let retry_at = turn
+                .compact_ttl_no_progress_tokens
+                .saturating_add((estimated_tokens / 20).max(2_000));
+            if estimated_tokens < retry_at {
+                let outcome = CompactOutcome::BackedOff {
+                    consecutive_no_progress: turn.compact_ttl_no_progress,
+                    estimated_tokens,
+                    last_tokens: turn.compact_ttl_no_progress_tokens,
+                    retry_at,
+                };
+                tracing::debug!(
+                    estimated_tokens,
+                    last_tokens = turn.compact_ttl_no_progress_tokens,
+                    retry_at,
+                    "the last cache-TTL tidy-up removed nothing; not retrying at this size"
+                );
+                self.emit_compaction(compaction_event_from_outcome(&outcome));
+                return Some(outcome);
+            }
         }
 
         turn.transition_to(TurnState::CompactRecovery);
@@ -15171,6 +15250,156 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    /// A tidy-up that removed nothing must not run again at the same size.
+    ///
+    /// The cache goes cold again after every long tool call, so the trigger
+    /// fires on nearly every turn of a run that shells out. A pass that found
+    /// nothing to remove finds nothing again when the history has not moved,
+    /// and the session used to pay for it every turn: both compaction hooks,
+    /// a clone of the whole history, a token estimate over it, and a
+    /// `compaction` frame in the stream. A benchmark run reported two of them
+    /// for exactly this reason.
+    #[tokio::test]
+    async fn a_cache_ttl_pass_that_removed_nothing_is_not_repeated_at_the_same_size() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        // Every tool result is within `keep_recent`, so the lightest pass has
+        // nothing eligible to shrink: the no-op shape, not the shrink shape.
+        turn.messages = vec![Message::user("hello")];
+        turn.set_history_range(0, turn.messages.len());
+
+        let cold_secs = engine.compact_config.cache_ttl_secs + 1;
+        let cold = || Instant::now() - std::time::Duration::from_secs(cold_secs);
+
+        engine.set_last_request_at(cold());
+        let first = engine
+            .maybe_compact_on_cache_ttl(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(
+            matches!(first, Some(CompactOutcome::NoProgress { .. })),
+            "the fixture must produce the empty pass: {first:?}"
+        );
+        assert_eq!(
+            turn.compact_ttl_no_progress, 1,
+            "the no-op was not recorded"
+        );
+
+        // The cache goes cold again with the history exactly where it was.
+        engine.set_last_request_at(cold());
+        let second = engine
+            .maybe_compact_on_cache_ttl(&mut turn, &SubmitOptions::default(), 2)
+            .await;
+        assert!(
+            matches!(second, Some(CompactOutcome::BackedOff { .. })),
+            "the empty pass ran again at the same size: {second:?}"
+        );
+        // Standing down must not be free either: a backed-off turn spends no
+        // recovery retry and does not touch the maintenance counters again.
+        assert_eq!(turn.compact_ttl_no_progress, 1, "{second:?}");
+        assert_eq!(turn.recovery_count, 0, "standing down spent a retry");
+    }
+
+    /// The backoff is a statement about a history, so a changed history lifts
+    /// it. A threshold pass that compacts leaves the history smaller than the
+    /// size the tidy-up backed off at — and the backoff survives the turn
+    /// boundary, so without lifting it the tidy-up would stay stood down for
+    /// the rest of the session.
+    #[tokio::test]
+    async fn a_compacted_history_lifts_the_cache_ttl_backoff() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        // Plain text, never a tool result: the lightest pass only truncates
+        // tool output, so this history is one it can only come away from empty.
+        turn.messages = vec![Message::user("start")];
+        for i in 0..8 {
+            turn.messages.push(Message::assistant(format!(
+                "step {i}: {}",
+                "y".repeat(4_000)
+            )));
+        }
+        turn.set_history_range(0, turn.messages.len());
+
+        let cold_secs = engine.compact_config.cache_ttl_secs + 1;
+        engine.set_last_request_at(Instant::now() - std::time::Duration::from_secs(cold_secs));
+        let outcome = engine
+            .maybe_compact_on_cache_ttl(&mut turn, &SubmitOptions::default(), 1)
+            .await;
+        assert!(
+            matches!(outcome, Some(CompactOutcome::NoProgress { .. })),
+            "the fixture must produce the empty pass: {outcome:?}"
+        );
+        assert_eq!(
+            turn.compact_ttl_no_progress, 1,
+            "the no-op was not recorded"
+        );
+        let backed_off_at = turn.compact_ttl_no_progress_tokens;
+
+        // The real accounting tail, on the real trigger, with a history that
+        // really changed. Nothing here is set by hand: the point is that
+        // `finish_compaction` is what lifts the backoff.
+        engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Auto,
+                    effective: CompactStrategy::Auto,
+                    messages: vec![Message::user("summarized")],
+                    tokens_removed: 1_000,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert!(
+            backed_off_at > 0,
+            "the fixture never recorded a size to back off at"
+        );
+        assert_eq!(
+            turn.compact_ttl_no_progress, 0,
+            "a changed history left the maintenance tidy-up stood down"
+        );
+        assert_eq!(turn.compact_ttl_no_progress_tokens, 0);
+    }
+
+    /// The mirror of the test above: a threshold pass that changed nothing is
+    /// not a reason to lift the backoff, because the history it describes is
+    /// the same one.
+    #[tokio::test]
+    async fn a_threshold_pass_that_changed_nothing_keeps_the_cache_ttl_backoff() {
+        let (mut engine, _rx, _session) = make_test_engine();
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        turn.messages = vec![Message::user("hello")];
+        turn.set_history_range(0, turn.messages.len());
+        turn.compact_ttl_no_progress = 2;
+        turn.compact_ttl_no_progress_tokens = 1_000;
+
+        let unchanged = turn.messages.clone();
+        engine
+            .finish_compaction(
+                &mut turn,
+                CompactResult {
+                    strategy: CompactStrategy::Micro,
+                    effective: CompactStrategy::Micro,
+                    messages: unchanged,
+                    tokens_removed: 0,
+                    boundary_inserted: false,
+                    boundary_index: None,
+                },
+                CompactTrigger::TokenThreshold,
+                SummaryOutcome::NotRequested,
+            )
+            .await;
+
+        assert_eq!(
+            turn.compact_ttl_no_progress, 2,
+            "a pass that changed nothing lifted the backoff anyway"
+        );
+        assert_eq!(turn.compact_ttl_no_progress_tokens, 1_000);
     }
 
     /// Once the token line is crossed the threshold path owns compaction, and
