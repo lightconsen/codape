@@ -1,15 +1,54 @@
-//! Job tools — list, read, and stop the shell jobs the Bash tool started.
+//! Job tools — list, read, and stop the shell jobs the platform's shell starts.
 //!
-//! The Bash tool records every command as a job under `.codape/jobs/`. Those
-//! records used to be write-only: nothing let the model find the job it started
-//! a minute ago, read a server's log while the server ran, or stop it. Without
-//! that, the only tools left were `ps`, scanning `/proc`, and `pkill` —
-//! and benchmark images routinely ship none of them, so a "restart the server"
-//! step became a `/proc` scan that could (and did) kill its own shell.
+//! The shell tool records every backgrounded command as a job under
+//! `.codape/jobs/`. Those records used to be write-only: nothing let the model
+//! find the job it started a minute ago, read a server's log while the server
+//! ran, or stop it. Without that, the only tools left were `ps`, scanning
+//! `/proc`, and `pkill` — and benchmark images routinely ship none of them, so
+//! a "restart the server" step became a `/proc` scan that could (and did) kill
+//! its own shell.
 //!
 //! These three tools are the supported way to manage background work. They
-//! read the same durable store the Bash tool writes, so a job started in an
+//! read the same durable store the shell tool writes, so a job started in an
 //! earlier call — or an earlier process — is still addressable by id.
+//!
+//! Only `Bash` backgrounds, so only on a platform that registers `Bash` is
+//! there anything to manage. See [`LIST_DESCRIPTION`].
+
+/// What `JobList` says it lists.
+///
+/// The start call has to be named, because "a background job" alone leaves the
+/// model unable to create one. It also has to be the call *this platform*
+/// offers: `Bash` is registered only where the platform is not Windows, and
+/// `PowerShell` takes no `run_in_background` at all — its schema advertises one
+/// that `advertised_schema` strips, and its `execute` never reads it. So on
+/// Windows there is no way to start a shell job, and the honest description
+/// says so rather than pointing at a tool the session does not have.
+const LIST_DESCRIPTION: &str = {
+    if cfg!(windows) {
+        "No background shell jobs can be started on this platform: `PowerShell` runs every \
+         command to completion inside its call. This tool will always report an empty list."
+    } else {
+        "Lists the background shell jobs started with Bash `run_in_background`: the job id, \
+         state, pid, start time, output file and the command. Use it to find again a job you \
+         started earlier — a server, a build, a test run — instead of `ps`, which many images \
+         do not have."
+    }
+};
+
+/// What `JobOutput` says it reads. See [`LIST_DESCRIPTION`] for why this is
+/// platform-shaped.
+const OUTPUT_DESCRIPTION: &str = {
+    if cfg!(windows) {
+        "No background shell jobs can be started on this platform: `PowerShell` runs every \
+         command to completion inside its call. This tool has nothing to read."
+    } else {
+        "Reads the output of a background shell job started with Bash `run_in_background`. \
+         Returns the job's state and the last `tail_lines` lines of its output file. The file \
+         is written while the command runs, so calling this again shows the new output — this \
+         is how you check whether a server has started, instead of starting a second copy."
+    }
+};
 
 use crate::context::{ToolError, ToolOutput};
 use crate::job_control;
@@ -70,12 +109,7 @@ pub struct JobListTool;
 #[async_trait]
 impl Tool for JobListTool {
     fn description(&self) -> Option<&'static str> {
-        Some(
-            "Lists the background shell jobs started with Bash `run_in_background`: the job id, \
-             state, pid, start time, output file and the command. Use it to find again a job you \
-             started earlier — a server, a build, a test run — instead of `ps`, which many images \
-             do not have.",
-        )
+        Some(LIST_DESCRIPTION)
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -137,7 +171,12 @@ impl Tool for JobListTool {
 
         if jobs.is_empty() {
             return Ok(ToolOutput {
-                output: if all {
+                output: if cfg!(windows) {
+                    // No call can start one here, so the ordinary "none
+                    // running yet" wording would read as "start one and come
+                    // back", which is the misleading half.
+                    LIST_DESCRIPTION.to_string()
+                } else if all {
                     "No background shell jobs.".to_string()
                 } else {
                     "No running background shell jobs. `JobList` with `all: true` also shows \
@@ -184,12 +223,7 @@ pub struct JobOutputTool;
 #[async_trait]
 impl Tool for JobOutputTool {
     fn description(&self) -> Option<&'static str> {
-        Some(
-            "Reads the output of a background shell job started with Bash `run_in_background`. \
-             Returns the job's state and the last `tail_lines` lines of its output file. The file \
-             is written while the command runs, so calling this again shows the new output — this \
-             is how you check whether a server has started, instead of starting a second copy.",
-        )
+        Some(OUTPUT_DESCRIPTION)
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -393,8 +427,131 @@ fn extract_string(args: &serde_json::Value, key: &str) -> Result<String, ToolErr
 mod tests {
     use super::*;
     use crate::context::ExecutionContext;
+    use crate::tool::BoxedTool;
     use codape_core::task::now_ms;
     use std::path::Path;
+
+    /// Does a description's claim about how jobs are started hold up?
+    ///
+    /// A job tool's text says how to make one — "started with Bash
+    /// `run_in_background`". That is a claim about the tool list, and it can be
+    /// false in two ways: the named tool is not registered on this platform, or
+    /// it is registered but strips `run_in_background` from what it sends.
+    ///
+    /// The second way is the one that actually bit. `PowerShell`'s
+    /// `descriptor` does list `run_in_background`, but its `capabilities` is
+    /// `Backgrounding::None`, and `advertised_schema` removes the property
+    /// before it reaches the wire — so a check reading `descriptor()` would see
+    /// the parameter and pass. This reads `input_schema` **after** that
+    /// stripping, which is what the model gets.
+    ///
+    /// Split out from both inputs so each platform's shape can be tested on any
+    /// machine: a check that read `cfg!(windows)` would only ever exercise the
+    /// platform running it, and the Windows half is the broken half.
+    fn claim_holds(claim: &str, offered: &[(String, BoxedTool)]) -> Result<(), String> {
+        let Some(named) = ["Bash", "PowerShell"]
+            .into_iter()
+            .find(|n| claim.contains(n))
+        else {
+            return Ok(()); // a claim that names no shell tool asserts nothing
+        };
+        let Some((_, start_tool)) = offered.iter().find(|(name, _)| name == named) else {
+            return Err(format!("{named} is not offered on this platform"));
+        };
+        // `advertised_schema` is private to the dispatcher, so mirror its one
+        // rule here: a tool that does not background has the property removed.
+        let advertised = start_tool.capabilities().backgrounding;
+        let sends_it = advertised != crate::tool::Backgrounding::None
+            && start_tool
+                .descriptor()
+                .input_schema
+                .pointer("/properties/run_in_background")
+                .is_some();
+        if !sends_it {
+            return Err(format!("{named} does not send `run_in_background`"));
+        }
+        Ok(())
+    }
+
+    /// The job tools name the call that *starts* the jobs they report on, so
+    /// that name — and the argument it names — has to be something a model can
+    /// actually use on this platform.
+    ///
+    /// Read against the real registry, this is the live guard.
+    #[test]
+    fn the_job_tools_name_only_a_start_call_this_platform_offers() {
+        let mut registry = crate::registry::ToolRegistry::new();
+        crate::builtins::register_builtin_tools(&mut registry);
+        let offered: Vec<(String, BoxedTool)> = registry.list_tools();
+
+        for tool in [&JobListTool as &dyn Tool, &JobOutputTool as &dyn Tool] {
+            let description = tool
+                .description()
+                .expect("the job tools describe themselves");
+            let Some(start) = description.find("started with ") else {
+                // Naming no start call is only honest where none exists, so it
+                // is acceptable exactly when the shell tool cannot background.
+                let any_can_background = offered.iter().any(|(_, tool)| {
+                    tool.capabilities().backgrounding != crate::tool::Backgrounding::None
+                });
+                assert!(
+                    !any_can_background,
+                    "{} names no way to start a job although this platform can background one",
+                    tool.descriptor().name
+                );
+                continue;
+            };
+            if let Err(why) = claim_holds(&description[start..], &offered) {
+                panic!("{} makes a false claim: {why}", tool.descriptor().name);
+            }
+        }
+    }
+
+    /// The guard above is worth nothing if `claim_holds` cannot fail. These are
+    /// the two shapes it has to reject, built here rather than borrowed from
+    /// the machine the test runs on — so both are checked on every platform.
+    #[test]
+    fn a_claim_about_a_start_call_is_judged_against_what_is_offered() {
+        let with_bash: Vec<(String, BoxedTool)> = {
+            let mut registry = crate::registry::ToolRegistry::new();
+            registry.register(std::sync::Arc::new(crate::builtins::BashTool::new()));
+            registry.list_tools()
+        };
+        let bash_claim = "started with Bash `run_in_background`: the job id";
+        claim_holds(bash_claim, &with_bash).expect("Bash takes run_in_background and is offered");
+
+        // The Windows shape: PowerShell is the shell tool and takes no
+        // `run_in_background`, so the Bash wording is false AND PowerShell
+        // wording would be false too.
+        let powershell_only: Vec<(String, BoxedTool)> = {
+            let mut registry = crate::registry::ToolRegistry::new();
+            registry.register(std::sync::Arc::new(crate::builtins::PowerShellTool));
+            registry.list_tools()
+        };
+        assert!(
+            claim_holds(bash_claim, &powershell_only).is_err(),
+            "a Bash claim where Bash is not offered must be rejected"
+        );
+        assert!(
+            claim_holds(
+                "started with PowerShell `run_in_background`",
+                &powershell_only
+            )
+            .is_err(),
+            "PowerShell does not take run_in_background, so naming it is equally false"
+        );
+
+        // Nothing offered at all.
+        assert!(claim_holds(bash_claim, &[]).is_err());
+
+        // A claim naming no shell tool asserts nothing and is not an error —
+        // this is the wording Windows ships, which must stay allowed.
+        claim_holds(
+            "No background shell jobs can be started on this platform",
+            &[],
+        )
+        .expect("a description that names no start call makes no claim");
+    }
 
     fn ctx(cwd: &Path) -> ToolContext<'_> {
         ToolContext::new(ExecutionContext::Normal, cwd)
