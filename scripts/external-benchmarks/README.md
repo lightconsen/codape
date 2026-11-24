@@ -5,7 +5,7 @@ Runners that measure Codape on three public, Docker-based agent benchmarks:
 | Benchmark | What it measures | Harness pinned here |
 |---|---|---|
 | [SWE-bench](https://www.swebench.com/) | Fixing real GitHub issues in Python repositories (Verified, Lite) and in nine languages (Multilingual). Each instance is graded by the project's own tests: `FAIL_TO_PASS` must start passing and `PASS_TO_PASS` must keep passing. | `swebench==5.0.2`, a pinned dataset revision |
-| [Terminal-Bench](https://www.tbench.ai/) | Completing end-to-end tasks in a Linux terminal container (files, processes, services, scripts). Each task is graded by task-specific tests. | `terminal-bench==0.2.18`, `terminal-bench-core==0.1.1` |
+| [Terminal-Bench](https://www.tbench.ai/) | Completing end-to-end tasks in a Linux terminal container (files, processes, services, scripts). Each task is graded by task-specific tests. | `terminal-bench==0.2.18`, `terminal-bench-core==0.1.1` (recorded runs); `harbor==0.27.0` with `terminal-bench/terminal-bench@4.1.0` for a current row |
 | [ProgramBench](https://programbench.com/) | Rebuilding a program from a compiled reference executable and its documentation, with hidden behavioural tests. The agent must produce source and a `compile.sh`; the grader deletes the reference and builds the submission. | `programbench==1.2.5`, cleanroom `task_cleanroom_v6` |
 
 All runners use the official harness to grade. Codape only generates the work
@@ -280,7 +280,92 @@ Useful options:
 the Docker pull/run/install/extract commands, the exact `docker exec` invocation
 (values of key variables are not printed), and the official evaluation command.
 
-## Terminal-Bench adapter and runner
+## Terminal-Bench adapters and runner
+
+There are **two** adapters, because the harness moved and left the old one
+behind:
+
+| Adapter | Harness | Dataset | Status |
+|---|---|---|---|
+| `terminal-bench/codape_agent.py` | `terminal-bench==0.2.18` | `terminal-bench-core==0.1.1` | works; harness frozen |
+| `terminal-bench/codape_harbor_agent.py` | `harbor==0.27.0` | `terminal-bench/terminal-bench@4.1.0` | new; needed for a current row |
+
+`terminal-bench==0.2.18` is the last release of the old harness — it is not
+removed, and `run_terminal_bench.py` still drives it against the pinned
+dataset — but its own README points new users at Harbor, and Harbor is what
+Terminal-Bench 4.1 is published against (`v4.1.0`, 2026-11-03, 66 tasks). The
+two adapters share no base class, so they are separate files; deleting the old
+one would strand the runs recorded in
+[terminal-bench.md](../../docs/terminal-bench.md).
+
+Harbor's CLI takes `--agent module:Class`, where the module must be importable
+(a file path fails with `No module named '/abs/x.py'`). Run from this directory,
+or put it on `PYTHONPATH`:
+
+```bash
+harbor run -d terminal-bench/terminal-bench@4.1.0 \
+  --agent codape_harbor_agent:CodapeHarborAgent \
+  --model anthropic/claude-sonnet-4-5 \
+  -k 4
+```
+
+`@4.1.0` is a **release ref**, not a `sha256:` dataset version. `harbor datasets
+list` prints versions as digests and will not show `4.1.0` among them; the ref
+is resolved by `harbor run -d` itself. Getting this backwards is how an earlier
+version of this document concluded, wrongly, that no 4.x dataset existed.
+
+The Harbor adapter's ATIF conversion is checked in CI by
+`scripts/external-benchmarks/check_harbor_agent.py`, which runs the same
+function on synthetic transcripts with harbor stubbed out. Under a venv that
+has harbor installed, the same script additionally validates the result through
+harbor's own pydantic models — worth doing before a paid run, because
+`AgentCapabilities(atif=True)` is a promise that `trajectory.json` is valid.
+
+The adapter also declares a `ModelConnectionSpec`, and that is not decoration:
+Harbor raises `Agent 'codape' does not support inference connection overrides`
+for `--base-url` whenever the spec is missing, and
+`Trial._network_plan` reads `model_connection.inference_base_url` to add the
+inference host to an allowlist. Two consequences worth knowing before a run:
+
+- Harbor resolves `--base-url` / `--api-key-name` into `model_connection.env`,
+  keyed by Codape's own variable names (`CODAPE_BASE_URL`,
+  `CODAPE_API_KEY` — the spellings Codape checks before the `ANTHROPIC_` ones).
+  Nothing applies that dict for a custom agent, so the adapter merges it into
+  the exec environment itself.
+- `--model anthropic/claude-sonnet-4-5` is Harbor's spelling, not the API's.
+  Codape forwards a model id verbatim, so the adapter strips the `anthropic/`
+  prefix and forwards the bare id in `CODAPE_MODEL`; a prefix naming any other
+  provider is left alone, because a gateway may really serve `vendor/model`.
+
+The CI check asserts both, and both were confirmed by fault injection while the
+check was written — reintroducing either defect makes it fail.
+
+The adapter imposes **no wall clock of its own** by default, and that is
+deliberate. Harbor bounds `run()` with the task's `[agent] timeout_sec` and
+raises `AgentTimeoutError` when it expires, but it hands that number only to the
+oracle agent (`Trial._init_agent`), so an installed agent cannot read it. Any
+fixed number is therefore wrong in one direction or the other: longer than the
+budget and it never fires, shorter and it ends a run Harbor was still willing to
+pay for. The adapter used to hardcode 1740 s, and the tasks in the released
+`terminal-bench/terminal-bench@4.1.0` declare a 28800 s budget — so it stopped
+7.5 hours early on every task inspected and the unfinished work was recorded as
+a wrong answer rather than a timeout. `claude_code.py` passes no timeout either.
+
+`--ak timeout_sec=N` sets one anyway, for a graceful ending rather than for
+budget reasons: Codape answers SIGTERM with an `interrupted` result frame
+carrying what the provider billed, and the adapter then raises Harbor's
+`AgentTimeoutError` so the trial is graded as a timeout. Without that raise a
+truncated run returns as the agent's answer and counts against the score.
+
+One thing the trajectory deliberately does not carry: per-step `Step.metrics`.
+Codape's stream-json reports usage only on the closing `result` frame, so a
+per-turn split cannot be derived from the transcript without inventing one.
+Harbor's `compute_model_usage` therefore returns nothing and
+`AgentContext.model_usage` falls back to the totals the adapter sets directly
+(`n_input_tokens` including cache, `n_cache_tokens`, `n_output_tokens`,
+`cost_usd`) — accurate totals, no per-model breakdown.
+
+### The 0.2.18 adapter
 
 `codape_agent.py` subclasses `AbstractInstalledAgent`, the supported extension
 point in `terminal-bench==0.2.18`. The harness:
@@ -560,6 +645,40 @@ reason: it edits synthetic files, not a dataset.
   `terminal-bench==0.2.18` package: factory import, Jinja setup rendering for
   both release and local-binary modes, command construction, env quoting, and
   result-frame parsing.
+- The Harbor adapter resolves through `harbor==0.27.0`'s
+  `AgentFactory.get_agent_class_from_config` as `codape_harbor_agent:CodapeHarborAgent`,
+  reports no unimplemented abstract methods, and produces an ATIF-v1.8
+  trajectory that round-trips through harbor's own pydantic models
+  (`Trajectory.model_validate_json`, `extra="forbid"` on every model). Its
+  conversion is covered in CI by `check_harbor_agent.py`, which stubs harbor
+  when it is absent.
+
+  Against the real package, the connection path was exercised too: with
+  `--model anthropic/claude-sonnet-4-5`, `CODAPE_MODEL` resolves to the bare
+  `claude-sonnet-4-5` (the prefixed spelling is Harbor's and Codape forwards a
+  model id verbatim); `base_url=` is accepted and lands in `CODAPE_BASE_URL`,
+  which Codape reads before `ANTHROPIC_BASE_URL`; `MODEL_CONNECTION` makes
+  `inference_base_url` non-empty, which is what lets `Trial._network_plan`
+  allowlist the inference host; and a key selected by Harbor is projected into
+  `CODAPE_API_KEY` and reaches the exec environment. The adapter also
+  constructs under harbor, defaults to no wall clock, and accepts
+  `--ak timeout_sec=` as the string the CLI actually passes.
+
+  **Nothing beyond that is verified:** this adapter has not run a benchmark
+  task, so `install`/`run` against a real container image — the release
+  download, the checksum, the stream capture, and the metrics read-back — are
+  untested.
+- The deadline claim was checked against the released dataset rather than from
+  reading one task. `harbor datasets download terminal-bench/terminal-bench@4.1.0`
+  declares 66 tasks in its `dataset.toml` and a clean download wrote 63 of them
+  (three did not come down over a 50 KB/s link); every one of the 63, and the
+  three read from the tag's own `task.toml`, declares
+  `[agent] timeout_sec = 28800.0`. The dataset repository's `main` branch has a
+  different, mixed set of budgets — 600 s to 12000 s — and it is *not* what
+  `@4.1.0` resolves to; an earlier draft of this file quoted those numbers.
+- The 80-task `terminal-bench-core==0.1.1` set that `docs/benchmark.md` records
+  scores against shares **zero** task names with the 4.1 set, so no recorded
+  Terminal-Bench score in this repository is a 4.1 score.
 - A real headless Codape invocation with the source build confirmed that `-p`
   reads stdin, accepts the flags used here, and returns a `result` frame; with
   an unreachable API it returned `is_error: true` with exit status 0, which is

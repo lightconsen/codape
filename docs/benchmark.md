@@ -23,7 +23,7 @@ Everything else below needs work first.
 
 | Benchmark | Size | Runner in this repository | Recorded score |
 |---|---|---|---|
-| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; 2026-11-10 revalidation 5/10; eight-task reliability, three repeats: **6/8, 6/8, 6/8** — [terminal-bench.md](terminal-bench.md) |
+| [Terminal-Bench](https://www.tbench.ai/) | 80 tasks in `terminal-bench-core==0.1.1` | `scripts/external-benchmarks/terminal-bench/` | Yes — 73/75 best-of-runs; 2026-11-10 revalidation 5/10; eight-task reliability, three repeats: **6/8, 6/8, 6/8** — [terminal-bench.md](terminal-bench.md). This is the frozen 0.2.18 harness against the 0.1.1 task set, which shares **no task names** with Terminal-Bench 4.1; an adapter for the current harness (`harbor==0.27.0`, `terminal-bench@4.1.0`) exists in the same directory but has **no recorded score**, so this row is not a 4.1 leaderboard entry |
 | [SWE-bench Verified](https://www.swebench.com/verified.html) | 500 | `scripts/external-benchmarks/swebench/` | Sample — **21/24** on a 24-instance, 12-repository stratified subset (`swe-verified-24-20261110-b1..b6`); earlier hand-picked subsets 3/3, 2/3; see [run history](#swe-bench-run-history) |
 | [SWE-bench Lite](https://www.swebench.com/lite.html) | 300 | same runner (`--dataset lite`) | Subset only — 2/3 (`lite-batch1-20261110-122725`); see [run history](#swe-bench-run-history) |
 | [SWE-bench Multilingual](https://www.swebench.com/multilingual.html) | 300 | same runner (`--dataset multilingual`) | Sample — **9/12** on a 12-instance, 9-language stratified subset (`swe-multilingual-12-20261110-b1..b3`); earlier pipeline check 1/1; see [run history](#swe-bench-run-history) |
@@ -408,6 +408,8 @@ locations in the external README.
 | SWE-bench Multilingual revision | `846e647b9f33c0b51b739d005d13d85493c9af09` |
 | Terminal-Bench harness | `terminal-bench==0.2.18` |
 | Terminal-Bench dataset | `terminal-bench-core==0.1.1` |
+| Terminal-Bench 4.1 harness | `harbor==0.27.0` |
+| Terminal-Bench 4.1 dataset | `terminal-bench/terminal-bench@4.1.0` (66 tasks; a release *ref*, not a `sha256:` version) |
 | ProgramBench harness | `programbench==1.2.5` |
 | ProgramBench cleanroom image | `task_cleanroom_v6` |
 | Codape in containers | `v0.2.2` (`x86_64-unknown-linux-musl`) |
