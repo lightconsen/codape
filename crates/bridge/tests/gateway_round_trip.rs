@@ -14,16 +14,34 @@ use codape_bridge::transport::{Transport, TransportMessage};
 use codape_server::gateway::GatewayServer;
 
 /// Start the gateway on a free loopback port and return its base URL.
-async fn start_gateway() -> String {
+///
+/// The task's handle is returned alongside the URL so a gateway that dies can
+/// be distinguished from one that is merely slow. The old version discarded the
+/// task's result with `let _ = gateway.run_on(...)`: `run_on` can return `Err`
+/// before it ever accepts — `local_addr` is the one step in it that fails — and
+/// with the error dropped, every later call in the test failed as a bare
+/// timeout with no hint that the server had already gone. A test that cannot
+/// say *why* it failed sends the next person looking for a race in the client.
+async fn start_gateway() -> (String, tokio::task::JoinHandle<Result<(), String>>) {
     let gateway = std::sync::Arc::new(GatewayServer::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind a loopback port");
     let address = listener.local_addr().expect("local address");
-    tokio::spawn(async move {
-        let _ = gateway.run_on(listener).await;
-    });
-    format!("http://{address}")
+    let handle = tokio::spawn(async move { gateway.run_on(listener).await });
+    (format!("http://{address}"), handle)
+}
+
+/// Report a gateway that has already exited, with its error, instead of letting
+/// the failure surface later as an unexplained timeout.
+///
+/// `JoinHandle::is_finished` says whether the task is done without taking the
+/// result. Awaiting is only safe once that is true, because it cannot block.
+async fn assert_gateway_running(handle: &mut tokio::task::JoinHandle<Result<(), String>>) {
+    if handle.is_finished() {
+        let outcome = handle.await;
+        panic!("the gateway exited before the test finished: {outcome:?}");
+    }
 }
 
 /// Submit one assignment through the gateway's HTTP API.
@@ -55,7 +73,7 @@ fn frame(kind: &str, payload: serde_json::Value) -> TransportMessage {
 
 #[tokio::test]
 async fn a_worker_registers_claims_submitted_work_and_reports_capacity() {
-    let base = start_gateway().await;
+    let (base, mut gateway) = start_gateway().await;
     let control_plane = HttpControlPlaneClient::new(&base);
 
     control_plane
@@ -96,11 +114,16 @@ async fn a_worker_registers_claims_submitted_work_and_reports_capacity() {
             .expect("fetch again")
             .is_empty()
     );
+
+    // Every call above went through the gateway, so it was up throughout; the
+    // check confirms it did not die on the last one and take the result with
+    // it.
+    assert_gateway_running(&mut gateway).await;
 }
 
 #[tokio::test]
 async fn a_permission_request_round_trips_between_worker_and_operator() {
-    let base = start_gateway().await;
+    let (base, mut gateway) = start_gateway().await;
 
     let mut worker = HttpPollTransport::new(&base, "env-a");
     worker.connect().await.expect("worker connects");
@@ -115,10 +138,14 @@ async fn a_permission_request_round_trips_between_worker_and_operator() {
         .await
         .expect("worker sends the request");
 
-    let request = tokio::time::timeout(std::time::Duration::from_secs(5), operator.receive())
-        .await
-        .expect("the operator should see the request")
-        .expect("receive");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), operator.receive()).await;
+    let Ok(request) = request else {
+        // Distinguish "the gateway died" from "delivery is slow" before
+        // reporting the timeout, so a failure names a cause.
+        assert_gateway_running(&mut gateway).await;
+        panic!("the operator did not see the request within 5s, and the gateway is still up");
+    };
+    let request = request.expect("receive");
     assert_eq!(request.r#type, "permission_request");
     assert!(request.payload.contains("req-1"), "{}", request.payload);
 
@@ -130,10 +157,12 @@ async fn a_permission_request_round_trips_between_worker_and_operator() {
         .await
         .expect("operator answers");
 
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), worker.receive())
-        .await
-        .expect("the worker should see the answer")
-        .expect("receive");
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), worker.receive()).await;
+    let Ok(answer) = answer else {
+        assert_gateway_running(&mut gateway).await;
+        panic!("the worker did not see the answer within 5s, and the gateway is still up");
+    };
+    let answer = answer.expect("receive");
     assert_eq!(answer.r#type, "permission_response");
     assert!(
         answer.payload.contains("\"allowed\":true"),
@@ -149,7 +178,7 @@ async fn a_permission_request_round_trips_between_worker_and_operator() {
 
 #[tokio::test]
 async fn the_gateway_refuses_a_frame_with_no_environment_to_deliver_it_to() {
-    let base = start_gateway().await;
+    let (base, mut gateway) = start_gateway().await;
     let mut transport = HttpPollTransport::new(&base, "env-missing");
     transport.connect().await.expect("connect");
     transport
@@ -166,6 +195,9 @@ async fn the_gateway_refuses_a_frame_with_no_environment_to_deliver_it_to() {
     let received =
         tokio::time::timeout(std::time::Duration::from_millis(400), other.receive()).await;
     assert!(received.is_err(), "a frame leaked between environments");
+    // A silent `receive` is only evidence of isolation if the gateway is still
+    // answering; a dead one is silent for the wrong reason.
+    assert_gateway_running(&mut gateway).await;
 }
 
 /// A claim that the control plane answers with a transient error is retried:
@@ -261,4 +293,42 @@ async fn a_non_transient_claim_failure_is_not_retried() {
         .expect_err("a 400 is the server's answer, not a transient failure");
     assert!(error.contains("400"), "{error}");
     assert_eq!(seen.load(Ordering::SeqCst), 1, "a 400 must not be retried");
+}
+
+#[cfg(test)]
+mod diagnostics {
+    use super::*;
+
+    /// The diagnostic is only useful if it reports the gateway's own error.
+    /// Exercised directly, because the end-to-end path cannot always be made
+    /// to reach it: a gateway that dies fast enough to matter usually drops its
+    /// listener first, so the request fails with `SendFailed` before any
+    /// timeout is reachable. When it does die with the socket still open, this
+    /// is the message that makes the failure legible — so it is checked on its
+    /// own rather than left to whichever failure mode the machine produces.
+    #[tokio::test]
+    async fn a_dead_gateway_is_reported_with_its_own_error() {
+        let mut handle = tokio::spawn(async { Err::<(), String>("bind failed: injected".into()) });
+        // Let the task finish so `is_finished` is true and awaiting cannot block.
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let outcome = tokio::spawn(async move { assert_gateway_running(&mut handle).await }).await;
+        let message = format!("{:?}", outcome.expect_err("the assertion must panic"));
+        assert!(
+            message.contains("bind failed: injected"),
+            "the gateway's own error must survive into the report: {message}"
+        );
+    }
+
+    /// And it must say nothing when the gateway is healthy.
+    #[tokio::test]
+    async fn a_running_gateway_is_not_reported() {
+        let mut handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(())
+        });
+        assert_gateway_running(&mut handle).await;
+        handle.abort();
+    }
 }
