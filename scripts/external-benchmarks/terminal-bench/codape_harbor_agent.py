@@ -512,9 +512,16 @@ class CodapeHarborAgent(BaseInstalledAgent):
             "result_frames": (summary or {}).get("result_frames"),
         }
 
+        # What the trajectory records as the model. Ask `_env()`, not
+        # `self.model_name`: that attribute is Harbor's `-m` and is routinely
+        # **null** for a custom agent — `harbor run` without one leaves
+        # `agents[0].model_name` null, and Codape then falls back to the host's
+        # `CODAPE_MODEL`. Reading `_env()` records the id the container was
+        # actually launched with, which is the same resolution `_env()` applies
+        # and so cannot drift from it.
         trajectory = build_trajectory(
             transcript,
-            model_name=self.model_name,
+            model_name=self._env().get("CODAPE_MODEL"),
             agent_version=self._version,
             instruction=self._render_instruction_placeholder(),
         )
