@@ -668,6 +668,31 @@ reason: it edits synthetic files, not a dataset.
   task, so `install`/`run` against a real container image — the release
   download, the checksum, the stream capture, and the metrics read-back — are
   untested.
+- The first attempt to run one did pay for itself, and is why `install` now
+  calls `ensure_system_dependencies` first: `cargo-flight-dispatch`, whose base
+  is `python:3.13-slim-bookworm`, carries **no `curl`**, so the release step
+  exited 127 and the trial failed as `NonZeroAgentExitCodeError` before any task
+  work began. `check_harbor_agent.py` now asserts the prerequisites are ensured
+  before the download runs, so that specific defect cannot come back. A second
+  attempt died at `curl: (18) HTTP/2 stream 1 was not closed cleanly` partway
+  through the 20 MB archive, with no retry to absorb it — the download now
+  passes `--retry 5 --retry-all-errors`, also guarded.
+- With both fixes, `--install-only` on `terminal-bench/cargo-flight-dispatch`
+  completes with **0 exceptions** (`jobs/2026-11-24__13-15-54`, 9m29s): the
+  image starts, Harbor installs the download prerequisites, the archive
+  downloads, its sha256 matches `SHA256SUMS`, the binary installs to
+  `/usr/local/bin/codape`, and `configure` writes the per-run settings. That is
+  the half a paid run cannot tell you cheaply, because a failure here looks like
+  an agent that never started. What is still unverified: `run` against a real
+  model — the instruction render, the stream capture, the `result` frame parse,
+  and the metrics read-back.
+- Two host-level requirements, both hit here: Docker Hub was reached through a
+  mirror that refuses `harborframework/*` digests (docker.io direct and
+  `mirror.gcr.io` both serve them), and this machine's container egress is
+  ~50 KB/s, which pushes the binary download past Harbor's default 360 s agent
+  setup budget (`--agent-setup-timeout-multiplier` raises it). Neither is an
+  adapter defect, but both make a run on such a host fail in a way that reads
+  like one.
 - The deadline claim was checked against the released dataset rather than from
   reading one task. `harbor datasets download terminal-bench/terminal-bench@4.1.0`
   declares 66 tasks in its `dataset.toml` and a clean download wrote 63 of them

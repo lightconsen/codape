@@ -216,9 +216,26 @@ class CodapeHarborAgent(BaseInstalledAgent):
                 command=f"install -m 0755 {LOCAL_BINARY_PATH} {CODAPE_BIN}",
             )
         else:
+            # A task image is not required to carry a downloader. The first one
+            # this adapter was run against — `cargo-flight-dispatch`, whose
+            # base is `python:3.13-slim-bookworm` — has no `curl` at all, so
+            # the release step exited 127 before any task work started. Harbor
+            # knows the package name per distro and installs it through the
+            # image's own package manager, which is why the reference
+            # implementation (`claude_code.py`) calls this before it curls
+            # anything.
+            await self.ensure_system_dependencies(
+                environment, ("curl", "ca_certificates", "xz")
+            )
             # A release download has to be verified: an unverified tarball run
             # as root in the task container is a supply-chain hole. The
             # checksum is published beside the archive.
+            #
+            # `--retry-all-errors` is not decoration: the first run of this
+            # step died with `curl: (18) HTTP/2 stream 1 was not closed cleanly`
+            # partway through a 20 MB archive. Without a retry that single
+            # truncated stream fails the whole trial, which is indistinguishable
+            # from a broken adapter or a weak model in the results.
             await self.exec_as_root(
                 environment,
                 command=(
@@ -226,8 +243,9 @@ class CodapeHarborAgent(BaseInstalledAgent):
                     'TMP="$(mktemp -d)"; '
                     f'BASE="https://github.com/lightconsen/codape/releases/download/{self._version}"; '
                     f'ARCHIVE="codape-{RELEASE_TARGET}.tar.gz"; '
-                    'curl -fsSL "$BASE/$ARCHIVE" -o "$TMP/$ARCHIVE"; '
-                    'curl -fsSL "$BASE/SHA256SUMS" -o "$TMP/SHA256SUMS"; '
+                    'CURL="curl -fsSL --retry 5 --retry-all-errors --retry-delay 2"; '
+                    '$CURL "$BASE/$ARCHIVE" -o "$TMP/$ARCHIVE"; '
+                    '$CURL "$BASE/SHA256SUMS" -o "$TMP/SHA256SUMS"; '
                     'EXPECTED="$(awk -v n="$ARCHIVE" \'$2 == n { print $1; exit }\' "$TMP/SHA256SUMS")"; '
                     '[ -n "$EXPECTED" ] || { echo "SHA256SUMS has no entry for $ARCHIVE" >&2; exit 1; }; '
                     'ACTUAL="$(sha256sum "$TMP/$ARCHIVE" | awk \'{ print $1 }\')"; '

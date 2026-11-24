@@ -386,6 +386,7 @@ class _ExecStub:
 
         class _Result:
             return_code = 0
+            stderr = ""
 
         result = _Result()
         result.stdout = stdout
@@ -404,7 +405,11 @@ class _ExecStub:
             self.run_timeouts.append(timeout_sec)
             return self._result(command)
 
+        async def exec_as_root(_environment, command, *_args, **_kw):
+            return await self.exec(command)
+
         agent.exec_as_agent = exec_as_agent
+        agent.exec_as_root = exec_as_root
 
 
 def _agent(module, **kwargs):
@@ -468,6 +473,48 @@ def check_timeout(module) -> None:
               f"no configured timeout means no exec timeout, got {stub.run_timeouts[0]}")
 
 
+def check_install_prerequisites(module) -> None:
+    """`install` must not assume the task image carries a downloader.
+
+    The first task this adapter was run against — `cargo-flight-dispatch`, base
+    `python:3.13-slim-bookworm` — has no `curl`, so the release step exited 127
+    before any task work began. Only a real container shows that, and the
+    failure looks like an agent that could not start. Harbor's own
+    `ensure_system_dependencies` installs through the image's package manager;
+    the reference implementation calls it before it curls anything.
+    """
+
+    agent = _agent(module, version="v0.2.2")
+    calls: list[tuple] = []
+
+    async def ensure_system_dependencies(_environment, dependencies):
+        calls.append(tuple(dependencies))
+
+    agent.ensure_system_dependencies = ensure_system_dependencies
+    stub = _ExecStub()
+    stub.bind(agent)
+    asyncio.run(agent.install(stub))
+
+    check(
+        calls == [("curl", "ca_certificates", "xz")],
+        f"install must ensure its download prerequisites first, got {calls}",
+    )
+    download = next(
+        (c for c in stub.exec_calls if "releases/download" in c), ""
+    )
+    check(
+        bool(download),
+        "the release download should run after the prerequisites are in place",
+    )
+    # A single truncated stream must not fail a whole trial: the first real run
+    # died with `curl: (18) HTTP/2 stream 1 was not closed cleanly`. The retry
+    # has to be in the download command itself, not assumed of the host.
+    check(
+        "--retry" in download and "--retry-all-errors" in download,
+        "the release download must retry a truncated transfer",
+    )
+
+
 def check_timed_out_raises(module) -> None:
     """An interrupted run must raise Harbor's timeout, not return an answer.
 
@@ -495,6 +542,7 @@ def main() -> int:
     check_build(module)
     check_metrics(module)
     check_timeout(module)
+    check_install_prerequisites(module)
     check_timed_out_raises(module)
     check_against_real_harbor(module)
     if FAILURES:
