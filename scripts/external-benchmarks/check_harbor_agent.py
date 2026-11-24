@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -535,6 +536,64 @@ def check_timed_out_raises(module) -> None:
     check(False, "an interrupted run returned normally instead of raising a timeout")
 
 
+def check_trajectory_model_name(module) -> None:
+    """The trajectory must name the model that actually ran, not Harbor's `-m`.
+
+    `harbor run` without `-m` leaves `agents[0].model_name` **null** for a
+    custom agent — that is what the first paid trial's `config.json` held — and
+    Codape then falls back to the host's `CODAPE_MODEL`. `_record` used to pass
+    `self.model_name` straight into `build_trajectory`, so the ATIF document of
+    that run recorded `agent.model_name: null`: the one field Harbor uses to
+    label a run, lost, in a document that costs real tokens to produce.
+
+    Asserts on the **argument at the call site**, by intercepting
+    `build_trajectory`. Reading the written file would need a real pydantic
+    `Trajectory` (`model_dump_json`), and the stub deliberately has none, so
+    this check must run without harbor — it is the one that catches a defect
+    found on a paid run.
+    """
+    real = module.build_trajectory
+    recorded: list[str | None] = []
+
+    def capture(text, **kwargs):
+        recorded.append(kwargs.get("model_name"))
+        return None  # nothing to write, which is also a path `_record` handles
+
+    module.build_trajectory = capture
+    try:
+        model = "deepseek-v4.1-flash"
+        os.environ["CODAPE_MODEL"] = model
+        try:
+            agent = module.CodapeHarborAgent(
+                logs_dir=Path(tempfile.mkdtemp(prefix="codape-harbor-model-")),
+                model_name=None,
+            )
+            stub = _ExecStub({"codape-stream.jsonl": transcript(TEXT, RESULT)})
+            stub.bind(agent)
+            asyncio.run(agent.run("do it", stub, module.AgentContext()))
+        finally:
+            os.environ.pop("CODAPE_MODEL", None)
+
+        check(recorded == [model],
+              f"with no Harbor -m the trajectory must record the model the "
+              f"container ran ({model!r}), got {recorded!r}")
+
+        # The other half of the same choice: Harbor's `-m` still wins when it
+        # exists, so the fix cannot silently start ignoring an explicit pick.
+        recorded.clear()
+        agent = module.CodapeHarborAgent(
+            logs_dir=Path(tempfile.mkdtemp(prefix="codape-harbor-model-explicit-")),
+            model_name="anthropic/claude-sonnet-4-5",
+        )
+        stub = _ExecStub({"codape-stream.jsonl": transcript(TEXT, RESULT)})
+        stub.bind(agent)
+        asyncio.run(agent.run("do it", stub, module.AgentContext()))
+        check(recorded == ["claude-sonnet-4-5"],
+              f"an explicit Harbor model must still win, got {recorded!r}")
+    finally:
+        module.build_trajectory = real
+
+
 def main() -> int:
     module = load_adapter()
     print("harbor adapter: ATIF conversion")
@@ -544,6 +603,7 @@ def main() -> int:
     check_timeout(module)
     check_install_prerequisites(module)
     check_timed_out_raises(module)
+    check_trajectory_model_name(module)
     check_against_real_harbor(module)
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s):")
