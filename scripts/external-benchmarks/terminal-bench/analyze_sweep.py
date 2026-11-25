@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """Compare the two arms of the Terminal-Bench sweep, task by task.
 
-Reads two harbor job directories and reports, per task, what each arm scored,
-how long it took, what it cost in tokens, and — the thing the four-layer
+Reads harbor job directories and reports, per task, what each arm scored, how
+long it took, what it cost in tokens, and — the thing the four-layer
 optimisation plan actually turns on — how much of each arm's output was
 reasoning rather than answer.
 
-    python3 -I analyze_sweep.py <codape-job-dir> <claude-job-dir>
+    python3 -I analyze_sweep.py <job-dir>...
+
+An arm is not one job. The sweep runs each arm as a concurrent batch plus a
+separate single-core batch for the tasks that claim 16 GB, and the control
+tasks may have been run earlier still, so one arm arrives as several job
+directories. They are merged here, and the arm each belongs to is read from the
+job's own `config.json` rather than from the order the directories were given.
 
 Every field read here is one harbor writes for every trial, so a job from an
 older adapter still compares on the columns that exist. A trial absent from one
 arm is reported as such rather than scored zero: a task that never ran and a
-task that ran and failed are different facts.
+task that ran and failed are different facts. A trial whose directory exists
+but whose `result.json` has not been written yet is reported as still running,
+which is what makes this usable while a sweep is halfway through.
 
 Scores are all-or-nothing in Terminal-Bench 4.1 — `reward` is 0.0 or 1.0 — so
 the per-test ctrf count is carried alongside it. Two arms can both score 0.0
@@ -32,7 +40,11 @@ def load_trial(directory: str) -> dict:
     """Everything this comparison needs from one trial directory."""
     name = os.path.basename(directory.rstrip("/")).split("__")[0]
     result_path = os.path.join(directory, "result.json")
-    trial = {"name": name, "ran": False}
+    # A directory without a result is not the same as a directory that is not
+    # there: the first is a trial in flight, the second a task this arm never
+    # ran. Reporting both as "not run" would make a half-finished sweep look
+    # like a task was dropped.
+    trial = {"name": name, "ran": False, "present": os.path.isdir(directory)}
 
     if not os.path.exists(result_path):
         return trial
@@ -125,12 +137,77 @@ def _text_volume(directory: str) -> tuple[int, int]:
     return reasoning, answer
 
 
-def load_arm(job_directory: str) -> dict[str, dict]:
-    trials = {}
-    for directory in sorted(glob.glob(os.path.join(job_directory, "*/"))):
-        trial = load_trial(directory)
-        trials[trial["name"]] = trial
-    return trials
+def _arm_of(job_directory: str) -> str:
+    """Which arm a job belongs to, from the job's own record.
+
+    Read rather than inferred from the directory name or the order the
+    directories were passed: the sweep's directories are timestamped, and a
+    timestamp says nothing about which agent ran inside. Harbor records the
+    agent once, in `config.json`, so that is the one place the answer cannot
+    drift from.
+
+    Anything unrecognized comes back as its own label instead of being folded
+    into an arm, so a third agent in the directory is visible rather than
+    silently compared as if it were the reference.
+    """
+    path = os.path.join(job_directory, "config.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            agents = json.load(handle).get("agents") or []
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+    if not agents:
+        return "unknown"
+    name = (agents[0].get("name") or "").strip()
+    if name == "claude-code":
+        return "claude"
+    if "codape" in name.lower():
+        return "codape"
+    return name or "unknown"
+
+
+def _started_at(job_directory: str) -> str:
+    """When the job started, for choosing between duplicate trials."""
+    path = os.path.join(job_directory, "result.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle).get("started_at") or ""
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def load_arms(job_directories: list[str]) -> dict[str, dict[str, dict]]:
+    """Merge every job directory into one task map per arm.
+
+    A task can appear in more than one job of the same arm — the nine control
+    tasks were run first and then again inside the sweep — so duplicates are
+    resolved rather than appended. A trial that produced a `result.json` wins
+    over one that is still in flight, and among two that both finished the
+    later start wins: a rerun supersedes the run it repeats.
+    """
+    arms: dict[str, dict[str, dict]] = {}
+    # Oldest first, so a later directory overwrites an earlier one and the
+    # "last write wins" rule below is the same rule the sweep itself follows.
+    for job_directory in sorted(job_directories, key=_started_at):
+        arm = _arm_of(job_directory)
+        trials = arms.setdefault(arm, {})
+        for directory in sorted(glob.glob(os.path.join(job_directory, "*/"))):
+            trial = load_trial(directory)
+            previous = trials.get(trial["name"])
+            if previous is None or _prefer(trial, previous):
+                trials[trial["name"]] = trial
+    return arms
+
+
+def _prefer(candidate: dict, existing: dict) -> bool:
+    """Whether `candidate` should replace `existing` for the same task."""
+    if existing.get("ran") and not candidate.get("ran"):
+        return False
+    if candidate.get("ran") and not existing.get("ran"):
+        return True
+    # Both ran, or neither did. The caller iterates oldest job first, so a
+    # later candidate is a rerun.
+    return True
 
 
 def _reward(value: float | None) -> str:
@@ -172,13 +249,15 @@ def report(codape: dict[str, dict], claude: dict[str, dict]) -> None:
         right = claude.get(name) or {"ran": False}
 
         def cell(trial: dict) -> str:
-            if not trial.get("ran"):
-                return "not run"
-            return (
-                f"{_reward(trial.get('reward'))} "
-                f"{_counts(trial.get('passed'), trial.get('tests'))} "
-                f"{_minutes_text(trial.get('minutes'))}"
-            )
+            if trial.get("ran"):
+                return (
+                    f"{_reward(trial.get('reward'))} "
+                    f"{_counts(trial.get('passed'), trial.get('tests'))} "
+                    f"{_minutes_text(trial.get('minutes'))}"
+                )
+            if trial.get("present"):
+                return "running"
+            return "not run"
 
         delta = "-"
         if left.get("ran") and right.get("ran"):
@@ -216,17 +295,23 @@ def report(codape: dict[str, dict], claude: dict[str, dict]) -> None:
 
 def _totals(label: str, trials: dict[str, dict]) -> None:
     ran = [t for t in trials.values() if t.get("ran")]
+    running = [t for t in trials.values() if t.get("present") and not t.get("ran")]
     if not ran:
-        print(f"\n{label}: no trials")
+        print(f"\n{label}: no finished trials"
+              + (f", {len(running)} running" if running else ""))
         return
     scored = [t for t in ran if t.get("reward") == 1.0]
     minutes = [t["minutes"] for t in ran if t.get("minutes") is not None]
     output = [t["output_tokens"] for t in ran if t.get("output_tokens")]
     print(
-        f"\n{label}: {len(ran)} trials, {len(scored)} solved "
+        f"\n{label}: {len(ran)} finished, {len(scored)} solved "
         f"({len(scored) / len(ran) * 100:.0f}%), "
         f"{sum(minutes):.0f} min total"
         + (f", {sum(output):,} output tokens" if output else "")
+        # An in-flight trial has no score yet. Counting it either way would be
+        # wrong: as a failure it understates, as an omission it hides how much
+        # of the arm is still unmeasured.
+        + (f"  [{len(running)} still running]" if running else "")
     )
 
 
@@ -265,16 +350,23 @@ def _reasoning_table(rows: list[tuple[str, dict, dict]]) -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    if len(sys.argv) < 2:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
-        print("usage: analyze_sweep.py <codape-job-dir> <claude-job-dir>", file=sys.stderr)
+        print("usage: analyze_sweep.py <job-dir>...", file=sys.stderr)
         return 2
-    codape_dir, claude_dir = sys.argv[1], sys.argv[2]
-    for directory in (codape_dir, claude_dir):
+    job_directories = sys.argv[1:]
+    for directory in job_directories:
         if not os.path.isdir(directory):
             print(f"not a directory: {directory}", file=sys.stderr)
             return 1
-    report(load_arm(codape_dir), load_arm(claude_dir))
+    arms = load_arms(job_directories)
+    for label in ("codape", "claude"):
+        arms.setdefault(label, {})
+    report(arms["codape"], arms["claude"])
+    extra = sorted(set(arms) - {"codape", "claude"})
+    if extra:
+        print()
+        print(f"ignored job(s) from other agents: {', '.join(extra)}")
     return 0
 
 
