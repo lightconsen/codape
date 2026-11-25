@@ -327,57 +327,128 @@ finding in [`tb-codape-vs-claude.md`](tb-codape-vs-claude.md): what the model
 thinks is a property of the model on this benchmark, and no harness-side
 trimming of the visible answer touches it.
 
-### The one process difference that is Codape's
+### The one process difference that is Codape's — and its cause
 
-Codape's `Bash` hands back a job handle when a foreground command outlives its
-60 s timeout, with `output_file` in the handle. The model's pattern is then
-`sleep N; cat <output_file>`, in the foreground, repeatedly:
+Codape can start a long command in the background, and it can read one. What it
+cannot do is **wait for one** — and that gap is what its trajectory is full of.
+
+**The pattern.** The model writes `sleep N; cat /app/.codape/jobs/shell-….out`
+in the foreground:
 
 ```
-step 85   sleep 120; cd /app && tail -5 /app/.codape/jobs/shell-…-69.out
-step 106  sleep 90;  tail -4 /app/.codape/jobs/shell-…-82.out
-step 177  sleep 55;  cat /app/.codape/jobs/shell-…-146.out
+step 135   sleep 120; cd /tmp/ks && cat /app/.codape/jobs/shell-…-103.out
+step 145   sleep 100; cat /app/.codape/jobs/shell-…-110.out
+step 179   sleep  90; cat /app/.codape/jobs/shell-…-134.out
+step 194   sleep 240; cat /app/.codape/jobs/shell-…-150.out
 ```
 
-Across the same eight trials that is **2,597 s of foreground `sleep` (43
-minutes)** on the Codape arm against **266 s (4.4 minutes)** on Claude's — and
-`ks-solver-cpp` alone spends 1,825 s of its 126 minutes there. 56 observations
-in that arm are the `still running after 60s` notice, so the timeout-push path
-is exercised constantly; `run_in_background` is passed **zero times in 865
-Codape tool calls**.
+(Recorded as truncated one-line summaries, so the file names are abbreviated
+here; the `sleep` values and the job ids are verbatim.)
 
-The zero is about the flag, not about intent. `run_in_background` is not the
-only way this model gets concurrency, and the trait that is actually visible is
-a different one: it rarely issues two calls in one batch. Same-batch calls do
-run concurrently — `tool_scheduler::run_tool_calls` executes the approved batch
-with `futures::future::join_all` — so a `Bash` paired with a `JobOutput` is
-overlap by construction. On `vf2` there are only 5 such multi-call steps out of
-192, and 3 of them are exactly that pair (steps 19, 20, 90). Claude Code issues
-them more often (8 of 192 on `vf2`, 14 of 92 on `kv-live-surgery`, almost all
-`Bash`+`Bash`), which is the readable difference in the two styles: Codape waits
-with a foreground `sleep`, Claude starts two commands at once.
+Across the same eight trials that is **2,580 s of foreground `sleep` polling**
+(30 calls that open with `sleep`) on the Codape arm against **141 s over 5
+calls** on Claude's — an **18× gap** on an identical task set. Counting any
+`sleep` anywhere in a command the totals are 2,597 s over 38 calls against 222 s
+over 59, which is a fairer view of Claude's style (it inlines short sleeps in
+`pkill …; sleep 1` rather than polling), and the gap survives it: **12×**.
+`ks-solver-cpp` alone spends 1,825 s of its 126 minutes there.
+`run_in_background` is passed **zero times in 865 Codape tool calls**, and 56
+observations are the `still running after 60s` notice.
 
-`react-lead-form` is where that reading needs qualifying: Codape *does* batch
-there (5 steps of 113), but every one is a `Read` burst at the start of the run
-(steps 1–5, up to four files at a time). Batch-compensating the exploration is
-a habit the model shows; batch-compensating a *build or a test run* is not.
+**The cause is a 60 s ceiling, not a missing idea.** `Bash`'s `timeout` defaults
+to 60 s (`MAX_TIMEOUT_SECS` is 600, `bash_tool.rs:48`). Any `sleep` longer than
+that gets moved to the background *instead of returning its output* — the call
+answers with a job handle and `"command still running after 60s"`. The model
+never raises `timeout`, so **every one of the arm's 56 push notices reports
+60 s**. Of the 30 polling sleeps, **20 are pushed** (each in a step whose push
+is unambiguous — no step mixes a sleep with another `Bash`), and after 8 of
+those the model's next move, within three steps, is another `sleep`. On
+`ks-solver-cpp` all 15 pushed sleeps are followed within three steps by a
+direct `cat` of the output file (1 of 5 on `vf2`) — the model is not confused
+about where the output is, it is retrying a wait that never completes.
 
-One thing I could not settle from the recorded data, and am therefore not
-claiming: `vf2` step 169 launched `tests/fuzz_small.py` with a 2400 s ceiling
-that wrote to `/tmp/f1.log`, and the observation is `started\nTrue` with exit
-0 and **no** `job_id` — so the tool did not push it to the background. Whether
-the command detached itself in the shell or simply finished inside the 60 s
-window is not decidable here: the trajectory stores a truncated one-line
-summary per call rather than the command text, `/tmp/f1.log` appears nowhere
-else in the transcript, and step 185 runs the same script to completion with
-visible output in under 60 s. Either reading is consistent with what was
-recorded, so no overlap is inferred from it.
+So the three-way story I first recorded is wrong in each part:
 
-Claude Code, for its part, has no `JobOutput` tool to call and backgrounds the
-`run_in_background` way four times across its nine trials. It also has a
-`Monitor` tool; on `kv-live-surgery` it spent a step discovering it
-(`ToolSearch`) and another arming it — which is the shape Codape lacks: a way to
-wait that is not a `sleep` in the foreground.
+- It is not "the model does not know a background job keeps running". It knows:
+  it reads the `.out` file directly, and on `vf2` it paired `Bash` with
+  `JobOutput` in one batch at steps 20, 21 and 91 — genuine overlap.
+- It is not "the mechanism is fine, the prompt is weak". **`JobOutput` has no
+  wait parameter.** It reads the file and returns immediately
+  (`job_tools.rs:293`), so polling a running job yields the same bytes twice —
+  steps 133 and 134 of `ks-solver-cpp` return byte-identical output. The only
+  way to wait for a job is therefore `sleep`, and `sleep` is capped at 60 s by
+  the same ceiling that created the job. That is a **tool-surface gap**, not a
+  prompting one.
+- Claude is not better at this. It has no `JobOutput` tool at all and bundles
+  its own `Bash`; it waits less (141 s) mostly because it launches fewer long
+  jobs. Its `Monitor` tool — which it discovered at step 76 of
+  `kv-live-surgery` (`ToolSearch: select:Monitor`) and armed at step 77 — is
+  the shape Codape lacks, and its result text says exactly why:
+
+  > Monitor started (task bf7i9ee3q, expires in 6m 40s …). You will be notified
+  > on each event. **Keep working — do not poll or sleep.**
+
+  A wait that does not consume a tool call, and that tells the model not to
+  sleep. Codape has no equivalent. The job record *does* carry a state change —
+  `Bash`'s background task calls `JobStore::settle` when the child exits
+  (`bash_tool.rs:264`) — but nothing pushes that into the conversation: the
+  settle only rewrites the record, and the model learns of it by asking. So the
+  loop has no way to be told, and the only way to wait is to occupy it with
+  `sleep`.
+
+### Proposal: a wait that is not a `sleep`
+
+Written up here because the sweep cannot test it: it measures `v0.2.2`, and any
+behaviour change mid-sweep puts fixed-binary trials beside `v0.2.2` ones.
+
+**The defect in one line:** a job cannot be waited on. `JobOutput` returns
+immediately whatever the job's state, so the only blocking primitive is `sleep`,
+which the 60 s `Bash` ceiling immediately converts into *another* background job.
+
+**Fix, smallest first.**
+
+1. **Give `JobOutput` a bounded `wait_secs`.** Block until the job settles or the
+   deadline passes, then return state plus tail — the same shape the tool
+   already returns, with the wait folded in. This is the load-bearing change: it
+   makes "wait for this job" one tool call instead of a `sleep` loop, and it
+   costs one parameter. It does not depend on a prompt change, so it does not
+   affect how the model chooses to work — only what happens once it does.
+
+   **The trap it walks into.** The executor wraps every tool call in a 60 s
+   `ExecutionConfig::default_timeout` (`executor.rs:185`) and returns
+   `ToolError::Timeout` on expiry — the same ceiling, one layer up, so a naive
+   `wait_secs: 300` would be cut off at 60 s and look like a broken job. The
+   escape already exists: `capabilities().self_managed_timeout` makes the
+   executor call the tool directly and skip its own deadline (`executor.rs:180`),
+   and its doc comment (`tool.rs:307`) says a declaring tool "is responsible for
+   not hanging". `Bash` and `PowerShell` are the only declarers today. Whoever
+   implements the wait must set it on `JobOutput` too, and then own the bound
+   itself — `wait_secs` clamped to `MAX_TIMEOUT_SECS` (600) and a hard stop at
+   the deadline regardless of job state. A job that never ends must not hold the
+   call open forever, and `JobKill` must remain able to reach it while it blocks.
+2. **Make the push notice say what to do.** It currently says "Read it with
+   JobOutput", which is true and useless while `JobOutput` cannot wait; the
+   600 s cap on `Bash`'s own `timeout` also already allows a 10-minute
+   foreground wait the model never uses. With (1) in place the notice can name
+   one actionable call instead of a poll loop.
+3. **Only then, the prompt.** The `Bash` description can say a background job
+   keeps running and to come back to it — but that is the change that alters
+   behaviour and breaks comparability, and it is the weakest of the three: the
+   trajectory shows the model already looks for work to do while a job runs.
+
+**Expected effect, stated conservatively.** 2,580 s of foreground sleep over
+eight trials cannot be reclaimed entirely — a wait for a job that genuinely takes
+four minutes is still four minutes, and it is work the task needs. But 8 sleeps
+totalling **540 s** are not waiting at all: each follows a sleep the 60 s
+ceiling already cut off, so it is a second attempt at the same wait. Those 8
+calls, their round trips and the context they add are what a real wait
+primitive removes. That is a step-count and token problem before it is a
+wall-clock one — 540 s of the arm's 21,428 s (2.5 %) — which is why it belongs
+to L3 rather than to the provider-latency findings above.
+
+**Not done, on purpose.** Changing `JobOutput`'s contract mid-sweep would put
+two tool surfaces in one dataset. Re-measure after the sweep ends, on the same
+eight tasks, before claiming a number.
 
 ### `model_ms + tool_ms == duration_ms` is not a parallelism test
 
@@ -396,9 +467,11 @@ running inside the stream has its wall clock subtracted from `model_ms`
 opposite direction from what the test assumes. (That path is off by default —
 `FeatureFlags::streaming_tool_execution` is `false` and neither the adapter nor
 `run-arm.sh` sets `--betas` — so on this sweep the netting never engaged, which
-removes the explanation but not the invalidity.) And a background job's runtime
-is charged to the call that started it, which returns at once, so the time it
-saves never appears in `tool_ms` at all.
+removes the explanation but not the invalidity.) And a pushed background job's
+runtime is not charged to `tool_ms` at all: a `sleep 240` that is pushed at 60 s
+contributes 60 s, which is why `sound-change-cascade`'s 2,516 s of nominal sleep
+sits inside 2,181 s of tool time — an arithmetic impossibility that is the
+cleanest proof the metric cannot see the wait.
 
 Measured over the eight Codape trials, `duration_ms − model_ms − tool_ms` in
 seconds is: `foodstuff` 1, `gsea` 0, `ks-solver` −489, `kv-live` 0,
@@ -414,8 +487,7 @@ What the six near-zero gaps do say is narrower and still useful: context
 building, hooks and inter-turn idle cost nothing measurable, so a
 completeness check on the accounting passes. That is all. It is not a test for
 concurrency, and it cannot distinguish a run that used a background job from
-one that did not — a background job's runtime is charged to the call that
-started it, which returns immediately.
+one that did not — a pushed job's time is simply absent from both figures.
 
 ## Harness behaviour worth knowing
 
