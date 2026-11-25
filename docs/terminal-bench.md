@@ -6,6 +6,42 @@ and is described there; this file is the **record of results**, and it is the
 place to look before blaming a model for a result Codape caused, or vice
 versa.
 
+## What this file records
+
+**This entire file — every batch, every scoreboard row, every defect — was
+measured on `terminal-bench-core==0.1.1` (80 tasks) driven by the
+`terminal-bench==0.2.18` harness.** Those two version numbers are the
+identity of the benchmark this record describes, and they are pinned: `0.2.18`
+is the last release of the old harness and has been frozen, and
+`terminal-bench-core==0.1.1` is the dataset it reads from the local cache. The
+adapter is `scripts/external-benchmarks/terminal-bench/codape_agent.py` and the
+runner is `run_terminal_bench.py`.
+
+Nothing in this file describes the newer benchmark. As of 2026-11-24 the
+current row is measured on a **different dataset through a different harness** —
+`terminal-bench/terminal-bench@4.1.0` (66 tasks) through `harbor==0.27.0` with
+`codape_harbor_agent.py`. That work is recorded separately in
+[`tb-harbor-4.1.md`](tb-harbor-4.1.md).
+
+**Do not compare the two.** They share a name and a shape and nothing else:
+
+| | this file | `tb-harbor-4.1.md` |
+|---|---|---|
+| Dataset | `terminal-bench-core==0.1.1` (80 tasks) | `terminal-bench/terminal-bench@4.1.0` (66 tasks) |
+| Harness | `terminal-bench==0.2.18` | `harbor==0.27.0` |
+| Adapter | `codape_agent.py` | `codape_harbor_agent.py` |
+| Overlap in task names | — | **zero** |
+| Scoring | per-test `parser_results`, partial passes recorded | all-or-nothing `reward` |
+| Failure classification | `failure_mode` | `exception_info` + `verifier_result` |
+
+The 97 %-resolved scoreboard below therefore says **nothing** about a
+`@4.1.0` result, in either direction — and a 4.1 pass rate says nothing about
+it either.
+
+`scripts/external-benchmarks/README.md` carries the same two-adapter table:
+`0.2.18` is kept because it still works and the recorded runs depend on it,
+but it points new work at Harbor.
+
 The distinction that matters throughout: a benchmark score of 0 can mean the
 agent harness failed, *or* it can mean the model chose not to follow the task.
 Those have nothing in common except the number, and separating them is why this
@@ -3118,15 +3154,24 @@ All nineteen were real, and all are fixed:
     `input + max_tokens ≤ window` rule and by half the window — above half,
     compaction cannot recover the context, so a larger ceiling there only
     trades one rejection for another. When the ceiling cannot move (the
-    default 32 768 on any window ≤ 64 K, which includes every DeepSeek
-    deployment) no second request is sent and the turn is reported as the
-    no-op it was. The retry happens inside `send_request_streaming`, before
+    default 32 768 on any window ≤ 64 K) no second request is sent and the
+    turn is reported as the no-op it was. That used to include every DeepSeek
+    deployment, because the model table had no `deepseek-v4` entry: the window
+    fell back to the 32 000-token guess, and `retry_ceiling` refuses a guessed
+    window outright. Both Terminal-Bench tasks that ended `error_no_output`
+    (`biped-contact-dynamics`, `ks-solver-cpp`) died in that refusal with the
+    gateway serving a 1M window. The entry was added in `ee448320`; the
+    endpoint was then probed directly and accepts a 65 536 `max_tokens`, so
+    the raised ceiling is a request the provider will take, not one it will
+    reject. Analysed in `docs/tb-codape-vs-claude.md`. The retry happens inside
+    `send_request_streaming`, before
     the thinking block is written to the turn's messages, because a
     thinking-only assistant turn as the *last* message is a prefill and is
     rejected by current models. `TurnRuntime::empty_answer_retries` keeps the
     re-ask from compounding with `recovery_count`.
 
     Covered by `a_retry_ceiling_needs_room_the_request_does_not_have`,
+    `a_model_in_the_table_can_recover_from_an_empty_answer`,
     `a_run_that_spent_its_ceiling_thinking_reports_no_output` and
     `a_no_op_turn_is_re_asked_at_a_larger_ceiling`.
 

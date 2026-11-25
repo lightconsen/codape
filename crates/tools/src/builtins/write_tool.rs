@@ -119,8 +119,15 @@ impl Tool for WriteTool {
             })?;
 
         let bytes = content.len();
+        // The content just came back in the request, so echoing it would spend
+        // the model's context to tell it something it already has. What it
+        // cannot infer is that the file on disk now *is* that content — say
+        // that, and say that a read-back is wasted.
         Ok(ToolOutput {
-            output: format!("Wrote {bytes} bytes to {path}"),
+            output: format!(
+                "Wrote {bytes} bytes to {path}\n\n(the file now holds exactly the content \
+                 you sent — no need to Read it back)"
+            ),
             is_display: true,
             images: Vec::new(),
         })

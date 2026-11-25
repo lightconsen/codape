@@ -788,7 +788,12 @@ pub const MODEL_CONTEXT_WINDOWS: &[(&str, usize)] = &[
     ("gemini-2.5-pro", 1_000_000),
     ("gemini-2.5-flash", 1_000_000),
     ("gemini-3", 1_000_000),
-    // DeepSeek.
+    // DeepSeek. The v4 family serves a much larger window than the legacy
+    // chat/reasoner endpoints. Both spellings are listed because
+    // [`family_matches`] only splits on `-`: `deepseek-v4.1-flash` matches the
+    // dotted entry, a later `deepseek-v4-x` would match the hyphenated one.
+    ("deepseek-v4.1", 1_000_000),
+    ("deepseek-v4", 1_000_000),
     ("deepseek-chat", 64_000),
     ("deepseek-reasoner", 64_000),
     ("deepseek-r1", 64_000),
@@ -1635,7 +1640,13 @@ pub const MODEL_MAX_OUTPUT_TOKENS: &[(&str, u32)] = &[
     ("o1", 100_000),
     ("o3", 100_000),
     ("o4-mini", 100_000),
-    // DeepSeek: an 8k output cap behind a 64k window.
+    // DeepSeek: an 8k output cap behind a 64k window on the legacy endpoints.
+    // The v4 family raises both; 32k matches the ceiling the gateway accepts
+    // and is what [`crate::engine::QueryEngine::DEFAULT_MAX_TOKENS`] already
+    // asks for, so listing it keeps `retry_ceiling` usable rather than made out
+    // of a guess.
+    ("deepseek-v4.1", 32_768),
+    ("deepseek-v4", 32_768),
     ("deepseek-chat", 8_192),
     ("deepseek-reasoner", 8_192),
 ];
@@ -2412,6 +2423,32 @@ mod context_window_tests {
                 "unknown models must not claim the largest known window"
             );
         }
+    }
+
+    /// The v4 family is served behind a 1M window, and it has to be in the
+    /// table rather than left to the unknown-model guess. The guess is 32k,
+    /// which puts the compaction line at 16k — a session would compact every
+    /// few turns against a window thirty times larger, and `retry_ceiling`
+    /// refuses to raise a ceiling for a guessed window at all.
+    ///
+    /// The legacy entries must keep their own values: a `deepseek-v4` prefix
+    /// that also swallowed `deepseek-chat` would hand a 64k endpoint a 1M
+    /// window and let the engine send requests the provider rejects.
+    #[test]
+    fn deepseek_v4_is_known_and_the_legacy_endpoints_are_not_shadowed() {
+        assert_eq!(
+            ModelId::table_context_window_for("deepseek-v4.1-flash"),
+            1_000_000
+        );
+        assert_eq!(table_max_output_tokens("deepseek-v4.1-flash"), Some(32_768));
+        for legacy in ["deepseek-chat", "deepseek-reasoner", "deepseek-r1"] {
+            assert_eq!(
+                ModelId::table_context_window_for(legacy),
+                64_000,
+                "{legacy}"
+            );
+        }
+        assert_eq!(table_max_output_tokens("deepseek-chat"), Some(8_192));
     }
 
     #[test]

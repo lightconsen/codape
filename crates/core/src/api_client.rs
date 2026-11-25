@@ -54,7 +54,15 @@ pub enum ApiError {
     #[error("access policy error: {0}")]
     AccessPolicy(String),
     /// Retry attempts exhausted.
-    #[error("retry exhausted after {attempts} attempts")]
+    ///
+    /// The last failure is part of the message, not only of the struct. It
+    /// used to be dropped here, and the chain after this one flattens the
+    /// error into a string — `ProviderError::Unavailable` carries no cause,
+    /// so `provider_error_to_api` rebuilds an `ApiError::Http` from the text
+    /// alone. By the time an operator sees "retry exhausted after 4
+    /// attempts", the reason it exhausted has been erased at this line, and
+    /// a rate limit is indistinguishable from a dropped connection.
+    #[error("retry exhausted after {attempts} attempts: {last_error_message}")]
     RetryExhausted {
         /// Number of retry attempts.
         attempts: u32,
@@ -3429,6 +3437,47 @@ mod tests {
         assert!(!is_retryable(&ApiError::Http(
             "timeout while connecting".to_string()
         )));
+    }
+
+    /// An exhausted retry must say what it exhausted on.
+    ///
+    /// This is not cosmetic. The error is flattened twice after it is built:
+    /// `provider_error_to_api` turns a `ProviderError::Unavailable` back into
+    /// an `ApiError::Http` carrying only its message string, and the
+    /// `error_during_execution` result frame records `err.to_string()`. So the
+    /// `last_error_message` field is unreachable from the moment it is
+    /// displayed — if the `Display` impl omits it, it is gone, and a rate
+    /// limit cannot be told from a cut connection from a 500.
+    ///
+    /// That is exactly what a live benchmark run showed: three turns ended as
+    /// `HTTP error: retry exhausted after 4 attempts` with no way to say why,
+    /// while a direct probe of the same gateway answered 200 in under two
+    /// seconds. The text was the only surviving evidence and it had thrown the
+    /// cause away.
+    #[test]
+    fn an_exhausted_retry_reports_what_it_exhausted_on() {
+        let error = ApiError::RetryExhausted {
+            attempts: 4,
+            last_error_message: "API error (529): overloaded".into(),
+        };
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("4 attempts"),
+            "the count is missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("529") && rendered.contains("overloaded"),
+            "the cause was dropped: {rendered}"
+        );
+        // The round trip through the string-only provider error must preserve
+        // it too, because that is the path the result frame actually takes.
+        let round_tripped = crate::provider::provider_error_to_api(
+            crate::provider::classify_api_error("test", &error),
+        );
+        assert!(
+            round_tripped.to_string().contains("529"),
+            "flattening lost the cause: {round_tripped}"
+        );
     }
 
     #[test]

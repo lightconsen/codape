@@ -46,7 +46,12 @@ const OUTPUT_DESCRIPTION: &str = {
         "Reads the output of a background shell job started with Bash `run_in_background`. \
          Returns the job's state and the last `tail_lines` lines of its output file. The file \
          is written while the command runs, so calling this again shows the new output — this \
-         is how you check whether a server has started, instead of starting a second copy."
+         is how you check whether a server has started, instead of starting a second copy.\n\n\
+         With `wait_secs`, the call blocks until the job finishes or that many seconds pass, \
+         then returns the state and the new output. Use it to wait for a build or a test run \
+         rather than sleeping in the foreground and reading the file again: one call replaces \
+         a `sleep N; cat jobfile` loop, and it returns as soon as the job ends instead of at \
+         the end of a fixed sleep."
     }
 };
 
@@ -58,12 +63,29 @@ use crate::tool::{
 use async_trait::async_trait;
 use codape_core::job_record::{JobKind, JobRecord, JobState, JobStore};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 /// How much of a job's output one call returns.
 const MAX_OUTPUT_BYTES: usize = 20_000;
 
 /// Default number of trailing lines returned by `JobOutput`.
 const DEFAULT_TAIL_LINES: usize = 200;
+
+/// Largest `wait_secs` a `JobOutput` call may ask for.
+///
+/// The same ceiling `Bash` and `Sleep` use, for the same reason: a call that
+/// blocks must have a deadline it advertises, and ten minutes is the longest
+/// one this platform already lets a tool take. A background job can legitimately
+/// run for hours, so a wait is always bounded — the model re-issues the call
+/// rather than holding one forever.
+const MAX_WAIT_SECS: u64 = 600;
+
+/// How often a blocking `JobOutput` re-reads the record.
+///
+/// A record is one small JSON file, so a poll is cheap, and 200 ms is well
+/// under the granularity of anything the model can act on. Coarser would make
+/// a job that finishes just after a poll wait needlessly; finer would spin.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 fn job_store(ctx: &ToolContext<'_>) -> JobStore {
     JobStore::new(ctx.cwd)
@@ -100,6 +122,73 @@ fn tail_text(bytes: &[u8], max_bytes: usize, tail_lines: Option<usize>) -> (Stri
         }
     }
     (text, truncated)
+}
+
+/// Render one job's state and the tail of its output file.
+fn render_job(store: &JobStore, job_id: &str, record: &JobRecord, tail_lines: usize) -> String {
+    let output_path = store.root().join(format!("{job_id}.out"));
+    let bytes = std::fs::read(&output_path).unwrap_or_default();
+    let (text, truncated) = tail_text(&bytes, MAX_OUTPUT_BYTES, Some(tail_lines));
+
+    let mut output = format!(
+        "job {job_id}: {}{}\n",
+        record.state.label(),
+        record
+            .exit_code
+            .map_or_else(String::new, |code| format!(", exit code {code}")),
+    );
+    if let Some(error) = &record.error {
+        let _ = writeln!(output, "error: {error}");
+    }
+    output.push_str("---\n");
+    if truncated {
+        output.push_str("... (earlier output omitted)\n");
+    }
+    output.push_str(&text);
+    if !text.is_empty() && !text.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+/// Re-read `record` until it reaches a terminal state or `secs` elapse.
+///
+/// The wait is a poll of the durable record rather than a subscription: the
+/// record is one small JSON file that `Bash`'s background task settles when
+/// the child exits, and a session has a handful of jobs, so a 200 ms re-read
+/// costs nothing and needs no channel between the tool and every possible
+/// producer. It also works for a job started by an earlier process.
+///
+/// Returns `true` when the deadline passed with the job still running. A job
+/// that disappears from the store mid-wait is treated as settled: the record
+/// is the only claim of liveness there is, so its absence cannot mean
+/// "still running".
+async fn wait_for_settle(
+    store: &JobStore,
+    job_id: &str,
+    record: &mut JobRecord,
+    secs: u64,
+) -> Result<bool, ToolError> {
+    if record.state.is_terminal() {
+        return Ok(false);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+        match store.load(job_id).map_err(list_error)? {
+            Some(current) => {
+                let settled = current.state.is_terminal();
+                *record = current;
+                if settled {
+                    return Ok(false);
+                }
+            }
+            None => return Ok(false),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+    }
 }
 
 /// List the background shell jobs of this session.
@@ -238,6 +327,13 @@ impl Tool for JobOutputTool {
                     "tail_lines": {
                         "type": "number",
                         "description": "How many trailing lines to return (default 200)"
+                    },
+                    "wait_secs": {
+                        "type": "number",
+                        "description": "Block until the job finishes, up to this many seconds \
+                                        (max 600), then return its state and new output. Omit \
+                                        to read the job as it is now. Use this instead of \
+                                        sleeping and reading the output file again."
                     }
                 }
             }),
@@ -261,6 +357,10 @@ impl Tool for JobOutputTool {
             // Polling is the point: the same call must see output written
             // since the last one.
             skip_result_cache: true,
+            // `wait_secs` blocks for up to ten minutes, so the executor's 60 s
+            // default would cut it off with a `ToolError::Timeout` the tool
+            // never asked for. `wait_for_settle` owns its deadline instead.
+            self_managed_timeout: true,
             ..ToolCapabilities::default()
         }
     }
@@ -277,9 +377,14 @@ impl Tool for JobOutputTool {
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(DEFAULT_TAIL_LINES);
+        let wait_secs = input
+            .arguments
+            .get("wait_secs")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |n| n.min(MAX_WAIT_SECS));
 
         let store = job_store(&ctx);
-        let record =
+        let mut record =
             store
                 .load(&job_id)
                 .map_err(list_error)?
@@ -289,27 +394,26 @@ impl Tool for JobOutputTool {
                     ),
                 })?;
 
-        let output_path = store.root().join(format!("{job_id}.out"));
-        let bytes = std::fs::read(&output_path).unwrap_or_default();
-        let (text, truncated) = tail_text(&bytes, MAX_OUTPUT_BYTES, Some(tail_lines));
+        let waited_out = if wait_secs > 0 {
+            wait_for_settle(&store, &job_id, &mut record, wait_secs).await?
+        } else {
+            false
+        };
 
-        let mut output = format!(
-            "job {job_id}: {}{}\n",
-            record.state.label(),
-            record
-                .exit_code
-                .map_or_else(String::new, |code| format!(", exit code {code}")),
-        );
-        if let Some(error) = &record.error {
-            let _ = writeln!(output, "error: {error}");
-        }
-        output.push_str("---\n");
-        if truncated {
-            output.push_str("... (earlier output omitted)\n");
-        }
-        output.push_str(&text);
-        if !text.is_empty() && !text.ends_with('\n') {
-            output.push('\n');
+        let mut output = render_job(&store, &job_id, &record, tail_lines);
+        if wait_secs > 0 {
+            // Say which of the two happened. A job still running at the
+            // deadline means "ask again", not "it is stuck", and the model
+            // has to be able to tell those apart without guessing.
+            if waited_out {
+                let _ = writeln!(
+                    output,
+                    "(waited {wait_secs}s; the job is still {})",
+                    record.state.label()
+                );
+            } else {
+                let _ = writeln!(output, "(waited until the job ended)");
+            }
         }
 
         Ok(ToolOutput {
@@ -706,5 +810,179 @@ mod tests {
             .await
             .unwrap();
         assert!(output.output.contains("already ended"), "{}", output.output);
+    }
+
+    #[tokio::test]
+    async fn wait_returns_as_soon_as_the_job_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        record(dir.path(), "shell-w-0", JobState::Running);
+        let store = JobStore::new(dir.path());
+        let id = "shell-w-0".to_string();
+        let root = dir.path().to_path_buf();
+
+        // Settle the record from another task after ~300 ms, which is more than
+        // one poll interval — so this fails if the wait never re-reads.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = JobStore::new(&root).settle(&id, JobState::Done, now_ms(), Some(0), None);
+        });
+
+        let started = std::time::Instant::now();
+        let output = JobOutputTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "JobOutput".into(),
+                    arguments: serde_json::json!({ "job_id": "shell-w-0", "wait_secs": 30 }),
+                },
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        // The point of the tool: it returns when the job ends, not when the
+        // deadline the model guessed at expires. Asserting the deadline
+        // (30 s) would pass even with the wait removed, so assert the early
+        // return instead — with room for a loaded CI machine.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the wait did not return on settle: {elapsed:?}"
+        );
+        assert!(output.output.contains("done"), "{}", output.output);
+        assert!(
+            output.output.contains("waited until the job ended"),
+            "{}",
+            output.output
+        );
+        assert!(
+            store
+                .load("shell-w-0")
+                .unwrap()
+                .unwrap()
+                .state
+                .is_terminal()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_stops_at_the_deadline_and_says_the_job_is_still_running() {
+        let dir = tempfile::tempdir().unwrap();
+        record(dir.path(), "shell-w-1", JobState::Running);
+
+        let started = std::time::Instant::now();
+        let output = JobOutputTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "JobOutput".into(),
+                    arguments: serde_json::json!({ "job_id": "shell-w-1", "wait_secs": 1 }),
+                },
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "the wait gave up early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the wait overshot its deadline: {elapsed:?}"
+        );
+        assert!(
+            output.output.contains("the job is still running"),
+            "{}",
+            output.output
+        );
+    }
+
+    /// A wait that asks for more than the ceiling is clamped, not honoured and
+    /// not rejected: the caller gets a bounded call either way.
+    #[tokio::test]
+    async fn wait_secs_is_clamped_to_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        record(dir.path(), "shell-w-2", JobState::Done);
+        let output = JobOutputTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "JobOutput".into(),
+                    arguments: serde_json::json!({ "job_id": "shell-w-2", "wait_secs": 999_999 }),
+                },
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        // Already terminal, so it returns immediately — but the clamp must not
+        // have turned into a 999999-second sleep before checking state.
+        assert!(output.output.contains("done"), "{}", output.output);
+    }
+
+    /// The executor cuts every non-`self_managed_timeout` call at 60 s, so a
+    /// blocking `JobOutput` has to opt out or `wait_secs` above that is
+    /// silently truncated into a `ToolError::Timeout`.
+    #[test]
+    fn waiting_takes_over_its_own_deadline_from_the_executor() {
+        assert!(
+            JobOutputTool.capabilities().self_managed_timeout,
+            "a blocking JobOutput would be cut off at the executor's 60 s default"
+        );
+        // A ceiling at or below the executor's default would make the opt-out
+        // pointless, so the relationship is checked at compile time.
+        const { assert!(MAX_WAIT_SECS > 60) };
+    }
+
+    /// End to end against a real background child: the point of `wait_secs` is
+    /// that it replaces `sleep N; cat jobfile`, so both halves of that have to
+    /// be beaten — it must return when the job ends, and it must return the
+    /// output the read would have found.
+    #[tokio::test]
+    async fn wait_on_a_real_background_job_returns_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = crate::builtins::BashTool::new()
+            .execute(
+                ToolInput {
+                    call_id: "bg".into(),
+                    name: "Bash".into(),
+                    arguments: serde_json::json!({
+                        "command": "sleep 0.4; echo waited-result",
+                        "run_in_background": true,
+                    }),
+                },
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        let handle: serde_json::Value = serde_json::from_str(&started.output).unwrap();
+        let id = handle["job_id"].as_str().unwrap().to_string();
+        assert_eq!(handle["note"], "command running in background");
+
+        let before = std::time::Instant::now();
+        let output = JobOutputTool
+            .execute(
+                ToolInput {
+                    call_id: "1".into(),
+                    name: "JobOutput".into(),
+                    arguments: serde_json::json!({ "job_id": id, "wait_secs": 30 }),
+                },
+                ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        let elapsed = before.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the wait ran to its deadline instead of returning on settle: {elapsed:?}"
+        );
+        assert!(output.output.contains("done"), "{}", output.output);
+        assert!(
+            output.output.contains("waited-result"),
+            "the wait returned without the output the job wrote: {}",
+            output.output
+        );
     }
 }
