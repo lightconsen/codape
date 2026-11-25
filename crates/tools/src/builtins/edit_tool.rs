@@ -5,9 +5,51 @@ use crate::tool::{Tool, ToolContext, ToolDescriptor, ToolInput, ToolTier};
 use async_trait::async_trait;
 use std::io::{Read as _, Seek, SeekFrom, Write as _};
 
+/// Lines of context shown either side of the edited region.
+const EXCERPT_CONTEXT_LINES: usize = 3;
+
+/// Largest excerpt returned with an edit.
+///
+/// The point of the excerpt is to let the model confirm its own edit without a
+/// second `Read`; it does not need the whole file for that. A cap keeps a large
+/// replacement from turning one edit into a 300 KB observation.
+const MAX_EXCERPT_CHARS: usize = 4_000;
+
 /// Edit file contents with exact string replacement.
 #[derive(Debug)]
 pub struct EditTool;
+
+/// The region an edit touched, with a few lines either side.
+///
+/// `start_line` is the zero-based line of the first replaced character in the
+/// *old* content — everything before it is unchanged, so the same index lands
+/// on the edit in the new content. `block_lines` is how many lines the new
+/// text occupies, so the window covers the replacement and not just its first
+/// line.
+fn excerpt_around(content: &str, start_line: usize, block_lines: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let from = start_line.saturating_sub(EXCERPT_CONTEXT_LINES);
+    let to = (start_line + block_lines.max(1) + EXCERPT_CONTEXT_LINES).min(lines.len());
+    if from >= to {
+        return String::new();
+    }
+
+    let mut text = lines[from..to].join("\n");
+    let omitted_before = from > 0;
+    let omitted_after = to < lines.len();
+
+    if text.chars().count() > MAX_EXCERPT_CHARS {
+        let clipped: String = text.chars().take(MAX_EXCERPT_CHARS).collect();
+        text = format!("{clipped}\n... (excerpt truncated)");
+    }
+    if omitted_before {
+        text.insert_str(0, "...\n");
+    }
+    if omitted_after {
+        text.push_str("\n...");
+    }
+    text
+}
 
 #[async_trait]
 impl Tool for EditTool {
@@ -132,6 +174,14 @@ impl Tool for EditTool {
             content.replacen(&old_string, &new_string, 1)
         };
 
+        // Where the edit landed, for the excerpt: the first replaced character
+        // sits on the same line number in the old and the new content, because
+        // everything ahead of it is unchanged.
+        let start_line = content
+            .find(&old_string)
+            .map_or(0, |offset| content[..offset].matches('\n').count());
+        let block_lines = new_string.lines().count();
+
         // Snapshot the current content so `/rewind` can undo this edit.
         if let Some(store) = crate::tool::checkpoint_store_from(&ctx) {
             store.snapshot(&input.call_id, &actual);
@@ -146,8 +196,23 @@ impl Tool for EditTool {
                 message: format!("failed to write file: {e}"),
             })?;
 
+        // The model has not seen the file since it edited it, and a bare
+        // "Replaced 1 occurrence" tells it nothing about whether the change
+        // reads right. Half of a measured Codape run's edits were followed by
+        // the model reading the same file back to find out; the excerpt makes
+        // that second call unnecessary.
+        let excerpt = excerpt_around(&new_content, start_line, block_lines);
+        let mut output = format!("Replaced {count} occurrence(s) of old_string in {path}");
+        if !excerpt.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(&excerpt);
+        }
+        output.push_str(
+            "\n\n(these lines are the current file content around the edit — \
+             no need to Read the file back)",
+        );
         Ok(ToolOutput {
-            output: format!("Replaced {count} occurrence(s) of old_string in {path}"),
+            output,
             is_display: true,
             images: Vec::new(),
         })
@@ -296,6 +361,113 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("test.txt")).unwrap(),
             "same content"
+        );
+    }
+
+    /// The edit returns the region it touched, so confirming it does not cost
+    /// a second `Read`. Both directions of context are shown, and the answer
+    /// says a read-back is not needed.
+    #[tokio::test]
+    async fn the_answer_shows_the_edited_region() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body: String = (1..=20).fold(String::new(), |mut all, n| {
+            use std::fmt::Write as _;
+            let _ = writeln!(all, "line {n}");
+            all
+        });
+        std::fs::write(tmp.path().join("f.txt"), &body).unwrap();
+
+        let output = EditTool
+            .execute(
+                edit_input("f.txt", "line 10", "LINE TEN", false),
+                test_ctx(tmp.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            output.output.contains("Replaced 1 occurrence"),
+            "{}",
+            output.output
+        );
+        assert!(
+            output.output.contains("LINE TEN"),
+            "the new text: {}",
+            output.output
+        );
+        // Three lines either side: line 7 through line 13.
+        assert!(output.output.contains("line 7"), "{}", output.output);
+        assert!(output.output.contains("line 13"), "{}", output.output);
+        assert!(
+            !output.output.contains("line 1\n"),
+            "line 1 is too far away: {}",
+            output.output
+        );
+        assert!(
+            !output.output.contains("line 20"),
+            "line 20 is too far away: {}",
+            output.output
+        );
+        assert!(
+            output.output.contains("no need to Read the file back"),
+            "{}",
+            output.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
+            body.replace("line 10", "LINE TEN")
+        );
+    }
+
+    /// A replacement longer than the file's own lines still shows the whole
+    /// inserted block, not just its first line.
+    #[tokio::test]
+    async fn a_multiline_replacement_is_covered_by_the_excerpt() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("f.txt"), "a\nREPLACE\nz\n").unwrap();
+
+        let output = EditTool
+            .execute(
+                edit_input("f.txt", "REPLACE", "one\ntwo\nthree\nfour", false),
+                test_ctx(tmp.path()),
+            )
+            .await
+            .unwrap();
+
+        for line in ["one", "two", "three", "four"] {
+            assert!(
+                output.output.contains(line),
+                "{line} missing: {}",
+                output.output
+            );
+        }
+    }
+
+    /// A whole-file replacement is bounded: the excerpt is a window, not the
+    /// file.
+    #[tokio::test]
+    async fn a_huge_replacement_does_not_return_the_whole_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let big = "x".repeat(50_000);
+        std::fs::write(tmp.path().join("f.txt"), "stub\n").unwrap();
+
+        let output = EditTool
+            .execute(
+                edit_input("f.txt", "stub", &big, false),
+                test_ctx(tmp.path()),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            output.output.len() < MAX_EXCERPT_CHARS + 1_000,
+            "the excerpt is {} bytes",
+            output.output.len()
+        );
+        assert!(
+            output.output.contains("excerpt truncated"),
+            "{}",
+            &output.output[..200]
         );
     }
 }
