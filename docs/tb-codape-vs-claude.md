@@ -72,8 +72,41 @@ this benchmark, not something Codape adds. It does rule out the whole family of
 harness-side optimisations aimed at the answer: trimming the answer, shortening
 tool output, or trimming the prompt prefix all act on the 2 %.
 
-What it does *not* rule out is how much thinking the harness asks for. Codape
-requests a thinking budget; the size of that budget is a harness decision.
+### And the harness never asked for it
+
+The obvious next lever would be the thinking budget — Codape has `--effort`,
+which maps to `thinking.budget_tokens`. **Neither arm passes it.** The Codape
+adapter's command line is `codape -p ... --max-turns 300`, with no `--effort`,
+so `effective_reasoning_effort()` is `None`, `apply_reasoning_effort` returns
+on its first line, and the request body carries **no `thinking` field at all**.
+
+Probing the endpoint with exactly that body — model, `max_tokens`, one user
+message, nothing else — still returns a `thinking` block followed by text. So
+the 98 % is the model's own default on this gateway, not something either
+harness requested. There is no harness-side knob to turn here: the only way to
+make the model think less is a parameter this endpoint does not require the
+caller to send and that neither agent sends.
+
+Two consequences follow, and they cut against the obvious plan:
+
+- Trimming, capping, or budgeting the reasoning is **not** available as a
+  harness optimisation on this model. That rules out the one lever the
+  measurement seemed to leave open.
+- The remaining lever is what it does with the thinking it produced — turning
+  it into a tool call before the ceiling arrives. That is the `error_no_output`
+  defect below, and `retry_ceiling` is the mechanism already in the code.
+
+**A related gap that is real but did not affect these numbers.** Codape
+resolves its provider profile from the base URL, and `opencode.ai` matches
+neither `anthropic.com` nor `openai.com`, so it resolves to `custom`, whose
+`reasoning_effort_support()` is `Unsupported`. Both arms ran with `--effort`
+unset, so nothing was lost here — but a user who *did* set `--effort` on this
+gateway would have it silently dropped with a warning, even though the gateway
+accepts both the `budget_tokens` and the `output_config.effort` encodings
+(probed: both return 200). `CODAPE_PROVIDER_PROFILE=anthropic` is the
+workaround; it is not set by anything in this repo. Not changed while the sweep
+runs — altering request parameters mid-sweep would make the two halves of the
+Codape arm incomparable.
 
 ## The defect the comparison finds
 
