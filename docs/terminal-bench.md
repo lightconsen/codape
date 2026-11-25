@@ -3154,15 +3154,24 @@ All nineteen were real, and all are fixed:
     `input + max_tokens ≤ window` rule and by half the window — above half,
     compaction cannot recover the context, so a larger ceiling there only
     trades one rejection for another. When the ceiling cannot move (the
-    default 32 768 on any window ≤ 64 K, which includes every DeepSeek
-    deployment) no second request is sent and the turn is reported as the
-    no-op it was. The retry happens inside `send_request_streaming`, before
+    default 32 768 on any window ≤ 64 K) no second request is sent and the
+    turn is reported as the no-op it was. That used to include every DeepSeek
+    deployment, because the model table had no `deepseek-v4` entry: the window
+    fell back to the 32 000-token guess, and `retry_ceiling` refuses a guessed
+    window outright. Both Terminal-Bench tasks that ended `error_no_output`
+    (`biped-contact-dynamics`, `ks-solver-cpp`) died in that refusal with the
+    gateway serving a 1M window. The entry was added in `ee448320`; the
+    endpoint was then probed directly and accepts a 65 536 `max_tokens`, so
+    the raised ceiling is a request the provider will take, not one it will
+    reject. Analysed in `docs/tb-codape-vs-claude.md`. The retry happens inside
+    `send_request_streaming`, before
     the thinking block is written to the turn's messages, because a
     thinking-only assistant turn as the *last* message is a prefill and is
     rejected by current models. `TurnRuntime::empty_answer_retries` keeps the
     re-ask from compounding with `recovery_count`.
 
     Covered by `a_retry_ceiling_needs_room_the_request_does_not_have`,
+    `a_model_in_the_table_can_recover_from_an_empty_answer`,
     `a_run_that_spent_its_ceiling_thinking_reports_no_output` and
     `a_no_op_turn_is_re_asked_at_a_larger_ceiling`.
 

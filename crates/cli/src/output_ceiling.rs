@@ -18,9 +18,12 @@
 //! above that line is `output_reserve + trigger_buffer` — 33 000 tokens with
 //! the default config — and `DEFAULT_MAX_TOKENS` is 32 768 precisely so a
 //! request sent at the line still fits. It cannot simply be raised: it is a
-//! plain number, checked against no model, and DeepSeek's whole window is
-//! 64 000, so a flat 65 536 would make every DeepSeek request fail before it
-//! was ever sent.
+//! plain number, checked against no model, and the legacy DeepSeek endpoints
+//! (`deepseek-chat`, `deepseek-reasoner`, `deepseek-r1`) have a 64 000-token
+//! window, so a flat 65 536 would make every request to one of them fail
+//! before it was ever sent. The v4 family is not the tight case — it has a
+//! 1M window — but the default is a single number for whatever model a
+//! session ends up on, so it is sized for the smallest window still in use.
 //!
 //! A caller that wants more room can ask, because it knows its model and can
 //! check the window. What that buys is a later request being rejected by the
