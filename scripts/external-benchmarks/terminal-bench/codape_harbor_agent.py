@@ -645,6 +645,18 @@ def build_trajectory(
     * ``assistant`` with a ``tool_use`` block — a call the model made;
     * ``user`` with a ``tool_result`` block — that call's output.
 
+    There is no per-turn boundary frame to key on. ``result`` is emitted once,
+    when the session ends — not once per turn — so flushing only on ``result``
+    folded every turn of a 300-turn run into a single ``Step``: a real trial
+    recorded 306 tool calls under one step, which makes the trajectory useless
+    for exactly the per-turn analysis it exists to support.
+
+    The boundary has to be inferred from the protocol's own ordering. A turn is
+    ``[thinking][text][tool_use…][tool_result…]``, so once every accumulated
+    call has its result the turn is complete, and whatever arrives next opens a
+    new one. ``_turn_complete`` is that test; ``flush`` runs on it as well as on
+    ``result`` and at end of stream.
+
     Returns ``None`` when the transcript holds no turns, because an empty
     trajectory is worse than none: Harbor would render an empty tab and a
     consumer could not tell it from a run that did nothing.
@@ -660,7 +672,7 @@ def build_trajectory(
     saw_anything = False
 
     def flush() -> Step | None:
-        nonlocal text_parts, thinking_parts, tool_calls
+        nonlocal text_parts, thinking_parts, tool_calls, results
         if not (text_parts or thinking_parts or tool_calls):
             return None
         message = "".join(text_parts).strip()
@@ -688,11 +700,35 @@ def build_trajectory(
             ),
         )
         text_parts, thinking_parts, tool_calls = [], [], []
+        # Results are cleared with the calls they belong to. Keeping them would
+        # let a later turn satisfy `turn_complete` on a stale id and flush a
+        # step whose observation is empty.
+        results = {}
         return step
 
     steps: list[Step] = []
     if instruction:
         steps.append(Step(step_id=1, source="user", message=instruction))
+
+    def turn_complete() -> bool:
+        """True when the accumulated turn's tool cycle has finished.
+
+        One turn is ``[thinking][text][tool_use…][tool_result…]``, so the turn
+        ends at the frame that completes the *last* outstanding result — not at
+        the frame after it. Waiting for a following frame would be wrong for a
+        different reason in each direction:
+
+        * flushing on any later content frame splits one streamed answer into a
+          step per token, because ``text_delta`` arrives per token;
+        * a turn that makes no calls (the model's final prose) has no tool
+          cycle to close and is flushed by ``result`` or end-of-stream instead.
+
+        Calls may be issued in parallel, so results can arrive in any order and
+        ``all`` over the accumulated calls is what says the cycle is done.
+        """
+        return bool(tool_calls) and all(
+            call.tool_call_id in results for call in tool_calls
+        )
 
     for line in text.splitlines():
         line = line.strip()
@@ -736,6 +772,13 @@ def build_trajectory(
                     )
                     saw_anything = True
         elif kind == "result":
+            pending = flush()
+            if pending is not None:
+                steps.append(pending)
+        # The turn's tool cycle closed on this frame. Flushing here is what
+        # turns a 300-turn session into 300 steps instead of one; `result` is
+        # only the session's last frame and would collapse everything.
+        if turn_complete():
             pending = flush()
             if pending is not None:
                 steps.append(pending)

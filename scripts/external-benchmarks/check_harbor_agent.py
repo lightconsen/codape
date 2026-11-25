@@ -299,6 +299,101 @@ def check_build(module) -> None:
           "a transcript with no turns must produce no trajectory")
 
 
+def check_multi_turn(module) -> None:
+    """One ``Step`` per model turn, not one for the whole session.
+
+    Codape emits ``result`` once, when the session ends — never per turn. An
+    adapter that flushed only on ``result`` therefore folded every turn into a
+    single step: the first harbor trial recorded 306 tool calls under one step,
+    300 turns' worth of trajectory in a document that could not be read. This
+    is the case a single-turn fixture cannot catch, because with one turn
+    "flush at the end" and "flush at each turn boundary" agree.
+
+    The boundary has to be inferred. Three turns here, each a tool call and its
+    result, with no frame separating them but the results themselves.
+    """
+    def use(cid, command):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": cid, "name": "Bash",
+             "input": {"command": command}}]}}
+
+    def result(cid, text):
+        return {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": cid, "content": text}]}}
+
+    traj = module.build_trajectory(
+        transcript(
+            THINKING, TEXT, use("c1", "ls"), result("c1", "a.txt"),
+            THINKING, TEXT, use("c2", "cat a.txt"), result("c2", "hello"),
+            THINKING, TEXT, use("c3", "pwd"), result("c3", "/app"),
+            RESULT,
+        ),
+        instruction="do the task",
+    )
+    check(traj is not None, "multi-turn: production must not be None")
+    if traj is None:
+        return
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    check(len(agent_steps) == 3,
+          f"three tool turns must produce three agent steps, got {len(agent_steps)}")
+    for index, step in enumerate(agent_steps, start=1):
+        calls = step.tool_calls or []
+        check(len(calls) == 1,
+              f"step {index} must carry exactly its own call, got {len(calls)}")
+        if not calls:
+            continue
+        check(calls[0].tool_call_id == f"c{index}",
+              f"step {index} must carry call c{index}, got {calls[0].tool_call_id!r}")
+        # A result left in the accumulator would attach this turn's call to a
+        # previous turn's output, or leave the observation empty.
+        observed = (step.observation.results if step.observation else None) or []
+        check(len(observed) == 1,
+              f"step {index} must carry its own observation, got {len(observed)}")
+        if observed:
+            check(observed[0].source_call_id == f"c{index}",
+                  f"step {index} observation must match its call, got "
+                  f"{observed[0].source_call_id!r}")
+    check(traj.final_metrics is not None
+          and traj.final_metrics.total_steps == len(traj.steps),
+          "total_steps must still match the step count")
+
+    # Parallel calls in one turn are one step, not one each: the boundary is
+    # "the turn's cycle closed", not "a result arrived".
+    parallel = module.build_trajectory(
+        transcript(
+            use("p1", "ls"), use("p2", "pwd"),
+            result("p1", "a.txt"), result("p2", "/app"),
+            RESULT,
+        ),
+        instruction="x",
+    )
+    check(parallel is not None, "parallel: production must not be None")
+    if parallel is not None:
+        steps = [s for s in parallel.steps if s.source == "agent"]
+        check(len(steps) == 1,
+              f"two parallel calls are one turn, got {len(steps)} steps")
+        if steps:
+            check(len(steps[0].tool_calls or []) == 2,
+                  "both parallel calls must land in the one step")
+
+    # The model's closing prose makes no call, so nothing closes a tool cycle
+    # and only `result` or end-of-stream flushes it. It must still appear.
+    closing = module.build_trajectory(
+        transcript(use("c1", "ls"), result("c1", "a.txt"), THINKING, TEXT, RESULT),
+        instruction="x",
+    )
+    check(closing is not None, "closing-prose: production must not be None")
+    if closing is not None:
+        steps = [s for s in closing.steps if s.source == "agent"]
+        check(len(steps) == 2,
+              f"tool turn plus closing prose must be two steps, got {len(steps)}")
+        if len(steps) == 2:
+            check("I will look." in (steps[1].message or ""),
+                  f"the closing answer must be its own step: {steps[1].message!r}")
+            check(not (steps[1].tool_calls or []),
+                  "the closing step must make no calls")
+
+
 def check_metrics(module) -> None:
     traj = module.build_trajectory(transcript(TEXT, RESULT), instruction="x")
     assert traj is not None
@@ -599,6 +694,7 @@ def main() -> int:
     print("harbor adapter: ATIF conversion")
     check_model_env(module)
     check_build(module)
+    check_multi_turn(module)
     check_metrics(module)
     check_timeout(module)
     check_install_prerequisites(module)
