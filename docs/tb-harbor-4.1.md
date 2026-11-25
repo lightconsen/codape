@@ -260,6 +260,153 @@ finding as the first paid run recorded in
 reasoning latency and volume, not Codape's local overhead.** A local
 optimisation cannot move these numbers.
 
+## Codape and Claude Code, head to head on eight tasks
+
+Two later jobs ran the same eight tasks on the same model and gateway, one per
+arm: Codape `2026-11-25__09-59-09` (published `v0.2.2`, with
+`CODAPE_CONTEXT_WINDOW=1000000` exported by `run-arm.sh`) and Claude Code
+`2026-11-25__06-47-04`. These are not the trials in *Results* above, which came
+from the earlier job; nothing here changes those numbers.
+
+The split is even, which is what makes the setup usable: Codape wins two,
+Claude wins two, four are ties — and each arm's advantage is on a different
+task, so neither is measuring a broken configuration.
+
+| Task | Codape | Claude Code |
+|---|---|---|
+| `react-lead-form` | **1.0** 167/167 · 25.2 min | **1.0** 167/167 · 15.3 min |
+| `vf2-speedup-networkx` | **1.0** 60/60 · 88.9 min | 0.0 54/60 · 65.3 min |
+| `kv-live-surgery` | 0.0 5/6 · 61.2 min | **1.0** 6/6 · 34.4 min |
+| `foodstuff-beta-activity` | 0.0 11/13 · 26.2 min | 0.0 10/13 · 23.1 min |
+| `gsea-proteomics` | 0.0 10/16 · 20.0 min | 0.0 11/16 · 15.8 min |
+| `nextjs-performance` | 0.0 2/7 · 5.2 min | 0.0 2/7 · 23.8 min |
+| `ks-solver-cpp` | 0.0 1/2 · 126.4 min | 0.0 1/2 · 83.1 min |
+| `vllm-deepseek-streaming` | 0.0 3/7 · 3.9 min | 0.0 3/7 · 0.8 min |
+
+`vf2` is the sharpest contrast: Claude stopped at 54/60 and Codape passed all
+60, for 23.6 extra minutes. `kv-live-surgery` runs the other way — Claude solved
+it outright and Codape missed the one `throughput` assertion, in 27 more
+minutes. So the time advantage belongs to Claude on both.
+
+### The process, not the score
+
+Same step count, different allocation. On `vf2` both arms took **192 steps**;
+Codape spent them rewriting (Write 17 / Edit 3) where Claude patched (Edit 11 /
+Write 8). Both approaches can pass — Claude's reached 54/60 — so the split is a
+style difference, not by itself the reason for the four-test gap.
+
+| On `vf2` | Codape | Claude Code |
+|---|---|---|
+| steps | 192 | 192 |
+| output tokens | 310,898 | 331,914 |
+| input tokens | 46.7 M (99.2 % cached) | 47.8 M (99.1 % cached) |
+| reasoning share | 99.2 % | 98.8 % |
+| wall clock | 88.9 min | 65.3 min |
+| `model_ms` / `tool_ms` | 3,297 s / 2,035 s | `null` |
+| Bash / Write / Edit / Read | 160 / 17 / 3 / 1 | 178 / 8 / 11 / 2 |
+| job tools | `JobOutput` 9, `JobKill` 3, `JobList` 2 | none used |
+| foreground `sleep` | **645 s** over 10 calls (12.1 % of wall) | 34 s over 4 calls (0.9 %) |
+
+On `react-lead-form` — the task both arms solved — the difference is step
+economy rather than style: Claude took 80 steps and 15.3 minutes, Codape 113
+steps and 25.2 minutes, for the same 167/167. Codape's extra steps are
+Edit/Write churn (49 calls against 33).
+
+Reasoning share is 97–99 % on both arms on every large task, which repeats the
+finding in [`tb-codape-vs-claude.md`](tb-codape-vs-claude.md): what the model
+thinks is a property of the model on this benchmark, and no harness-side
+trimming of the visible answer touches it.
+
+### The one process difference that is Codape's
+
+Codape's `Bash` hands back a job handle when a foreground command outlives its
+60 s timeout, with `output_file` in the handle. The model's pattern is then
+`sleep N; cat <output_file>`, in the foreground, repeatedly:
+
+```
+step 85   sleep 120; cd /app && tail -5 /app/.codape/jobs/shell-…-69.out
+step 106  sleep 90;  tail -4 /app/.codape/jobs/shell-…-82.out
+step 177  sleep 55;  cat /app/.codape/jobs/shell-…-146.out
+```
+
+Across the same eight trials that is **2,597 s of foreground `sleep` (43
+minutes)** on the Codape arm against **266 s (4.4 minutes)** on Claude's — and
+`ks-solver-cpp` alone spends 1,825 s of its 126 minutes there. 56 observations
+in that arm are the `still running after 60s` notice, so the timeout-push path
+is exercised constantly; `run_in_background` is passed **zero times in 865
+Codape tool calls**.
+
+The zero is about the flag, not about intent. `run_in_background` is not the
+only way this model gets concurrency, and the trait that is actually visible is
+a different one: it rarely issues two calls in one batch. Same-batch calls do
+run concurrently — `tool_scheduler::run_tool_calls` executes the approved batch
+with `futures::future::join_all` — so a `Bash` paired with a `JobOutput` is
+overlap by construction. On `vf2` there are only 5 such multi-call steps out of
+192, and 3 of them are exactly that pair (steps 19, 20, 90). Claude Code issues
+them more often (8 of 192 on `vf2`, 14 of 92 on `kv-live-surgery`, almost all
+`Bash`+`Bash`), which is the readable difference in the two styles: Codape waits
+with a foreground `sleep`, Claude starts two commands at once.
+
+`react-lead-form` is where that reading needs qualifying: Codape *does* batch
+there (5 steps of 113), but every one is a `Read` burst at the start of the run
+(steps 1–5, up to four files at a time). Batch-compensating the exploration is
+a habit the model shows; batch-compensating a *build or a test run* is not.
+
+One thing I could not settle from the recorded data, and am therefore not
+claiming: `vf2` step 169 launched `tests/fuzz_small.py` with a 2400 s ceiling
+that wrote to `/tmp/f1.log`, and the observation is `started\nTrue` with exit
+0 and **no** `job_id` — so the tool did not push it to the background. Whether
+the command detached itself in the shell or simply finished inside the 60 s
+window is not decidable here: the trajectory stores a truncated one-line
+summary per call rather than the command text, `/tmp/f1.log` appears nowhere
+else in the transcript, and step 185 runs the same script to completion with
+visible output in under 60 s. Either reading is consistent with what was
+recorded, so no overlap is inferred from it.
+
+Claude Code, for its part, has no `JobOutput` tool to call and backgrounds the
+`run_in_background` way four times across its nine trials. It also has a
+`Monitor` tool; on `kv-live-surgery` it spent a step discovering it
+(`ToolSearch`) and another arming it — which is the shape Codape lacks: a way to
+wait that is not a `sleep` in the foreground.
+
+### `model_ms + tool_ms == duration_ms` is not a parallelism test
+
+This was written down as one, and it is wrong on the code's own terms.
+`TurnTiming::tool_ms` says the sum is **"at most the turn's wall clock and
+usually less"** (`cost.rs:344`) — context building, hooks, compaction and the
+gap between turns belong to neither figure. A sum that equals the wall clock is
+therefore the expected shape of a run with no idle time, not a signature of
+zero concurrency, and a sum *below* it is equally consistent with heavy
+overlap and with a slow compaction.
+
+Two mechanisms make it worse as a concurrency probe. The engine nets overlap
+out rather than letting it show: with `streaming_tool_execution` on, a tool
+running inside the stream has its wall clock subtracted from `model_ms`
+(`engine.rs:7066`), so overlap shrinks the sum instead of growing it — the
+opposite direction from what the test assumes. (That path is off by default —
+`FeatureFlags::streaming_tool_execution` is `false` and neither the adapter nor
+`run-arm.sh` sets `--betas` — so on this sweep the netting never engaged, which
+removes the explanation but not the invalidity.) And a background job's runtime
+is charged to the call that started it, which returns at once, so the time it
+saves never appears in `tool_ms` at all.
+
+Measured over the eight Codape trials, `duration_ms − model_ms − tool_ms` in
+seconds is: `foodstuff` 1, `gsea` 0, `ks-solver` −489, `kv-live` 0,
+`nextjs` −27, `react-lead-form` 1, `vf2` 2, `vllm` 0. Two are negative, which
+settles the question: the relation is not an invariant, so a run whose sum
+exceeds the wall clock is not thereby proven to have overlapped anything, and
+one whose sum equals it is not thereby proven not to have. I have not
+established why those two are negative — the adapter sums each `result` frame's
+timing, which is a plausible contributor on `ks-solver` (two frames) but not on
+`nextjs` (one).
+
+What the six near-zero gaps do say is narrower and still useful: context
+building, hooks and inter-turn idle cost nothing measurable, so a
+completeness check on the accounting passes. That is all. It is not a test for
+concurrency, and it cannot distinguish a run that used a background job from
+one that did not — a background job's runtime is charged to the call that
+started it, which returns immediately.
+
 ## Harness behaviour worth knowing
 
 ### The counters in `result.json` go stale
