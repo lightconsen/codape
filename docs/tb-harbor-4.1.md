@@ -268,6 +268,16 @@ arm: Codape `2026-11-25__09-59-09` (published `v0.2.2`, with
 `2026-11-25__06-47-04`. These are not the trials in *Results* above, which came
 from the earlier job; nothing here changes those numbers.
 
+They are also not the nine-task comparison in
+[`tb-codape-vs-claude.md`](tb-codape-vs-claude.md), and the difference is the
+point: that one ran Codape on a **32 K window with a 16 K compaction line**
+(`2026-11-24__23-33-13`, before the model-table entry existed in the release)
+and scored **Codape 1, Claude 4, tie 4**. Same tasks, same reference agent, but
+a Codape arm that was handicapped — `kv-live-surgery` never got past 4/6 there
+and passes 5/6 here, `vf2` goes from 57/60 to a clean 60/60. Where the two
+disagree, this section supersedes it; the older file is still the record of
+what the window defect cost, and says so.
+
 The split is even, which is what makes the setup usable: Codape wins two,
 Claude wins two, four are ties — and each arm's advantage is on a different
 task, so neither is measuring a broken configuration.
