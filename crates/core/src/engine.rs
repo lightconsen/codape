@@ -9521,6 +9521,47 @@ mod tests {
         assert_eq!(retry_ceiling(32_768, 1_000, known(64_000)), None);
     }
 
+    /// The model table's `deepseek-v4` entry is load-bearing, not cosmetic: it
+    /// is what lets a reasoning model that spent its whole ceiling thinking be
+    /// re-asked with a larger one.
+    ///
+    /// `retry_ceiling` refuses a guessed window outright, so while
+    /// `deepseek-v4.1-flash` was absent from the table a turn that produced
+    /// nothing could not retry at all — the window was `Unknown` at 32 000
+    /// tokens, the compaction line was half that, and the run ended as
+    /// `error_no_output`. Two Terminal-Bench trials ended exactly that way
+    /// (`biped-contact-dynamics`, `ks-solver-cpp`), burning 100 576 and
+    /// 131 196 output tokens on turns with no text and no tool call.
+    ///
+    /// The whole chain is asserted here rather than the number alone, because
+    /// the number was never the point: a table hit must come back `Table`, and
+    /// only a non-guess source lets the ceiling through.
+    #[test]
+    fn a_model_in_the_table_can_recover_from_an_empty_answer() {
+        use crate::types::{
+            ContextWindowResolver, ContextWindowSource, ResolvedContextWindow,
+            UNKNOWN_CONTEXT_WINDOW,
+        };
+
+        // No overrides attached: this is the resolution a run gets from the
+        // table alone, which is the case the entry fixes.
+        let window = ContextWindowResolver::default().resolve_detailed("deepseek-v4.1-flash");
+        assert_eq!(window.tokens, 1_000_000);
+        assert_eq!(window.source, ContextWindowSource::Table);
+
+        // The default 32 768-token engine ceiling, doubled against 1M of room.
+        assert_eq!(retry_ceiling(32_768, 40_000, window), Some(65_536));
+        // With nothing in the context yet the ceiling still stops at half the
+        // window, which 1M makes no obstacle.
+        assert_eq!(retry_ceiling(32_768, 0, window), Some(65_536));
+
+        // The control: the guess the entry replaced. Same numbers, same
+        // request, no retry — the branch the two trials died in.
+        let guessed =
+            ResolvedContextWindow::new(UNKNOWN_CONTEXT_WINDOW, ContextWindowSource::Unknown);
+        assert_eq!(retry_ceiling(32_768, 40_000, guessed), None);
+    }
+
     /// A provider outage ends the turn as `ApiUnavailable`, whatever the
     /// message says. The turn loop used to decide by reading the message —
     /// `e.starts_with("The AI service is temporarily unavailable")` — so the
