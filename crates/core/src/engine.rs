@@ -1940,6 +1940,59 @@ impl Drop for CacheTtlTimer {
 /// end of the run.
 pub const MAX_PROVIDER_RESUMES: u32 = 8;
 
+/// How many turns one run may lose to provider unavailability before the run
+/// ends.
+///
+/// An outage is a property of the connection, not of the work: the session's
+/// context is intact and the same request may succeed a moment later. Ending
+/// the *run* on the first one threw away everything the session had done — one
+/// measured benchmark trial re-did its whole 283-step task three times, losing
+/// 10.5 MB of stream each time, because a single exhausted retry budget looked
+/// exactly like a finished run to whatever drove it.
+///
+/// So a turn that dies of `ApiUnavailable` is retried from the same context,
+/// bounded so a provider that is down for good still ends the run. The retries
+/// back off on the same schedule as the transport retries, and the count is
+/// consecutive: a turn that succeeds resets it.
+pub const MAX_UNAVAILABLE_RETRIES: u32 = 3;
+
+/// The delay before re-asking a provider that was unavailable.
+///
+/// The retry budget inside one request already covers a short blip, so by the
+/// time a turn sees `ApiUnavailable` the provider has been failing for several
+/// attempts. These gaps are deliberately longer than a single request's
+/// backoff: a gateway that is down for a minute should not burn the whole
+/// allowance in a second.
+#[must_use]
+pub fn unavailable_retry_delay(
+    base: std::time::Duration,
+    retries_already_run: u32,
+) -> std::time::Duration {
+    let factor = 1u32 << retries_already_run.min(4);
+    base.saturating_mul(factor).min(UNAVAILABLE_RETRY_CEILING)
+}
+
+/// The longest gap between attempts to re-ask an unavailable provider.
+pub const UNAVAILABLE_RETRY_CEILING: std::time::Duration = std::time::Duration::from_secs(80);
+
+/// The gap production uses before re-asking an unavailable provider.
+pub const UNAVAILABLE_RETRY_BASE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the session holds model work worth preserving.
+///
+/// A session whose only message is the prompt has nothing an outage can
+/// destroy, so there is no reason to spend retries on it: the caller can start
+/// over for free. Once an assistant turn or a tool result exists, ending the
+/// run discards that work — which is what this whole path is about.
+fn session_holds_work(messages: &[crate::types::Message]) -> bool {
+    messages.iter().any(|message| {
+        matches!(
+            message.role,
+            crate::types::Role::Assistant | crate::types::Role::Tool
+        )
+    })
+}
+
 /// How many times one request is retried after the provider says its input
 /// does not fit.
 ///
@@ -2334,6 +2387,12 @@ pub struct QueryEngine {
     /// and embedders that render the lifecycle.
     transition_observer: Option<TransitionObserver>,
     max_tokens: u32,
+    /// Base gap between attempts to re-ask a provider reported unavailable.
+    ///
+    /// A field rather than the constant so a test can shrink it: the bounded
+    /// retry is the behaviour worth proving, and spending real minutes on it
+    /// would make the test unrunnable.
+    unavailable_retry_base: std::time::Duration,
 }
 
 /// A denied tool call that should be summarized in the next turn.
@@ -2702,6 +2761,7 @@ impl QueryEngine {
             summary_prefetch_failure: Arc::new(Mutex::new(None)),
             transition_observer: None,
             max_tokens: Self::DEFAULT_MAX_TOKENS,
+            unavailable_retry_base: UNAVAILABLE_RETRY_BASE,
         }
     }
 
@@ -3883,6 +3943,10 @@ impl QueryEngine {
         let mut turn_number = self.current_turn.load(std::sync::atomic::Ordering::SeqCst) + 1;
         let mut last_reason = TerminalReason::Completed;
         let mut provider_resumes: u32 = 0;
+        // Consecutive outages are what the bound is about: a turn that gets an
+        // answer resets the allowance, so a long run that meets one flaky
+        // minute early on can still ride out a second one later.
+        let mut unavailable_retries: u32 = 0;
 
         // A session that sits idle still has a cache to keep warm; the timer
         // asks for compaction when the TTL is nearly up.
@@ -3921,6 +3985,10 @@ impl QueryEngine {
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     last_reason = reason.clone();
+                    // The provider answered: whatever outage allowance was
+                    // spent is over. `execute_turn` reports a failed request as
+                    // an `Err`, so an `Ok` here is always a real answer.
+                    unavailable_retries = 0;
 
                     // An interrupt that arrived while this turn was running —
                     // during a tool, most often — ends the run here rather
@@ -3967,6 +4035,13 @@ impl QueryEngine {
                         TurnError::ContextOverflow { .. } => "context_overflow",
                         TurnError::Fatal { .. } => "error",
                     };
+                    // An outage is the connection's verdict, not the work's.
+                    // Decide before closing: the closing path is the same
+                    // either way, and a retry is a new attempt at the same
+                    // request rather than a new kind of ending.
+                    let retry_outage = matches!(error, TurnError::ApiUnavailable { .. })
+                        && unavailable_retries < MAX_UNAVAILABLE_RETRIES
+                        && session_holds_work(&self.session.messages);
                     let _ = self
                         .finish_turn(
                             &mut turn,
@@ -3979,6 +4054,29 @@ impl QueryEngine {
                         .await;
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
+                    if retry_outage {
+                        let delay = unavailable_retry_delay(
+                            self.unavailable_retry_base,
+                            unavailable_retries,
+                        );
+                        unavailable_retries += 1;
+                        tracing::warn!(
+                            retry = unavailable_retries,
+                            max = MAX_UNAVAILABLE_RETRIES,
+                            ?delay,
+                            "provider unavailable — re-asking rather than ending the run"
+                        );
+                        let _ = self.event_tx.send(EngineEvent::Notification {
+                            message: format!(
+                                "The AI service is temporarily unavailable; retrying this \
+                                 request ({unavailable_retries}/{MAX_UNAVAILABLE_RETRIES}) \
+                                 instead of ending the session."
+                            ),
+                        });
+                        self.wait_out_outage(delay).await;
+                        turn_number += 1;
+                        continue;
+                    }
                     return match error {
                         TurnError::ApiUnavailable { .. } | TurnError::ContextOverflow { .. } => {
                             Ok(reason)
@@ -3999,6 +4097,16 @@ impl QueryEngine {
             turn.terminate(last_reason.clone());
         }
         Ok(turn.terminal_reason.unwrap_or(last_reason))
+    }
+
+    /// Wait out a provider outage before re-asking.
+    ///
+    /// It only sleeps. An interrupt during the wait is not swallowed here: the
+    /// wait returns, the loop is re-entered, and the interrupt check at the top
+    /// of it is what ends the run.
+    async fn wait_out_outage(&self, delay: std::time::Duration) {
+        tracing::debug!(?delay, "waiting out a provider outage");
+        tokio::time::sleep(delay).await;
     }
 
     /// Submit a user message and run the full turn loop using streaming API.
@@ -4023,6 +4131,8 @@ impl QueryEngine {
         let mut turn_number = self.current_turn.load(std::sync::atomic::Ordering::SeqCst) + 1;
         let mut last_reason = TerminalReason::Completed;
         let mut provider_resumes: u32 = 0;
+        // Consecutive outages bound the retry allowance; an answer resets it.
+        let mut unavailable_retries: u32 = 0;
 
         // A session that sits idle still has a cache to keep warm; the timer
         // asks for compaction when the TTL is nearly up.
@@ -4064,6 +4174,9 @@ impl QueryEngine {
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
                     last_reason = reason.clone();
+                    // The provider answered: whatever outage allowance was
+                    // spent is over.
+                    unavailable_retries = 0;
 
                     // A turn that was interrupted ends here rather than
                     // continuing into the work it was about to do.
@@ -4109,6 +4222,12 @@ impl QueryEngine {
                         TurnError::ContextOverflow { .. } => "context_overflow",
                         TurnError::Fatal { .. } => "error",
                     };
+                    // Same decision as the non-streaming loop: an outage is
+                    // about the connection, so re-ask rather than discard the
+                    // session, bounded, and only when there is work to lose.
+                    let retry_outage = matches!(error, TurnError::ApiUnavailable { .. })
+                        && unavailable_retries < MAX_UNAVAILABLE_RETRIES
+                        && session_holds_work(&self.session.messages);
                     let _ = self
                         .finish_turn(
                             &mut turn,
@@ -4121,6 +4240,29 @@ impl QueryEngine {
                         .await;
                     self.current_turn
                         .store(turn_number, std::sync::atomic::Ordering::SeqCst);
+                    if retry_outage {
+                        let delay = unavailable_retry_delay(
+                            self.unavailable_retry_base,
+                            unavailable_retries,
+                        );
+                        unavailable_retries += 1;
+                        tracing::warn!(
+                            retry = unavailable_retries,
+                            max = MAX_UNAVAILABLE_RETRIES,
+                            ?delay,
+                            "provider unavailable — re-asking rather than ending the run"
+                        );
+                        let _ = self.event_tx.send(EngineEvent::Notification {
+                            message: format!(
+                                "The AI service is temporarily unavailable; retrying this \
+                                 request ({unavailable_retries}/{MAX_UNAVAILABLE_RETRIES}) \
+                                 instead of ending the session."
+                            ),
+                        });
+                        self.wait_out_outage(delay).await;
+                        turn_number += 1;
+                        continue;
+                    }
                     return match error {
                         TurnError::ApiUnavailable { .. } | TurnError::ContextOverflow { .. } => {
                             Ok(reason)
@@ -7152,6 +7294,12 @@ impl QueryEngine {
             // The message is what turns a failed stream into a reported error
             // instead of an empty, apparently successful turn.
             let mut stream_error: Option<String> = None;
+            // The failure itself, kept so the turn can classify it. Reading
+            // the rendered message would make "the provider was unreachable
+            // for every attempt" indistinguishable from "the provider
+            // rejected the request", and those two want opposite handling:
+            // one ends the run, the other is worth re-asking.
+            let mut stream_failure: Option<crate::api_client::ApiError> = None;
             let mut stop_reason: Option<String> = None;
             let mut retry_requested = false;
 
@@ -7253,6 +7401,7 @@ impl QueryEngine {
                             stream_text.delivered().len()
                         );
                         stream_error = Some(e.to_string());
+                        stream_failure = Some(e.clone());
                         stream_failed = true;
                         // Fail-open: stop consuming the stream but return
                         // whatever partial text and tool calls we have.
@@ -7437,8 +7586,9 @@ impl QueryEngine {
                 && deferred_calls.is_empty()
                 && early_results.is_empty()
             {
-                let message =
-                    stream_error.unwrap_or_else(|| "the provider returned no response".to_string());
+                let message = stream_error
+                    .clone()
+                    .unwrap_or_else(|| "the provider returned no response".to_string());
                 // A stream that failed because the prompt does not fit is not
                 // a malformed request: the provider stated its limit, and the
                 // turn can retry after compacting.
@@ -7448,6 +7598,17 @@ impl QueryEngine {
                         actual: overflow.actual,
                         limit: overflow.limit,
                     });
+                }
+                // Classify the failure itself rather than the sentence it
+                // rendered as. This used to be a blanket `Fatal`, so a
+                // provider that stayed unreachable for the whole streaming
+                // retry budget ended the *run* — the one case
+                // `ApiUnavailable` exists to describe and the turn loop can
+                // now re-ask. A rejected request still fails immediately:
+                // `turn_error_from_api_error` maps only exhaustion and
+                // retryable classes to an outage.
+                if let Some(failure) = stream_failure {
+                    return Err(self.turn_error_from_api_error(failure).await);
                 }
                 return Err(TurnError::Fatal { message });
             }
@@ -10905,6 +11066,385 @@ mod tests {
         assert!(
             found_notification,
             "expected Notification event to be emitted"
+        );
+    }
+
+    // ─── Surviving a provider outage ─────────────────────────────────────
+
+    /// How many times the mock was asked, split by path.
+    ///
+    /// The streaming path has a rescue of its own: a stream that fails with
+    /// nothing usable is retried once non-streaming inside the same turn, so
+    /// one outage costs the provider two calls. Counting the two separately
+    /// is what makes "one attempt" mean one attempt.
+    #[derive(Default)]
+    struct Attempts {
+        streaming: std::sync::atomic::AtomicUsize,
+        blocking: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Attempts {
+        fn streams(&self) -> usize {
+            self.streaming.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn blocks(&self) -> usize {
+            self.blocking.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// A provider that fails the first `failures` streamed requests, then
+    /// answers. The non-streaming rescue always fails, so the outage the test
+    /// is about is the one the stream reports.
+    struct FlakyProvider {
+        failures: usize,
+        attempts: std::sync::Arc<Attempts>,
+    }
+
+    fn unavailable() -> crate::api_client::ApiError {
+        crate::api_client::ApiError::RetryExhausted {
+            attempts: 4,
+            last_error_message: "connection refused".into(),
+        }
+    }
+
+    impl FlakyProvider {
+        fn flaky(failures: usize) -> (Box<dyn ApiClient>, std::sync::Arc<Attempts>) {
+            let attempts = std::sync::Arc::new(Attempts::default());
+            (
+                Box::new(Self {
+                    failures,
+                    attempts: std::sync::Arc::clone(&attempts),
+                }),
+                attempts,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ApiClient for FlakyProvider {
+        fn clone_box(&self) -> Box<dyn ApiClient> {
+            Box::new(Self {
+                failures: self.failures,
+                attempts: std::sync::Arc::clone(&self.attempts),
+            })
+        }
+
+        async fn create_message(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> Result<ApiResponse, crate::api_client::ApiError> {
+            self.attempts
+                .blocking
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(unavailable())
+        }
+
+        async fn create_message_streaming(
+            &self,
+            _system: &str,
+            _messages: &[serde_json::Value],
+            _model: &ModelId,
+            _max_tokens: u32,
+            _tools: &[crate::tool_executor::ToolInfo],
+        ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>> {
+            let n = self
+                .attempts
+                .streaming
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.failures {
+                return Box::pin(futures::stream::iter(vec![StreamEvent::Error(
+                    unavailable(),
+                )]));
+            }
+            Box::pin(futures::stream::iter(vec![
+                StreamEvent::TextDelta("the answer".into()),
+                StreamEvent::StopReason("end_turn".into()),
+                StreamEvent::StreamEnd,
+            ]))
+        }
+    }
+
+    /// An engine whose outage retries cost milliseconds rather than seconds,
+    /// with work already in the session so the allowance applies.
+    fn engine_surviving_outages(
+        api: Box<dyn ApiClient>,
+    ) -> (QueryEngine, mpsc::UnboundedReceiver<EngineEvent>) {
+        let (mut engine, rx) = test_engine_with_api(api);
+        engine.unavailable_retry_base = std::time::Duration::from_millis(1);
+        // A tool result is the cheapest non-empty history: the session has
+        // done something an outage would destroy.
+        engine.session.messages = vec![
+            Message::user("work on the task"),
+            Message::assistant("asking the shell"),
+            Message::tool(ToolResult::text("call-0", "the tool ran")),
+        ];
+        (engine, rx)
+    }
+
+    /// An outage no longer ends the run: the turn is re-asked from the same
+    /// context and the work survives.
+    ///
+    /// This is the defect the whole path exists for. One exhausted retry
+    /// budget used to `break` the turn loop, so a benchmark trial re-did its
+    /// entire task from scratch — measured at three runs and 10.5 MB of
+    /// stream for one 283-step trial.
+    #[tokio::test]
+    async fn a_short_outage_is_re_asked_instead_of_ending_the_run() {
+        let (api, attempts) = FlakyProvider::flaky(1);
+        let (mut engine, mut rx) = engine_surviving_outages(api);
+
+        let reason = engine
+            .submit_streaming("keep going".into(), SubmitOptions::default())
+            .await
+            .expect("an outage is a recoverable outcome, not a fatal error");
+
+        assert!(
+            matches!(reason, TerminalReason::Completed),
+            "the session should have ridden out the outage, not ended: {reason:?}"
+        );
+        assert_eq!(
+            attempts.streams(),
+            2,
+            "the failed request should have been asked exactly once more"
+        );
+
+        // The reader is told, and told which attempt this is.
+        let notices: Vec<String> = drain_events(&mut rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::Notification { message } => Some(message),
+                _ => None,
+            })
+            .filter(|message| message.contains("retrying this request"))
+            .collect();
+        assert_eq!(notices.len(), 1, "expected one retry notice: {notices:?}");
+        assert!(
+            notices[0].contains(&format!("(1/{MAX_UNAVAILABLE_RETRIES})")),
+            "the notice should count the attempt: {}",
+            notices[0]
+        );
+
+        // The work the outage interrupted is still there, and the answer the
+        // retry produced was added to it rather than replacing it.
+        assert!(
+            engine.session.messages.len() > 4,
+            "the pre-outage history was lost: {:?}",
+            engine.session.messages
+        );
+    }
+
+    /// The retry gaps grow from the base and stop growing at the ceiling, so
+    /// a provider that is down for a minute cannot be re-asked in a tenth of
+    /// a second.
+    #[test]
+    fn the_outage_gaps_grow_and_are_bounded() {
+        let base = std::time::Duration::from_secs(5);
+        assert_eq!(
+            unavailable_retry_delay(base, 0),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            unavailable_retry_delay(base, 1),
+            std::time::Duration::from_secs(10)
+        );
+        assert_eq!(
+            unavailable_retry_delay(base, 2),
+            std::time::Duration::from_secs(20)
+        );
+
+        // The exponent is clamped, and so is the result: a large base or a
+        // large count must not overflow or wait for hours.
+        assert_eq!(
+            unavailable_retry_delay(base, u32::MAX),
+            UNAVAILABLE_RETRY_CEILING
+        );
+        assert_eq!(
+            unavailable_retry_delay(std::time::Duration::from_secs(u64::MAX / 2), 4),
+            UNAVAILABLE_RETRY_CEILING
+        );
+    }
+
+    /// Only real work earns an outage retry. A session holding just the
+    /// prompt can be re-run for nothing, so it is not worth waiting for.
+    #[test]
+    fn a_session_holds_work_only_after_the_model_did_something() {
+        assert!(!session_holds_work(&[Message::user("just a prompt")]));
+        assert!(!session_holds_work(&[]));
+        assert!(session_holds_work(&[
+            Message::user("the prompt"),
+            Message::assistant("the model spoke"),
+        ]));
+        // A tool result alone counts too: a turn that was cut off between
+        // the call and its answer left side effects on the disk.
+        assert!(session_holds_work(&[Message::tool(ToolResult::text(
+            "call-0",
+            "the tool ran"
+        ))]));
+    }
+
+    /// The allowance is a bound, not a promise: a provider that is down for
+    /// good still ends the run, and the run ends as `ApiUnavailable` so the
+    /// caller knows to try later rather than think the task finished.
+    #[tokio::test]
+    async fn an_outage_that_never_lifts_still_ends_the_run() {
+        let (api, attempts) = FlakyProvider::flaky(usize::MAX);
+        let (mut engine, _rx) = engine_surviving_outages(api);
+
+        let reason = engine
+            .submit_streaming("keep going".into(), SubmitOptions::default())
+            .await
+            .expect("an unrecoverable outage is reported, not raised");
+
+        assert!(
+            matches!(reason, TerminalReason::ApiUnavailable { .. }),
+            "a permanent outage reported {reason:?}"
+        );
+        assert_eq!(
+            attempts.streams() as u32,
+            1 + MAX_UNAVAILABLE_RETRIES,
+            "the first attempt plus exactly the allowance"
+        );
+    }
+
+    /// An outage on a session that has done nothing is not retried: there is
+    /// nothing to preserve, and the caller can start over for free. This is
+    /// what keeps the three pre-existing outage tests fast and unchanged.
+    #[tokio::test]
+    async fn an_outage_before_any_work_is_not_retried() {
+        let (api, attempts) = FlakyProvider::flaky(usize::MAX);
+        let (mut engine, _rx) = test_engine_with_api(api);
+        engine.unavailable_retry_base = std::time::Duration::from_millis(1);
+
+        let reason = engine
+            .submit_streaming("hello".into(), SubmitOptions::default())
+            .await
+            .expect("the outage is reported as a reason");
+
+        assert!(
+            matches!(reason, TerminalReason::ApiUnavailable { .. }),
+            "reported {reason:?}"
+        );
+        assert_eq!(
+            attempts.streams(),
+            1,
+            "a session with nothing to lose should not spend a retry"
+        );
+        // The one blocking call is the streaming path's own rescue from a
+        // stream that produced nothing usable, inside the same attempt — not
+        // a second attempt. Counting the two paths together is how a test
+        // concludes an outage was retried when it was not.
+        assert_eq!(
+            attempts.blocks(),
+            1,
+            "one attempt, one rescue: the outage was not retried"
+        );
+    }
+
+    /// A success in between resets the allowance, so a long run that meets
+    /// two separate outages is not ended by the second one just because the
+    /// first spent the budget.
+    #[tokio::test]
+    async fn a_successful_turn_resets_the_outage_allowance() {
+        // Fails, succeeds, fails, succeeds.
+        let (api, attempts) = FlakyProvider::flaky(2);
+        let (mut engine, _rx) = engine_surviving_outages(api);
+
+        let first = engine
+            .submit_streaming("keep going".into(), SubmitOptions::default())
+            .await
+            .expect("the first outage is recoverable");
+        assert!(matches!(first, TerminalReason::Completed), "{first:?}");
+
+        // The second submission's own first attempt fails: without the reset
+        // this outage would have no allowance left and end the run.
+        let second = engine
+            .submit_streaming("keep going".into(), SubmitOptions::default())
+            .await
+            .expect("the second outage is recoverable too");
+        assert!(
+            matches!(second, TerminalReason::Completed),
+            "the second outage ended the run: {second:?}"
+        );
+        assert_eq!(
+            attempts.streams(),
+            4,
+            "two failures and two answers — the reset allowed the second retry"
+        );
+    }
+
+    /// A request the provider *rejects* is not an outage: classifying the
+    /// failure, rather than reading its message, is what keeps the retry from
+    /// spending its allowance on a 400.
+    #[tokio::test]
+    async fn a_rejected_request_is_not_retried_as_an_outage() {
+        struct Rejecting(std::sync::Arc<Attempts>);
+
+        #[async_trait::async_trait]
+        impl ApiClient for Rejecting {
+            fn clone_box(&self) -> Box<dyn ApiClient> {
+                Box::new(Self(std::sync::Arc::clone(&self.0)))
+            }
+
+            async fn create_message(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> Result<ApiResponse, crate::api_client::ApiError> {
+                self.0
+                    .blocking
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::api_client::ApiError::Response {
+                    status: 400,
+                    message: "messages: field required".into(),
+                })
+            }
+
+            async fn create_message_streaming(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[crate::tool_executor::ToolInfo],
+            ) -> std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send + 'static>>
+            {
+                self.0
+                    .streaming
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(futures::stream::iter(vec![
+                    StreamEvent::Error(crate::api_client::ApiError::Response {
+                        status: 400,
+                        message: "messages: field required".into(),
+                    }),
+                    StreamEvent::StreamEnd,
+                ]))
+            }
+        }
+
+        let attempts = std::sync::Arc::new(Attempts::default());
+        let (mut engine, _rx) =
+            engine_surviving_outages(Box::new(Rejecting(std::sync::Arc::clone(&attempts))));
+
+        let outcome = engine
+            .submit_streaming("keep going".into(), SubmitOptions::default())
+            .await;
+
+        assert!(
+            outcome.is_err(),
+            "a rejected request must fail the run, not be retried: {outcome:?}"
+        );
+        assert_eq!(
+            attempts.streams(),
+            1,
+            "the request should not have been asked again"
         );
     }
 
