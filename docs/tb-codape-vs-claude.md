@@ -29,19 +29,25 @@ per-turn overhead it caused is quantified at the end.
 | `vf2-speedup-networkx` | 0.0 **57/60**, 133 min | 0.0 54/60, 65 min | Codape ahead by 3 tests |
 | `gsea-proteomics` | 0.0 10/16, 16 min | 0.0 11/16, 16 min | Claude +1 test |
 | `vllm-deepseek-streaming` | 0.0 3/7, 13 min | 0.0 3/7, **1 min** | identical tests, Codape 13× slower |
-| `ks-solver-cpp` | 0.0 0/2, 20 min | 0.0 1/2 | Claude +1 test; Codape emitted no answer |
-| `nextjs-performance` | 0.0 2/7, 44 min, 300 turns | — | |
-| `biped-contact-dynamics` | 0.0 0/3, 17 min | — | Codape emitted no answer |
-| `foodstuff-beta-activity` | 0.0 10/13, 13 min | — | |
+| `ks-solver-cpp` | 0.0 0/2, 20 min | 0.0 1/2, 83 min | Claude +1 test; Codape emitted no answer |
+| `nextjs-performance` | 0.0 2/7, 44 min, 300 turns | 0.0 2/7, 24 min | tie on tests, Codape 1.8× slower |
+| `biped-contact-dynamics` | 0.0 0/3, 17 min | 0.0 2/3, 89 min | Claude +2 tests; Codape emitted no answer |
+| `foodstuff-beta-activity` | 0.0 10/13, 13 min | 0.0 10/13, 23 min | tie on tests, Codape faster |
 
-Terminal-Bench 4.1 is **all-or-nothing**: `reward` is 1.0 or 0.0, so only one
-task out of nine is "solved" by either arm. The per-test counts are the real
-signal and they are what the verdict column reads.
+**Codape 1, Claude 4, tie 4** across the nine. Terminal-Bench 4.1 is
+**all-or-nothing**: `reward` is 1.0 or 0.0, so only two of nine are "solved" by
+either arm and the per-test counts carry most of the signal.
 
-The directions disagree — Codape wins on `vf2`, loses on `kv-live-surgery` — so
-there is no one-way systematic bias in the setup. Nine tasks is too few to rank
-the two agents; it is enough to locate specific defects, which is what this
-file is for.
+The directions still disagree, which is what makes the setup usable: Codape
+wins `vf2` by three tests and is faster on `foodstuff`, loses `kv-live-surgery`
+outright and is 2–3× slower on four others. Nine tasks is too few to rank the
+two agents; it is enough to locate specific defects, which is what this file is
+for.
+
+The two zero-output tasks are the sharpest single finding. On both,
+**Codape produced no answer at all** while Claude produced a partial one — the
+same failure the model-table entry fixes, and the reason the analysis below is
+about ceilings rather than about reasoning quality.
 
 ## The finding: output is ~98 % reasoning
 
@@ -60,7 +66,6 @@ actually consumes. Per task:
 | `foodstuff-beta-activity` | 219 984 | 4 050 | 98.2 % |
 | `gsea-proteomics` | 65 454 | 5 422 | 92.4 % |
 | `vllm-deepseek-streaming` | 19 215 | 85 425 | 18.4 % |
-
 **Claude Code does the same thing.** Its trajectory is 97–99 % reasoning on
 every task where the split is available. So this is a property of the model on
 this benchmark, not something Codape adds. It does rule out the whole family of
@@ -79,15 +84,19 @@ stopped with `subtype: error_no_output`. 131 196 output tokens, zero answer,
 
 That is `TokenLimitStop { produced: false }` — the turn hit `max_tokens` with
 nothing to show, which is the reasoning model spending its entire ceiling
-thinking. The arithmetic in the usage field says the same thing independently:
-`ks-solver-cpp` billed **131 196** output tokens, which is `4 × 32 768 + 124` —
-four turns that each ended exactly on the 32 768 default ceiling, with no
-65 536 retry. `retry_ceiling()` exists to recover from exactly this by
-re-asking with a larger ceiling, and it returned `None` because the context
-window was **guessed** (`window.source.is_guess()`), and it refuses to raise a
-ceiling against a window it does not know. A guessed 32 K window also put the
-compaction line at 16 K, so the session compacted every few turns and lost
-history.
+thinking. The trajectory shows it directly: four model steps, one with two tool
+calls, then **three consecutive steps of ~110 000 reasoning characters with zero
+message and zero tool calls**.
+
+The usage field says the same thing independently. `ks-solver-cpp` billed
+**131 196** output tokens — 124 above `4 × 32 768`, so four turns each ending
+exactly on the 32 768 default ceiling. The arithmetic rules out a retry having
+fired: one turn at 65 536 plus its 32 768 attempt is 98 304 by itself, and three
+empty turns would put the total above 163 840. So `retry_ceiling()` returned
+`None` on every one of them. It does that when the context window is **guessed**
+(`window.source.is_guess()`), refusing to raise a ceiling against a window it
+does not know. A guessed 32 K window also put the compaction line at 16 K, so
+the session compacted every few turns and lost history.
 
 Both causes are the same missing table entry, fixed in `ee448320`:
 
@@ -106,21 +115,61 @@ retry the code considers legal could have turned every empty-answer turn into a
 400 instead of recovering it.
 
 `biped-contact-dynamics` ended the same way (12 turns, 100 576 output tokens,
-0/3). Claude, on the same task family, took 106 steps and scored 1/2 on
-`ks-solver-cpp` — it also produced 736 298 characters of reasoning, but it kept
-acting. **The gap is not thinking too much; it is failing to convert thinking
-into action when the ceiling arrives.**
+0/3). Claude, on the same two tasks, produced a partial answer at 2–3× the
+token spend — 385 437 tokens for 2/3 on `biped`, 286 912 for 1/2 on
+`ks-solver` — and its reasoning share was just as high (99 %). **The gap is not
+thinking too much; it is failing to convert thinking into action when the
+ceiling arrives.** Claude kept acting under the same ceiling; Codape thought
+until the budget was gone.
 
 ## Cost
 
 Codape reports no cost for these runs (its adapter does not price the model).
-Claude Code's arm cost **$60.50** for five tasks. On the four tasks both arms
-ran, Codape spent 1 440 721 output tokens to Claude's 697 821 — **2.1× the
-output for the same or worse score**.
+Across all nine tasks Codape spent **1 907 502** output tokens to Claude's
+**1 645 547** — 1.16× for one solved task against two.
 
-The `vf2` case is the extreme: Codape 9.7 M input / 674 732 output for 57/60;
-Claude 47.8 M input / 331 914 output for 54/60. Codape sent **one fifth the
-prompt** and wrote **twice the answer tokens**.
+The per-task ratio is where the shape shows:
+
+| task | Codape out | Claude out | ratio |
+|---|---|---|---|
+| `kv-live-surgery` | 575 234 | 179 098 | **3.2×** |
+| `vf2-speedup-networkx` | 674 732 | 331 914 | **2.0×** |
+| `nextjs-performance` | 158 081 | 99 128 | 1.6× |
+| `ks-solver-cpp` | 131 196 | 286 912 | 0.5× |
+| `biped-contact-dynamics` | 100 576 | 385 437 | **0.3×** |
+| `react-lead-form` | 120 888 | 120 128 | 1.0× |
+
+Codape overspends by 2–3× where it *fails slowly* (`kv-live-surgery`,
+`vf2` — 300 turns each), and underspends 3× where it *fails fast*
+(`biped`, `ks-solver` — both zero-output). That is one defect, not two:
+those two tasks spent the budget on thinking and emitted nothing, so the
+token count is low precisely because the run collapsed.
+
+The `vf2` case is the extreme input-side split: Codape 9.7 M input / 674 732
+output for 57/60; Claude 47.8 M input / 331 914 output for 54/60. Codape sent
+**one fifth the prompt** and wrote **twice the answer tokens** — the opposite
+of the caching story one would expect from the prefix work.
+
+## A caveat that must be read with every number here
+
+**The Codape arm ran `v0.2.2`, a published release, not the working tree.** Its
+`agent_result.metadata.version` records `v0.2.2`, and the adapter's
+`DEFAULT_VERSION` is what installed it. `ee448320` — the model-table fix this
+whole analysis points at — is *not* in that release, so the Codape column above
+measures the bug, deliberately and on the record.
+
+The sweep that follows it compensates at the boundary instead: `run-arm.sh`
+exports `CODAPE_CONTEXT_WINDOW=1000000`, which v0.2.2 resolves as an `Env`
+source, and `is_guess()` is false for `Env`. So `retry_ceiling` gets a known
+window and the retry can fire without the table entry. Verified by reading
+v0.2.2's own `resolve_detailed` and `is_guess`. What the env override does
+**not** fix is the output-cap half: v0.2.2 has no `deepseek-v4` entry in
+`MODEL_MAX_OUTPUT_TOKENS`, so the compaction reserve is the flat 20 000 rather
+than the model's 32 768 — but `min(20_000, 32_768)` is 20 000, so the resolved
+compaction line is identical either way. The two paths agree for this model,
+and that is why the sweep remains comparable to the control despite the version
+difference.
+
 
 ## What the trajectory artifact was not recording
 
