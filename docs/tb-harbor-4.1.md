@@ -935,6 +935,14 @@ result, and both consumed a full trial slot. Note that in both cases `subtype`
 is `success` with real turn and duration numbers — the agent's work is recorded
 and is simply never graded.
 
+**The sidecar failure is confirmed harness-side, not agent-specific.** The
+Claude Code arm on the same task, on the same host, later failed with the same
+message and the same image name
+(`harbor-prebuilt:harbor-docker-egress-control-sidecar--c08979aaa1949ff7`,
+`unknown flag: --file`, exit code 125). Two different agents cannot both cause
+a Docker image build to reject a CLI flag, so this is a defect in the harness
+image recipe and it will drop that task from any arm that runs it.
+
 ### What this sweep says about the Part 1 failure causes
 
 Part 1 named four causes and proposed a lever for each. The second sweep is a
