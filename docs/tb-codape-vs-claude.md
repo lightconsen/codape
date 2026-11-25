@@ -79,10 +79,13 @@ stopped with `subtype: error_no_output`. 131 196 output tokens, zero answer,
 
 That is `TokenLimitStop { produced: false }` — the turn hit `max_tokens` with
 nothing to show, which is the reasoning model spending its entire ceiling
-thinking. `retry_ceiling()` exists to recover from exactly this by re-asking
-with a larger ceiling, and it returned `None` because the context window was
-**guessed** (`window.source.is_guess()`), and it refuses to raise a ceiling
-against a window it does not know. A guessed 32 K window also put the
+thinking. The arithmetic in the usage field says the same thing independently:
+`ks-solver-cpp` billed **131 196** output tokens, which is `4 × 32 768 + 124` —
+four turns that each ended exactly on the 32 768 default ceiling, with no
+65 536 retry. `retry_ceiling()` exists to recover from exactly this by
+re-asking with a larger ceiling, and it returned `None` because the context
+window was **guessed** (`window.source.is_guess()`), and it refuses to raise a
+ceiling against a window it does not know. A guessed 32 K window also put the
 compaction line at 16 K, so the session compacted every few turns and lost
 history.
 
@@ -94,7 +97,13 @@ Both causes are the same missing table entry, fixed in `ee448320`:
 ```
 
 With the entry present, `retry_ceiling` computes `32_768 × 2 = 65_536` against
-1 M of room and the retry fires.
+1 M of room and the retry fires — and the gateway accepts that ceiling, which
+is not something to assume. Probed directly against the same endpoint with the
+same credential, `max_tokens` 32 768 and 65 536 both return `200` with
+`stop_reason: end_turn`; the model entry's 32 768 is the *default* this build
+asks for, not a hard rejection limit at the gateway. Without that check, a
+retry the code considers legal could have turned every empty-answer turn into a
+400 instead of recovering it.
 
 `biped-contact-dynamics` ended the same way (12 turns, 100 576 output tokens,
 0/3). Claude, on the same task family, took 106 steps and scored 1/2 on
