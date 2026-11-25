@@ -504,9 +504,19 @@ impl Tool for BashTool {
             Err(_) => {
                 // Keep it: the job and its output file are still there, and the
                 // model can collect them with JobOutput.
+                //
+                // This notice used to say only "read it with JobOutput", and a
+                // measured benchmark run then waited for 2,580 s of `sleep`
+                // across 30 calls — because a bare JobOutput returns at once
+                // and `sleep` is not a wait: past 60 s Bash pushed the sleep
+                // itself into another job. Naming `wait_secs` is what makes
+                // this notice actionable; naming `sleep` as the wrong thing is
+                // what stops the loop from repeating.
                 return Ok(job.as_output(&format!(
                     "command still running after {timeout_secs}s; it continues in the background. \
-                     Read it with JobOutput and stop it with JobKill"
+                     Wait for it with JobOutput({{job_id, wait_secs: N}}) — that call blocks until \
+                     the job finishes or N seconds pass. Do not poll with `sleep`: a sleep longer \
+                     than 60s is itself pushed into another job. Stop it with JobKill."
                 )));
             }
         };
@@ -650,10 +660,21 @@ mod tests {
 
         let handle: serde_json::Value = serde_json::from_str(&output.output).unwrap();
         let id = handle["job_id"].as_str().unwrap().to_string();
+        let note = handle["note"].as_str().unwrap();
         assert!(
-            handle["note"].as_str().unwrap().contains("background"),
-            "the handle should say the command keeps running: {}",
-            output.output
+            note.contains("background"),
+            "the handle should say the command keeps running: {note}"
+        );
+        // The notice has to name the call that can actually wait. A measured
+        // run slept 2,580 s across 30 calls because the old notice said only
+        // "read it with JobOutput", and a bare JobOutput returns immediately.
+        assert!(
+            note.contains("wait_secs"),
+            "the handle should name the wait, not just the read: {note}"
+        );
+        assert!(
+            note.contains("sleep"),
+            "the handle should name what not to do: {note}"
         );
 
         let done = wait_for_terminal(&JobStore::new(dir.path()), &id).await;
