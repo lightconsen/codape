@@ -68,6 +68,14 @@ def load_trial(directory: str) -> dict:
     metadata = agent.get("metadata") or {}
     trial["subtype"] = metadata.get("subtype")
     trial["num_turns"] = metadata.get("num_turns")
+    # `result_frames` is how many times the agent emitted a session-ending
+    # frame. One is a normal run. More than one means the harness drove the
+    # session again after it ended — and since the frame that ends a run is
+    # `error_during_execution` far more often than not, the count is the only
+    # surviving evidence, in a finished trial, that a run was interrupted and
+    # redone. The raw stream that would show why is deleted when the trial
+    # closes; `trajectory.json` keeps the steps but not the failure.
+    trial["result_frames"] = metadata.get("result_frames")
     # `model_ms` is time waiting on the model and `tool_ms` time running tools.
     # Their ratio is what says whether a slow task was slow in the agent or in
     # the model, and only the latter is worth optimising in the harness.
@@ -184,6 +192,14 @@ def load_arms(job_directories: list[str]) -> dict[str, dict[str, dict]]:
     resolved rather than appended. A trial that produced a `result.json` wins
     over one that is still in flight, and among two that both finished the
     later start wins: a rerun supersedes the run it repeats.
+
+    That first rule cuts both ways, and the cutting side is worth knowing: if a
+    newer job is still working a task that an older job already finished, the
+    older result is what shows, because it is the only measurement there is.
+    So a task can silently display a number from a different configuration than
+    its neighbours. When the two jobs differ in anything that could matter —
+    an environment override, an agent version — pass only the newer one and
+    let the unfinished tasks read as `running`.
     """
     arms: dict[str, dict[str, dict]] = {}
     # Oldest first, so a later directory overwrites an earlier one and the
@@ -250,10 +266,15 @@ def report(codape: dict[str, dict], claude: dict[str, dict]) -> None:
 
         def cell(trial: dict) -> str:
             if trial.get("ran"):
+                # A marker rather than a column: it only matters on the runs
+                # that have it, and a blank column on 95 % of rows would push
+                # the numbers that do matter off the edge of the terminal.
+                reran = (trial.get("result_frames") or 1) > 1
                 return (
                     f"{_reward(trial.get('reward'))} "
                     f"{_counts(trial.get('passed'), trial.get('tests'))} "
                     f"{_minutes_text(trial.get('minutes'))}"
+                    + (f" x{trial['result_frames']}" if reran else "")
                 )
             if trial.get("present"):
                 return "running"
