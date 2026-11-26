@@ -836,9 +836,8 @@ and nothing is thrown.** The subtype is emitted by three code paths
 reason, and an `Err` from the turn. None of the three carries its cause into
 `result.json` — the message goes into the frame's `data.error`, and **the
 Harbor adapter does not read that field**: `_record` copies `subtype`,
-`is_error`, `num_turns`, the timing keys and `result_frames`
-(`codape_harbor_agent.py:506-512`) and nothing else. The frame's `error` string
-is discarded at the adapter boundary.
+`is_error`, `num_turns`, the timing keys and `result_frames` and nothing else.
+The frame's `error` string is discarded at the adapter boundary.
 
 That is the one defect in this section that is Codape's, and it is a reporting
 defect rather than a behavioural one: the run failed for one of three reasons,
@@ -886,8 +885,8 @@ nothing happened: `Could not find the file /app/archive-clone` — the agent nev
 created the directory the task asks for.
 
 **`exit_code: null` is the diagnostic, and it narrows what this can be.** The
-adapter writes that file from a shell that always returns 0
-(`codape_harbor_agent.py:415-419`: `rc=$?; printf …; exit 0`), so a `null`
+adapter writes that file from a shell that always returns 0 (`rc=$?; printf …
+> {EXIT_CODE_PATH}; exit 0` in `run()`), so a `null`
 means the `cat` found no file — the command never got as far as producing an
 exit status. Nothing here records *why*.
 
@@ -930,8 +929,7 @@ after the agent.
 `[environment]` and `[verifier.environment]`, and Harbor refuses to start an
 agent whose `capabilities.skills` is false when a task supplies skills
 (`trial.py:1801`). At the time of the sweep the Codape adapter declared
-`AgentCapabilities(atif=True, base_url=True)` and nothing else
-(`codape_harbor_agent.py:136`).
+`AgentCapabilities(atif=True, base_url=True)` and nothing else.
 
 The directory is not in the task *package* — `environment/barber-shop-site/`
 has no `.agents/`, only a `skills-lock.json` naming `vercel-labs/agent-browser`.
@@ -1095,14 +1093,13 @@ hole in it, and the hole is worth naming because it is the one place where a
 Codape defect degraded this benchmark rather than the benchmark finding one.
 
 ATIF's `ToolCall.arguments` is filled from the `input` field of the
-`tool_use` block in the stream-json transcript
-(`codape_harbor_agent.py:762-767`). But Codape only puts the model's real
+`tool_use` block in the stream-json transcript (`build_trajectory`). But Codape
+only puts the model's real
 arguments in that field when `--verbose-tool-input` is set; by default the
 frame carries `{"summary": …}` instead — a model-written or deterministic
 prose label, its comment saying so explicitly
 (`repl.rs:1706-1716`, flag declared at `cli.rs:166`). The adapter does not
-pass the flag (`_command()` at `codape_harbor_agent.py:379-396`, whose
-`--extra-args` was never set for these runs).
+pass it in the runs this section describes (it does now — see below).
 
 The consequence, measured: **every one of the 5,534 `Bash` calls in the sweep
 has a truncated `summary` and no other argument at all** — the only key on any
@@ -1407,8 +1404,9 @@ emits no `total_cost_usd` frame.
 But Codape already reads a user price table: `CostTracker::new()` loads
 `pricing.json` from the config home, and `record_usage` checks it **before**
 the built-in table (`cost.rs:508-513`). The adapter points the config home at
-`/tmp/codape-config` (`codape_harbor_agent.py:60`, `:359`) and writes only
-`settings.json` into it (`:259-268`) — nothing writes a `pricing.json`. So the
+`/tmp/codape-config` (`CONFIG_DIR`, set into the run env as
+`CLAUDE_CONFIG_DIR`) and, in the sweep, wrote only `settings.json` into it —
+nothing wrote a `pricing.json`. So the
 arm could have reported per-trial dollars by adding one file, with no code
 change at all. That is the defect: not that Codape will not take a price, but
 that the benchmark adapter never gives it one.
@@ -1467,8 +1465,8 @@ a result that measures nothing; use the `usage limit reached` string to exclude
 a trial from an arm-to-arm comparison, because none of the 29 finished.
 
 The `medical-claims-processing` failure is a real, separate finding: the adapter
-declared `AgentCapabilities(atif=True, base_url=True)` at
-`codape_harbor_agent.py:136` and nothing else, so `mcp_servers` defaulted to
+declared `AgentCapabilities(atif=True, base_url=True)` and nothing else, so
+`mcp_servers` defaulted to
 `False` and Harbor refused to configure MCP for any task that declares a server.
 Codape does implement MCP — `crates/mcp/` has a full client (transports, oauth,
 elicitation, resources) and the CLI already takes `--mcp-config` — so this was
