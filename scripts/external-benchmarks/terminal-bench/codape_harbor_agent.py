@@ -58,6 +58,12 @@ from harbor.trial.errors import AgentTimeoutError
 
 CODAPE_BIN = "/usr/local/bin/codape"
 CONFIG_DIR = "/tmp/codape-config"
+# The task's MCP servers, in Codape's own `.mcp.json` shape, and the price
+# table its cost tracker reads at startup. Both live in the config home rather
+# than the working tree: a `.mcp.json` left in the task directory would show up
+# in `git status` and in every artifact the trial collects.
+MCP_CONFIG_PATH = f"{CONFIG_DIR}/mcp.json"
+PRICING_PATH = f"{CONFIG_DIR}/pricing.json"
 INSTALLED_DIR = "/installed-agent"
 INSTRUCTION_PATH = f"{INSTALLED_DIR}/instruction.txt"
 STREAM_PATH = f"{INSTALLED_DIR}/codape-stream.jsonl"
@@ -133,7 +139,45 @@ class CodapeHarborAgent(BaseInstalledAgent):
     # valid ATIF document. `build_trajectory` below is what keeps that promise;
     # if it ever stops being written, this flag has to come off rather than
     # stay a claim the code does not honour.
-    capabilities = AgentCapabilities(atif=True, base_url=True)
+    #
+    # `mcp_servers=True` is the same kind of promise, and it was missing for a
+    # measurable reason: Harbor refuses to set up a trial whose task declares
+    # MCP servers unless the agent claims them (`trial.py`,
+    # `_validate_agent_capabilities`), so `medical-claims-processing` — whose
+    # `task.toml` declares a `playwright` SSE server — died with "Agent 'codape'
+    # does not support MCP servers" before any agent code ran. Codape has a full
+    # MCP client (`crates/mcp/`) and `--mcp-config`; `_write_mcp_config` below is
+    # what turns `self.mcp_servers` into the file it reads. The declaration is
+    # only honest while that function exists.
+    #
+    # `mcp_http_headers=True` because the headers are written into that same
+    # file. A header the task secrets through `${VAR}` is resolved here and
+    # placed in the file, not in the argv — the config file is mode 0600 and the
+    # argv is visible to `ps`.
+    #
+    # `skills=True` was the same missing promise, one task wide:
+    # `cumulative-layout-shift` declares `skills_dir = "/app/barber-shop-site/
+    # .agents/skills"` under both `[environment]` and `[verifier.environment]`,
+    # and the trial died in `_validate_agent_capabilities` before starting. The
+    # package source has no `.agents/` directory — but the built image does:
+    # `agent-browser/SKILL.md`, 3263 bytes, and Codape parses it
+    # (`SkillLoader::load_from_dir`, directory form). `_register_skills_command`
+    # is what puts that directory on a discovery root.
+    #
+    # The honest limit: Codape reads `allowed_tools` (underscore) and this skill
+    # writes `allowed-tools` (hyphen, the Claude Code spelling), so the tool
+    # hint is dropped. Unknown frontmatter keys are skipped silently, the skill
+    # still loads and is still announced, and Codape never enforced per-skill
+    # tool lists anyway (`allowed_tools` is carried, not applied — the enforced
+    # one is `allowed_tools_override`), so the cost is a hint, not a difference
+    # in permission.
+    capabilities = AgentCapabilities(
+        atif=True,
+        base_url=True,
+        mcp_servers=True,
+        mcp_http_headers=True,
+        skills=True,
+    )
 
     # `base_url=True` is only honest with a spec behind it: Harbor raises
     # "Agent 'codape' does not support inference connection overrides" for
@@ -172,6 +216,7 @@ class CodapeHarborAgent(BaseInstalledAgent):
         task_proxy: str | None = None,
         extra_args: str | None = None,
         extra_instructions: str | None = None,
+        pricing_path: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -194,6 +239,12 @@ class CodapeHarborAgent(BaseInstalledAgent):
         self._extra_instructions = (
             str(extra_instructions).strip() if extra_instructions else None
         )
+        # Host-side JSON price table, uploaded into the config home as
+        # `pricing.json`. Read and validated here rather than at `configure`
+        # time: a malformed file should fail before the trial spends a
+        # container, and a bad table would otherwise be invisible until the
+        # result frame turned out to carry no `total_cost_usd` at all.
+        self._pricing = _read_pricing(pricing_path)
 
     @staticmethod
     def name() -> str:
@@ -257,7 +308,13 @@ class CodapeHarborAgent(BaseInstalledAgent):
             )
 
     async def configure(self, environment: BaseEnvironment) -> None:
-        """Write per-run state: settings, and the proxy for every shell."""
+        """Write per-run state: settings, MCP servers, prices, and the proxy.
+
+        All of it is per-run rather than part of ``install``: the settings file
+        names this run's telemetry choice, ``mcp.json`` is this *task's* server
+        list, and the price table is this run's model. Nothing here can be
+        baked into an image.
+        """
         await self.exec_as_root(
             environment,
             command=(
@@ -266,6 +323,19 @@ class CodapeHarborAgent(BaseInstalledAgent):
                 f"> {CONFIG_DIR}/settings.json"
             ),
         )
+        # The settings file is written 0644, so any user can read it; the two
+        # files below carry a resolved credential and are 0600, which means
+        # they need the owner the agent will actually run as.
+        agent_user = getattr(environment, "default_user", None)
+        mcp_command = self._register_mcp_servers_command(agent_user)
+        if mcp_command:
+            await self.exec_as_root(environment, command=mcp_command)
+        pricing_command = self._register_pricing_command(agent_user)
+        if pricing_command:
+            await self.exec_as_root(environment, command=pricing_command)
+        skills_command = self._register_skills_command()
+        if skills_command:
+            await self.exec_as_root(environment, command=skills_command)
         if self._task_proxy:
             # The tests run in their own shell, and several task scripts install
             # their tooling there (the `uv` bootstrap is the common one). A
@@ -286,6 +356,141 @@ class CodapeHarborAgent(BaseInstalledAgent):
                     "> /etc/profile.d/99-codape-proxy.sh"
                 ),
             )
+
+    def _register_mcp_servers_command(
+        self, agent_user: str | int | None = None
+    ) -> str | None:
+        """Write the task's MCP servers where Codape will read them.
+
+        Harbor hands the agent ``self.mcp_servers`` — already merged from the
+        task's ``[environment.mcp_servers]`` and any agent-level ones — in its
+        own model, whose field names are nearly Codape's. The mapping that is
+        *not* identity:
+
+        * ``transport``: Harbor spells streamable HTTP ``streamable-http``;
+          Codape's ``McpTransport`` accepts that as an alias for ``http``, so it
+          passes through unchanged. ``sse`` and ``stdio`` are shared spellings.
+        * ``url`` / ``command`` / ``args``: same names, same meaning.
+        * ``headers``: Harbor resolves ``${VAR}`` templates at construction and
+          exposes the results as ``mcp_header_env`` — a private exec env whose
+          variable names go into the config, never the values. Codape expands no
+          templates in a header (``crates/mcp/src/http.rs`` sends the map as
+          configured), so the resolved value has to be written here. That is
+          why the file is created 0600, and why ``agent_user`` matters: this
+          adapter writes as root, and a task that runs its agent as another
+          user (`[agent] user`) would otherwise get a config only root can read.
+
+        The path is given to Codape explicitly as ``--mcp-config`` in
+        ``_command()`` rather than relied on as ``<cwd>/.mcp.json``: the agent's
+        working directory is the task's, and a config file left there would be
+        part of the working tree a verifier reads and an artifact captures.
+
+        Returns ``None`` when the task declares no servers, so ``configure``
+        writes no empty file — Codape skips an empty config with a warning, and
+        a stray file would be noise in every run of the other 59 of the 60
+        cached 4.1 task packages (47 say nothing about MCP; 12 carry
+        ``mcp_servers = []``, which is Harbor's spelling for none).
+        """
+        if not self.mcp_servers:
+            return None
+        header_refs = self.mcp_header_env.refs
+        header_env = self.mcp_header_env.env
+        servers: dict[str, dict[str, object]] = {}
+        for server in self.mcp_servers:
+            if server.transport == "stdio":
+                servers[server.name] = {
+                    "type": "stdio",
+                    "command": server.command,
+                    "args": list(server.args),
+                }
+            else:
+                entry: dict[str, object] = {
+                    "type": server.transport,
+                    "url": server.url,
+                }
+                resolved = {
+                    name: header_env[variable]
+                    for name, variable in header_refs.get(server.name, {}).items()
+                    if variable in header_env
+                }
+                if resolved:
+                    entry["headers"] = resolved
+                servers[server.name] = entry
+        payload = json.dumps({"mcpServers": servers}, indent=2)
+        # `umask 077` rather than a chmod afterwards, so the file is never
+        # world-readable even for the moment between creation and the chmod.
+        command = (
+            f"umask 077 && printf '%s\\n' {shlex.quote(payload)} "
+            f"> {MCP_CONFIG_PATH} && chmod 600 {MCP_CONFIG_PATH}"
+        )
+        if agent_user is not None and str(agent_user) != "0":
+            owner = shlex.quote(str(agent_user))
+            command += f" && chown {owner} {MCP_CONFIG_PATH}"
+        return command
+
+    def _register_pricing_command(
+        self, agent_user: str | int | None = None
+    ) -> str | None:
+        """Write the host's price table into the config home, if one was given.
+
+        Codape refuses to emit a dollar total for a model it has no price for
+        (`known_total_cost` returns ``None`` once `unpriced_usage` is set), and
+        its built-in table holds Claude models only. That refusal is right; what
+        made the first comparison arm incomparable on cost was that the adapter
+        never supplied the one input that resolves it. ``CostTracker::new``
+        already loads ``pricing.json`` from the config home — which is
+        ``CLAUDE_CONFIG_DIR``, i.e. ``CONFIG_DIR`` — and prefers it to the
+        built-in table.
+
+        The file is a plain map of model id to the four per-million rates;
+        ``_read_pricing`` has already validated its shape. Returns ``None``
+        without one, leaving Codape's own refusal in place rather than inventing
+        a price. ``agent_user`` has the same meaning as in
+        ``_register_mcp_servers_command``: the file is 0600 and this adapter
+        writes as root.
+        """
+        if not self._pricing:
+            return None
+        payload = json.dumps(self._pricing, indent=2, sort_keys=True)
+        command = (
+            f"umask 077 && printf '%s\\n' {shlex.quote(payload)} > {PRICING_PATH}"
+        )
+        if agent_user is not None and str(agent_user) != "0":
+            owner = shlex.quote(str(agent_user))
+            command += f" && chown {owner} {PRICING_PATH}"
+        return command
+
+    def _register_skills_command(self) -> str | None:
+        """Point Codape's user skill root at the task's skills directory.
+
+        Codape's discovery roots are ``<config home>/skills``,
+        ``<repo>/.codape/skills``, plugins and the bundled tree
+        (``crates/plugins/src/skills.rs``, ``SkillLoader::load_all``). Harbor's
+        ``skills_dir`` is a fourth, unrelated location that the task names and
+        Harbor passes to the agent verbatim — for
+        ``cumulative-layout-shift`` it is
+        ``/app/barber-shop-site/.agents/skills``, inside the task image.
+
+        A symlink joins them. Copying would work for the single-file form of a
+        skill but silently drop the sibling files of the directory form
+        (``<name>/SKILL.md`` plus its templates and scripts) — and the one skill
+        actually shipped in a 4.1 task is the directory form.
+
+        The link lives in the config home rather than the working tree, so it
+        cannot appear in an artifact the verifier reads. It is created only when
+        the path exists: Harbor raises on a *declared* ``skills_dir`` whether or
+        not the directory is really there, so an absent path means the task
+        names a location it never populated, and an empty link would be a lie
+        about what the agent was given.
+        """
+        if not self.skills_dir:
+            return None
+        target = shlex.quote(str(self.skills_dir))
+        link = f"{CONFIG_DIR}/skills"
+        return (
+            f"if [ -e {target} ]; then "
+            f"rm -rf {link} && ln -s {target} {link}; fi"
+        )
 
     def _no_proxy_value(self) -> str:
         # NO_PROXY is one comma-separated string; split it so deduplication
@@ -392,8 +597,19 @@ class CodapeHarborAgent(BaseInstalledAgent):
             "stream-json",
             "--max-turns",
             str(self._max_turns),
-            *self._extra_args,
+            # Without this a `tool_use` frame carries `{"summary": "Running a
+            # command"}` and the ATIF trajectory the adapter writes names the
+            # tool but not what it was told to do — a 300-call run whose
+            # trajectory cannot answer "which command failed". The flag exists
+            # for exactly this purpose (`cli.rs`, "Meant for audits and
+            # benchmark runs"); `run_swebench.py` has always passed it.
+            "--verbose-tool-input",
         ]
+        # Only when the task declared servers: passing it otherwise would point
+        # Codape at a path `configure` deliberately did not create.
+        if self.mcp_servers:
+            parts.extend(["--mcp-config", MCP_CONFIG_PATH])
+        parts.extend(self._extra_args)
         return " ".join(shlex.quote(part) for part in parts)
 
     @with_prompt_template
@@ -540,6 +756,64 @@ class CodapeHarborAgent(BaseInstalledAgent):
             return path.read_text(encoding="utf-8")
         except OSError:
             return None
+
+
+def _read_pricing(path: str | None) -> dict[str, dict[str, float]]:
+    """Read and validate a host-side ``pricing.json`` for the config home.
+
+    Shape is Codape's own (`cost.rs`, ``load_pricing_from_path``): a map of
+    model id to the four per-million rates. Validated here so a typo fails at
+    agent construction — before a container is built and a task is paid for —
+    rather than as a silently missing ``total_cost_usd`` at the end of a run.
+
+    A key the four above do not name is carried through rather than dropped, so
+    a table written for a newer Codape still round-trips intact to an older
+    one. That is forward compatibility, not leniency: dropping it would let a
+    future ``cache_write_per_million`` vanish silently. Whether Codape can read
+    the extra key is Codape's call, and ``serde`` rejects an unknown field
+    without ``deny_unknown_fields`` only when the struct declares it — so an
+    older binary ignores what it does not know rather than failing the file.
+    """
+    if not path:
+        return {}
+    source = Path(str(path)).expanduser()
+    try:
+        raw = json.loads(source.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise FileNotFoundError(f"pricing file cannot be read: {source}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"pricing file is not JSON: {source}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"pricing file must map model ids to rates: {source}")
+    required = (
+        "input_per_million",
+        "output_per_million",
+        "cache_read_per_million",
+        "cache_creation_per_million",
+    )
+    table: dict[str, dict[str, float]] = {}
+    for model, rates in raw.items():
+        if not isinstance(rates, dict):
+            raise ValueError(f"pricing entry for {model!r} must be an object: {source}")
+        entry: dict[str, float] = {}
+        for name, rate in rates.items():
+            if not isinstance(rate, (int, float)) or isinstance(rate, bool):
+                raise ValueError(
+                    f"pricing entry for {model!r} has a non-numeric {name!r}: {source}"
+                )
+            try:
+                entry[str(name)] = float(rate)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(
+                    f"pricing entry for {model!r} has an unusable {name!r}: {source}"
+                ) from exc
+        missing = [name for name in required if name not in entry]
+        if missing:
+            raise ValueError(
+                f"pricing entry for {model!r} is missing {', '.join(missing)}: {source}"
+            )
+        table[str(model)] = entry
+    return table
 
 
 def _as_int(value: str) -> int | None:

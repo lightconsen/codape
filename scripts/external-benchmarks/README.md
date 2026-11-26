@@ -318,8 +318,10 @@ The Harbor adapter's ATIF conversion is checked in CI by
 `scripts/external-benchmarks/check_harbor_agent.py`, which runs the same
 function on synthetic transcripts with harbor stubbed out. Under a venv that
 has harbor installed, the same script additionally validates the result through
-harbor's own pydantic models — worth doing before a paid run, because
-`AgentCapabilities(atif=True)` is a promise that `trajectory.json` is valid.
+harbor's own pydantic models, and drives the MCP mapping through
+`harbor.models.task.config.MCPServerConfig` — worth doing before a paid run,
+because `AgentCapabilities(atif=True)` is a promise that `trajectory.json` is
+valid and `mcp_servers=True` is a promise that the servers reach the agent.
 
 The adapter also declares a `ModelConnectionSpec`, and that is not decoration:
 Harbor raises `Agent 'codape' does not support inference connection overrides`
@@ -339,6 +341,103 @@ inference host to an allowlist. Two consequences worth knowing before a run:
 
 The CI check asserts both, and both were confirmed by fault injection while the
 check was written — reintroducing either defect makes it fail.
+
+### What the adapter hands the agent beyond the flags
+
+Four things were missing in the version the 2026-11-25 sweep ran (`v0.2.2`
+binary, adapter as committed then). All four are fixed and each is guarded by a
+check that fails when the fix is removed.
+
+- **The task's MCP servers.** Harbor merges a task's `[environment.mcp_servers]`
+  into `agent.mcp_servers` and refuses to prepare the trial unless the agent
+  claims `capabilities.mcp_servers`; the adapter claimed `atif` and `base_url`
+  only, so `medical-claims-processing` — one `playwright` SSE server — died in
+  `Trial._validate_agent_capabilities` with "Agent 'codape' does not support MCP
+  servers" before any agent code ran. Exactly one of the 60 cached 4.1 task
+  packages declares a server at all — `medical-claims-processing`, and it
+  declares the same `playwright` entry under both `[environment]` and
+  `[verifier.environment]`. (Twelve more carry `mcp_servers = []`, which is not
+  a declaration.) So this defect is one task wide, which is exactly why it went
+  unnoticed: a 45-task arm loses one task and still looks complete. The adapter
+  now writes them, in Codape's `.mcp.json` shape, to
+  `/tmp/codape-config/mcp.json` (mode 0600, owned by the agent user) and passes
+  `--mcp-config` — not `<cwd>/.mcp.json`, which would be part of the working
+  tree a verifier reads. Harbor's own `streamable-http` spelling passes through
+  unchanged because `McpTransport` aliases it to `http`.
+
+  Headers are the part that is not identity. Harbor resolves a task's
+  `${VAR}`-templated header into `agent.mcp_header_env.env` and its own agents
+  write the *variable name* into their config, so the credential travels only
+  through the exec environment. Codape sends a header map verbatim
+  (`crates/mcp/src/http.rs`) and expands no templates, so this adapter writes
+  the resolved value into the file — which is why the file is 0600 and why
+  `capabilities.mcp_http_headers` has to be true for that to be honest.
+
+- **A price table.** Codape emits no `total_cost_usd` for a model it has no
+  price for, and the built-in table is Claude-only, so the whole Codape arm of
+  the sweep recorded no dollars while the Claude arm recorded a figure per
+  trial. The refusal is correct — a Sonnet price wearing another model's name
+  is worse than no number — but the adapter never supplied the one input that
+  resolves it: `CostTracker::new` already loads `pricing.json` from
+  `CLAUDE_CONFIG_DIR`, which the adapter already points at
+  `/tmp/codape-config`. `--ak pricing_path=./prices.json` now uploads that file.
+  It is validated at construction (missing rate, non-JSON, unreadable) so a typo
+  fails before a container is built, rather than as a missing field hours later.
+  The four rates are per million tokens. For the sweep's gateway they are $5.00
+  input, $0.50 cache read and $25.00 output, solved exactly from the Claude
+  arm's own ten clean trials and identical to four decimal places on each. That
+  solve lumped every cache token at 0.1× input, so it fixes cache *creation* no
+  more precisely than "the same as cache read"; the sweep never ran a model that
+  wrote a distinguishable cache volume, so a sharper number would be invented
+  rather than measured.
+
+- **The task's skills directory.** Same gate, same one-task-wide shape:
+  `cumulative-layout-shift` declares `skills_dir =
+  "/app/barber-shop-site/.agents/skills"` and the adapter claimed no
+  `capabilities.skills`, so the trial died in `_validate_agent_capabilities`
+  before starting. The path is not in the task *package* — that directory holds
+  a `skills-lock.json` pinning `vercel-labs/agent-browser` and no `.agents/` —
+  but the built image does: `agent-browser/SKILL.md`, 3263 bytes. Harbor's gate
+  looks at the declaration and never at whether the path is populated.
+
+  Codape's roots are `<config home>/skills`, `<repo>/.codape/skills`, plugins
+  and bundled (`SkillLoader::load_all`), none of which is Harbor's. The adapter
+  symlinks the task's directory to `<config home>/skills`, inside
+  `/tmp/codape-config` so it cannot appear in a verified artifact. A symlink and
+  not a copy: the directory form of a skill (`<name>/SKILL.md` plus its
+  templates and scripts) is exactly the form the one shipped 4.1 skill uses, and
+  copying would keep `SKILL.md` and drop the rest. The link is conditional on
+  the path existing, because the gate fires on a declaration alone and a task
+  can name a directory its image never populated.
+
+  No new release is needed: v0.2.2 already reads `<config home>/skills`
+  (`orchestrator.rs:1749` on the tag), and it was verified against this very
+  image — the v0.2.2 binary logs `skills loaded: 1 from user` and announces
+  `agent-browser` in the system-prompt advert. The one thing that does not
+  survive is `allowed-tools` (hyphen) in the frontmatter, which Codape reads as
+  `allowed_tools` (underscore); the skill still loads and is announced, and
+  Codape never enforced a per-skill tool list anyway.
+
+- **`--verbose-tool-input`.** Without it a `tool_use` frame carries
+  `{"summary": "Running a command"}` (`repl.rs`, `protocol_frame`), so the ATIF
+  trajectory a 300-call run produces cannot say which command ran. The flag has
+  been in the CLI since **v0.2.1** (`bc0dcc58`) and `run_swebench.py` has always
+  passed it; the Harbor adapter did not, so every trajectory from the sweep names
+  tools but not their arguments. Now always passed — the frames grow, which is
+  the cost the flag exists to let a benchmark pay for.
+
+The MCP defect and the skills defect are the same defect twice, found one arm
+apart, so the fifth fix is to stop finding them that way.
+`check_harbor_agent.py` now pairs every field of the declared
+`AgentCapabilities` with the code that honours it (`capability_coverage`): a
+capability claimed with nothing behind it fails, and so does one claimed while
+also sitting on the list of capabilities the adapter deliberately does not
+support (`resume`, `handoff`, `native_config`, `windows`, …). Harbor has
+thirteen fields and validates several of them before any agent code runs, so
+the next task that declares something is a red check rather than a trial that
+records a `ValueError` and gets read as the model being weak. Each group also
+runs through `run_check`, so a raise inside one is reported as that group's
+failure instead of aborting the file and hiding every check after it.
 
 The adapter imposes **no wall clock of its own** by default, and that is
 deliberate. Harbor bounds `run()` with the task's `[agent] timeout_sec` and
