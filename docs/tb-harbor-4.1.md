@@ -1474,7 +1474,10 @@ Codape does implement MCP — `crates/mcp/` has a full client (transports, oauth
 elicitation, resources) and the CLI already takes `--mcp-config` — so this was
 the adapter under-declaring a capability Codape has, not a missing feature; and
 it was the same class of defect as the missing `--verbose-tool-input`: the
-adapter described less of Codape than Codape can do.
+adapter described less of Codape than Codape can do. `cumulative-layout-shift`
+in Part 3 is the same defect in the `skills` slot, and the count of capabilities
+the adapter was under-declaring is four, not three: MCP servers, MCP headers,
+skills and `--verbose-tool-input`.
 
 **Fixed since**, and the fix has a shape worth recording because the naive one
 is wrong. Harbor resolves a task's `${VAR}`-templated header into
@@ -1499,8 +1502,21 @@ servers` and degrades to a warning rather than failing the trial, and
 ### The sweep ended here
 
 `run-all-57.log` closes at `2026-11-25T23:19:32Z sweep complete`, with the last
-step recorded as `END claude tasks-heavy.txt rc=130` — killed by hand, not
-completed. The quota message itself gives the recovery time:
+step recorded as `END claude tasks-heavy.txt rc=130`. That is `128 + SIGINT`:
+the run was interrupted, not finished, and the interruption came from outside
+the sweep. The job it was driving is `jobs/2026-11-26__07-17-39` (07:17:44
+local, 23:17:44 UTC — the log's `START` line), and its `result.json` records
+`n_cancelled_trials: 1`, `n_pending_trials: 2` and a `CancelledError` on
+`uefi-bootkit`: one trial was killed mid-run and the other two never started.
+So this step contributed no data to either arm. It is the same three GPU tasks
+the sweep had already deferred to a `-n 1` step; the Codape half of that step
+ran first (`06:56:02`, 3/3 completed) and this was the Claude half.
+
+Note that two trials of that Codape half are the zero-token ones counted
+above — `usage limit reached` reached them here too, a half hour after the
+wall, and they were graded 3/9 and 6/8 for an untouched workspace.
+
+The quota message itself gives the recovery time:
 
 > weekly, resets in **4d**
 
