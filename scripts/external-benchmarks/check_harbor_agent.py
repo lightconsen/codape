@@ -1046,6 +1046,52 @@ def check_pricing(module) -> None:
         else:
             check(False, "a non-JSON price file must be rejected")
 
+        # A rate the four required names do not cover must survive the read.
+        # Codape's `ModelPricing` is a plain serde struct, so an older binary
+        # ignores a field it does not know instead of rejecting the file; a
+        # reader that dropped it here would make the adapter the thing that
+        # loses a future `cache_write_per_million`.
+        forward = dict(table)
+        forward["deepseek-v4.1-flash"] = {
+            **table["deepseek-v4.1-flash"],
+            "cache_write_per_million": 6.25,
+        }
+        extra = Path(handle.name).with_suffix(".extra.json")
+        extra.write_text(json.dumps(forward), encoding="utf-8")
+        loaded = _agent(module, pricing_path=str(extra))._pricing
+        check(
+            loaded.get("deepseek-v4.1-flash", {}).get("cache_write_per_million") == 6.25,
+            f"a rate beyond the four required names must be carried through: {loaded!r}",
+        )
+
+        non_numeric = Path(handle.name).with_suffix(".nonnum.json")
+        non_numeric.write_text(
+            json.dumps({"m": {**table["deepseek-v4.1-flash"], "cache_write_per_million": "x"}}),
+            encoding="utf-8",
+        )
+        try:
+            _agent(module, pricing_path=str(non_numeric))
+        except ValueError as exc:
+            check("cache_write_per_million" in str(exc),
+                  f"the error should name the non-numeric rate: {exc}")
+        else:
+            check(False, "a non-numeric rate must be rejected, not written to the file")
+
+        # A JSON `true` is the case a bare `float()` hides: it coerces to 1.0,
+        # which is a plausible-looking rate that nobody wrote. Rejecting only
+        # strings would let a table price a model at $1/M by typo.
+        bool_rate = Path(handle.name).with_suffix(".bool.json")
+        bool_rate.write_text(
+            json.dumps({"m": {**table["deepseek-v4.1-flash"], "output_per_million": True}}),
+            encoding="utf-8",
+        )
+        try:
+            coerced = _agent(module, pricing_path=str(bool_rate))._pricing
+        except ValueError:
+            pass
+        else:
+            check(False, f"a boolean rate must be rejected, not coerced: {coerced!r}")
+
         try:
             _agent(module, pricing_path=str(Path(handle.name).with_suffix(".absent")))
         except FileNotFoundError:

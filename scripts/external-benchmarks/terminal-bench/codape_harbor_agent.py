@@ -709,8 +709,14 @@ def _read_pricing(path: str | None) -> dict[str, dict[str, float]]:
     model id to the four per-million rates. Validated here so a typo fails at
     agent construction — before a container is built and a task is paid for —
     rather than as a silently missing ``total_cost_usd`` at the end of a run.
-    Unknown keys are kept rather than rejected: a newer Codape may price cache
-    writes differently, and the extra key is harmless to an older one.
+
+    A key the four above do not name is carried through rather than dropped, so
+    a table written for a newer Codape still round-trips intact to an older
+    one. That is forward compatibility, not leniency: dropping it would let a
+    future ``cache_write_per_million`` vanish silently. Whether Codape can read
+    the extra key is Codape's call, and ``serde`` rejects an unknown field
+    without ``deny_unknown_fields`` only when the struct declares it — so an
+    older binary ignores what it does not know rather than failing the file.
     """
     if not path:
         return {}
@@ -733,14 +739,24 @@ def _read_pricing(path: str | None) -> dict[str, dict[str, float]]:
     for model, rates in raw.items():
         if not isinstance(rates, dict):
             raise ValueError(f"pricing entry for {model!r} must be an object: {source}")
-        missing = [name for name in required if name not in rates]
+        entry: dict[str, float] = {}
+        for name, rate in rates.items():
+            if not isinstance(rate, (int, float)) or isinstance(rate, bool):
+                raise ValueError(
+                    f"pricing entry for {model!r} has a non-numeric {name!r}: {source}"
+                )
+            try:
+                entry[str(name)] = float(rate)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(
+                    f"pricing entry for {model!r} has an unusable {name!r}: {source}"
+                ) from exc
+        missing = [name for name in required if name not in entry]
         if missing:
             raise ValueError(
                 f"pricing entry for {model!r} is missing {', '.join(missing)}: {source}"
             )
-        table[str(model)] = {
-            name: float(rates[name]) for name in required
-        }
+        table[str(model)] = entry
     return table
 
 
