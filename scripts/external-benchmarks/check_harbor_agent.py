@@ -36,6 +36,22 @@ def check(condition: bool, message: str) -> None:
         FAILURES.append(message)
 
 
+def run_check(name: str, function) -> None:
+    """Run one check group, turning an exception into a reported failure.
+
+    The groups call into the adapter, so a renamed or deleted method reaches
+    them as an `AttributeError` — and an uncaught one aborts the whole run at
+    that line, so every check after it never runs and never says why. A
+    traceback would still fail CI, but it reports the *symptom* at the call
+    site instead of the *contract* the adapter broke, and it hides the rest of
+    the document behind it. Naming the group is what makes the message usable.
+    """
+    try:
+        function()
+    except Exception as error:  # noqa: BLE001 — the point is to report, not to classify
+        FAILURES.append(f"{name} raised {type(error).__name__}: {error}")
+
+
 def _resolve_template(template: str) -> str:
     """Replace `${VAR}` with the environment's value, as Harbor's resolver does."""
     import re
@@ -84,8 +100,38 @@ def stub_harbor() -> None:
 
     capabilities = type(sys)("harbor.agents.capabilities")
 
+    # Harbor's real `AgentCapabilities` is `extra="forbid"` with these exact
+    # fields (`harbor/agents/capabilities.py`). The stub used to be a bare
+    # `pass`, which meant a field name the adapter invented — `skills_dir=True`,
+    # say — would sail through CI and fail on the first paid run with a
+    # pydantic error instead of a check. The names are copied literally; when
+    # Harbor adds one, `check_capability_coverage` reports the stub as stale
+    # rather than letting it silently accept anything.
     class AgentCapabilities(_Model):
-        pass
+        known_fields = (
+            "base_url",
+            "atif",
+            "resume",
+            "load_native_trajectory",
+            "load_atif_trajectory",
+            "handoff",
+            "native_config",
+            "native_web_tools",
+            "reasoning_effort",
+            "windows",
+            "skills",
+            "mcp_servers",
+            "mcp_http_headers",
+        )
+
+        def __init__(self, **kwargs):
+            unknown = sorted(set(kwargs) - set(self.known_fields))
+            if unknown:
+                raise TypeError(
+                    f"unexpected capability field(s): {', '.join(unknown)}"
+                )
+            for name in self.known_fields:
+                setattr(self, name, bool(kwargs.get(name, False)))
 
     capabilities.AgentCapabilities = AgentCapabilities
     sys.modules[capabilities.__name__] = capabilities
@@ -504,6 +550,19 @@ def check_against_real_harbor(module) -> None:
     check(len(back.steps) >= 2, "real-harbor: steps must survive a round trip")
     print(f"  validated against harbor: {len(back.steps)} steps, "
           f"{len(text)} bytes")
+
+    # The stub's field list is what lets CI catch a capability typo without
+    # harbor installed. It is only worth anything while it matches the real
+    # model — otherwise it accepts a field harbor rejects, or rejects one
+    # harbor would have taken.
+    from harbor.agents.capabilities import AgentCapabilities as RealCapabilities
+
+    real_fields = set(RealCapabilities.model_fields)
+    stub_fields = set(getattr(module.CodapeHarborAgent.capabilities, "known_fields", real_fields))
+    check(real_fields == stub_fields,
+          "the stub's AgentCapabilities field list has drifted from harbor's: "
+          f"missing {sorted(real_fields - stub_fields)}, "
+          f"extra {sorted(stub_fields - real_fields)}")
 
     check_mcp_against_real_harbor(module)
 
@@ -1142,6 +1201,16 @@ def check_skills(module) -> None:
           "a task that declares skills_dir is rejected before the agent runs "
           "unless capabilities.skills is true")
 
+    # A missing method must read as a failure, not abort the run with an
+    # AttributeError: this file's whole point is that one bad assertion still
+    # reports the rest.
+    handler = getattr(_agent(module), "_register_skills_command", None)
+    check(handler is not None,
+          "the adapter must implement _register_skills_command: declaring "
+          "capabilities.skills without it runs every skills task with no skills")
+    if handler is None:
+        return
+
     # No skills_dir: no link, so no directory appears in the config home that
     # the task never asked for.
     plain = _agent(module)
@@ -1175,23 +1244,119 @@ def check_skills(module) -> None:
           f"the path must be quoted for the shell: {odd_command!r}")
 
 
+def _capability_fields(capabilities) -> tuple[str, ...]:
+    """Harbor's capability field names, in stub mode or against the real model.
+
+    The stub carries the list as `known_fields`; the real pydantic model
+    exposes it as `model_fields` on the class. Both are the same tuple of
+    names, and `check_against_real_harbor` asserts they still agree.
+    """
+    names = getattr(capabilities, "known_fields", None)
+    if names is not None:
+        return tuple(names)
+    return tuple(type(capabilities).model_fields)
+
+
+def check_capability_coverage(module) -> None:
+    """Every capability the adapter claims must have code behind it.
+
+    The 2026-11-25 sweep lost two tasks to the same defect in two slots: the
+    adapter declared less than Codape can do, Harbor raised in
+    `_validate_agent_capabilities` before any agent code ran, and the trial
+    recorded a `ValueError` that reads like a harness problem. Both were found
+    by a paid run; neither is visible from the adapter alone.
+
+    So this walks Harbor's own capability list and demands a decision on each:
+    either it is declared *and* the adapter has the code that honours it, or it
+    is not declared and there is a reason that is written down. Claiming one
+    with nothing behind it is the failure the other checks cannot see — a
+    wrong `capabilities.skills = True` would run every skills task without its
+    skills and score the absence.
+    """
+    declared = {
+        name
+        for name in _capability_fields(module.CodapeHarborAgent.capabilities)
+        if getattr(module.CodapeHarborAgent.capabilities, name, False)
+    }
+    agent = _agent(module)
+    # `--mcp-config` only appears when there are servers, so the probe needs a
+    # server; an agent with none is the case `check_mcp_servers` already covers.
+    agent.mcp_servers = [
+        _server("probe", transport="sse", url="http://probe/sse")
+    ]
+
+    # Each claim paired with the code that makes it true.
+    honoured = {
+        "atif": hasattr(module, "build_trajectory"),
+        "base_url": module.CodapeHarborAgent.MODEL_CONNECTION is not None,
+        "mcp_servers": hasattr(agent, "_register_mcp_servers_command")
+        and "--mcp-config" in agent._command(),
+        "mcp_http_headers": _mcp_writes_headers(module),
+        "skills": hasattr(agent, "_register_skills_command"),
+    }
+    for name in sorted(declared):
+        check(honoured.get(name, False),
+              f"capability {name!r} is declared but nothing in the adapter "
+              f"implements it")
+
+    # The reverse direction, as a written decision rather than an omission.
+    # These are genuinely absent: Codape has no session handoff, no per-skill
+    # config file, no reasoning-effort capability surface to Harbor, and no
+    # trajectory-loading entry point. Windows cannot be run by the released
+    # binary's container at all.
+    deliberately_absent = {
+        "resume",
+        "load_native_trajectory",
+        "load_atif_trajectory",
+        "handoff",
+        "native_config",
+        "native_web_tools",
+        "reasoning_effort",
+        "windows",
+    }
+    # A declaration inside that set is a contradiction: either the adapter grew
+    # the code (then the name moves out of this set) or it claims something
+    # false.
+    contradictions = sorted(declared & deliberately_absent)
+    check(not contradictions,
+          f"declared but listed as deliberately absent: {contradictions}")
+
+
+def _mcp_writes_headers(module) -> bool:
+    """Whether the MCP config path carries headers, as the flag claims."""
+    os.environ["CODAPE_CHECK_HEADER_PROBE"] = "v"
+    try:
+        agent = _agent(module)
+        agent.mcp_servers = [
+            _server("s", transport="sse", url="http://h/sse",
+                    headers={"Authorization": "Bearer ${CODAPE_CHECK_HEADER_PROBE}"})
+        ]
+        return "Authorization" in (agent._register_mcp_servers_command() or "")
+    finally:
+        os.environ.pop("CODAPE_CHECK_HEADER_PROBE", None)
+
+
 def main() -> int:
     module = load_adapter()
     print("harbor adapter: ATIF conversion")
-    check_model_env(module)
-    check_build(module)
-    check_multi_turn(module)
-    check_metrics(module)
-    check_timeout(module)
-    check_mcp_servers(module)
-    check_pricing(module)
-    check_verbose_tool_input(module)
-    check_skills(module)
-    check_configure_writes(module)
-    check_install_prerequisites(module)
-    check_timed_out_raises(module)
-    check_trajectory_model_name(module)
-    check_against_real_harbor(module)
+    for name, function in (
+        ("model_env", check_model_env),
+        ("build", check_build),
+        ("multi_turn", check_multi_turn),
+        ("metrics", check_metrics),
+        ("timeout", check_timeout),
+        ("mcp_servers", check_mcp_servers),
+        ("pricing", check_pricing),
+        ("verbose_tool_input", check_verbose_tool_input),
+        ("skills", check_skills),
+        ("capability_coverage", check_capability_coverage),
+        ("configure_writes", check_configure_writes),
+        ("install_prerequisites", check_install_prerequisites),
+        ("timed_out_raises", check_timed_out_raises),
+        ("trajectory_model_name", check_trajectory_model_name),
+        ("against_real_harbor", check_against_real_harbor),
+    ):
+        run_check(name, lambda: function(module))
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s):")
         for failure in FAILURES:

@@ -426,6 +426,19 @@ check that fails when the fix is removed.
   tools but not their arguments. Now always passed — the frames grow, which is
   the cost the flag exists to let a benchmark pay for.
 
+The MCP defect and the skills defect are the same defect twice, found one arm
+apart, so the fifth fix is to stop finding them that way.
+`check_harbor_agent.py` now pairs every field of the declared
+`AgentCapabilities` with the code that honours it (`capability_coverage`): a
+capability claimed with nothing behind it fails, and so does one claimed while
+also sitting on the list of capabilities the adapter deliberately does not
+support (`resume`, `handoff`, `native_config`, `windows`, …). Harbor has
+thirteen fields and validates several of them before any agent code runs, so
+the next task that declares something is a red check rather than a trial that
+records a `ValueError` and gets read as the model being weak. Each group also
+runs through `run_check`, so a raise inside one is reported as that group's
+failure instead of aborting the file and hiding every check after it.
+
 The adapter imposes **no wall clock of its own** by default, and that is
 deliberate. Harbor bounds `run()` with the task's `[agent] timeout_sec` and
 raises `AgentTimeoutError` when it expires, but it hands that number only to the
