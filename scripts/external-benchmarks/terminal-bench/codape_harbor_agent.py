@@ -726,6 +726,16 @@ class CodapeHarborAgent(BaseInstalledAgent):
             "model_ms": (summary or {}).get("model_ms"),
             "tool_ms": (summary or {}).get("tool_ms"),
             "result_frames": (summary or {}).get("result_frames"),
+            # The frame's own explanation of a failed run. Codape emits
+            # `error_during_execution` from three unrelated paths (a turn task
+            # that ended without handing its engine back, a terminal reason of
+            # `BudgetExhausted`/`Error`/`ApiUnavailable`, and an `Err` from the
+            # turn), and only this string says which. Dropping it leaves the
+            # trial unattributable: the 2026-11-25 sweep produced four of these
+            # and could name the cause of none. Kept absent rather than empty
+            # for a clean run, so `"error" in metadata` answers the question.
+            **({"error": summary["error"]}
+               if (summary or {}).get("error") is not None else {}),
         }
 
         # What the trajectory records as the model. Ask `_env()`, not
@@ -895,6 +905,10 @@ def parse_result_summary(text: str) -> dict | None:
     return {
         "is_error": bool(last_result.get("is_error")),
         "subtype": last_result.get("subtype"),
+        # The one field that distinguishes the three paths that all end a run
+        # as `error_during_execution`. None on a clean frame, so the caller can
+        # tell "the frame explained itself" from "it did not".
+        "error": last_result.get("error"),
         "result_frames": result_frames,
         "usage": usage_total,
         "total_cost_usd": total_cost,
