@@ -36,6 +36,16 @@ def check(condition: bool, message: str) -> None:
         FAILURES.append(message)
 
 
+def _resolve_template(template: str) -> str:
+    """Replace `${VAR}` with the environment's value, as Harbor's resolver does."""
+    import re
+
+    def substitute(match):
+        return os.environ.get(match.group(1), "")
+
+    return re.sub(r"\$\{(\w+)\}", substitute, template)
+
+
 def stub_harbor() -> None:
     """Stand in for harbor's models with the fields the adapter sets.
 
@@ -96,17 +106,48 @@ def stub_harbor() -> None:
 
     installed = type(sys)("harbor.agents.installed.base")
 
+    class _MCPHeaderEnv:
+        """The shape `BaseAgent.mcp_header_env` yields, resolved from os.environ.
+
+        Harbor's own resolver lives in `harbor/agents/mcp_headers.py` and is
+        covered by the real-harbor branch when harbor is installed. Here the
+        contract that matters is only the two maps the adapter reads: `refs`
+        (server → header → generated variable) and `env` (variable → resolved
+        value). Reproducing the four-field dataclass faithfully would test the
+        stub; reproducing its *interface* is what lets the adapter's mapping be
+        checked at all.
+        """
+
+        def __init__(self, refs, env):
+            self.refs = refs
+            self.env = env
+            self.secrets = frozenset()
+
     class BaseInstalledAgent:
         MODEL_CONNECTION = None
 
-        def __init__(self, logs_dir=None, model_name=None, **kwargs):
+        def __init__(self, logs_dir=None, model_name=None, mcp_servers=None, **kwargs):
             del kwargs
             self.logs_dir = logs_dir
             self.model_name = model_name
+            self.mcp_servers = mcp_servers or []
 
         @property
         def model_connection(self):
             return _Connection()
+
+        @property
+        def mcp_header_env(self):
+            refs: dict[str, dict[str, str]] = {}
+            env: dict[str, str] = {}
+            for server_index, server in enumerate(self.mcp_servers):
+                for header_index, (name, template) in enumerate(
+                    (server.headers or {}).items()
+                ):
+                    variable = f"STUB_{server_index}_{header_index}"
+                    refs.setdefault(server.name, {})[name] = variable
+                    env[variable] = _resolve_template(template)
+            return _MCPHeaderEnv(refs, env)
 
     def with_prompt_template(fn):
         return fn
@@ -460,6 +501,102 @@ def check_against_real_harbor(module) -> None:
     print(f"  validated against harbor: {len(back.steps)} steps, "
           f"{len(text)} bytes")
 
+    check_mcp_against_real_harbor(module)
+
+
+def check_mcp_against_real_harbor(module) -> None:
+    """Feed Harbor's *own* MCP models to the adapter's mapping.
+
+    The stub branch proves the adapter reads the attributes it names; only the
+    real model proves those names and spellings are Harbor's. This is the check
+    that would have caught the whole `medical-claims-processing` failure class:
+    it constructs the same objects Harbor constructs from a `task.toml` and
+    asserts the file Codape is told to read carries them.
+    """
+    from harbor.models.task.config import MCPServerConfig, merge_mcp_servers
+
+    os.environ["CODAPE_CHECK_MCP_TOKEN"] = "resolved-at-runtime"
+    try:
+        servers = merge_mcp_servers(
+            [
+                MCPServerConfig(
+                    name="playwright", transport="sse",
+                    url="http://playwright-mcp:3080/sse",
+                ),
+                MCPServerConfig(
+                    name="remote", transport="streamable-http",
+                    url="https://mcp.example/api",
+                    headers={"Authorization": "Bearer ${CODAPE_CHECK_MCP_TOKEN}"},
+                ),
+                MCPServerConfig(
+                    name="local", transport="stdio",
+                    command="npx", args=["-y", "server"],
+                ),
+            ]
+        )
+        agent = _agent(module)
+        agent.mcp_servers = servers
+        # Harbor's own resolver has to succeed on these headers, which is also
+        # what `_validate_agent_capabilities` would require of the agent.
+        header_env = agent.mcp_header_env
+        check(bool(header_env.refs.get("remote")),
+              "harbor must resolve the header template into a reference")
+
+        command = agent._register_mcp_servers_command()
+        check(bool(command), "real-harbor: a config command must be produced")
+        # Pull the JSON back out of the shell literal and parse it, rather than
+        # substring-matching: the mapping's correctness is the object, not the
+        # quoting.
+        payload = _json_from_printf(command or "")
+        check(payload is not None,
+              f"real-harbor: cannot read the JSON back out of {command!r}")
+        if payload is not None:
+            written = payload.get("mcpServers") or {}
+            check(set(written) == {"playwright", "remote", "local"},
+                  f"real-harbor: every server must be written: {sorted(written)}")
+            check(written.get("playwright", {}).get("type") == "sse",
+                  "real-harbor: sse must keep its spelling")
+            check(written.get("playwright", {}).get("url")
+                  == "http://playwright-mcp:3080/sse",
+                  "real-harbor: the url must be carried through")
+            # Harbor spells streamable HTTP `streamable-http`; Codape's
+            # `McpTransport` aliases it to `http`, so passing it through is
+            # what keeps both sides honest without a translation table.
+            check(written.get("remote", {}).get("type") == "streamable-http",
+                  "real-harbor: streamable-http must pass through unrewritten")
+            check(written.get("remote", {}).get("headers", {}).get("Authorization")
+                  == "Bearer resolved-at-runtime",
+                  "real-harbor: the resolved header value must be in the file")
+            check(written.get("local", {}) == {
+                "type": "stdio", "command": "npx", "args": ["-y", "server"],
+            }, f"real-harbor: a stdio server must map exactly: {written.get('local')}")
+        print("  validated against harbor: MCP server mapping")
+    finally:
+        os.environ.pop("CODAPE_CHECK_MCP_TOKEN", None)
+
+
+def _json_from_printf(command: str) -> dict | None:
+    """Recover the JSON payload from `printf '%s\\n' '<json>' > path`."""
+    import shlex
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not tokens or "printf" not in tokens:
+        return None
+    index = tokens.index("printf")
+    for token in tokens[index + 1:]:
+        if token.startswith("%s"):
+            continue
+        try:
+            value = json.loads(token)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
 
 class _ExecStub:
     """Stands in for the environment, recording the budget the run asks for.
@@ -474,6 +611,9 @@ class _ExecStub:
         self.files = files or {}
         self.run_timeouts: list[int | None] = []
         self.exec_calls: list[str] = []
+        # What Harbor sets while it runs `install`/`configure`/`run`
+        # (`trial.py`, `with_default_user(self.task.config.agent.user)`).
+        self.default_user: str | int | None = None
 
     def _result(self, command: str):
         stdout = next(
@@ -567,6 +707,57 @@ def check_timeout(module) -> None:
     if stub.run_timeouts:
         check(stub.run_timeouts[0] is None,
               f"no configured timeout means no exec timeout, got {stub.run_timeouts[0]}")
+
+
+def check_configure_writes(module) -> None:
+    """`configure` must actually issue the writes, not merely know how to.
+
+    The two builders above are pure and easy to get right while the call site
+    forgets them — which is exactly the shape of the original defect: the
+    capability was absent, so no code path ever asked. This drives `configure`
+    through a recording stub and asserts the three files it is responsible for
+    (settings, MCP config, prices) each get a command.
+    """
+    os.environ["CODAPE_CHECK_MCP_TOKEN"] = "t0ken"
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, encoding="utf-8"
+    )
+    try:
+        json.dump({"m": {"input_per_million": 1.0, "output_per_million": 2.0,
+                         "cache_read_per_million": 0.1,
+                         "cache_creation_per_million": 1.0}}, handle)
+        handle.close()
+
+        agent = _agent(module, pricing_path=handle.name)
+        agent.mcp_servers = [
+            _server("playwright", transport="sse", url="http://mcp:3080/sse"),
+        ]
+        stub = _ExecStub()
+        stub.bind(agent)
+        asyncio.run(agent.configure(stub))
+
+        joined = "\n".join(stub.exec_calls)
+        check("settings.json" in joined, f"configure must write settings: {joined!r}")
+        check(module.MCP_CONFIG_PATH in joined,
+              f"configure must write the task's MCP servers: {joined!r}")
+        check(module.PRICING_PATH in joined,
+              f"configure must write the supplied price table: {joined!r}")
+
+        # And with neither feature configured, it must write neither file —
+        # a stray empty `mcp.json` would be noise in 53 of the 66 tasks.
+        bare = _agent(module)
+        bare.mcp_servers = []
+        stub = _ExecStub()
+        stub.bind(bare)
+        asyncio.run(bare.configure(stub))
+        joined = "\n".join(stub.exec_calls)
+        check(module.MCP_CONFIG_PATH not in joined,
+              f"no servers must mean no MCP file: {joined!r}")
+        check(module.PRICING_PATH not in joined,
+              f"no price table must mean no pricing file: {joined!r}")
+    finally:
+        os.environ.pop("CODAPE_CHECK_MCP_TOKEN", None)
+        Path(handle.name).unlink(missing_ok=True)
 
 
 def check_install_prerequisites(module) -> None:
@@ -689,6 +880,197 @@ def check_trajectory_model_name(module) -> None:
         module.build_trajectory = real
 
 
+def _server(name, *, transport="sse", url=None, command=None, args=None,
+            headers=None):
+    """A stand-in for Harbor's `MCPServerConfig`, with only the fields read."""
+
+    class _Server:
+        pass
+
+    server = _Server()
+    server.name = name
+    server.transport = transport
+    server.url = url
+    server.command = command
+    server.args = list(args or [])
+    server.headers = dict(headers or {})
+    return server
+
+
+def check_mcp_servers(module) -> None:
+    """A task's MCP servers must reach Codape, and the capability must be claimed.
+
+    Harbor refuses to prepare a trial whose task declares MCP servers unless the
+    agent's `capabilities.mcp_servers` is true, and fails **before** the agent
+    runs: on 2026-11-26 `medical-claims-processing` — whose `task.toml` declares
+    a `playwright` SSE server — died with "Agent 'codape' does not support MCP
+    servers" and produced no agent output at all. The declaration and the code
+    that honours it are checked together here, because either alone is a lie.
+    """
+    # `getattr`, not attribute access: the CI stub's `AgentCapabilities` has no
+    # fields (it stands in for `extra="forbid"` validation, not for the field
+    # list), so a missing capability must read as "not declared" and produce a
+    # failure message rather than an AttributeError that aborts the run.
+    capabilities = module.CodapeHarborAgent.capabilities
+    check(getattr(capabilities, "mcp_servers", False),
+          "a task with MCP servers is rejected before the agent runs unless "
+          "capabilities.mcp_servers is true")
+    check(getattr(capabilities, "mcp_http_headers", False),
+          "headers are written into the config file, so they must be claimed")
+
+    # No servers: no file, and no flag pointing at one that does not exist.
+    plain = _agent(module)
+    plain.mcp_servers = []
+    check(plain._command().find("--mcp-config") == -1,
+          f"a task with no MCP servers must not pass --mcp-config: {plain._command()!r}")
+    check(plain._register_mcp_servers_command() is None,
+          "a task with no MCP servers must not write an empty config")
+
+    # A header the task secrets through ${VAR}: the value must land in the
+    # file, because Codape sends a header map verbatim and expands no
+    # templates (`crates/mcp/src/http.rs`).
+    os.environ["CODAPE_CHECK_MCP_TOKEN"] = "s3cret-token-value"
+    try:
+        agent = _agent(module)
+        agent.mcp_servers = [
+            _server("playwright", transport="sse",
+                    url="http://playwright-mcp:3080/sse"),
+            _server("remote", transport="streamable-http",
+                    url="https://mcp.example/api",
+                    headers={"Authorization": "Bearer ${CODAPE_CHECK_MCP_TOKEN}"}),
+            _server("local", transport="stdio", command="npx",
+                    args=["-y", "some-mcp-server"]),
+        ]
+        command = agent._register_mcp_servers_command()
+        check(bool(command), "declared servers must produce a config command")
+        # The command is shell; read the JSON back out of the quoted literal
+        # rather than trusting a substring match.
+        check("s3cret-token-value" in (command or ""),
+              "a ${VAR} header must be resolved into the file: Codape does not "
+              "expand templates in a header map")
+        check("mcpServers" in (command or ""), "the file must use the mcpServers key")
+        check("streamable-http" in (command or ""),
+              "Codape accepts 'streamable-http' as an alias of http, so Harbor's "
+              "spelling passes through rather than being rewritten")
+        check("chmod 600" in (command or "") and "umask 077" in (command or ""),
+              "the config now carries a resolved credential; it must be 0600")
+        check("%s" in (command or ""),
+              "the JSON must be written by printf, not expanded by the shell")
+        check("chown" not in (command or ""),
+              "with no agent user the file stays root's — `chown` to root is noise")
+
+        # A task may run its agent as another user (`[agent] user`). Then a
+        # root-owned 0600 file is unreadable and Codape starts with no servers,
+        # which reads as a broken server rather than a permissions mistake.
+        owned = agent._register_mcp_servers_command("agent")
+        check("chown agent" in (owned or ""),
+              f"a non-root agent user must own the file: {owned!r}")
+        as_root = agent._register_mcp_servers_command(0)
+        check("chown" not in (as_root or ""),
+              "UID 0 needs no chown")
+
+        # The flag has to be on the run command when there are servers.
+        run_command = agent._command()
+        check("--mcp-config" in run_command and module.MCP_CONFIG_PATH in run_command,
+              f"declared servers must be passed through --mcp-config: {run_command!r}")
+        # ...and not on a run that has none.
+        bare = _agent(module)
+        bare.mcp_servers = []
+        check("--mcp-config" not in bare._command(),
+              "no servers means no --mcp-config")
+    finally:
+        os.environ.pop("CODAPE_CHECK_MCP_TOKEN", None)
+
+
+def check_pricing(module) -> None:
+    """A supplied price table must reach the file Codape's tracker reads.
+
+    Codape emits no `total_cost_usd` for a model with no price entry, and its
+    built-in table is Claude-only. That refusal is correct, and it is why the
+    Codape arm of the 2026-11-25 sweep recorded no dollars while the Claude arm
+    recorded a figure for every trial — the adapter never supplied the one
+    input that resolves it. `CostTracker::new` loads `pricing.json` from
+    `CLAUDE_CONFIG_DIR`, which `_env` sets to `CONFIG_DIR`.
+    """
+    check(module.PRICING_PATH.startswith(module.CONFIG_DIR),
+          f"the price table must live in the config home: {module.PRICING_PATH}")
+
+    no_table = _agent(module)
+    check(no_table._register_pricing_command() is None,
+          "no price table must mean no file, leaving Codape's own refusal intact")
+
+    table = {
+        "deepseek-v4.1-flash": {
+            "input_per_million": 5.0,
+            "output_per_million": 25.0,
+            "cache_read_per_million": 0.5,
+            "cache_creation_per_million": 5.0,
+        }
+    }
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".json", delete=False, encoding="utf-8"
+    )
+    try:
+        json.dump(table, handle)
+        handle.close()
+        agent = _agent(module, pricing_path=handle.name)
+        check(agent._pricing == table,
+              f"the table must be read and validated at construction: {agent._pricing!r}")
+        command = agent._register_pricing_command()
+        check(bool(command), "a supplied table must produce a write command")
+        check("deepseek-v4.1-flash" in (command or ""),
+              "the table must name the model")
+        check("umask 077" in (command or ""),
+              "the price file should not be world-readable")
+        check("chown agent" in (agent._register_pricing_command("agent") or ""),
+              "a non-root agent user must own the price file too")
+
+        # A malformed table has to fail at construction, before a container is
+        # built and a task paid for — not show up as a missing dollar figure.
+        bad = Path(handle.name).with_suffix(".bad.json")
+        bad.write_text(json.dumps({"m": {"input_per_million": 1.0}}), encoding="utf-8")
+        try:
+            _agent(module, pricing_path=str(bad))
+        except ValueError as exc:
+            check("cache_read_per_million" in str(exc),
+                  f"the error should name the missing rate: {exc}")
+        else:
+            check(False, "an incomplete price entry must be rejected")
+
+        not_json = Path(handle.name).with_suffix(".txt")
+        not_json.write_text("input_per_million: 1.0\n", encoding="utf-8")
+        try:
+            _agent(module, pricing_path=str(not_json))
+        except ValueError:
+            pass
+        else:
+            check(False, "a non-JSON price file must be rejected")
+
+        try:
+            _agent(module, pricing_path=str(Path(handle.name).with_suffix(".absent")))
+        except FileNotFoundError:
+            pass
+        else:
+            check(False, "a missing price file must be an error, not silently ignored")
+    finally:
+        for path in (handle.name,):
+            Path(path).unlink(missing_ok=True)
+
+
+def check_verbose_tool_input(module) -> None:
+    """The stream must carry each call's arguments, not just a summary.
+
+    Without `--verbose-tool-input` a `tool_use` frame holds
+    `{"summary": "Running a command"}` (`repl.rs`, `protocol_frame`), so the
+    ATIF trajectory built from the stream names the tool and nothing else — a
+    300-call run whose trajectory cannot say which command failed, which is the
+    analysis the trajectory exists for. `run_swebench.py` has always passed the
+    flag; this adapter did not.
+    """
+    check("--verbose-tool-input" in _agent(module)._command(),
+          f"the run command must ask for the call arguments: {_agent(module)._command()!r}")
+
+
 def main() -> int:
     module = load_adapter()
     print("harbor adapter: ATIF conversion")
@@ -697,6 +1079,10 @@ def main() -> int:
     check_multi_turn(module)
     check_metrics(module)
     check_timeout(module)
+    check_mcp_servers(module)
+    check_pricing(module)
+    check_verbose_tool_input(module)
+    check_configure_writes(module)
     check_install_prerequisites(module)
     check_timed_out_raises(module)
     check_trajectory_model_name(module)
