@@ -3858,6 +3858,9 @@ impl ReplLoop {
         // Background tools run inside a sub-agent's turn too, and a job record
         // written there must still name the session that owns it.
         let subagent_session_id = session_id.to_string();
+        // A sub-agent's background job ends just as far from its own turn as a
+        // session's does, so it announces through the same inbox.
+        let subagent_settled = engine.settled_jobs();
         // `--add-dir` grants are session-wide, so a sub-agent gets the same
         // roots. Shared rather than copied: the roots are resolved after this
         // factory is built.
@@ -3887,6 +3890,7 @@ impl ReplLoop {
             dispatcher.set_rate_limiter(Arc::new(RateLimiter::new()));
             dispatcher.set_chrome_client(ChromeClient::new());
             dispatcher.set_session_id(subagent_session_id.clone());
+            dispatcher.set_settled_jobs(Some(subagent_settled.clone()));
             // The child registry intentionally has no nested AgentManager. A
             // synchronous parent holds its manager while waiting, so nesting
             // through that same manager could deadlock; the built-in Agent
@@ -4009,6 +4013,11 @@ impl ReplLoop {
         // Tools that start durable background work attribute its record to
         // this session, so a later session can tell it apart from its own.
         dispatcher.set_session_id(session_id.to_string());
+
+        // Background jobs announce themselves through the engine's own inbox:
+        // the same queue `build_context` drains, so a job that ends between
+        // two tool calls is a message on the next request rather than a poll.
+        dispatcher.set_settled_jobs(Some(engine.settled_jobs()));
 
         // The file checkpoint store lets `/rewind` undo the files a turn
         // edited, not only the conversation history.

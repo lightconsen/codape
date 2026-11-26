@@ -290,6 +290,19 @@ and returns one `TaskNotification` per transition, so a crashed background
 agent is surfaced into the conversation once — never left as a phantom
 `running`, and never re-reported on every subsequent start.
 
+**Work that ends while the session runs is pushed, not polled.** The adoption
+path only covers records a *crashed* session left behind. For a job that
+finishes during the session, `SettledJobs` (`job_record.rs`) is a shared,
+draining inbox: whatever settles a record publishes `settled_notice(&record)`,
+and `build_context` drains the inbox at the start of the next request and pushes
+each entry as a system message (also emitted as `EngineEvent::Notification`).
+`Bash` wires it for shell jobs through `dispatcher.set_settled_jobs`, fed by
+`engine.settled_jobs()`, and withdraws the notice when the caller already got
+the result — a foreground return, or `JobOutput(wait_secs)`. The point is the
+cost of waiting: a poll is one tool call per check, an announcement is none.
+Background *agents* settle their records the same way but do not publish yet;
+their lifecycle already reaches the UI as `EngineEvent::AgentEvent`.
+
 **Cron is already durable.** `CronScheduler` (`crates/tools`) persists
 `durable` definitions to `~/.codape/scheduled_tasks.json` and reloads them at
 session start (`repl.rs` calls `load()` then `spawn_runner()`), which is what

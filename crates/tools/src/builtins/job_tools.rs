@@ -416,6 +416,15 @@ impl Tool for JobOutputTool {
             }
         }
 
+        // A job that ended while this call was blocked has just been reported
+        // in full. If the supervisor queued its own notice for the next
+        // request, drop it: one event, one message.
+        if record.state.is_terminal()
+            && let Some(settled) = crate::tool::settled_jobs_from(&ctx)
+        {
+            settled.forget(&job_id);
+        }
+
         Ok(ToolOutput {
             output,
             is_display: true,
