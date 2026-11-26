@@ -216,7 +216,12 @@ impl BashTool {
 /// `kill_after` is the only deadline this function enforces: a foreground
 /// call's own timeout is enforced by the caller, which keeps this task running
 /// (and the job alive) when that timeout fires.
-async fn supervise(mut child: Child, job: JobHandle, kill_after: Option<Duration>) -> JobOutcome {
+async fn supervise(
+    mut child: Child,
+    job: JobHandle,
+    kill_after: Option<Duration>,
+    settled: Option<codape_core::job_record::SettledJobs>,
+) -> JobOutcome {
     let deadline_secs = kill_after.map(|limit| limit.as_secs());
     let (status, timed_out) = if let Some(limit) = kill_after {
         if let Ok(status) = tokio::time::timeout(limit, child.wait()).await {
@@ -261,14 +266,38 @@ async fn supervise(mut child: Child, job: JobHandle, kill_after: Option<Duration
         },
     };
 
-    let _ = job.store.settle(
-        &job.id,
-        outcome.state,
-        now_ms(),
-        outcome.exit_code,
-        outcome.error.clone(),
-    );
+    let settled_now = job
+        .store
+        .settle(
+            &job.id,
+            outcome.state,
+            now_ms(),
+            outcome.exit_code,
+            outcome.error.clone(),
+        )
+        .unwrap_or(false);
+    // `settle` only moves a record that is still running, so a job another
+    // path already closed — `JobKill` — is not announced twice.
+    if settled_now {
+        announce_settle(&job, settled.as_ref());
+    }
     outcome
+}
+
+/// Announce a job the caller will never see the outcome of.
+///
+/// The notice is what turns waiting into a message: a job that ends after its
+/// tool call returned is otherwise discoverable only by asking. Reading the
+/// record back rather than building the text from the outcome means the notice
+/// describes what was *recorded* — and a settle that did not happen (the
+/// record was already terminal) announces nothing.
+fn announce_settle(job: &JobHandle, inbox: Option<&codape_core::job_record::SettledJobs>) {
+    let Some(inbox) = inbox else {
+        return;
+    };
+    if let Ok(Some(record)) = job.store.load(&job.id) {
+        inbox.push(codape_core::job_record::settled_notice(&record));
+    }
 }
 
 /// A file a foreground command writes its final `$PWD` into.
@@ -473,11 +502,14 @@ impl Tool for BashTool {
         if run_in_background {
             let kill_after = requested_timeout.map(|_| Duration::from_secs(timeout_secs));
             let job_for_task = job.clone();
+            // The tool call returns now; the job's end reaches the model as a
+            // system message on a later request rather than as another call.
+            let settled = crate::tool::settled_jobs_from(&ctx);
             tokio::spawn(async move {
                 // The handle keeps the platform sandbox alive for the child's
                 // whole lifetime (a macOS profile, a Windows Job Object).
                 let _sandbox_keepalive = sandbox_handle;
-                let _ = supervise(child, job_for_task, kill_after).await;
+                let _ = supervise(child, job_for_task, kill_after, settled).await;
             });
             return Ok(job.as_output("command running in background"));
         }
@@ -487,9 +519,14 @@ impl Tool for BashTool {
         // of dropping the wait with the process still alive.
         let (tx, rx) = tokio::sync::oneshot::channel();
         let job_for_task = job.clone();
+        // The result of a foreground call is in the tool output below. Only
+        // the timeout path leaves a job the model has to be told about, so the
+        // notice is withdrawn below when the outcome does arrive.
+        let settled = crate::tool::settled_jobs_from(&ctx);
+        let settle_for_task = settled.clone();
         tokio::spawn(async move {
             let _sandbox_keepalive = sandbox_handle;
-            let outcome = supervise(child, job_for_task, None).await;
+            let outcome = supervise(child, job_for_task, None, settle_for_task).await;
             let _ = tx.send(outcome);
         });
 
@@ -523,6 +560,13 @@ impl Tool for BashTool {
 
         if let Some(tracker) = tracker {
             tracker.apply(&ctx);
+        }
+
+        // The model is reading this very output: the exit code and the
+        // captured text are in it. A system notice about the same job would be
+        // a second message about one event, so it is withdrawn.
+        if let Some(settled) = settled.as_ref() {
+            settled.forget(&job.id);
         }
 
         let bytes = std::fs::read(&job.output_path).unwrap_or_default();
@@ -1043,6 +1087,70 @@ mod tests {
             Box::new(std::sync::Arc::clone(shared)),
         );
         ToolContext::new(ExecutionContext::Normal, cwd).with_extra(extra)
+    }
+
+    /// A background job's end reaches the model without a tool call.
+    ///
+    /// The call that started it has already returned, so nothing else can
+    /// report the exit: the supervisor is the only witness. This is the
+    /// measured gap — `biped` spent 27 calls polling jobs like this one.
+    #[tokio::test]
+    async fn a_finished_background_job_announces_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = codape_core::job_record::SettledJobs::new();
+        let mut extra = std::collections::HashMap::<String, crate::tool::SharedState>::new();
+        extra.insert(
+            crate::tool::SETTLED_JOBS_KEY.to_string(),
+            Box::new(inbox.clone()),
+        );
+        let ctx = ToolContext::new(ExecutionContext::Normal, dir.path()).with_extra(extra);
+
+        let output = BashTool::new()
+            .execute(background_input("sleep 0.1; echo announced", 10), ctx)
+            .await
+            .unwrap();
+        let handle: serde_json::Value = serde_json::from_str(&output.output).unwrap();
+        let id = handle["job_id"].as_str().unwrap().to_string();
+
+        // The supervisor publishes after it settles, so wait on the record and
+        // then give the queue a moment's grace.
+        let _ = wait_for_terminal(&JobStore::new(dir.path()), &id).await;
+        let mut notices = Vec::new();
+        for _ in 0..100 {
+            notices = inbox.take_pending();
+            if !notices.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(notices.len(), 1, "expected one notice, got {notices:?}");
+        assert!(notices[0].contains(&id), "{notices:?}");
+        assert!(notices[0].contains("do not poll or sleep"), "{notices:?}");
+    }
+
+    /// A foreground call that returns its own result must not also queue a
+    /// notice: the output the model is reading already says how it ended.
+    #[tokio::test]
+    async fn a_foreground_call_withdraws_its_own_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = codape_core::job_record::SettledJobs::new();
+        let mut extra = std::collections::HashMap::<String, crate::tool::SharedState>::new();
+        extra.insert(
+            crate::tool::SETTLED_JOBS_KEY.to_string(),
+            Box::new(inbox.clone()),
+        );
+        let ctx = ToolContext::new(ExecutionContext::Normal, dir.path()).with_extra(extra);
+
+        BashTool::new()
+            .execute(bash_input("echo foreground"), ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            inbox.take_pending().is_empty(),
+            "a foreground result must not also arrive as a notice"
+        );
     }
 
     #[tokio::test]

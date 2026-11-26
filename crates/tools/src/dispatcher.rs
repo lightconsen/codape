@@ -18,7 +18,7 @@ use crate::task_store::{TASK_STORE_KEY, TaskStore};
 use crate::todo_store::{TODO_STORE_KEY, TodoStore};
 use crate::tool::{
     Backgrounding, HOOK_EXECUTOR_KEY, JOB_SESSION_ID_KEY, RuleContentField, SESSION_CWD_KEY,
-    SharedState, ToolCapabilities, ToolContext, ToolInput,
+    SETTLED_JOBS_KEY, SharedState, ToolCapabilities, ToolContext, ToolInput,
 };
 use codape_config::FeatureFlags;
 use codape_core::hook_executor::HookExecutor;
@@ -125,6 +125,12 @@ pub struct RegistryToolDispatcher {
     /// agent manager holds a clone, and a sub-agent entering plan mode should
     /// move the session it belongs to.
     plan_mode_switch: Arc<parking_lot::RwLock<Option<codape_core::permissions::PlanModeSwitch>>>,
+    /// The session's inbox for jobs that have finished.
+    ///
+    /// Installed by the session from the engine, so the tool that supervises a
+    /// background job and the engine that drains the inbox before its next
+    /// request hold the same queue.
+    settled_jobs: Option<codape_core::job_record::SettledJobs>,
     /// Subject forms the pre-dispatch permission check saw, by call id.
     expected_subjects: Arc<parking_lot::Mutex<HashMap<String, Vec<String>>>>,
 }
@@ -319,8 +325,19 @@ impl RegistryToolDispatcher {
             path_verifier: Arc::new(parking_lot::RwLock::new(None)),
             extra_sandbox_roots: Arc::new(parking_lot::RwLock::new(Vec::new())),
             plan_mode_switch: Arc::new(parking_lot::RwLock::new(None)),
+            settled_jobs: None,
             expected_subjects: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Install the session's settled-job inbox.
+    ///
+    /// A background job's supervisor runs in its own task, so the moment a job
+    /// ends has nothing to do with the turn that started it. Publishing there
+    /// is what makes the end arrive as a message instead of as a poll — see
+    /// [`codape_core::job_record::SettledJobs`].
+    pub fn set_settled_jobs(&mut self, inbox: Option<codape_core::job_record::SettledJobs>) {
+        self.settled_jobs = inbox;
     }
 
     /// Grant tools access to directories outside the working directory.
@@ -812,6 +829,16 @@ impl CoreToolExecutor for RegistryToolDispatcher {
             extra.insert(
                 JOB_SESSION_ID_KEY.to_string(),
                 Box::new(session_id.clone()) as SharedState,
+            );
+        }
+
+        // The inbox a finishing background job publishes into. Cloned rather
+        // than moved: the queue is shared, so the copy a tool captures in a
+        // spawned supervisor still points at the engine's own.
+        if let Some(ref settled) = self.settled_jobs {
+            extra.insert(
+                SETTLED_JOBS_KEY.to_string(),
+                Box::new(settled.clone()) as SharedState,
             );
         }
 
