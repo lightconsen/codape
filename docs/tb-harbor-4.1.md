@@ -282,10 +282,9 @@ optimisation cannot move these numbers.
 ## Codape and Claude Code, head to head on nine tasks
 
 Two later jobs ran the same nine tasks on the same model and gateway, one per
-arm: Codape `2026-11-25__09-59-09` (published `v0.2.2`, with
-`CODAPE_CONTEXT_WINDOW=1000000` exported by `run-arm.sh`) and Claude Code
-`2026-11-25__06-47-04`. These are not the trials in *Results* above, which came
-from the earlier job; nothing here changes those numbers.
+arm: Codape `2026-11-25__09-59-09` and Claude Code `2026-11-25__06-47-04`.
+These are not the trials in *Results* above, which came from the earlier job;
+nothing here changes those numbers.
 
 They are also not the nine-task comparison in
 [`tb-codape-vs-claude.md`](tb-codape-vs-claude.md), and the difference is the
@@ -296,6 +295,21 @@ a Codape arm that was handicapped — `kv-live-surgery` never got past 4/6 there
 and passes 5/6 here, `vf2` goes from 57/60 to a clean 60/60. Where the two
 disagree, this section supersedes it; the older file is still the record of
 what the window defect cost, and says so.
+
+Why the window moved is worth recording, because it is not a setting this
+change introduced. `v0.2.2`'s tables knew no `deepseek-v4.1-flash` at all —
+`MODEL_CONTEXT_WINDOWS` held only `deepseek-chat` / `deepseek-reasoner` /
+`deepseek-r1` at 64 K — so the window could only come from
+`CODAPE_CONTEXT_WINDOW=1000000`, which appears verbatim in five trajectories'
+environment dumps and comes from `codape-env.json`, read and exported by
+`run-arm.sh`'s `eval` block rather than exported in the script itself. `main`
+has since added the entry (`6e0c67eb`), but **not in the binary this run
+measured.** Two details follow. The compaction line became
+`1 000 000 − 20 000 − 13 000` = 967 K, because `MODEL_MAX_OUTPUT_TOKENS` also
+had no entry and an unknown output cap keeps the flat 20 K reserve. And the
+output ceiling stayed at `DEFAULT_MAX_TOKENS` = 32 768, since `CODAPE_MAX_TOKENS`
+was unset — a table entry says what a model is documented to carry; it does not
+raise the request's `max_tokens`.
 
 Measuring by assertions rather than by the all-or-nothing reward, Claude leads on
 three (`kv-live-surgery`, `biped-contact-dynamics`, `gsea-proteomics`), Codape on
@@ -610,84 +624,27 @@ So the three-way story I first recorded is wrong in each part:
   prompting one.
 - Claude is not better at this. It has no `JobOutput` tool at all and bundles
   its own `Bash`; it waits less (141 s) mostly because it launches fewer long
-  jobs. Its `Monitor` tool — which it discovered at step 76 of
-  `kv-live-surgery` (`ToolSearch: select:Monitor`) and armed at step 77 — is
-  the shape Codape lacks, and its result text says exactly why:
-
-  > Monitor started (task bf7i9ee3q, expires in 6m 40s …). You will be notified
-  > on each event. **Keep working — do not poll or sleep.**
-
-  A wait that does not consume a tool call, and that tells the model not to
-  sleep. Codape had no equivalent when this was measured. The job record *does*
+  jobs. Its `Monitor` tool — discovered at step 76 of `kv-live-surgery` and
+  armed at step 77, quoted in
+  [fix 3](#the-three-fixes-this-comparison-argues-for) — is the shape Codape
+  lacks: a wait that consumes no tool call and tells the model not to sleep.
+  Codape had no equivalent when this was measured. The job record *does*
   carry a state change — `Bash`'s background task calls `JobStore::settle` when
   the child exits (`bash_tool.rs:264`) — but nothing pushed it into the
   conversation: the settle only rewrote the record, and the model learned of it
   by asking. So the loop had no way to be told, and the only way to wait was to
   occupy it with `sleep`. (Since fixed: the record's transition is now delivered
-  as a system message on the next request — see
-  [fix 3](#the-three-fixes-this-comparison-argues-for).)
+  as a system message on the next request.)
 
-### Proposal: a wait that is not a `sleep`
-
-Written up here because the sweep cannot test it: it measures `v0.2.2`, and any
-behaviour change mid-sweep puts fixed-binary trials beside `v0.2.2` ones. **All
-three items have since been implemented** — `JobOutput` takes `wait_secs` on
-`main` (`6e0c67eb`), with the `self_managed_timeout` declaration the trap below
-requires; the push notice now names that call instead of a poll loop; and a job
-that ends while the session runs announces itself (`SettledJobs`, see
-[fix 3](#the-three-fixes-this-comparison-argues-for)). None is in `v0.2.2`, so
-nothing in this file measured it. The proposal is kept as written because the
-reasoning, and the trap, are what a re-measurement should check against.
-
-**The defect in one line:** a job cannot be waited on. `JobOutput` returns
-immediately whatever the job's state, so the only blocking primitive is `sleep`,
-which the 60 s `Bash` ceiling immediately converts into *another* background job.
-
-**Fix, smallest first.**
-
-1. **Give `JobOutput` a bounded `wait_secs`.** Block until the job settles or the
-   deadline passes, then return state plus tail — the same shape the tool
-   already returns, with the wait folded in. This is the load-bearing change: it
-   makes "wait for this job" one tool call instead of a `sleep` loop, and it
-   costs one parameter. It does not depend on a prompt change, so it does not
-   affect how the model chooses to work — only what happens once it does.
-
-   **The trap it walks into.** The executor wraps every tool call in a 60 s
-   `ExecutionConfig::default_timeout` (`executor.rs:185`) and returns
-   `ToolError::Timeout` on expiry — the same ceiling, one layer up, so a naive
-   `wait_secs: 300` would be cut off at 60 s and look like a broken job. The
-   escape already exists: `capabilities().self_managed_timeout` makes the
-   executor call the tool directly and skip its own deadline (`executor.rs:180`),
-   and its doc comment (`tool.rs:307`) says a declaring tool "is responsible for
-   not hanging". `Bash` and `PowerShell` are the only declarers today. Whoever
-   implements the wait must set it on `JobOutput` too, and then own the bound
-   itself — `wait_secs` clamped to `MAX_TIMEOUT_SECS` (600) and a hard stop at
-   the deadline regardless of job state. A job that never ends must not hold the
-   call open forever, and `JobKill` must remain able to reach it while it blocks.
-2. **Make the push notice say what to do.** It said "Read it with JobOutput",
-   which was true and useless while `JobOutput` could not wait; it now names
-   `JobOutput({job_id, wait_secs: N})` and says plainly not to poll with
-   `sleep`. The 600 s cap on `Bash`'s own `timeout` also already allows a
-   10-minute foreground wait the model never used.
-3. **Only then, the prompt.** The `Bash` description can say a background job
-   keeps running and to come back to it — but that is the change that alters
-   behaviour and breaks comparability, and it is the weakest of the three: the
-   trajectory shows the model already looks for work to do while a job runs.
-
-**Expected effect, stated conservatively.** 2,580 s of foreground sleep over
-nine trials cannot be reclaimed entirely — a wait for a job that genuinely takes
-four minutes is still four minutes, and it is work the task needs. But 8 sleeps
-totalling **540 s** are not waiting at all: each follows a sleep the 60 s
-ceiling already cut off, so it is a second attempt at the same wait. Those 8
-calls, their round trips and the context they add are what a real wait
-primitive removes. That is a step-count and token problem before it is a
-wall-clock one — 540 s of the arm's 21,428 s (2.5 %) — which is why it belongs
-to L3 rather than to the provider-latency findings above.
-
-**Not done mid-sweep, on purpose.** Changing `JobOutput`'s contract (or the
-notice's) during the sweep would have put two tool surfaces into one dataset.
-All three are on the branch now and none is released; re-measure after a release,
-on the same nine tasks, before claiming a number.
+**What the fix can and cannot reclaim.** A job that genuinely takes four
+minutes is still four minutes, and it is work the task needs. Of the 2,580 s of
+foreground sleep, 8 sleeps totalling **540 s** are not waiting at all — each
+follows a sleep the 60 s ceiling already cut off, so it is a second attempt at
+the same wait. That is 2.5 % of the arm's 21,428 s: a step-count and token
+problem before it is a wall-clock one. One trap a re-measurement must respect:
+the executor wraps every tool call in its own 60 s deadline
+(`executor.rs:185`), so `wait_secs: 300` is cut off at 60 s unless the tool
+declares `self_managed_timeout` (`executor.rs:180`) and owns its bound.
 
 ### `model_ms + tool_ms == duration_ms` is not a parallelism test
 
@@ -730,39 +687,6 @@ one that did not — a pushed job's time is simply absent from both figures.
 
 ## Harness behaviour worth knowing
 
-
-### The counters in `result.json` go stale
-
-`result.json`'s `stats` block froze at `completed=3` while six trials had
-actually finished, then at `completed=8` while two more ran. Its `updated_at`
-stopped advancing while the sweep was demonstrably alive. Three separate
-observations rule out a stalled sweep each time:
-
-1. **Container transcripts keep growing.** The agent's stream is redirected to
-   `/installed-agent/codape-stream.jsonl` *inside the container*, not to `/app`;
-   watching `/app` finds nothing. `vf2`'s reached 31 MB.
-2. **The trial directory count** (`jobs/<ts>/*/`) and the `result.json` count
-   under it are the honest progress figures.
-3. **The `harbor run` process** keeps running.
-
-A byte-size increase over an interval is the reliable liveness signal; mtime
-alone only says "written recently", and a stalled-looking transcript can
-simply mean the agent is inside a long tool call
-(`timeout 600 python3 t_nx.py` accounts for a 10-minute silence).
-
-### SSH to the host fails under load, and the reason is CPU
-
-At peak the 5-minute load average reached **45.3** on 2 vCPUs. During that
-window `ping` answered and `nc -z … 22` succeeded, but every `ssh` attempt
-failed with `Connection timed out during banner exchange` or
-`kex_exchange_identification: read: Connection reset by peer`.
-
-Memory was **not** the cause: 323 MB of 1970 MB was in use, swap 439 MB, and
-`dmesg` carried no `oom`/`killed process` lines. The CPU was saturated, so
-sshd could not fork and write its banner. Retrying harder makes it worse —
-unauthenticated connections queue against `MaxStartups`. One connection with
-`ConnectTimeout=90` succeeds where five with 20–45 s do not.
-
 ### Harbor releases task images when a trial ends
 
 Disk filled from 63 % to 81 % during the sweep, then fell back to 44 % without
@@ -782,74 +706,16 @@ is the finding that ended the sweep, not a failure of any single task.
 
 ## Open questions
 
-Three of these are answered by the second sweep, which re-ran the same tasks on
-the same binary; each answer is annotated rather than deleted, because the
-wrong guess is worth keeping.
+Part 1 left five, and four were answered by Part 2. Their answers live in
+[what this sweep says about the Part 1 causes](#what-this-sweep-says-about-the-part-1-failure-causes)
+rather than here: the `error_no_output` mode did not recur, `kv-live-surgery`'s
+0.46× was the approach and not the host, `vf2`'s threshold was reachable (60/60),
+and `nextjs-performance` did not pass.
 
-- **Whether the `error_no_output` tasks are a prompt problem or a modelling
-  problem.** `ks-solver-cpp` and `biped-contact-dynamics` produced no tool
-  calls at all — 100 K+ characters of reasoning and nothing else. The
-  instruction text states the deliverable path plainly, so this looks like a
-  reasoning-budget failure rather than a misread prompt, but it has not been
-  proven: the test is whether the same task behaves differently at a larger
-  `CODAPE_MAX_TOKENS`. `terminal-bench.md` records the mirror-image mistake
-  being made once before — a truncated prompt looked like a model ignoring
-  requirements — so the instruction text was checked first this time.
-  **Part 2: the mode did not recur, and `CODAPE_MAX_TOKENS` was not changed.**
-  Both tasks ran normally — `ks-solver-cpp` 240 turns and 1/2 (`biped` 283
-  turns and 0/3 on three identical traces). The one thing that
-  changed was the host — 4 vCPU / 15 GB instead of 2 vCPU / 2 GB — which points
-  at memory pressure rather than the token budget. Not proof; see
-  [Part 2](#what-this-sweep-says-about-the-part-1-failure-causes).
-- **Whether `kv-live-surgery`'s 0.46× can become 5.0× at all on this host.**
-  The task wants a 5× throughput improvement on 2 vCPUs shared with another
-  concurrent trial. A regression to half speed suggests the approach was wrong,
-  but a host with no spare CPU may be unable to demonstrate any speedup
-  regardless of approach.
-  **Part 2: the host was not the obstacle.** With 4 vCPU and 4 concurrent
-  trials the failure changed shape entirely — `throughput` passed and the
-  single remaining failure is `correctness` (25 bad GETs out of 423 M
-  keep-alive requests), 5/6. The 0.46× was a property of that approach, not
-  of the hardware.
-- **Whether `vf2`'s 5000× threshold is reachable without compiled code.** The
-  50.6× result came from a pure-Python implementation. That threshold is
-  probably intended to force a C extension or Cython; if so, the assertion is
-  testing build tooling as much as algorithm choice.
-  **Part 2: yes — 60/60.** The question is closed; whatever approach it used,
-  the threshold was reachable in 191 turns.
-- **Whether `gsea-proteomics`'s parameter guess is discoverable from the
-  instruction alone** — the verifier names the missing `set_min`/`set_max`
-  defaults, but nothing in the prompt states them. *Still open:* Part 2 scored
-  it 10/16, the same shape.
-- **Whether `nextjs-performance` would have passed.** It hit the 300-turn cap
-  and was cut during its verifier's `docker compose up --wait`, so no verdict
-  exists. It is the one trial whose result the stop cost, and re-running it
-  alone is the cheapest way to recover that datum.
-  **Part 2: no.** It ended `error_during_execution` after 19 turns at 2/7 —
-  the opposite end of the run from a turn-cap loss, and now a data point for
-  the [new subtype](#the-four-error_during_execution-trials) rather than a
-  missing datum.
-
-## Reproducing Part 1
-
-The sweep is resumable: `jobs/2026-11-24__15-08-19/` holds each trial's
-`result.json`, `verifier/ctrf.json` and `verifier/test-stdout.txt`, and the
-container transcripts are copied out of `/installed-agent/` before the
-environment is deleted.
-
-Per-test verdicts:
-
-```sh
-python3 -I -c '
-import json, glob
-from collections import Counter
-for f in sorted(glob.glob("jobs/<job>/*/verifier/ctrf.json")):
-    d = json.load(open(f))
-    tests = (d.get("results") or {}).get("tests") or d.get("tests") or []
-    c = Counter(t.get("status") for t in tests)
-    print("%-44s %d/%d" % (f.split("/")[-3][:44], c.get("passed", 0), len(tests)))
-'
-```
+One is still open. **Whether `gsea-proteomics`'s parameter guess is discoverable
+from the instruction alone** — the verifier names the missing `set_min`/`set_max`
+defaults, but nothing in the prompt states them, and Part 2 scored it 10/16,
+the same shape as Part 1.
 
 ## Part 2: the full sweep, 2026-11-25
 
@@ -969,7 +835,9 @@ zeros, they are absences.
 
 Aggregates over all 54 trials: **3,239 minutes of agent wall clock**
 (2,457 model, 911 tool, **−128 other**), **1,264.0 M input tokens**,
-**1,228.8 M cached** (97.2 %), **8.91 M output tokens**, 65 result frames.
+**1,228.8 M cached** (97.2 %), **8.91 M output tokens**, 65 result frames — a
+count of headless submits, not of turns, which
+[the per-turn section](#what-the-run-actually-did-turn-by-turn) explains.
 
 ### The twelve one-assertion misses
 
@@ -1020,48 +888,325 @@ four causes:
 | `photonic-waveguide-routing` | 9 | 47.9 min | 4,633,314 | 12/14 | mid-geometry, computing the straight-segment budget around a 90° corner |
 | `freecad-spring-clip` | 6 | 62.8 min | 6,081,218 | 0/2 | mid-derivation, working out where a tab's centre must lie relative to a lobe |
 
-All four report `exit_code: 0` and `is_error: true`, and all four end with the
-agent **still thinking** — the last trajectory step in each is a live
-investigation, not a conclusion and not a tool call that never returned. There
-is no exception in `result.json`, and the trial log shows the agent command
-completing normally.
+All four report `exit_code: 0` and `is_error: true`. Three of the four end on a
+step that made no tool call and wrote no answer — the last trajectory step is
+live reasoning, not a conclusion. `nextjs-performance` is the exception: its
+last step made two `Bash` probes, both results came back (`[Exit code: 7]` and a
+`TypeError: fetch failed`), and the run ended without the model being asked
+again. In no case is there an exception in `result.json`, and in every case the
+trial log shows the agent command completing normally.
 
 So this is the failure mode where **the run ends while the model is mid-thought
-and nothing is thrown.** The subtype is emitted by three code paths
+or mid-probe and nothing is thrown.** The subtype is emitted by four code paths
 (`repl.rs`): a turn task that ended without handing its engine back
 (`repl.rs:13035`), a `BudgetExhausted` / `Error` / `ApiUnavailable` terminal
-reason, and an `Err` from the turn. None of the three carries its cause into
-`result.json` — the message goes into the frame's `data.error`, and **the
-Harbor adapter does not read that field**: `_record` copies `subtype`,
-`is_error`, `num_turns`, the timing keys and `result_frames` and nothing else.
-The frame's `error` string is discarded at the adapter boundary.
+reason, an `Err` from the turn, and — in the same `_ =>` arm — a `StopHook`
+terminal reason. Only the first three are reachable: `TerminalReason::StopHook`
+(`engine.rs:538`) has a `Display` arm and is matched here, but nothing in the
+tree ever constructs it, so it is a variant waiting for a producer. None of the
+three carries its cause into `result.json` — the message goes into the frame's
+`data.error`, and **the Harbor adapter does not read that field**: `_record`
+copies `subtype`, `is_error`, `num_turns`, the timing keys and `result_frames`
+and nothing else. The frame's `error` string is discarded at the adapter
+boundary.
 
 That is the one defect in this section that is Codape's, and it is a reporting
-defect rather than a behavioural one: the run failed for one of three reasons,
-all three were recorded on the wire, and the artifact the benchmark keeps cannot
-say which. **The fix is done** — `parse_result_summary` carries `error` out of
+defect rather than a behavioural one: the run failed for one of three possible
+reasons, all three were recorded on the wire, and the artifact the benchmark
+keeps cannot say which. **The fix is done** — `parse_result_summary` carries `error` out of
 the frame and `_record` puts it in `context.metadata`, absent rather than empty
 on a clean run so `"error" in metadata` answers the question. `check_failure_is_attributable`
 drives `_record` end to end against both fixtures and fails if either half of
 that is removed. It costs nothing and it turns the next four trials of this kind
 into four attributed ones.
 
-The other half is behavioural and not established here. `model_ms` exceeds
-`duration_ms` on three of the four (`photonic` 4.63 M vs 2.88 M, `freecad`
-6.08 M vs 3.77 M, `ontology` 2.17 M vs 1.66 M) — a ratio above 1.0, which
-means the provider time booked against a turn is larger than the turn's own
-wall clock. That is only possible if a request's time was charged to a turn it
-did not run in, and the mechanism is in the code: `send_request` and
-`send_request_streaming` (`engine.rs:7111`, `engine.rs:7198`) record
-`started.elapsed()` around the whole call, and the streaming path's inner
-retries call `send_request` **inside** that window (`engine.rs:7513`,
-`7665`, `7730`) — so a fallback or retry is counted once by the inner wrapper
-and again by the outer one. `photonic` and `freecad-spring-clip` have four
-`result` frames each, `ontology` one, so frame-splitting is not the
-explanation either.
+The other half is behavioural and only partly established. `model_ms` exceeds
+`duration_ms` on **four** trials — `photonic` 4.63 M vs 2.88 M (1.61×, 4
+frames), `freecad` 6.08 M vs 3.77 M (1.61×, 4), `ontology` 2.17 M vs 1.66 M
+(1.31×, **1**), `music-harmony` 2.88 M vs 2.45 M (1.18×, 2) — a ratio above
+1.0, which means the provider time booked against a turn is larger than the
+turn's own wall clock. The mechanism is in the code: `send_request` and
+`send_request_streaming` (`engine.rs:7156`, `7243`) record `started.elapsed()`
+around the whole call, and the streaming path's inner retries call
+`send_request` **inside** that window (`engine.rs:7558`, `7710`, `7775`) — so a
+retry is counted once by the inner wrapper and again by the outer one. The
+blocking path (`execute_turn`, `engine.rs:4416`, `4460`, `4510`) has no outer
+timer, so only the streaming path over-counts. That is local to the timing
+tracker and fixable there: the inner call should hand its elapsed time out
+instead of a nested wrapper being timed twice.
+
+The frame count is what distinguishes the two candidate mechanisms. If the
+adapter's `duration_ms` were the offender — summed per frame, so that a turn
+split across frames is counted once in `duration_ms` and once in `model_ms` — a
+single-frame trial could not overrun. `ontology-kg-querying` has **one** frame
+and still runs 2.17 M ms of model time against 1.66 M of wall clock, a ratio of
+1.31. That is the nesting, inside a single submit.
+
+The trials with four frames are where both mechanisms could have shown up, and
+`freecad-spring-clip` is the clearest: four `result` frames,
+`model_ms` 6.08 M against `duration_ms` 3.77 M. That ratio survives the
+`continue_until_artifacts` reading in [the next
+section](#what-the-run-actually-did-turn-by-turn) because Σ`duration_ms` over
+those four frames equals Harbor's `agent_execution` window exactly — so the
+frames are honest, and the overcount is inside them.
 
 **Worth stating plainly: this affects the timing columns of this file and
-nothing else.** `reward` does not read timing.
+nothing else.** `reward` does not read timing, and token counts do not come
+from the timing tracker.
+
+### What the run actually did, turn by turn
+
+The table above says what each trial scored. This section says what the agent
+spent its time doing, measured from the 51 trajectories the sweep kept (three
+trials have no trajectory: the two dead ones and `cumulative-layout-shift`,
+which never started). Every number here is re-derived from
+`agent/trajectory.json` and `result.json` together; where they disagree the
+trajectory wins on step counts and `result.json` wins on wall clock.
+
+**Duration: failing runs are longer, and not by much.**
+
+| | Trials | Median duration | Mean | Median turns |
+|---|---|---|---|---|
+| Passed | 13 | **40.8 min** | 56.0 min | **112** |
+| Failed (scored) | 36 | **57.1 min** | 66.8 min | 100 |
+
+The median failed run is 1.4× the median passed run and takes *fewer* turns —
+so what a failure costs is time per turn spent going nowhere, not more turns of
+the same work. The longest runs are all failures: `ctr-optimization` 223.5 min,
+`biped-contact-dynamics` 198.5, `coq-block-bound` 182.5, `layout-config-recreation`
+180.7. The shortest is `vllm-deepseek-streaming` at 3.9 min — a run that
+self-destructed in a repetition loop (see below).
+
+Wall clock decomposes into 0.49 h environment setup, 0.21 h agent setup
+(the binary download), **54.0 h of agent execution** and 1.24 h of verifying
+across 54 trials. Against a 15.92 h job that is a mean concurrency of **3.39**
+on a host configured for 4, so the sweep was not throughput-limited: it was
+latency-limited, and the latency is provider-side.
+
+**Per turn, the model call is the cost.** Over the 41 scored trials with a
+single submit — the only basis on which the timing fields are internally
+consistent, because multi-frame trials double-count per the section above —
+model time is **71.5 %** of wall clock and tool time **29.2 %**, with the
+remaining −0.8 % being the tracker's own overlap subtraction (a documented
+invariant: `model_ms + tool_ms` is at most the turn's wall clock, and when
+early tools overlap a stream the subtraction can undershoot). Medians per turn:
+
+| | Wall | Model | Tool | Input tok | Output tok |
+|---|---|---|---|---|---|
+| All scored (n=49) | 27.6 s | 19.7 s | 4.4 s | 110,992 | 1,485 |
+| Passed (n=13) | **25.0 s** | **15.1 s** | 4.4 s | 101,977 | 1,250 |
+| Failed (n=36) | **29.6 s** | **21.1 s** | 4.5 s | 113,119 | 1,524 |
+
+Tool time is identical between the two groups to within 0.1 s. **Everything
+that distinguishes a pass from a fail is on the model side** — 6 s more
+provider time per turn and 11 K more input tokens per turn in the failing set.
+That is the same finding as Part 1's "time is model time, not tool time", now
+measured on 49 scored trials instead of one, and it means no local optimisation
+of Codape can move the pass rate. The one exception is the sleep-polling loop,
+which is tool time and is measured separately.
+
+Output is 64.8 tokens per model-second on this basis — about 3,900 tokens a
+minute, so a 1,485-token turn at the median is 23 s of generation. The model is
+neither fast nor stalled; it is doing a normal amount of work per turn, more
+slowly when it is failing.
+
+**What a step looks like: 6,517 steps over 51 trajectories and 6,559 turns.**
+
+| | Count | Share |
+|---|---|---|
+| Agent steps | 6,517 | — |
+| Steps with at least one tool call | 6,458 | **99.1 %** |
+| Steps with no tool call | 59 | 0.9 % |
+| …of which wrote an answer | 45 | — |
+| …of which wrote nothing at all | **14** | 0.2 % |
+| Steps whose `message` is empty | 5,980 | **91.8 %** |
+
+A step is one model turn in ATIF terms, so 99.1 % of turns end in a tool call
+and only 8.2 % of turns produce any user-visible text at all. That is the
+*reasoning is 98.9 %* finding stated in step counts rather than characters: the
+agent works, it does not talk. The 45 prose steps are almost entirely the single
+closing summary each finished run writes — 42 of the 51 trajectories end on one,
+which is the "Here's a summary of what I built" message the reward function
+never reads.
+
+**Tool mix: Bash is the agent.**
+
+| Tool | Calls | Share |
+|---|---|---|
+| `Bash` | **5,534** | 82.0 % |
+| `Edit` | 350 | 5.2 % |
+| `Read` | 349 | 5.2 % |
+| `Write` | 236 | 3.5 % |
+| `JobOutput` | 191 | 2.8 % |
+| `JobKill` | 32 | 0.5 % |
+| `Sleep` | 25 | 0.4 % |
+| `WebSearch` | 10 | 0.2 % |
+| `JobList` | 8 | 0.1 % |
+| `TodoWrite` | 6 | 0.1 % |
+| `ListDir` | 3 | — |
+| `CurrentDir` | 2 | — |
+| `TaskOutput` | 2 | — |
+| `TaskStop` | 1 | — |
+| `ListMcpResources` | 1 | — |
+| **Total** | **6,750** | |
+
+A median trial makes 111 tool calls of 4 distinct kinds; six trials used no
+tool but `Bash`; the busiest is `layout-config-recreation` at 317 calls. One
+turn in `intrastat-meldung` issued **43 calls at once** (42 `Bash`, 1 `Read`) —
+an entire task solved in a single batch — and passed 47/47. That is the shape
+of the agent's competence when the task is well-specified and local: fan out,
+read the results, done. It is the opposite of the sleep-poll shape below.
+
+**The 14 silent steps are the artifact loop, not a thinking-without-acting
+disease.** This is the sentence an earlier draft of this analysis got wrong, and
+the correction is worth recording in full because it changes what a reader
+should infer from a blank step.
+
+| Trial | Frames | Silent steps (indices) | Ending | Reward |
+|---|---|---|---|---|
+| `freecad-spring-clip` | 4 | 3, 4, 5, 6 (4 of 4, all) | silent | 0.0 |
+| `photonic-waveguide-routing` | 4 | 6, 7, 8, 9 (4 of 4, all) | silent | 0.0 |
+| `biped-contact-dynamics` | 4 | 5, 6, 7 | prose summary | 0.0 |
+| `music-harmony` | 2 | 19 | prose summary | 0.0 |
+| `ontology-kg-querying` | 1 | 20 | silent | 0.0 |
+| `ks-solver-cpp` | 2 | 7 | prose summary | 0.0 |
+
+Two facts kill the "a silent step means the run failed" reading. First, every
+one of the 14 silent steps is 73 K–128 K **characters** of reasoning — up to
+3,500 words — so what looks like an empty turn is the longest generation in the
+run. Second, `biped-contact-dynamics` and `ks-solver-cpp` continue after their
+silent steps and finish normally (`subtype: success`); a silent step is not
+even terminal for them.
+
+What every silent step *does* mark is a turn that a host sent back for another
+try. **`result_frames` is the number of headless submits, and it equals the
+number of no-tool-call steps in all 51 trajectories with a trajectory (51 of
+51, zero mismatches, with a floor of 1 for the ordinary single-submit case).**
+The loop that produces them is `continue_until_artifacts` (`repl.rs:10563`):
+`missing_required_artifacts` checks the paths the instruction names, and when
+they are absent it re-runs `run_headless_turn` with a reminder — up to
+`MAX_ARTIFACT_CONTINUATIONS = 3` — and each re-run emits its own `result`
+frame. The corroboration is that Σ`duration_ms` over a trial's frames equals
+Harbor's own `agent_execution` window to the millisecond: the ratio is **1.00
+in all 8 multi-frame trials**, so nothing is lost or double-counted at the
+frame level. Each submit really did take that long.
+
+The clause echoes are in the trajectories and are unmistakable:
+
+- `photonic-waveguide-routing`: *"The message strongly says: produce the
+  deliverable now, don't start a new search"* — step 9, 103 K chars.
+- `freecad-spring-clip`: *"I need to produce the deliverable now"* — steps 4
+  and 6, both >120 K chars.
+- `music-harmony`: *"the turn ended with instructions to produce it immediately
+  from what I have"* — step 20, 68 K chars.
+- `biped-contact-dynamics`: *"But first priority per the reminder: produce
+  *something* at those paths now"* — step 8, which is where it finally acts.
+
+Both `freecad-spring-clip` and `photonic-waveguide-routing` name their outputs
+explicitly (`/app/answer.py`, `/app/answer_base.FCStd`, `/app/answer_edit.FCStd`;
+`/app/routing_result_1.json`), so `required_from_instruction`
+(`crates/cli/src/artifacts.rs:58`) picks them up from the instruction with no
+adapter flag — the trials' `config.json` carries `"artifacts": []` and the
+adapter passes no `--require-artifact`. Neither file was ever created; the
+trial log shows the collection step failing on it (`Could not find the file
+/app/routing_result_1.json`).
+
+So the mechanism is: the deliverable is missing, the loop sends the model back
+with "produce it now from what you already have", the model **thinks about the
+geometry instead of writing it**, and the generation is cut off before it can
+act. Three of the four submits in `freecad-spring-clip` are that same turn
+restarted. The measured ceiling supports the "cut off" half: no reasoning block
+in the sweep exceeds 127,555 characters, **18 of the 27 steps over 95 K
+characters end mid-word or mid-sentence**, against a 0.1 % mid-sentence rate for
+steps under 8 K characters. A turn the model meant to continue was severed at
+about 3.9 chars/token × 32,768 — the `DEFAULT_MAX_TOKENS` ceiling, rounded
+differently per tokenizer.
+
+**What this means for a fix**, and it is not the loop-detector one:
+`continue_until_artifacts` is doing its job — it names the right file and the
+model acknowledges the reminder — but the remedy it offers ("write the best
+version that meets the stated format") invites a model with a 32 K output
+ceiling to reason its way to a best version rather than write a first one. The
+hand-off between "think" and "write" is where the tokens run out, and the
+reminder is a *second* full-length attempt, not a continuation of the first.
+Raising `--require-artifact` support or the token ceiling is not the lever; the
+lever is that the reminder asks for the finished thing in one turn. Whether
+supplying a skeleton or a shorter reminder fixes it is a hypothesis a paid run
+would have to test — this data can establish the mechanism and not the remedy.
+
+**The `vllm-deepseek-streaming` loop is invisible to the loop detector.**
+`loop_detector.rs` fingerprints a tool call as name + SHA256(canonical input)
+[+ result] and flags exact repeats and A-B alternations
+(`DEFAULT_REPEAT_THRESHOLD = 3` over `DEFAULT_MAX_HISTORY = 32`). The run that
+failed here repeats in **message text**: step 7 is 98,504 characters containing
+5,742 occurrences of `Emit.` over 95 distinct characters. `error_max_output_tokens`
+is the correct verdict — the answer was cut at the ceiling mid-repetition — and
+no change to `loop_detector.rs` would catch it, because the model made no
+repeated tool call at all. A text-repetition detector would be a new mechanism,
+not a threshold change.
+
+**The −128 minutes is not a bug worth chasing.** The other-activity column is
+negative because across 54 trials the sum of negative residuals is −128.8 min
+and the sum of positive ones is +0.5 min. The negatives concentrate exactly
+where this section already expects them: `freecad-spring-clip` −38.6 min,
+`photonic-waveguide-routing` −29.3, `biped-contact-dynamics` −24.3,
+`coq-block-bound` −10.6, `ontology-kg-querying` −8.7, `ks-solver-cpp` −8.1,
+`music-harmony` −8.1. Six of the eight are trials with retried submits or
+retried requests. It is the double-count showing up in the subtraction.
+
+**The model is re-run, not re-fed: the run-1 to run-2 regression.** Nine tasks
+were run in both the 12-trial job (`2026-11-24__23-33-13`, 32 K window) and
+this one. The score went 1 → 2, and the work went up 5.2×:
+
+| | Run 1 (32 K window) | Run 2 (1 M window) |
+|---|---|---|
+| Passes of 9 | 1 | **2** |
+| Agent minutes | 6.96 h | **9.26 h** |
+| Input tokens | 46.3 M | **240.8 M** |
+
+| Task | Run 1 | Run 2 |
+|---|---|---|
+| `biped-contact-dynamics` | 0.0 · 12 turns · 16 K in | 0.0 · **283** turns · **93.7 M** in |
+| `ks-solver-cpp` | 0.0 · 5 turns · 52 K in | 0.0 · **240** turns · **61.2 M** in |
+| `vf2-speedup-networkx` | 0.0 · 300 (cap) · 9.7 M in | **1.0** · 191 turns · 46.7 M in |
+| `kv-live-surgery` | 0.0 · 300 (cap) · 18.8 M in | 0.0 · 133 turns · 21.2 M in |
+| `nextjs-performance` | 0.0 · 300 (cap) · 8.4 M in | 0.0 · 19 turns · 0.38 M in |
+| `vllm-deepseek-streaming` | 0.0 · 44 turns · 0.88 M in | 0.0 · 7 turns · 0.07 M in |
+| `react-lead-form` | **1.0** · 189 turns · 6.2 M in | **1.0** · 112 turns · 11.1 M in |
+| `foodstuff-beta-activity` | 0.0 · 26 turns · 0.84 M in | 0.0 · 38 turns · 2.1 M in |
+| `gsea-proteomics` | 0.0 · 49 turns · 1.3 M in | 0.0 · 79 turns · 4.4 M in |
+
+The two that Part 1 recorded as `error_no_output` are the top two rows:
+`biped-contact-dynamics` goes from 12 turns and 16 K tokens to 283 turns and
+93.7 M, and `ks-solver-cpp` from 5 turns to 240. **Both still score 0.0**, so
+what the larger window bought was the *ability to keep working*, not the
+ability to finish. `vf2-speedup-networkx` is the one genuine conversion, and
+the three 300-turn runs that had been burning input tokens against the cap are
+now short — `nextjs-performance` in particular stops at 19 turns and 0.38 M.
+
+That is not a clean regression story. It is two different failure populations:
+runs that died early under a small window now run to their natural length, and
+their natural length is expensive. Read the score against the minutes, not
+against each other.
+
+**Cost, on one basis.** At the gateway rates solved in
+[Cost](#cost) — \$5.00/M input, \$0.50/M cache read, \$25.00/M output:
+
+| | Trials | Cost |
+|---|---|---|
+| Scored | 49 | **\$966.69** |
+| …passed | 13 | \$256.24 |
+| …failed | 36 | \$710.45 |
+| …the twelve one-assertion misses | 12 | **\$281.85** |
+| All 54 | 54 | \$1,012.88 |
+
+\$74 per solved trial, and the twelve near-misses cost 29 % of the bill for
+zero reward. Cache is 97.2 % of input, in/out is 141.9 : 1, and the
+concentration is the same list as before: top 5 trials 33.6 % of input
+(35.5 % of the scored input), top 10 57.3 %. Three of those five hit the
+300-turn cap, and the four cap trials between them are **23.4 % of the scored
+input** — so a quarter of the model spend went to runs the turn limit had
+already decided.
 
 ### The two dead trials are not results
 
@@ -1202,7 +1347,11 @@ reached 1/2, and `biped-contact-dynamics` ran 283 turns to 0/3, with the same
 single bug on all three of its traces. Part 1
 attributed this to the output ceiling and suggested `CODAPE_MAX_TOKENS` or a
 lower effort. **Neither was changed for this run** — both sweeps used
-`v0.2.2` with the same settings. What was different is the host: 4 vCPU and
+`v0.2.2`, and neither set `CODAPE_MAX_TOKENS`, so the 32 768-token output
+ceiling was live in both. The *context* window did change, from an unknown
+model's 32 K guess in Part 1 to `CODAPE_CONTEXT_WINDOW=1000000` here, and that
+is not a change to the output ceiling — it moves compaction, not
+`max_tokens`. What was also different is the host: 4 vCPU and
 15 GB instead of 2 vCPU and 2 GB (with 8 GB of swap being thrashed). That is
 weak evidence, not proof, but it points at **wall clock under memory pressure**
 rather than at the token budget, and it makes Part 1's stated remedy the less
@@ -1340,8 +1489,8 @@ section describes the sweep's artifact, not the current adapter.
 |---|---|
 | input tokens | 1,264.0 M |
 | cached | 1,228.8 M (**97.2 %**) |
-| output tokens | 8.91 M |
-| in/out ratio | **142 : 1** |
+| output tokens | 8.91 M (a floor — see below) |
+| in/out ratio | **142 : 1** reported; ≈ 133 : 1 corrected |
 
 The five largest consumers are 34.7 % of the input between them:
 `telecom-entity-resolution` 97.7 M, `coq-block-bound` 96.9 M,
@@ -1349,11 +1498,41 @@ The five largest consumers are 34.7 % of the input between them:
 `ctr-optimization` 66.9 M. Note what those have in common: all five ran
 100+ turns, and three hit the 300-turn cap.
 
-**Reasoning is 98.5 % of everything the model wrote** — 24.4 M characters of
-`reasoning_content` against 360 K of `message`, over all trajectories. This is
-the same finding as the nine-task comparison and as Part 1, now measured on 54
-trials: what is visible in the answer is a rounding error against what is
-thought. No harness-side change to how output is displayed can move it.
+**Reasoning is 98.5 % of everything in the transcript** — 24,427,678 characters
+of `reasoning_content` against 362,086 of `message`, over all trajectories.
+Split the other way: 269,322 of those `message` characters are the agent's own
+text (excluding the 92,764 characters of instructions), and against that the
+share is **98.9 %**. Either denominator says the same thing, and it is the same
+finding as the nine-task comparison and as Part 1, now measured on 54 trials:
+what is visible in the answer is a rounding error against what is thought. No
+harness-side change to how output is displayed can move it.
+
+**The totals are trustworthy; the per-request usage behind them is not.** Three
+trials report output-token counts that cannot describe their own transcripts:
+
+| Trial | Characters on the wire | `n_output_tokens` | chars per token |
+|---|---|---|---|
+| `freecad-spring-clip` | 624,534 | **211** | 2,960× |
+| `photonic-waveguide-routing` | 386,440 | **346** | 1,117× |
+| `ontology-kg-querying` | 539,970 | 20,254 | 26.9× |
+
+Against the 2.61 characters per completion token the other 51 trajectories
+average (2.0–3.3, trial by trial), those numbers are impossible: 211 tokens
+cannot be 624,534 characters of anything. The cause is `v0.2.2`'s SSE reader,
+which took usage only from `message_delta` and dropped the whole block when the
+body ended without a trailing blank line (fixed by `c968f360`, with input
+tokens moved to `message_start` by `a3f86604`, both on `main` after this run).
+
+**So the 8.91 M output total is a floor.** The trial's own
+`final_metrics.total_completion_tokens` is a sum of the same lost reports — it
+reads `211` for `freecad` as well — so this is not a per-request problem that
+cancels out in the total. At the 51-trial ratio those three trials would carry
+about 594 K tokens rather than the 20,811 they report, which puts the sweep's
+real output volume near **9.5 M** and the in/out ratio near 133 : 1 rather
+than 142 : 1. The input side is unaffected — those three trials' prompts are
+1.53 M of the 1.264 G, one tenth of one percent — so the direction of the
+correction is one-way: every output-derived figure in this file is a lower
+bound on `v0.2.2`, not a measurement.
 
 ### The resource audit, and what it excluded
 
@@ -1394,8 +1573,8 @@ Part 1 ran anyway under `--cpus ignore` and which took 144.5 minutes to reach
 
 ### Reproducing Part 2
 
-Same as Part 1, against `jobs/2026-11-25__09-59-09/`. Two field-shape traps
-worth repeating because they cost time:
+Everything is derivable from `jobs/2026-11-25__09-59-09/` with the standard
+library. Two field-shape traps worth repeating because they cost time:
 
 ```python
 # `reward` is a nested object, not a scalar.
@@ -1534,11 +1713,10 @@ The two filters answer different questions:
 - **Did the agent do anything?** Drop the 25 zero-token ones; the other four
   ran, and their scores are lower bounds rather than baselines.
 
-`n_input_tokens == 0 and n_output_tokens == 0` is the second filter, and it is
-the general form: it also catches Part 2's `risk-scorer-replay` /
-`rs-archive-clone` and the two Codape heavy-arm trials, which are non-results
-for reasons that have nothing to do with quota. Use it to reject a *result*;
-use the string to reject a *trial from an arm comparison*.
+The second filter is general, not quota-specific: `n_input_tokens == 0 and
+n_output_tokens == 0` also catches Part 2's `risk-scorer-replay` /
+`rs-archive-clone` and Codape's two heavy-arm trials. Use it to reject a
+*result*; use the string to reject a *trial from an arm comparison*.
 
 ### The ten usable trials
 
@@ -1595,7 +1773,11 @@ tokens (98.7 % cached), 1.93 M output. The Codape arm's own 54 trials moved
 the same gateway rates comes to **$1,013** — the same order as Claude's
 per-trial spend, not an order of magnitude apart. That figure is a computation
 over the recorded token counts, not a billing record: Codape emits no
-`cost_usd` at all.
+`cost_usd` at all. One correction applies: the 8.91 M output is a floor (three
+trials lost their usage reports; see
+[token cost](#token-cost-is-concentrated-and-mostly-cached)), which adds about
+$14 at $25/M — $1,027 rather than $1,013. Input dominates this bill (78 % of
+it), and the input counts are sound.
 
 **The gap is narrower than it looks, and closing it is configuration, not
 code.** `known_total_cost()` (`crates/core/src/cost.rs:644-650`) returns `None`
@@ -1644,28 +1826,10 @@ never made a request — the gateway was already 429 by the time they started at
 22:56 UTC, a half hour after the wall — and Harbor graded whatever partial tree
 the task container carried. `takens-embedding-lean` at 3/9 and `uefi-bootkit`
 at 6/8 are the task's baseline score for an untouched workspace, not Codape's
-result. (`medical-claims-processing` is the third trial in that arm, and it
-never got as far as a request: Harbor rejected it at capability validation.)
-
-**The zero-token check is therefore the general form of the "did the agent do
-anything" filter**, and it works regardless of which agent produced the trial:
-
-```python
-if (agent_result["n_input_tokens"] == 0
-        and agent_result["n_output_tokens"] == 0):
-    continue          # nothing was ever sent; this is not a score
-```
-
-That test catches the 25 zero-token quota trials, both heavy-arm trials, and
-Codape's `risk-scorer-replay` / `rs-archive-clone` from Part 2 in one line. A
-trial that spent nothing did nothing.
-
-It is *not* the same rule as the arm filter in
-[the trap](#the-trap-a-429-is-graded-not-discarded): the four quota trials in
-that section which did spend tokens pass this one, and rightly — they ran, and
-`layout-config-recreation` even tied Codape at 10/12. Use this check to reject
-a result that measures nothing; use the `usage limit reached` string to exclude
-a trial from an arm-to-arm comparison, because none of the 29 finished.
+result, and they are the [zero-token filter](#the-trap-a-429-is-graded-not-discarded)
+catching Codape's own trials as well as Claude's.
+(`medical-claims-processing` is the third trial in that arm, and it never got as
+far as a request: Harbor rejected it at capability validation.)
 
 The `medical-claims-processing` failure is a real, separate finding: the adapter
 declared `AgentCapabilities(atif=True, base_url=True)` and nothing else, so
