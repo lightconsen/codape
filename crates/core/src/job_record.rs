@@ -328,6 +328,82 @@ fn notification_for(record: &JobRecord) -> TaskNotification {
     }
 }
 
+// ─── Settled jobs ───────────────────────────────────────────────────────────
+
+/// The inbox a finishing background job announces itself through.
+///
+/// A job does not finish inside a turn: its supervisor is a spawned task, so
+/// the moment it exits is unrelated to whatever the model is doing. The one
+/// useful thing to do with that moment is make it *arrive* — a message the
+/// model reads on its next request, saying the job is over. That is what makes
+/// waiting free: without it the model has to spend a tool call asking, and a
+/// measured benchmark run spent 27 (`biped`) and 16 (`ks-solver`) calls asking.
+///
+/// Deliberately a queue of rendered text rather than structured records: the
+/// consumer is a prompt, and a second structured form would be a second thing
+/// to keep in step with what the model is told.
+#[derive(Debug, Clone, Default)]
+pub struct SettledJobs {
+    pending: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+}
+
+impl SettledJobs {
+    /// An empty inbox.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue one notice for the next request.
+    pub fn push(&self, text: impl Into<String>) {
+        self.pending.lock().push(text.into());
+    }
+
+    /// Take everything queued since the last drain.
+    #[must_use]
+    pub fn take_pending(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending.lock())
+    }
+
+    /// Drop any queued notice about `job_id`.
+    ///
+    /// A caller that observed the job's end itself — `JobOutput` with
+    /// `wait_secs` — has already told the model everything the notice would,
+    /// so delivering it as well is a second message about one event.
+    pub fn forget(&self, job_id: &str) {
+        let needle = format!("job {job_id} ");
+        self.pending.lock().retain(|text| !text.contains(&needle));
+    }
+}
+
+/// The message a finished background job leaves for the model.
+///
+/// Written as a system reminder because that is the shape the prompt already
+/// carries for "something happened you did not ask about": `test_guard` uses
+/// it for a regression. The closing line is the part that matters — a notice
+/// that only says "done" still invites a call to confirm it.
+#[must_use]
+pub fn settled_notice(record: &JobRecord) -> String {
+    let end = match (record.state, record.exit_code, record.error.as_deref()) {
+        (JobState::Done, Some(code), _) => format!("done (exit code {code})"),
+        (JobState::Done, None, _) => "done".to_string(),
+        (JobState::Failed, _, Some(error)) => format!("failed: {error}"),
+        (JobState::Failed, Some(code), None) => format!("failed (exit code {code})"),
+        (state, _, _) => state.label().to_string(),
+    };
+    format!(
+        "<system-reminder>\nBackground {} job {} ({}) finished: {end}.\n\
+         Its output is in .codape/jobs/{}.out; read it with JobOutput when you \
+         need the text. This notice arrived on its own — do not poll or sleep \
+         waiting for a job to finish, and do not re-run it to find out.\n\
+         </system-reminder>",
+        record.kind.label(),
+        record.id,
+        record.description,
+        record.id,
+    )
+}
+
 // ─── adopt ──────────────────────────────────────────────────────────────────
 
 /// Classify persisted records for a starting session.
@@ -1038,5 +1114,93 @@ mod tests {
         assert_eq!(decoded.ended_at_ms, None);
         assert_eq!(decoded.exit_code, None);
         assert_eq!(decoded.error, None);
+    }
+
+    // ─── Settled jobs ───────────────────────────────────────────────────────
+
+    /// The contract the notice exists for: it says the job ended and tells the
+    /// model not to go looking. A notice that only reported the exit would
+    /// still cost the call it is meant to save.
+    #[test]
+    fn a_settled_notice_names_the_job_its_exit_and_the_no_poll_rule() {
+        let mut r = record(
+            "shell-7",
+            JobKind::Shell,
+            Some("sess_a"),
+            JobState::Running,
+            NOW,
+        );
+        r.settle(JobState::Done, NOW + 5, Some(0), None);
+
+        let text = settled_notice(&r);
+        assert!(text.contains("shell-7"), "{text}");
+        assert!(text.contains("exit code 0"), "{text}");
+        assert!(text.contains("do not poll or sleep"), "{text}");
+        // The output path is what the model needs to read it without a listing.
+        assert!(text.contains(".codape/jobs/shell-7.out"), "{text}");
+    }
+
+    /// A failure says why, because "failed" alone sends the model back to ask.
+    #[test]
+    fn a_failed_notice_carries_the_recorded_reason() {
+        let mut r = record(
+            "shell-8",
+            JobKind::Shell,
+            Some("sess_a"),
+            JobState::Running,
+            NOW,
+        );
+        r.settle(JobState::Failed, NOW + 5, Some(1), Some("boom".into()));
+
+        let text = settled_notice(&r);
+        assert!(text.contains("failed: boom"), "{text}");
+    }
+
+    /// The inbox is drained, not read: a second request must not repeat a
+    /// notice the first one already carried.
+    #[test]
+    fn the_inbox_hands_each_notice_out_once() {
+        let inbox = SettledJobs::new();
+        inbox.push("first");
+
+        assert_eq!(inbox.take_pending(), vec!["first".to_string()]);
+        assert!(inbox.take_pending().is_empty());
+    }
+
+    /// A caller that saw the end itself withdraws the notice; a notice about
+    /// some *other* job survives.
+    #[test]
+    fn forget_drops_only_the_named_jobs_notice() {
+        let inbox = SettledJobs::new();
+        inbox.push(settled_notice(&record(
+            "shell-1",
+            JobKind::Shell,
+            None,
+            JobState::Done,
+            NOW,
+        )));
+        inbox.push(settled_notice(&record(
+            "shell-2",
+            JobKind::Shell,
+            None,
+            JobState::Done,
+            NOW,
+        )));
+
+        inbox.forget("shell-1");
+        let left = inbox.take_pending();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("shell-2"), "{left:?}");
+    }
+
+    /// Two handles into the inbox see one queue: the engine holds one copy and
+    /// the dispatcher another, and they must not diverge.
+    #[test]
+    fn clones_share_one_queue() {
+        let inbox = SettledJobs::new();
+        let shared = inbox.clone();
+        shared.push("from the supervisor");
+
+        assert_eq!(inbox.take_pending(), vec!["from the supervisor".to_string()]);
     }
 }

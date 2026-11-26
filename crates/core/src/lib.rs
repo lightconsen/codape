@@ -102,8 +102,8 @@ pub use task::{TaskError, TaskHandle, TaskKind, TaskManager, TaskState};
 
 pub use job_record::{
     AdoptOutcome, DISABLE_ADOPT_ENV, JobKind, JobRecord, JobState, JobStore, JobStoreError,
-    StartupAdopt, TaskNotification, adopt, adopt_and_reconcile, adopt_disabled,
-    adopt_disabled_with, adopt_for_session,
+    SettledJobs, StartupAdopt, TaskNotification, adopt, adopt_and_reconcile, adopt_disabled,
+    adopt_disabled_with, adopt_for_session, settled_notice,
 };
 
 pub use worktree::{

@@ -20,6 +20,14 @@ pub type SharedState = Box<dyn std::any::Any + Send + Sync>;
 /// whoever is adopting.
 pub const JOB_SESSION_ID_KEY: &str = "job_session_id";
 
+/// Key in `ToolContext.extra` holding the session's [`SettledJobs`] inbox, as
+/// a `codape_core::job_record::SettledJobs`.
+///
+/// A tool that supervises background work publishes there when a job ends, and
+/// the engine drains the same inbox at the start of each request. Absent in a
+/// bare test context, where nobody is waiting to be told.
+pub const SETTLED_JOBS_KEY: &str = "settled_jobs";
+
 /// Key in `ToolContext.extra` holding the directory the session's shell is
 /// working in, as an `Arc<parking_lot::RwLock<PathBuf>>`.
 ///
@@ -40,6 +48,20 @@ pub fn session_cwd_from(
     ctx.extra
         .get(SESSION_CWD_KEY)
         .and_then(|state| state.downcast_ref::<Arc<parking_lot::RwLock<std::path::PathBuf>>>())
+        .cloned()
+}
+
+/// Borrow the session's settled-job inbox out of a tool context.
+///
+/// `None` in a bare test context. A caller that gets one publishes a notice
+/// when a background job ends; the engine drains it before its next request.
+#[must_use]
+pub fn settled_jobs_from(
+    ctx: &ToolContext<'_>,
+) -> Option<codape_core::job_record::SettledJobs> {
+    ctx.extra
+        .get(SETTLED_JOBS_KEY)
+        .and_then(|state| state.downcast_ref::<codape_core::job_record::SettledJobs>())
         .cloned()
 }
 

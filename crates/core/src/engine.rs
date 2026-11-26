@@ -2214,6 +2214,12 @@ pub struct QueryEngine {
     denied_tools: Vec<DeniedToolCall>,
     /// Watches test results so a regression is surfaced to the model.
     test_guard: crate::test_guard::TestGuard,
+    /// Finished background jobs that have not yet been reported to the model.
+    ///
+    /// Shared with whatever supervises the jobs, which is what lets a job that
+    /// ends between two tool calls say so on the next request. See
+    /// [`crate::job_record::SettledJobs`] for why this is a queue of text.
+    settled_jobs: crate::job_record::SettledJobs,
     /// Schema validator for structured output.
     structured_output: Option<StructuredOutputValidator>,
     /// Prompt compiler for system prompt assembly.
@@ -2726,6 +2732,7 @@ impl QueryEngine {
             current_turn: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             denied_tools: Vec::new(),
             test_guard: crate::test_guard::TestGuard::new(),
+            settled_jobs: crate::job_record::SettledJobs::new(),
             structured_output: None,
             prompt_compiler: PromptCompiler::new(config),
             compact_config: config,
@@ -2993,6 +3000,17 @@ impl QueryEngine {
             }
         });
         self.tools.set_path_verifier(Some(verifier));
+    }
+
+    /// The inbox finished background jobs announce themselves through.
+    ///
+    /// The session hands the same handle to whatever supervises the jobs (the
+    /// tool dispatcher, via `ToolContext.extra`). The engine drains it at the
+    /// start of every request and pushes what it finds as a system message, so
+    /// a job that ends between two tool calls is reported on the next one.
+    #[must_use]
+    pub fn settled_jobs(&self) -> crate::job_record::SettledJobs {
+        self.settled_jobs.clone()
     }
 
     /// Set the loop detector for detecting repetitive tool call patterns.
@@ -5421,6 +5439,33 @@ impl QueryEngine {
         // went red after an edit.
         for reminder in self.test_guard.take_pending() {
             turn.messages.push(Message::system(reminder));
+        }
+
+        // A background job that finished since the previous request says so
+        // here, for the same reason: it is news the model did not ask for.
+        // Measured cost of not having it — on `biped` the run spent 27 tool
+        // calls waiting for jobs it had started, and on `ks-solver` 16, because
+        // nothing ever told it one had ended. It is a system message rather
+        // than a tool result because there is no request to attach it to: the
+        // job's supervisor is a spawned task, and its exit lands wherever it
+        // likes.
+        for notice in self.settled_jobs.take_pending() {
+            // Also on the event channel: the model reads the message, and a
+            // person watching the session sees the job end without having to
+            // re-read the transcript. `turn.messages` is per-request, so this
+            // is the only surface that outlives it.
+            let _ = self.event_tx.send(EngineEvent::Notification {
+                message: notice.clone(),
+            });
+            // Placement matters and is the same as the two injections above:
+            // every system message joins into one `system` string and the cache
+            // breakpoint goes before the working-tree snapshot, so this text
+            // sits inside the cached prefix. That bounds the cost of a notice
+            // to one prefix re-write per job, which is the price the denied-tool
+            // and test-guard summaries already pay; do not move this below the
+            // snapshot, or the cached prefix stops being byte-identical between
+            // turns.
+            turn.messages.push(Message::system(notice));
         }
 
         // Append custom system prompt if provided
@@ -9037,6 +9082,63 @@ mod tests {
         assert_eq!(
             after_first, after_second,
             "rebuilding context must be idempotent per turn, not append"
+        );
+    }
+
+    /// A background job that ended since the last request is news on the next
+    /// one — and only on that one.
+    ///
+    /// This is the whole contract of the sink: what the supervisor publishes
+    /// arrives as a system message the model reads before deciding anything,
+    /// and is drained so a later turn does not repeat it.
+    #[test]
+    fn a_settled_job_is_announced_once_on_the_next_request() {
+        let (mut engine, _rx, mut session) = make_test_engine();
+        session.messages.push(Message::user("start the server"));
+
+        let mut record = crate::job_record::JobRecord::new(
+            "shell-42",
+            crate::job_record::JobKind::Shell,
+            "npm run dev",
+            "/tmp/test",
+            Some("sess_a"),
+            0,
+        );
+        record.settle(crate::job_record::JobState::Done, 5, Some(0), None);
+        engine
+            .settled_jobs()
+            .push(crate::job_record::settled_notice(&record));
+
+        let mut turn = TurnRuntime::new(TokenBudget::with_defaults());
+        engine.build_context(&mut turn, &SubmitOptions::default());
+
+        let notices: Vec<String> = turn
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, crate::types::Role::System))
+            .filter_map(|m| match &m.content {
+                crate::types::MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .filter(|text| text.contains("shell-42"))
+            .collect();
+        assert_eq!(notices.len(), 1, "one request, one notice: {notices:?}");
+        assert!(notices[0].contains("do not poll or sleep"), "{notices:?}");
+
+        // The next request must not repeat it: a notice is about an event, and
+        // the event already arrived.
+        turn.reset();
+        engine.build_context(&mut turn, &SubmitOptions::default());
+        assert!(
+            !turn
+                .messages
+                .iter()
+                .filter_map(|m| match &m.content {
+                    crate::types::MessageContent::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .any(|text| text.contains("shell-42")),
+            "the notice was delivered twice"
         );
     }
 
