@@ -310,6 +310,12 @@ RESULT = {"type": "result", "subtype": "success", "is_error": False,
 INTERRUPTED = {"type": "result", "subtype": "interrupted", "is_error": False,
                "duration_ms": 100, "num_turns": 1,
                "usage": {"input_tokens": 10, "output_tokens": 5}}
+# A run that ended mid-thought. The three paths that produce this subtype are
+# indistinguishable without `error`, which is the one field the frame carries.
+FAILED = {"type": "result", "subtype": "error_during_execution", "is_error": True,
+          "duration_ms": 311695, "num_turns": 19,
+          "error": "provider unavailable after 3 retries",
+          "usage": {"input_tokens": 10, "output_tokens": 5}}
 
 
 def check_model_env(module) -> None:
@@ -512,6 +518,84 @@ def check_metrics(module) -> None:
           "no usage must yield None, not 0")
     check(module.prompt_tokens_from({"input_tokens": 0}) == 0,
           "a reported zero must stay 0")
+
+    # `error` is the only field that says *which* of the three paths ended a
+    # run as `error_during_execution` (budget, a turn error, or an outage).
+    # Four 2026-11-25 trials recorded that subtype and none of them could be
+    # attributed, because the adapter read the frame without this key.
+    summary = module.parse_result_summary(transcript(TEXT, FAILED)) or {}
+    check(summary.get("error") == "provider unavailable after 3 retries",
+          f"the failed frame's error must survive parsing: {summary.get('error')!r}")
+    # And a clean run must not carry an empty one, so `"error" in metadata`
+    # answers the question rather than always being true.
+    clean = module.parse_result_summary(transcript(TEXT, RESULT)) or {}
+    check(clean.get("error") is None,
+          f"a clean frame must not invent an error: {clean.get('error')!r}")
+
+
+def _trajectory_write_stubbed(module):
+    """Make `_record`'s trajectory write a no-op for one call.
+
+    The stub's models have no `model_dump_json` on purpose (see `_Model`), so
+    `_record` cannot serialize a trajectory against them. Rather than making the
+    model permissive — which would let the trajectory checks assert on a quietly
+    stringified `Step` — the one write is skipped here. Checks that care about
+    the serialized document go through `check_against_real_harbor`.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        original = module.build_trajectory
+        module.build_trajectory = lambda *_a, **_k: None
+        try:
+            yield
+        finally:
+            module.build_trajectory = original
+
+    return _ctx()
+
+
+def check_failure_is_attributable(module) -> None:
+    """A failed run must say at the artifact boundary *why* it failed.
+
+    `error_during_execution` is emitted by three unrelated paths — a turn task
+    that ended without handing its engine back, a terminal reason of
+    `BudgetExhausted`/`Error`/`ApiUnavailable`, and an `Err` from the turn — and
+    the frame's `error` string is the only thing that distinguishes them. The
+    2026-11-25 sweep recorded that subtype four times and could attribute none
+    of them, so every explanation for those four trials was a guess.
+
+    Driving `_record` rather than parsing in isolation is the point: the field
+    can survive `parse_result_summary` and still be dropped when metadata is
+    assembled, and that second half is where it was actually lost.
+    """
+    stream = transcript(TEXT, TOOL_USE, TOOL_RESULT, FAILED)
+    stub = _ExecStub({module.STREAM_PATH: stream, module.EXIT_CODE_PATH: "0\n"})
+    agent = _agent(module)
+    stub.bind(agent)
+    context = module.AgentContext()
+    with _trajectory_write_stubbed(module):
+        asyncio.run(agent._record(stub, context))
+
+    metadata = getattr(context, "metadata", None) or {}
+    check(metadata.get("error") == FAILED["error"],
+          "a failed run's error must reach context.metadata; without it the "
+          f"trial records a subtype nobody can explain: {metadata.get('error')!r}")
+    check(metadata.get("subtype") == "error_during_execution",
+          f"the subtype must still be recorded: {metadata.get('subtype')!r}")
+
+    # A clean run must not gain the key at all, so its presence is the signal.
+    clean_stub = _ExecStub({module.STREAM_PATH: transcript(TEXT, RESULT),
+                            module.EXIT_CODE_PATH: "0\n"})
+    clean_agent = _agent(module)
+    clean_stub.bind(clean_agent)
+    clean_context = module.AgentContext()
+    with _trajectory_write_stubbed(module):
+        asyncio.run(clean_agent._record(clean_stub, clean_context))
+    clean_metadata = getattr(clean_context, "metadata", None) or {}
+    check("error" not in clean_metadata,
+          f"a clean run must not carry an error key: {clean_metadata.get('error')!r}")
 
 
 def check_against_real_harbor(module) -> None:
@@ -1344,6 +1428,7 @@ def main() -> int:
         ("build", check_build),
         ("multi_turn", check_multi_turn),
         ("metrics", check_metrics),
+        ("failure_is_attributable", check_failure_is_attributable),
         ("timeout", check_timeout),
         ("mcp_servers", check_mcp_servers),
         ("pricing", check_pricing),
