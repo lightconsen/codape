@@ -344,8 +344,8 @@ check was written — reintroducing either defect makes it fail.
 
 ### What the adapter hands the agent beyond the flags
 
-Three things were missing in the version the 2026-11-25 sweep ran (`v0.2.2`
-binary, adapter as committed then). All three are fixed and each is guarded by a
+Four things were missing in the version the 2026-11-25 sweep ran (`v0.2.2`
+binary, adapter as committed then). All four are fixed and each is guarded by a
 check that fails when the fix is removed.
 
 - **The task's MCP servers.** Harbor merges a task's `[environment.mcp_servers]`
@@ -390,6 +390,33 @@ check that fails when the fix is removed.
   more precisely than "the same as cache read"; the sweep never ran a model that
   wrote a distinguishable cache volume, so a sharper number would be invented
   rather than measured.
+
+- **The task's skills directory.** Same gate, same one-task-wide shape:
+  `cumulative-layout-shift` declares `skills_dir =
+  "/app/barber-shop-site/.agents/skills"` and the adapter claimed no
+  `capabilities.skills`, so the trial died in `_validate_agent_capabilities`
+  before starting. The path is not in the task *package* — that directory holds
+  a `skills-lock.json` pinning `vercel-labs/agent-browser` and no `.agents/` —
+  but the built image does: `agent-browser/SKILL.md`, 3263 bytes. Harbor's gate
+  looks at the declaration and never at whether the path is populated.
+
+  Codape's roots are `<config home>/skills`, `<repo>/.codape/skills`, plugins
+  and bundled (`SkillLoader::load_all`), none of which is Harbor's. The adapter
+  symlinks the task's directory to `<config home>/skills`, inside
+  `/tmp/codape-config` so it cannot appear in a verified artifact. A symlink and
+  not a copy: the directory form of a skill (`<name>/SKILL.md` plus its
+  templates and scripts) is exactly the form the one shipped 4.1 skill uses, and
+  copying would keep `SKILL.md` and drop the rest. The link is conditional on
+  the path existing, because the gate fires on a declaration alone and a task
+  can name a directory its image never populated.
+
+  No new release is needed: v0.2.2 already reads `<config home>/skills`
+  (`orchestrator.rs:1749` on the tag), and it was verified against this very
+  image — the v0.2.2 binary logs `skills loaded: 1 from user` and announces
+  `agent-browser` in the system-prompt advert. The one thing that does not
+  survive is `allowed-tools` (hyphen) in the frontmatter, which Codape reads as
+  `allowed_tools` (underscore); the skill still loads and is announced, and
+  Codape never enforced a per-skill tool list anyway.
 
 - **`--verbose-tool-input`.** Without it a `tool_use` frame carries
   `{"summary": "Running a command"}` (`repl.rs`, `protocol_frame`), so the ATIF

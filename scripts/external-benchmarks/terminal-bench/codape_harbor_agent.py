@@ -154,8 +154,29 @@ class CodapeHarborAgent(BaseInstalledAgent):
     # file. A header the task secrets through `${VAR}` is resolved here and
     # placed in the file, not in the argv — the config file is mode 0600 and the
     # argv is visible to `ps`.
+    #
+    # `skills=True` was the same missing promise, one task wide:
+    # `cumulative-layout-shift` declares `skills_dir = "/app/barber-shop-site/
+    # .agents/skills"` under both `[environment]` and `[verifier.environment]`,
+    # and the trial died in `_validate_agent_capabilities` before starting. The
+    # package source has no `.agents/` directory — but the built image does:
+    # `agent-browser/SKILL.md`, 3263 bytes, and Codape parses it
+    # (`SkillLoader::load_from_dir`, directory form). `_register_skills_command`
+    # is what puts that directory on a discovery root.
+    #
+    # The honest limit: Codape reads `allowed_tools` (underscore) and this skill
+    # writes `allowed-tools` (hyphen, the Claude Code spelling), so the tool
+    # hint is dropped. Unknown frontmatter keys are skipped silently, the skill
+    # still loads and is still announced, and Codape never enforced per-skill
+    # tool lists anyway (`allowed_tools` is carried, not applied — the enforced
+    # one is `allowed_tools_override`), so the cost is a hint, not a difference
+    # in permission.
     capabilities = AgentCapabilities(
-        atif=True, base_url=True, mcp_servers=True, mcp_http_headers=True
+        atif=True,
+        base_url=True,
+        mcp_servers=True,
+        mcp_http_headers=True,
+        skills=True,
     )
 
     # `base_url=True` is only honest with a spec behind it: Harbor raises
@@ -312,6 +333,9 @@ class CodapeHarborAgent(BaseInstalledAgent):
         pricing_command = self._register_pricing_command(agent_user)
         if pricing_command:
             await self.exec_as_root(environment, command=pricing_command)
+        skills_command = self._register_skills_command()
+        if skills_command:
+            await self.exec_as_root(environment, command=skills_command)
         if self._task_proxy:
             # The tests run in their own shell, and several task scripts install
             # their tooling there (the `uv` bootstrap is the common one). A
@@ -435,6 +459,38 @@ class CodapeHarborAgent(BaseInstalledAgent):
             owner = shlex.quote(str(agent_user))
             command += f" && chown {owner} {PRICING_PATH}"
         return command
+
+    def _register_skills_command(self) -> str | None:
+        """Point Codape's user skill root at the task's skills directory.
+
+        Codape's discovery roots are ``<config home>/skills``,
+        ``<repo>/.codape/skills``, plugins and the bundled tree
+        (``crates/plugins/src/skills.rs``, ``SkillLoader::load_all``). Harbor's
+        ``skills_dir`` is a fourth, unrelated location that the task names and
+        Harbor passes to the agent verbatim — for
+        ``cumulative-layout-shift`` it is
+        ``/app/barber-shop-site/.agents/skills``, inside the task image.
+
+        A symlink joins them. Copying would work for the single-file form of a
+        skill but silently drop the sibling files of the directory form
+        (``<name>/SKILL.md`` plus its templates and scripts) — and the one skill
+        actually shipped in a 4.1 task is the directory form.
+
+        The link lives in the config home rather than the working tree, so it
+        cannot appear in an artifact the verifier reads. It is created only when
+        the path exists: Harbor raises on a *declared* ``skills_dir`` whether or
+        not the directory is really there, so an absent path means the task
+        names a location it never populated, and an empty link would be a lie
+        about what the agent was given.
+        """
+        if not self.skills_dir:
+            return None
+        target = shlex.quote(str(self.skills_dir))
+        link = f"{CONFIG_DIR}/skills"
+        return (
+            f"if [ -e {target} ]; then "
+            f"rm -rf {link} && ln -s {target} {link}; fi"
+        )
 
     def _no_proxy_value(self) -> str:
         # NO_PROXY is one comma-separated string; split it so deduplication

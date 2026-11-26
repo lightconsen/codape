@@ -913,6 +913,12 @@ as a 0.0 in the 13/54.
 
 ### Three no-verdict trials, one of them Codape's
 
+Harbor recorded 51 graded trials and 3 exceptions in the Codape arm of
+`2026-11-25__09-59-09`; these are the three. None of them is a Codape result —
+each trial ended with no agent output to grade. Only the first is the adapter's
+fault, and it is now fixed; the other two are the harness failing before or
+after the agent.
+
 | Task | Turns | Duration | What happened |
 |---|---|---|---|
 | `cumulative-layout-shift` | — | — | `ValueError: Agent 'codape' does not support skills; configured skills require capabilities.skills = True` |
@@ -920,20 +926,47 @@ as a 0.0 in the 13/54.
 | `payments-pipeline-fix` | 281 | 71.0 min | `RuntimeError`: verifier `docker compose up --detach --wait` failed |
 
 **`cumulative-layout-shift` is a real adapter gap.** Its `task.toml` declares
-`skills_dir = "/app/barber-shop-site/.agents/skills"`, and Harbor refuses to
-start an agent whose `capabilities.skills` is false when a task supplies skills
-(`trial.py:1801`). The Codape adapter declares `AgentCapabilities(atif=True,
-base_url=True)` and nothing else (`codape_harbor_agent.py:136`). The refusal is
-correct behaviour from Harbor — it is telling the truth, that nobody wired
-skills through.
+`skills_dir = "/app/barber-shop-site/.agents/skills"` under both
+`[environment]` and `[verifier.environment]`, and Harbor refuses to start an
+agent whose `capabilities.skills` is false when a task supplies skills
+(`trial.py:1801`). At the time of the sweep the Codape adapter declared
+`AgentCapabilities(atif=True, base_url=True)` and nothing else
+(`codape_harbor_agent.py:136`).
 
-Codape *does* have a skill system (`crates/plugins/src/skills.rs`, with a
-built-in `Skill` tool). What it does not have is a path from Harbor's
-`skills_dir` into Codape's discovery roots, which are `~/.codape/skills`,
-`<repo>/.codape/skills`, plugins and the built-ins. So the adapter's refusal is
-the honest answer for `v0.2.2`, and enabling the flag without the wiring would
-be worse than false — it would run every skills task without its skills and
-score the absence.
+The directory is not in the task *package* — `environment/barber-shop-site/`
+has no `.agents/`, only a `skills-lock.json` naming `vercel-labs/agent-browser`.
+It is in the built image: `docker cp` out of the 4.1 environment image gives
+`/app/barber-shop-site/.agents/skills/agent-browser/SKILL.md`, 3263 bytes, a
+browser-automation CLI that the task's own `skills-lock.json` pins. Harbor
+raises on the *declaration* and never checks whether the path is populated, so
+for this task the gate was rejecting an agent for a directory that is really
+there.
+
+An earlier revision of this section said Codape has "no path from Harbor's
+`skills_dir` into Codape's discovery roots" and that enabling the flag "would
+be worse than false". That was wrong, and the same mistake as the MCP arm:
+Codape's user skill root is `config_home()/skills`, `config_home()` is
+`CLAUDE_CONFIG_DIR`, and the adapter already sets `CLAUDE_CONFIG_DIR` to its own
+`CONFIG_DIR`. A symlink from `<CONFIG_DIR>/skills` to the task's directory is
+enough, and it works in the published v0.2.2 — `orchestrator.rs:1749` on the
+`v0.2.2` tag reads `<config home>/skills`. Verified end to end against the real
+4.1 image: the v0.2.2 binary logs `skills loaded: 1 from user` and announces
+`agent-browser`, with its description, in the system-prompt advert
+(`render_skill_adverts`).
+
+So the fix is the same shape as MCP and pricing: claim `skills=True` and add
+`_register_skills_command`, which symlinks the task's directory onto that root.
+A symlink rather than a copy, because Codape's directory form of a skill
+(`<name>/SKILL.md` plus its templates and scripts) loses everything beside
+`SKILL.md` if copied. The link is created only when the path exists, since the
+gate fires on the declaration alone.
+
+One honest limit remains: the skill writes `allowed-tools` (hyphen, the Claude
+Code spelling) and Codape reads `allowed_tools` (underscore), so that hint is
+dropped. Codape never enforced per-skill tool lists anyway — `allowed_tools` is
+carried on `SkillMetadata`, while the enforced check is
+`allowed_tools_override` in `tool_scheduler.rs` — so the skill loads, is
+announced, and runs with the same permissions it would have had.
 
 The other two are harness-side and cost 107.5 minutes of agent wall clock
 between them. `batched-eval-parity`'s `unknown flag: --file` is a Docker

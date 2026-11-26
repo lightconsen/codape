@@ -126,11 +126,15 @@ def stub_harbor() -> None:
     class BaseInstalledAgent:
         MODEL_CONNECTION = None
 
-        def __init__(self, logs_dir=None, model_name=None, mcp_servers=None, **kwargs):
+        def __init__(self, logs_dir=None, model_name=None, mcp_servers=None,
+                     skills_dir=None, **kwargs):
             del kwargs
             self.logs_dir = logs_dir
             self.model_name = model_name
             self.mcp_servers = mcp_servers or []
+            # Harbor's `BaseAgent.__init__` stores the task's skills directory
+            # here (`agents/base.py`); the stub mirrors the contract.
+            self.skills_dir = skills_dir
 
         @property
         def model_connection(self):
@@ -1117,6 +1121,60 @@ def check_verbose_tool_input(module) -> None:
           f"the run command must ask for the call arguments: {_agent(module)._command()!r}")
 
 
+def check_skills(module) -> None:
+    """A task's skills directory must reach Codape's discovery, and be claimed.
+
+    Same shape as the MCP defect: Harbor raises in
+    `_validate_agent_capabilities` for a task that declares `skills_dir`
+    unless the agent claims `capabilities.skills`, so
+    `cumulative-layout-shift` produced no agent output at all on 2026-11-26.
+    The gate looks at the *declaration*, not at whether the directory exists —
+    so the claim and the code that honours it are checked together.
+
+    The link is the part that is easy to get wrong: Codape's roots are
+    `<config home>/skills`, `<repo>/.codape/skills`, plugins and bundled, none
+    of which is Harbor's `skills_dir`. A copy would drop the sibling files of
+    the directory form of a skill, which is the form the one shipped 4.1 skill
+    uses.
+    """
+    capabilities = module.CodapeHarborAgent.capabilities
+    check(getattr(capabilities, "skills", False),
+          "a task that declares skills_dir is rejected before the agent runs "
+          "unless capabilities.skills is true")
+
+    # No skills_dir: no link, so no directory appears in the config home that
+    # the task never asked for.
+    plain = _agent(module)
+    plain.skills_dir = None
+    check(plain._register_skills_command() is None,
+          "a task with no skills_dir must not create a skills link")
+
+    agent = _agent(module)
+    agent.skills_dir = "/app/some-task/.agents/skills"
+    command = agent._register_skills_command() or ""
+    check(bool(command), "a declared skills_dir must produce a command")
+    check(f"{module.CONFIG_DIR}/skills" in command,
+          f"the link must land on Codape's user skill root: {command!r}")
+    check("/app/some-task/.agents/skills" in command,
+          f"the link must point at the task's directory: {command!r}")
+    check("ln -s" in command,
+          f"a symlink, not a copy: copying drops a directory skill's siblings: {command!r}")
+    # Harbor raises on the declaration alone, so a task can name a path its
+    # image never populated. Linking to nothing would claim skills were handed
+    # over when none were.
+    check("-e " in command,
+          f"the link must be conditional on the directory existing: {command!r}")
+    check("rm -rf" in command,
+          f"a stale link from an earlier run must be cleared: {command!r}")
+
+    # A path with a space or a quote would otherwise break the shell.
+    odd = _agent(module)
+    odd.skills_dir = "/app/a task/it's here/skills"
+    odd_command = odd._register_skills_command() or ""
+    check("it's" not in odd_command,
+          f"the path must be quoted for the shell: {odd_command!r}")
+
+
 def main() -> int:
     module = load_adapter()
     print("harbor adapter: ATIF conversion")
@@ -1128,6 +1186,7 @@ def main() -> int:
     check_mcp_servers(module)
     check_pricing(module)
     check_verbose_tool_input(module)
+    check_skills(module)
     check_configure_writes(module)
     check_install_prerequisites(module)
     check_timed_out_raises(module)
