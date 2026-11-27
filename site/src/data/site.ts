@@ -15,7 +15,7 @@ export const INSTALL_CMD = `curl -fsSL ${INSTALL_URL} | sh`
  * the landing page cannot outlive a bump — the hero and the terminal animation
  * both read this constant rather than repeating the string.
  */
-export const VERSION = "0.2.2"
+export const VERSION = "0.2.3"
 
 /**
  * Counts the code asserts, not counts to remember. Each one has a test in the
