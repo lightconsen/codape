@@ -1,0 +1,65 @@
+# The 54 tasks of the full 4.1 sweep (`2026-11-25__09-59-09`), which is the
+# 66-task dataset minus everything this class of host cannot run: 3 tasks that
+# need an H100 and 9 that declare 8 or more CPUs or 16 GB
+# (docs/tb-harbor-4.1.md, "The resource audit"). This list is a copy of that
+# run's own `tasks-all.txt`, kept here so a re-run is the same set and not a
+# reconstruction from memory.
+#
+# Baseline this reproduces (`2026-11-25__09-59-09`, 4 vCPU / 15.5 GB, `-n 4`,
+# `--resources auto`, v0.2.2): 15 h 55 m, 51 graded of 54, 13 solved, mean
+# reward 0.255, $1012.88 at the recorded token counts. Change the agent, the
+# resource policy or `-n` and it is a different experiment.
+atrx-vep-crispr
+batched-eval-parity
+biped-contact-dynamics
+bun-sourcemap-leak
+cad-model
+cargo-flight-dispatch
+coq-block-bound
+ctr-optimization
+cumulative-layout-shift
+data-anonymization
+embedding-drift-monitor
+fin-saccr-rwa
+foodstuff-beta-activity
+freecad-impeller
+freecad-platform-drawing
+freecad-spring-clip
+freight-dispatch-shift
+glycan-ms2-elucidation
+gsea-proteomics
+heat-pump-warranty
+hof-topology-interpenetration
+html-js-filter
+interleaved-vigenere
+intrastat-meldung
+ks-solver-cpp
+kv-live-surgery
+layout-config-recreation
+layout-config-recreation2
+legacy-utility-triage
+mp-checkpoint-consolidation
+music-harmony
+mvcc-lsm-compaction
+nextjs-performance
+ontology-kg-querying
+payments-pipeline-fix
+photonic-waveguide-routing
+pretrain-shard-corruption
+production-planning
+protein-autointerp-disulfide
+react-lead-form
+retro-console-soc
+risk-scorer-replay
+roy-polymorph-cn
+rs-archive-clone
+satb-audio-transcription
+session-window-debug
+sglang-qwen-burst
+sound-change-cascade
+telecom-entity-resolution
+vba-userform-port
+vf2-speedup-networkx
+vllm-deepseek-streaming
+vpp-loss-divergence
+wal-recovery-ordering

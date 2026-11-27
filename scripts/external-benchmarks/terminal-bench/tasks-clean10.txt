@@ -1,0 +1,21 @@
+# The ten tasks that were clean on both arms in the 2026-11-26 comparison.
+#
+# "Clean" is `exception_info: null` on both sides — the agent ran to its own end
+# on both arms. The fifteen tasks the Claude arm reached also include four the
+# quota cut off mid-work and one where both arms died in the same Docker build
+# failure; those are not comparable and are not here.
+#
+# This is the set `docs/tb-harbor-4.1.md` prices at $190.59 (Codape) against
+# $183.55 (Claude), and the set the cache-prefix argument is about: two commits
+# already in the source beside the sweep fixed the prefix that gap names, and a
+# re-run here is what turns the predicted $136.79 into a measurement.
+cargo-flight-dispatch
+fin-saccr-rwa
+freecad-impeller
+freecad-platform-drawing
+freight-dispatch-shift
+legacy-utility-triage
+satb-audio-transcription
+session-window-debug
+sglang-qwen-burst
+sound-change-cascade

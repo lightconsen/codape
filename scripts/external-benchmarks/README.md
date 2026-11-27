@@ -298,6 +298,82 @@ two adapters share no base class, so they are separate files; deleting the old
 one would strand the runs recorded in
 [terminal-bench.md](../../docs/terminal-bench.md).
 
+### Running an arm: `run-harbor.sh`
+
+`run_terminal_bench.py` drives the old harness only. There was no runner for a
+4.1 arm: every recorded 4.1 score came from a shell script on a host that has
+since been shut down, and that script was never in the repository. It showed —
+its local-binary variable was spelled `CODPE_LOCAL_BINARY`, one letter short, so
+the branch could not fire however it was called, and nothing in review would
+ever have looked at it.
+
+`terminal-bench/run-harbor.sh` is that script, in the repository:
+
+```bash
+export RUN_HARBOR_KEY_FILE=~/.codape-env.json   # mode 0600, see below
+
+# the ten tasks the 2026-11-26 comparison was clean on, on the new release
+scripts/external-benchmarks/terminal-bench/run-harbor.sh \
+    codape tasks-clean10.txt --version v0.2.3
+
+# the full 54-task sweep, at an explicit concurrency
+scripts/external-benchmarks/terminal-bench/run-harbor.sh \
+    codape tasks-all54.txt --concurrent 4 --version v0.2.3
+
+# the same arm on a binary built from the working tree
+scripts/external-benchmarks/terminal-bench/run-harbor.sh \
+    codape tasks-control9.txt --binary ~/codape/target/x86_64-unknown-linux-musl/release/codape
+
+# what would run, without spending anything
+scripts/external-benchmarks/terminal-bench/run-harbor.sh \
+    codape tasks-clean10.txt --dry-run
+```
+
+It is a wrapper, not a second implementation: it builds the Harbor argv, puts
+the adapter's directory on `PYTHONPATH`, and `exec`s harbor so a signal reaches
+the trial. What it enforces that a hand-typed command does not:
+
+- **The task lists ship with it.** `tasks-control9.txt`, `tasks-clean10.txt`,
+  `tasks-capability2.txt` and `tasks-all54.txt` are the sets the recorded
+  comparisons are built on, each with a comment saying which experiment it
+  belongs to. A re-run that changes a list is not the same experiment, and
+  passing the list as a file is what makes that visible in a shell history.
+- **Concurrency defaults to the host, and says so.** `-n` is left to
+  `getconf _NPROCESSORS_ONLN`, with no cap, because that is the only rule that
+  reproduces both recorded baselines rather than introducing a number no run
+  used. It is not a speed knob: the same nine tasks on the same host at `-n 2`
+  and `-n 4` flip two results, because `--resources auto` hands each container
+  a share that concurrency decides. The resolved value is printed and lands in
+  the job's own `config.json`, so a run cannot be mistaken for a different one.
+- **The resource policy is explicit, and its default is Harbor's.** `--resources
+  auto` leaves Docker's cgroup limits live — it is spelled by *omitting* `--cpus
+  --memory`, which is how the 54-task baseline was launched and why its
+  `config.json` records `auto`. `--resources ignore` passes both flags and
+  reproduces Part 1 and the Claude control arm; it is the policy under which a
+  16-CPU task took 144.5 minutes to reach 0/1 on a 2-vCPU host. The resolved
+  policy is announced either way, so a log says which one ran.
+- **`--version` and `--binary` cannot both reach the adapter.** The adapter
+  keeps an explicit version beside `binary_path` — it reads that as the caller
+  naming the build — so a command carrying both stamps `agent_info.version`
+  with a release the trial did not run. That is the defect the adapters were
+  just fixed for, so the script drops `--version` and says so.
+- **The model is checked before a container starts.** A model the gateway does
+  not serve is rejected mid-trial as `Generation.ModelNotInGo`, which costs a
+  container and about twenty minutes to discover. `ALLOWED_MODELS` is one line
+  at the top of the script.
+- **Credentials never reach a command line.** The key file is a flat JSON object
+  read by the script's own shell with `python3 -I`, `shlex.quote`d, and
+  `eval`'d; only names are echoed, and only when one is missing. `--dry-run`
+  prints the command without the environment.
+- **The Claude arm gets the same setup multiplier.** `--agent-setup-timeout-
+  multiplier 6` applied to the Codape arm only in the sweep, which is why five
+  `AgentSetupTimeoutError` trials sit in the Claude column
+  ([tb-harbor-4.1.md](../../docs/tb-harbor-4.1.md)). That was a configuration
+  asymmetry, not a model property, so both arms get it here.
+
+`prices.json` is the price table `--pricing` uploads; it lived outside the
+repository and is what turns a Codape trial's missing `cost_usd` into a number.
+
 Harbor's CLI takes `--agent module:Class`, where the module must be importable
 (a file path fails with `No module named '/abs/x.py'`). Run from this directory,
 or put it on `PYTHONPATH`:

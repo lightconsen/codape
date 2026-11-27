@@ -1,0 +1,8 @@
+{
+  "deepseek-v4.1-flash": {
+    "input_per_million": 5.0,
+    "output_per_million": 25.0,
+    "cache_read_per_million": 0.5,
+    "cache_creation_per_million": 5.0
+  }
+}
