@@ -359,17 +359,27 @@ cat <<MSG
           chmod 600 \$HOME/codape-env.json
       No value is needed by this script and none is written by it.
 
-   2. Measure the link before a paid run, because every cost and duration
+   2. Put the venv's harbor on PATH. Everything below needs it, and the error
+      without it is just "harbor not found":
+          export PATH="$VENV/bin:\$PATH"
+
+   3. Measure the link before a paid run, because every cost and duration
       estimate depends on it and one recorded snapshot was pathological:
           $DEST/scripts/external-benchmarks/terminal-bench/measure-host-speed.sh \\
               --json speed.json
 
-   3. Then the cheap stage first, and only after it matches the recorded
-      numbers does the rest make sense:
+   4. Then the cheap stage first, and only after it matches the recorded
+      numbers does the rest make sense. The task list is given by absolute
+      path: the runner resolves it against the current directory, and that is
+      not the directory holding this script.
           RUN_HARBOR_KEY_FILE=\$HOME/codape-env.json \\
           $DEST/scripts/external-benchmarks/terminal-bench/run-harbor.sh \\
-              codape tasks-clean10.txt --version v0.2.3 --dry-run
+              codape $DEST/scripts/external-benchmarks/terminal-bench/tasks-clean10.txt \\
+              --version v0.2.3 --dry-run
       (drop --dry-run to spend; the dry run prints the full argv.)
+
+      Pass --version explicitly. The adapter's own DEFAULT_VERSION is still
+      v0.2.2, so a run that omits it measures the previous release silently.
 MSG
 
 # Non-zero after a dry run that found faults, so this is usable as a CI or
