@@ -165,10 +165,14 @@ run $SUDO apt-get install -y -qq \
     ca-certificates curl git jq rsync xz-utils unzip \
     python3 python3-venv python3-pip \
     build-essential pkg-config
+# harbor 0.27.0 declares `requires_python >= 3.12`, and pip on 3.10 refuses to
+# install it at all. Ubuntu 24.04 ships 3.12 and passes this; 22.04 ships 3.10
+# and does not, and is handled by `ensure_python312` below rather than by a note
+# nobody reads — a warning here would let the venv step fail with a pip error
+# that names neither the version nor the fix.
 if [ "$DRY_RUN" -eq 0 ]; then
     python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' ||
-        note "python3 is $(python3 -V 2>&1); harbor 0.27 needs 3.12+. On Ubuntu
-         22.04 use deadsnakes or the uv install below, which brings its own."
+        note "ubuntu's python3 is $(python3 -V 2>&1); see the 3.12 install below"
 fi
 
 # --- docker -----------------------------------------------------------------
@@ -242,6 +246,43 @@ fi
 # --- harbor -----------------------------------------------------------------
 
 say "harbor $HARBOR_VERSION"
+
+# harbor 0.27.0's `requires_python` is >=3.12, and pip refuses to install it on
+# anything older with an error that names neither the interpreter it used nor
+# the fix. Ubuntu 24.04 ships 3.12; 22.04 ships 3.10. `uv` is used when it can
+# supply an interpreter, because that is one command and touches no apt source;
+# deadsnakes is the fallback and the one that writes into /etc. The interpreter
+# chosen here is the one the venv is built from, so this decides the run.
+PYTHON=${PYTHON:-}
+if [ -z "$PYTHON" ]; then
+    PYTHON=$(command -v python3.12 2>/dev/null || true)
+fi
+if [ -z "$PYTHON" ]; then
+    PYTHON=$(command -v python3 2>/dev/null || true)
+    if [ -n "$PYTHON" ] &&
+       ! "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null; then
+        PYTHON=""
+    fi
+fi
+if [ -z "$PYTHON" ]; then
+    say "python 3.12 (harbor requires it)"
+    if command -v uv >/dev/null 2>&1; then
+        run uv python install 3.12
+        PYTHON=$(uv python find 3.12 2>/dev/null || true)
+    else
+        run bash -c "$SUDO add-apt-repository -y ppa:deadsnakes/ppa && \
+            $SUDO apt-get update -qq && \
+            $SUDO apt-get install -y -qq python3.12 python3.12-venv"
+        PYTHON=$(command -v python3.12 2>/dev/null || true)
+    fi
+    if [ "$DRY_RUN" -eq 0 ] && [ -z "$PYTHON" ]; then
+        die "no Python 3.12 after installing one; harbor $HARBOR_VERSION requires
+             >=3.12 and pip will refuse it on anything older"
+    fi
+    ok "python for the venv: ${PYTHON:-a 3.12 interpreter}"
+fi
+[ "$DRY_RUN" -eq 1 ] || ok "python for the venv: $($PYTHON -V 2>&1)"
+
 if [ -x "$VENV/bin/harbor" ]; then
     have=$("$VENV/bin/harbor" --version 2>/dev/null | awk '{print $NF}' || echo "?")
     ok "already installed in $VENV (version ${have})"
@@ -249,7 +290,7 @@ if [ -x "$VENV/bin/harbor" ]; then
         note "the adapter was checked against $HARBOR_VERSION; $have is a
           different harness and its trial layout may differ"
 else
-    run python3 -m venv "$VENV"
+    run "${PYTHON:-python3}" -m venv "$VENV"
     run "$VENV/bin/pip" install -q --upgrade pip
     run "$VENV/bin/pip" install -q "harbor[modal]==$HARBOR_VERSION"
     if [ "$DRY_RUN" -eq 0 ]; then
