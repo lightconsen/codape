@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 
+import { VERSION } from "@/data/site"
 import { cn } from "@/lib/utils"
 
 type Tone = "prompt" | "tool" | "result" | "note" | "muted" | "input"
@@ -13,7 +14,7 @@ type Line = {
 }
 
 const SCRIPT: Line[] = [
-  { tone: "muted", text: "codape v0.2.2 · sandbox: seatbelt · permissions: default", pause: 600 },
+  { tone: "muted", text: `codape v${VERSION} · sandbox: seatbelt · permissions: default`, pause: 600 },
   { tone: "input", text: 'add retry with backoff to the upload client', pause: 1100 },
   { tone: "tool", text: "read", meta: "crates/net/src/upload.rs", pause: 700 },
   { tone: "tool", text: "grep", meta: "'backoff|retry'  3 files, 11 matches", pause: 640 },
