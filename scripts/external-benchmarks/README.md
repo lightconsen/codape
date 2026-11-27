@@ -19,6 +19,10 @@ These are research instruments, **not CI checks**. See [Why this is not in CI](#
 scripts/external-benchmarks/
 ├── README.md
 ├── check_reporting.py      # transcript parsing, no Docker: the one part CI can run
+├── check_harbor_runner.py  # the Harbor runner's argv, with a stand-in `harbor`
+├── check_harbor_agent.py   # the adapter's ATIF conversion and capability claims
+├── check_host_scripts.py   # the fresh-host installer and the link probe
+├── check_sweep_analysis.py # the two-arm verdicts, on synthetic job directories
 ├── fixture_patches.py      # rebuilds the Terminal-Bench grading fixtures, no Docker
 ├── swebench/
 │   ├── run.sh              # thin wrapper; --help/--dry-run need only stdlib
@@ -26,8 +30,13 @@ scripts/external-benchmarks/
 ├── terminal-bench/
 │   ├── run.sh              # thin wrapper
 │   ├── run_terminal_bench.py
-│   ├── codape_agent.py    # Terminal-Bench installed-agent adapter
-│   └── codape-setup.sh.j2 # in-container Codape installer
+│   ├── codape_agent.py     # Terminal-Bench installed-agent adapter
+│   ├── run-harbor.sh       # the 4.1 arm runner (Harbor)
+│   ├── codape_harbor_agent.py   # the 4.1 adapter
+│   ├── install-benchmark-host.sh # fresh Ubuntu host: docker, harbor, checks
+│   ├── measure-host-speed.sh     # the two download rates a sweep depends on
+│   ├── tasks-*.txt         # the recorded task sets (9, 10, 2, 54)
+│   └── codape-setup.sh.j2  # in-container Codape installer
 └── programbench/
     ├── run.sh              # thin wrapper; --dry-run needs only stdlib
     └── run_programbench.py # cleanroom container, allowlisted proxy, official eval
@@ -122,6 +131,65 @@ only context the harness runs it in.
   spends much of a task compacting instead of working. The runners forward
   `CODAPE_MAX_TOKENS` for the same reason: a reasoning model can otherwise
   spend the whole per-request ceiling on thinking.
+
+### Preparing a fresh host
+
+A sweep long enough to be worth reporting runs on a rented machine, and the
+machine is the part nobody tests. Two scripts close that gap; both are checked
+by `check_host_scripts.py` in CI, which runs them on Ubuntu with a stand-in
+`curl` and no Docker.
+
+```bash
+# On a fresh Ubuntu x86_64 host, as a user with sudo:
+scripts/external-benchmarks/terminal-bench/install-benchmark-host.sh --dry-run
+scripts/external-benchmarks/terminal-bench/install-benchmark-host.sh
+```
+
+`install-benchmark-host.sh` installs the packages a working-tree build needs,
+Docker from Docker's own repository, `harbor[modal]==0.27.0` in a venv, and
+pulls one `harborframework/*` image. `--dry-run` walks every section and prints
+the commands, then exits 1 if it found anything that would stop a real run — so
+it is usable as a pre-rental check on a machine that is not the target. The
+faults it looks for are the ones that read as something else afterwards:
+
+- **Docker must come from `download.docker.com`, not Ubuntu's repo.** Ubuntu
+  20.04's `docker.io` is 20.10, whose `build` has no `--file`; Harbor passes
+  `--file` on every trial. The trial then dies with `unknown flag: --file`
+  before the agent starts, which looks like an agent that never ran. The script
+  refuses a CLI older than 24.
+- **The registry must actually serve `harborframework/*`.** A mirror can refuse
+  those digests and serve `alpine` normally, so `docker pull alpine` is not a
+  test. The script pulls `harborframework/terminal-bench:hello-world`.
+- **The architecture must be x86_64.** Every recorded arm ran x86_64 binaries
+  and amd64 task images; under emulation the numbers are not comparable.
+
+It reads and writes no credential. The key file is the operator's to place at
+`$HOME/codape-env.json` (mode 0600), which the script names but never opens.
+
+```bash
+scripts/external-benchmarks/terminal-bench/measure-host-speed.sh --json speed.json
+```
+
+`measure-host-speed.sh` measures the link in the two places a sweep uses it:
+the release asset every trial downloads (single-stream, because that download
+is one `curl` in the adapter) and four parallel streams (because Docker pulls
+layers concurrently). The two differ by several times on a per-connection cap,
+so each rate is used where it applies — the single-stream rate decides whether
+agent setup fits its budget, the parallel rate decides image time. It also
+measures connect/TLS latency and, if Docker is usable, the same download from
+inside a container, where a proxy can make a fast host look slow.
+
+The verdict is the part to read:
+
+```
+  release 20.0 MB over one stream -> 2.9min  (setup budget 36.0min)
+  one task image ~500 MB over 4.2 streams -> 17.4min
+  VERDICT: adequate for a paid sweep
+```
+
+Upload is measured only with `--upload-url`; without it the report says "not
+measured", which is not the same as "fine". Nothing is POSTed anywhere by
+default.
 
 ## Version pins
 
@@ -774,6 +842,15 @@ kind of thing: it does not run a benchmark, it runs the functions that read a
 benchmark's output, against fixtures. That is deterministic, key-free, and takes
 a second. `fixture_patches.py self-test` is the second exception for the same
 reason: it edits synthetic files, not a dataset.
+
+The third is the runner and host-script checks (`check_harbor_runner.py`,
+`check_host_scripts.py`). They do not run a benchmark either: the first drives
+the runner's argv with a stand-in for `harbor`, the second runs the installer's
+`--dry-run` and feeds the speed probe a stand-in `curl`. Neither installs
+anything, pulls an image, or touches a key. They are in CI because their subject
+is the thing that only ever runs on a rented machine — the same setting that
+kept the 4.1 runner's local-binary switch spelled `CODPE_LOCAL_BINARY`, one
+letter short and unreachable, for an entire 108-trial sweep.
 
 ## What was verified locally
 
