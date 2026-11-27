@@ -178,10 +178,33 @@ def check_installer_paths() -> None:
         "the closing instructions must point at the speed probe; every cost "
         "estimate depends on it",
     )
+    # The instructions are the only place the venv's harbor is mentioned, and
+    # `harbor` is a console script inside the venv: not on PATH, so the runner
+    # dies with "harbor not found" after the whole install succeeded.
+    check(
+        "export PATH=" in out and "/bin:$PATH" in out,
+        "the closing instructions must put the venv's harbor on PATH",
+    )
+    # A relative task list is resolved against the caller's directory, and the
+    # suggested command is not run from the script's directory.
+    check(
+        re.search(r"codape /\S*/tasks-clean10\.txt", out) is not None,
+        "the closing command must name the task list by absolute path",
+    )
+    # The adapter's DEFAULT_VERSION is v0.2.2; omitting --version measures the
+    # previous release with no error at all.
+    check(
+        "--version v0.2.3" in out,
+        "the closing command must pin --version explicitly",
+    )
+    check(
+        "DEFAULT_VERSION is still" in out,
+        "and must say why: the adapter's default is an older release",
+    )
 
 
 def check_version_gate() -> None:
-    """The gate that refuses an old docker CLI must read a major version."""
+    """The gates that refuse a too-old docker or python must read a version."""
     text = INSTALLER.read_text(encoding="utf-8")
     check(
         re.search(r"MIN_DOCKER_MAJOR=\d+", text) is not None,
@@ -196,6 +219,24 @@ def check_version_gate() -> None:
         "cut -d. -f1" in text,
         "the version gate must compare a major version; `docker --version` "
         "prints 'Docker version 29.4.0, build x', which does not compare",
+    )
+    # harbor 0.27.0 declares `requires_python >=3.12`; on 3.10 pip refuses it
+    # with an error that names neither the interpreter nor the fix. A note is
+    # not enough — the installer has to produce a 3.12 interpreter, or stop.
+    check(
+        "3, 12" in text,
+        "the Python floor must be compared as a version, not assumed from the "
+        "distro: 24.04 ships 3.12 and 22.04 ships 3.10",
+    )
+    check(
+        "uv python install 3.12" in text and "deadsnakes" in text,
+        "both ways to get 3.12 must be present: uv touches no apt source, "
+        "deadsnakes is the fallback when uv is absent",
+    )
+    check(
+        'run "${PYTHON:-python3}" -m venv' in text,
+        "the venv must be built from the interpreter this script selected, or "
+        "the 3.12 fallback above is decorative",
     )
 
 
