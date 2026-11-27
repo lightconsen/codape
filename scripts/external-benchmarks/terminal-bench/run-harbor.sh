@@ -230,6 +230,14 @@ fi
 
 if [ -n "$PRICING" ]; then
     [ -r "$PRICING" ] || die "no price table at $PRICING"
+    # Made absolute for the same reason `--binary` is: the adapter reads it with
+    # a plain `open`, against Harbor's working directory rather than this
+    # script's. The relative path works only when the caller happens to stand in
+    # the repository root, and the failure is a paid run that reports no cost.
+    case "$PRICING" in
+        /*) ;;
+        *) PRICING=$(CDPATH='' cd -- "$(dirname -- "$PRICING")" && pwd)/$(basename -- "$PRICING") ;;
+    esac
 fi
 
 # --- credentials -----------------------------------------------------------
