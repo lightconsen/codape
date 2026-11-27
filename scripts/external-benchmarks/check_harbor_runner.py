@@ -85,7 +85,11 @@ def run(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["sh", str(RUNNER), *args],
+        # The runner's shebang is bash and it uses arrays. Invoking it with `sh`
+        # is what let this check pass on macOS — whose /bin/sh happens to accept
+        # arrays — and fail on Ubuntu, where /bin/sh is dash. The script is
+        # executed the way a caller executes it: through its own shebang.
+        [str(RUNNER), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -257,7 +261,7 @@ def check_no_leak(tmp: Path, tasks: Path) -> None:
     probe.chmod(0o755)
     env = {"RUN_HARBOR_KEY_FILE": str(key_file), "RUN_HARBOR_BIN": str(probe)}
     result = subprocess.run(
-        ["sh", str(RUNNER), "codape", str(tasks)],
+        [str(RUNNER), "codape", str(tasks)],
         capture_output=True,
         text=True,
         env={**os.environ, **env},
@@ -301,7 +305,7 @@ def check_hostile_values(tmp: Path, tasks: Path) -> None:
     )
     probe.chmod(0o755)
     result = subprocess.run(
-        ["sh", str(RUNNER), "codape", str(tasks)],
+        [str(RUNNER), "codape", str(tasks)],
         capture_output=True,
         text=True,
         env={
