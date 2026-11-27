@@ -12,8 +12,9 @@
 #   run-harbor.sh <codape|claude> <task-list> [options] [-- extra harbor args]
 #
 # Examples:
-#   run-harbor.sh codape tasks-control9.txt --concurrent 2 --version v0.2.3
+#   run-harbor.sh codape tasks-control9.txt --version v0.2.3
 #   run-harbor.sh codape tasks-clean10.txt --dry-run
+#   run-harbor.sh codape tasks-all54.txt --concurrent 4 --version v0.2.3
 #   RUN_HARBOR_KEY_FILE=~/codape-env.json run-harbor.sh claude tasks-control9.txt
 #
 # Credentials are read from a file by *this* shell and exported, never printed
@@ -23,8 +24,12 @@
 # cannot be imported in its place.
 #
 # Options:
-#   -n, --concurrent N   Concurrent trials (default 2; each trial holds at least
-#                        one container, and a task may declare a whole stack)
+#   -n, --concurrent N   Concurrent trials (default `auto` = this host's CPU
+#                        count; each trial holds at least one container, and a
+#                        task may declare a whole stack)
+#       --resources P    `auto` (default) or `ignore`. `auto` leaves Docker's
+#                        cgroup limits live; `ignore` removes them, and a task
+#                        declaring more than the host has will then thrash it
 #       --attempts N     Attempts per task (default 1)
 #       --version TAG    Release tag to download, e.g. v0.2.3. Codape arm only;
 #                        default comes from the adapter's DEFAULT_VERSION
@@ -76,8 +81,15 @@ die() {
 
 ARM=""
 TASK_LIST=""
-CONCURRENT=2
+# Empty means `auto`, resolved once the host is known. `n` is an experimental
+# parameter and not a speed knob: the same nine tasks on the same host at `-n 2`
+# and `-n 4` flip two results (`vf2-speedup-networkx` 0->1, `kv-live-surgery`
+# 1->0) and move one task's input by 22x, because `--resources auto` gives each
+# container a share that concurrency decides. So the value is resolved, printed,
+# and left in the job's own `config.json` rather than being implied.
+CONCURRENT=""
 ATTEMPTS=1
+RESOURCES="auto"
 VERSION=""
 BINARY=""
 TIMEOUT=""
@@ -94,6 +106,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         -h|--help) usage 0 ;;
         -n|--concurrent) need_value "$@"; CONCURRENT=$2; shift 2 ;;
+        --resources) need_value "$@"; RESOURCES=$2; shift 2 ;;
         --attempts) need_value "$@"; ATTEMPTS=$2; shift 2 ;;
         --version) need_value "$@"; VERSION=$2; shift 2 ;;
         --binary) need_value "$@"; BINARY=$2; shift 2 ;;
@@ -141,6 +154,44 @@ while IFS= read -r name; do
 done < "$TASK_LIST"
 
 [ "${#TASK_ARGS[@]}" -gt 0 ] || die "task list $TASK_LIST has no task names"
+
+# --- concurrency and resource policy ---------------------------------------
+
+# `auto` is the host's CPU count, with no cap. That is not a guess: it reproduces
+# both recorded baselines exactly — 2 on Part 1's 2-vCPU host, 4 on Part 2's and
+# Part 3's 4-vCPU host — and it gives a larger host the trials it can hold. Any
+# other formula (a cap of 4, a memory-derived share) yields a number no recorded
+# run used, and the numbers above show `n` moves results, not just the clock.
+#
+# `getconf` rather than `nproc`: it exists on macOS and Ubuntu alike, and `nproc`
+# does not exist on macOS at all. Under a cgroup limit it reports the machine's
+# count rather than the container's, so a run inside one passes `-n` explicitly.
+cpu_count() {
+    local n
+    n=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || n=""
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -lt 1 ] && [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+        n=$(sysctl -n hw.ncpu 2>/dev/null) || n=""
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    fi
+    printf '%s\n' "$n"
+}
+
+if [ -z "$CONCURRENT" ]; then
+    CONCURRENT=$(cpu_count)
+    [ "$CONCURRENT" -ge 1 ] ||
+        die "cannot detect this host's CPU count; pass --concurrent N"
+    echo "note: --concurrent defaults to auto = $CONCURRENT on this host" >&2
+fi
+case "$CONCURRENT" in
+    ''|*[!0-9]*) die "--concurrent needs a positive integer, got '$CONCURRENT'" ;;
+esac
+[ "$CONCURRENT" -ge 1 ] || die "--concurrent needs a positive integer"
+
+case "$RESOURCES" in
+    auto|ignore) ;;
+    *) die "--resources is auto or ignore, not '$RESOURCES'" ;;
+esac
 
 # --- arm-specific constraints ---------------------------------------------
 
@@ -245,10 +296,6 @@ if [ "$ARM" = codape ]; then
     [ -z "$BINARY" ] || COMMAND+=( --agent-kwarg "binary_path=$BINARY" )
     [ -z "$TIMEOUT" ] || COMMAND+=( --agent-kwarg "timeout_sec=$TIMEOUT" )
     [ -z "$PRICING" ] || COMMAND+=( --agent-kwarg "pricing_path=$PRICING" )
-    # Not a memory limit and not a CPU limit: the tasks declare their own, and
-    # `ignore` is what the recorded runs used. Leaving it unset would apply
-    # Harbor's defaults, which are not the same comparison.
-    COMMAND+=( --cpus ignore --memory ignore )
 else
     COMMAND+=( -a "$CLAUDE_ADAPTER" --agent-setup-timeout-multiplier 6 )
     [ -z "$MAX_TURNS" ] || COMMAND+=( --agent-kwarg "max_turns=$MAX_TURNS" )
@@ -259,6 +306,24 @@ else
     COMMAND+=( --model "${CODAPE_MODEL:-<CODAPE_MODEL>}"
                --base-url "${CODAPE_BASE_URL:-<CODAPE_BASE_URL>}"
                --api-key-name ANTHROPIC_AUTH_TOKEN )
+fi
+
+# The policy: `auto` is Harbor's own default, so it is spelled by *omitting* the
+# flags — which is exactly what the 54-task baseline did, and its `config.json`
+# is the evidence that omitting them means `auto` (it records
+# `cpu_enforcement_policy: "auto"`). Writing `--cpus auto` instead would assume
+# the CLI accepts its own default as a literal; nothing in the archive shows
+# that, and a rejected value there is a paid run that never starts. `ignore` is
+# passed because it is the opt-in, and it is the policy Part 1 and the Claude
+# control arm ran under: without it, a task declaring more than the host has is
+# refused rather than allowed to thrash it (Part 1 let a 16-CPU task take 144.5
+# minutes to reach 0/1 on a 2-vCPU host).
+if [ "$RESOURCES" = ignore ]; then
+    COMMAND+=( --cpus ignore --memory ignore )
+else
+    # Named so `--dry-run` and the log say the policy out loud, without putting
+    # a value on Harbor's command line that Harbor may not parse.
+    echo "note: --resources auto; Docker's cgroup limits stay live (Harbor's default)" >&2
 fi
 
 COMMAND+=( -n "$CONCURRENT" )

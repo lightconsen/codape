@@ -109,6 +109,24 @@ def has_flag(argv: list[str], flag: str) -> bool:
     return flag in argv
 
 
+def host_cpu_count() -> str | None:
+    """The same number the runner is meant to find, read independently of it.
+
+    `getconf` first because the runner uses it, then `sysctl`: a check that
+    only knew one of the two would call a correct Darwin fallback a failure.
+    """
+    for command in (["getconf", "_NPROCESSORS_ONLN"], ["sysctl", "-n", "hw.ncpu"]):
+        try:
+            out = subprocess.run(
+                command, capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.isdigit() and int(out) >= 1:
+            return out
+    return None
+
+
 def value_of(argv: list[str], flag: str) -> str | None:
     if flag not in argv:
         return None
@@ -141,7 +159,49 @@ def check_codape_argv(tmp: Path, tasks: Path, binary: Path) -> None:
         "the setup multiplier is what keeps a slow image download from timing "
         "out before the agent runs",
     )
-    check(value_of(argv, "-n") == "3", "`--concurrent 3` must become `-n 3`")
+    check(
+        value_of(argv, "-n") == "3", "`--concurrent 3` must become `-n 3`"
+    )
+    # `-n` is an experimental parameter, not a speed knob: the same nine tasks
+    # on the same host at `-n 2` and `-n 4` flip two results and move one
+    # task's input by 22x. So it must be chained in the argv, not left to
+    # Harbor's own default of 1, which no recorded run used.
+    check(
+        has_flag(argv, "-n"),
+        "the runner must always pass `-n`, or Harbor's default of 1 silences "
+        "the host the run was sized for",
+    )
+    # `--resources` has to be visible in the argv or the log, never guessed.
+    # `auto` is Harbor's own default and is spelled by omitting the flags: the
+    # 54-task baseline omitted them and its `config.json` recorded `auto`, so
+    # passing `--cpus auto` would assume the CLI parses its own default as a
+    # literal — an unsupported assumption whose cost is a paid run that never
+    # starts.
+    check(
+        not has_flag(argv, "--cpus") and not has_flag(argv, "--memory"),
+        "the default policy is `auto`, which is spelled by omitting the flags; "
+        "`--cpus auto` is a literal the archived runs never used",
+    )
+    check(
+        "--resources auto" in result.stderr,
+        "the default policy must be announced, so a log records it",
+    )
+    ignored = run(
+        ["codape", str(tasks), "--dry-run", "--resources", "ignore"],
+    )
+    ignored_argv = command_of(ignored)
+    check(
+        ignored_argv is not None
+        and value_of(ignored_argv, "--cpus") == "ignore"
+        and value_of(ignored_argv, "--memory") == "ignore",
+        "`--resources ignore` must reach Harbor as both `--cpus ignore` and "
+        "`--memory ignore`; `ignore` is what reproducing Part 1 needs",
+    )
+    check(
+        run(["codape", str(tasks), "--dry-run", "--resources", "auto-ish"]).returncode
+        != 0,
+        "an unknown --resources value must be refused, not treated as `ignore`",
+    )
     check(
         "max_turns=250" in joined,
         "`--max-turns` must reach the adapter as a kwarg",
@@ -228,10 +288,53 @@ def check_guards(tmp: Path, tasks: Path) -> None:
         "a Claude arm with --version must be refused rather than ignored",
     )
 
-    # An unknown arm, an empty list, a missing list.
-    check(run(["nobody", str(tasks), "--dry-run"]).returncode != 0, "unknown arm")
+    # `auto` resolves from the host. The oracle is a *second* reading of the
+    # host, taken here rather than derived from the script: comparing the
+    # announced number against the argv alone would pass for any constant
+    # (2, 4, 8) that happens to be smaller than this machine.
+    auto = run(["codape", str(tasks), "--dry-run"])
+    auto_argv = command_of(auto)
+    announced = None
+    for line in auto.stderr.splitlines():
+        if "defaults to auto" in line:
+            tail = line.rsplit("=", 1)[-1].strip().split()[0]
+            announced = tail if tail.isdigit() else None
+    check(
+        announced is not None and int(announced) >= 1,
+        f"`auto` must resolve to a positive integer; stderr was "
+        f"{auto.stderr.strip()!r}",
+    )
+    check(
+        auto_argv is not None and value_of(auto_argv, "-n") == announced,
+        f"the resolved concurrency ({announced}) must be the one in the argv, "
+        f"not a second reading of the host",
+    )
+    host = host_cpu_count()
+    check(
+        host is not None and announced == host,
+        f"`auto` must be this host's CPU count ({host}), not a fixed number; "
+        f"got {announced}. A constant is wrong in both directions: it wastes a "
+        "larger host and oversubscribes a smaller one",
+    )
+    check(
+        "defaults to auto" in auto.stderr,
+        "the resolved concurrency must be printed, so a log says which one ran",
+    )
+    # An explicit `-n` wins over `auto`, and must not print the note.
+    explicit = run(["codape", str(tasks), "--dry-run", "-n", "2"])
+    explicit_argv = command_of(explicit)
+    check(
+        explicit_argv is not None and value_of(explicit_argv, "-n") == "2",
+        "an explicit `--concurrent` must override `auto`",
+    )
+    check(
+        "defaults to auto" not in explicit.stderr,
+        "`auto` must not be resolved, or announced, when `-n` was given",
+    )
+
+    # A task list with no task names must be refused, not run as zero tasks.
     no_tasks = tmp / "none.txt"
-    no_tasks.write_text("# only a comment\n", encoding="utf-8")
+    check(run(["nobody", str(tasks), "--dry-run"]).returncode != 0, "unknown arm")
     check(
         run(["codape", str(no_tasks), "--dry-run"]).returncode != 0,
         "a task list with no task names must be refused, not run as zero tasks",
@@ -326,6 +429,7 @@ def check_shipped_lists() -> None:
         ("tasks-control9.txt", 9),
         ("tasks-clean10.txt", 10),
         ("tasks-capability2.txt", 2),
+        ("tasks-all54.txt", 54),
     ):
         path = TASK_LISTS / name
         check(path.is_file(), f"{name} is missing; a re-run would have no task set")
