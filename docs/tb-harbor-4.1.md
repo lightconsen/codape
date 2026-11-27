@@ -2097,7 +2097,15 @@ mean would hide the one task that dominates, so it is not reported.
 
 **Every Codape trial in the sweep ran the published v0.2.2 tarball**
 (`afba93fe`, 2026-11-19) — `agent_info.version` says so in each `result.json`,
-and the adapter curled the release because no trial passed `binary_path`. Two
+and the adapter curled the release because no trial passed `binary_path`. That
+field was the only evidence available, and it was worth checking rather than
+trusting: a `binary_path` trial used to be recorded with its `version=` pin
+anyway, so it named a release it had not run. The adapter now drops the pin for
+a local binary and lets Harbor ask the container (`get_version_command`), and
+the trial's metadata carries `local_binary` — the host path of the file that
+was uploaded — because two builds of one commit report one crate version. The
+sweep predates both fixes, so nothing in this section was affected; a rerun
+that passes `--ak binary_path=...` would have been, and now cannot be. Two
 commits that land squarely on this number are *after* that release:
 
 | Commit | Date | What it fixes |

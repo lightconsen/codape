@@ -336,11 +336,15 @@ difference.
 contain it. So the two-pass comparison above measures the model-table and
 context-window fixes and says nothing about the outage retry, the edit-result
 excerpt, or the actionable timeout notice. A binary built from `main` exists on
-the host (`/home/ubuntu/codape-local/codape`, musl, 48 MB) and `run-arm.sh`
-accepts `CODPE_LOCAL_BINARY` to use it, but no trial here ran it: the sweep was
-already in flight on `v0.2.2` when that path was added, and switching the
-binary mid-sweep would have split the arm into two halves that cannot be
-compared.
+the host (`/home/ubuntu/codape-local/codape`, musl, 48 MB), and the sweep's
+driver is written to use it, but nothing here ran it — twice over. The driver's
+variable was spelled `CODPE_LOCAL_BINARY` (one letter short), so its branch
+could not fire however it was called; and the adapter stamped every trial with
+its `version=` pin regardless of `binary_path`, so a local-binary run would
+have been recorded as `v0.2.2` — the release it did not execute — in exactly
+the field this section reads to establish which binary produced a score. Both
+are fixed (`get_version_command`; the driver is host-side), and neither changes
+the reading above, which is why they are recorded rather than corrected here.
 
 ### What Codape #2 does not show, and why it is not a ranking
 
