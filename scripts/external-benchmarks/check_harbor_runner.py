@@ -268,6 +268,22 @@ def check_guards(tmp: Path, tasks: Path) -> None:
         "does not serve" in result.stderr,
         f"the refusal must name the problem; got: {result.stderr.strip()!r}",
     )
+    # The check above passes for an *empty* list, which refuses everything and
+    # proves nothing. These say the list is a roster: each name is accepted, so
+    # adding an endpoint is a line here rather than a loosened comparison.
+    #
+    # Deliberately *not* a `--dry-run`: the model gate is inside the block that
+    # only runs for a real invocation (a dry run must work without a key file),
+    # so a dry run accepts every model and an assertion written that way passes
+    # however the list reads. The stand-in `harbor` is what makes a real
+    # invocation free.
+    for served in ("deepseek-v4.1-flash", "k3"):
+        result = run(["codape", str(tasks)], key_file=write_key_file(tmp, model=served))
+        check(
+            result.returncode == 0,
+            f"`{served}` is in ALLOWED_MODELS and must be accepted; got: "
+            f"{result.stderr.strip()!r}",
+        )
 
     # A missing credential is refused before anything is spent.
     empty = tmp / "empty.json"
