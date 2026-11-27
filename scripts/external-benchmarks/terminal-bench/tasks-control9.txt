@@ -1,0 +1,17 @@
+# The nine tasks the 2026-11-25/26 sweep compared both arms on.
+#
+# Kept as a file rather than a CLI argument because the comparison is only valid
+# against exactly this set: the Claude control run `2026-11-25__06-47-04` scored
+# these nine, so a Codape arm that adds or drops one is not the same experiment.
+# A re-run with the same list is what makes "same tasks, new binary" a claim.
+#
+# The three GPU tasks are in none of these lists: this host cannot run them.
+vf2-speedup-networkx
+kv-live-surgery
+nextjs-performance
+ks-solver-cpp
+biped-contact-dynamics
+gsea-proteomics
+react-lead-form
+vllm-deepseek-streaming
+foodstuff-beta-activity

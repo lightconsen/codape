@@ -105,6 +105,20 @@ jobs:
       - name: Check the runners' transcript parsing
         run: python3 -I scripts/external-benchmarks/check_reporting.py
 
+  benchmark-harbor-runner:
+    name: Benchmark Harbor runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # The 4.1 runner lived on a benchmark host and nowhere else, and its
+      # local-binary switch was spelled one letter short — unreachable, and
+      # unseen, for an entire 108-trial sweep. This drives the version now in
+      # `terminal-bench/run-harbor.sh` with a stand-in for `harbor`, so nothing
+      # is downloaded or billed.
+      - name: Check the Harbor runner's argv
+        run: python3 -I scripts/external-benchmarks/check_harbor_runner.py
+
   benchmark-sweep-analysis:
     name: Benchmark sweep analysis
     runs-on: ubuntu-latest

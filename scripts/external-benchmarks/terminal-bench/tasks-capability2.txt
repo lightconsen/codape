@@ -1,0 +1,18 @@
+# The two tasks a v0.2.2 arm never started, and why they belong in a re-run.
+#
+# Both died in Harbor's `_validate_agent_capabilities` before any agent code
+# ran, because the adapter as committed then declared neither MCP servers nor
+# skills. Neither is a score: one is a `ValueError` and the other a
+# `ValueError`, and reading either as a failure would be reading the adapter's
+# declaration as the model's behaviour.
+#
+#   cumulative-layout-shift    task declares `skills_dir`; the image has the
+#                              skill, the package source does not
+#   medical-claims-processing  task declares a `playwright` SSE MCP server
+#
+# The adapter now declares both (`mcp_servers=True`, `mcp_http_headers=True`,
+# `skills=True`), each behind a check that fails if the code that honours the
+# claim is removed. Running these two is how the declaration is tested against
+# Harbor's real gate rather than against the stub the CI check uses.
+cumulative-layout-shift
+medical-claims-processing
