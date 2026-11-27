@@ -116,8 +116,19 @@ class CodapeAgent(AbstractInstalledAgent):
     ):
         super().__init__(**kwargs)
         self._model_name = str(model_name).removeprefix("anthropic/") if model_name else None
-        self._version = str(version)
         self._binary_path = Path(str(binary_path)).expanduser() if binary_path else None
+        # `version` is the release tag whose tarball gets downloaded, so the
+        # default pin cannot also name a build of the working tree. On an arm64
+        # host `--codape-binary` is the *only* way to run an arm at all (the
+        # pinned release is x86_64), and the run record used to write `v0.2.2`
+        # for it — a version the trial never executed. The pin is dropped for a
+        # local binary and the record carries `local_binary` instead; an
+        # explicit version beside `binary_path` is the caller naming that build,
+        # so it is kept.
+        version = None if version is None else str(version)
+        if self._binary_path is not None and version == DEFAULT_VERSION:
+            version = None
+        self._version = version
         self._max_turns = int(max_turns)
         self._timeout_sec = float(timeout_sec)
         self._extra_instructions = (
@@ -232,7 +243,10 @@ class CodapeAgent(AbstractInstalledAgent):
 
     def _get_template_variables(self) -> dict[str, object]:
         return {
-            "version": self._version,
+            # Empty when a local binary is used: the template's
+            # `use_local_binary` branch takes neither this nor the tag, and a
+            # value here would only mislabel the run.
+            "version": self._version or "",
             "target": "x86_64-unknown-linux-musl",
             "use_local_binary": self._binary_path is not None,
         }
@@ -405,6 +419,12 @@ class CodapeAgent(AbstractInstalledAgent):
             session,
             {
                 "version": self._version,
+                # Which file this trial actually measured, when it was one the
+                # host uploaded. Two builds of one commit report one crate
+                # version, so the path is what separates them after the fact.
+                "local_binary": (
+                    str(self._binary_path) if self._binary_path is not None else None
+                ),
                 "model": self._model_name,
                 "exit_code": exit_code,
                 "subtype": subtype,

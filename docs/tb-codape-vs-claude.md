@@ -336,11 +336,15 @@ difference.
 contain it. So the two-pass comparison above measures the model-table and
 context-window fixes and says nothing about the outage retry, the edit-result
 excerpt, or the actionable timeout notice. A binary built from `main` exists on
-the host (`/home/ubuntu/codape-local/codape`, musl, 48 MB) and `run-arm.sh`
-accepts `CODPE_LOCAL_BINARY` to use it, but no trial here ran it: the sweep was
-already in flight on `v0.2.2` when that path was added, and switching the
-binary mid-sweep would have split the arm into two halves that cannot be
-compared.
+the host (`/home/ubuntu/codape-local/codape`, musl, 48 MB), and the sweep's
+driver is written to use it, but nothing here ran it — twice over. The driver's
+variable was spelled `CODPE_LOCAL_BINARY` (one letter short), so its branch
+could not fire however it was called; and the adapter stamped every trial with
+its `version=` pin regardless of `binary_path`, so a local-binary run would
+have been recorded as `v0.2.2` — the release it did not execute — in exactly
+the field this section reads to establish which binary produced a score. Both
+are fixed (`get_version_command`; the driver is host-side), and neither changes
+the reading above, which is why they are recorded rather than corrected here.
 
 ### What Codape #2 does not show, and why it is not a ranking
 
@@ -366,46 +370,61 @@ adapter gap — the agent would have run and its result is simply unavailable �
 but it is not an agent failure and must not be read as one. It is one task of
 the 54.
 
-## The 45 tasks with no Claude comparison yet
+## The 30 tasks with no Claude result, and the fifteen that now have one
+
+> **Rewritten 2026-11-27.** This section was first written while the Claude arm
+> for the 45 tasks was still queued, and it listed all 45 as uncompared. That
+> arm has since run (`2026-11-26__01-55-42`): **15 of the 45 now have a real
+> Claude trial**, and none of the remaining 30 does. The comparison for those
+> 15 lives in
+> [`tb-harbor-4.1.md`](tb-harbor-4.1.md#the-matched-comparison-on-the-fifteen-tasks-both-arms-reached),
+> and what follows is the state of the other 30.
 
 The 54-task Codape list and the nine-task control overlap by nine. The other
-**45 tasks have a Codape result and no Claude result yet**, so nothing in this
-file compares them. They are listed here so the gap is on the record rather
-than implied:
+45 tasks were run on the Claude arm as well, and it produced **15 real trials**
+for them; the remaining **30 never reached the model at all** — 25 with
+`UnknownApiError` (the gateway's weekly quota, `usage limit reached`) and 5 with
+`AgentSetupTimeoutError` — and their 0.0 is an absence, not a loss:
 
-`atrx-vep-crispr`, `batched-eval-parity`, `bun-sourcemap-leak`, `cad-model`,
-`cargo-flight-dispatch`, `coq-block-bound`, `ctr-optimization`,
+`atrx-vep-crispr`, `bun-sourcemap-leak`, `cad-model`, `ctr-optimization`,
 `cumulative-layout-shift`, `data-anonymization`, `embedding-drift-monitor`,
+`freecad-spring-clip`, `glycan-ms2-elucidation`,
+`hof-topology-interpenetration`, `html-js-filter`, `interleaved-vigenere`,
+`intrastat-meldung`, `layout-config-recreation2`, `mp-checkpoint-consolidation`,
+`music-harmony`, `mvcc-lsm-compaction`, `ontology-kg-querying`,
+`payments-pipeline-fix`, `photonic-waveguide-routing`, `pretrain-shard-corruption`,
+`production-planning`, `protein-autointerp-disulfide`, `risk-scorer-replay`,
+`roy-polymorph-cn`, `rs-archive-clone`, `telecom-entity-resolution`,
+`vba-userform-port`, `vpp-loss-divergence`, `wal-recovery-ordering`.
+
+Codape #2's own result on those 30: **9 solved** — `embedding-drift-monitor`,
+`html-js-filter`, `interleaved-vigenere`, `intrastat-meldung`,
+`layout-config-recreation2`, `mp-checkpoint-consolidation`,
+`telecom-entity-resolution`, `vba-userform-port`, `wal-recovery-ordering`. Those
+nine have no Claude counterpart and, after the quota wall, none is expected
+from this sweep. Together with the 15 that do, and the two the nine-task
+control contributed, this is Codape's **13 of 54 (24 %)**, which has not
+changed.
+
+**The 15 that now have a Claude trial** are `cargo-flight-dispatch`,
 `fin-saccr-rwa`, `freecad-impeller`, `freecad-platform-drawing`,
-`freecad-spring-clip`, `freight-dispatch-shift`, `glycan-ms2-elucidation`,
-`heat-pump-warranty`, `hof-topology-interpenetration`, `html-js-filter`,
-`interleaved-vigenere`, `intrastat-meldung`, `layout-config-recreation`,
-`layout-config-recreation2`, `legacy-utility-triage`,
-`mp-checkpoint-consolidation`, `music-harmony`, `mvcc-lsm-compaction`,
-`ontology-kg-querying`, `payments-pipeline-fix`, `photonic-waveguide-routing`,
-`pretrain-shard-corruption`, `production-planning`,
-`protein-autointerp-disulfide`, `retro-console-soc`, `risk-scorer-replay`,
-`roy-polymorph-cn`, `rs-archive-clone`, `satb-audio-transcription`,
-`session-window-debug`, `sglang-qwen-burst`, `sound-change-cascade`,
-`telecom-entity-resolution`, `vba-userform-port`, `vpp-loss-divergence`,
-`wal-recovery-ordering`.
+`freight-dispatch-shift`, `legacy-utility-triage`, `satb-audio-transcription`,
+`session-window-debug`, `sglang-qwen-burst`, `sound-change-cascade` (the ten
+that ran to completion), plus `coq-block-bound`, `heat-pump-warranty`,
+`layout-config-recreation` and `retro-console-soc` (cut off by the quota
+mid-work), plus `batched-eval-parity`, which failed identically on both arms.
+They are disjoint from the nine-task control, so the two comparisons in these
+documents are two independent samples.
 
-Codape #2's own result on that 45, as of this writing: **11 solved of 45**, which
-with the nine gives **13 of 54 (24 %)** overall. Three of the 45 were still
-running when this was written — `ctr-optimization`, `freecad-spring-clip`,
-`music-harmony` — so the count is provisional and may rise.
-
-The Claude arm for the 45 is next in the queue: `run-all-57.sh` ran the Codape
-arm as its first step, and a replacement orchestrator now starts the Claude arm
-`tasks-claude-rest.txt` (45 tasks, `-n 4`) before the three 16 GB tasks so the
-comparison is not delayed behind them. Until it lands, **any claim about Codape
-being better or worse than Claude on these 45 tasks is unsupported by this
-document.**
+**Any claim about Codape being better or worse than Claude on the remaining
+30 tasks remains unsupported** — there is no Claude observation for them, and
+their zeros must not be counted as losses.
 
 Three tasks run at `-n 1` rather than `-n 4` because they claim 16 GB:
-`medical-claims-processing`, `takens-embedding-lean`, `uefi-bootkit`. They are
-in neither count above and have no result on either arm yet; they are the two
-remaining steps of the continuation script.
+`medical-claims-processing`, `takens-embedding-lean`, `uefi-bootkit`. That step
+ran afterwards and the quota killed it as well: two of the three were graded
+3/9 and 6/8 for an untouched workspace, and the third never started. They are
+in neither count above.
 
 Nine further tasks of the 66 are unrunnable on this host and are excluded from
 every list: `distributed-dedup`, `formal-crypto`, `lake-temp-glm`,

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -210,7 +211,7 @@ class CodapeHarborAgent(BaseInstalledAgent):
     def __init__(
         self,
         binary_path: str | None = None,
-        version: str = DEFAULT_VERSION,
+        version: str | None = DEFAULT_VERSION,
         max_turns: int = DEFAULT_MAX_TURNS,
         timeout_sec: float | str | None = DEFAULT_TIMEOUT_SEC,
         task_proxy: str | None = None,
@@ -220,6 +221,16 @@ class CodapeHarborAgent(BaseInstalledAgent):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # `version` names the *release tarball* to download, so the default pin
+        # cannot also name a build of the working tree. With a local binary and
+        # no version of the caller's own, it is dropped — which makes Harbor's
+        # `_detect_version` ask the binary in the container
+        # (`get_version_command` below), so `result.json` says which binary
+        # actually ran. Passing the default through was how a local-binary trial
+        # would have been recorded as the release it did not run, and the
+        # sweep's documents read `agent_info.version` to establish which binary
+        # produced a score. An explicit version alongside `binary_path` is the
+        # caller naming that build, so it is kept.
         self._local_binary = (
             Path(str(binary_path)).expanduser() if binary_path else None
         )
@@ -227,7 +238,17 @@ class CodapeHarborAgent(BaseInstalledAgent):
             raise FileNotFoundError(
                 f"Codape binary does not exist: {self._local_binary}"
             )
-        self._version = str(version)
+        if self._local_binary is not None and str(version) == DEFAULT_VERSION:
+            version = None
+        if version is None and self._local_binary is None:
+            # A release run with no tag has nothing to download. Before the pin
+            # could be dropped this could not be reached; it can now, so it is
+            # refused here rather than rendered as `releases/download/None`.
+            raise ValueError(
+                "a release run needs a version to download; pass --ak version=..."
+                " or --ak binary_path=..."
+            )
+        self._version = None if version is None else str(version)
         self._max_turns = int(max_turns)
         # `--ak timeout_sec=...` arrives as a string; the CLI parses kwargs as
         # key=value pairs. Empty means "no adapter-imposed ceiling".
@@ -249,6 +270,35 @@ class CodapeHarborAgent(BaseInstalledAgent):
     @staticmethod
     def name() -> str:
         return "codape"
+
+    # -- identity ------------------------------------------------------
+
+    def get_version_command(self) -> str | None:
+        """Ask the binary in the container which version it is.
+
+        Harbor calls this once after setup for an agent with no pinned version,
+        and records the answer as `agent_info.version` — the field the sweep's
+        documents read to establish which binary produced a score. Without it a
+        local build has no identity at all: Harbor records `unknown`, and two
+        arms built from different commits become indistinguishable.
+
+        `CODAPE_BIN` rather than the bare command name: `install` puts the
+        binary there, and the task image's `PATH` is not this adapter's.
+        """
+        return f"{CODAPE_BIN} --version"
+
+    def parse_version(self, stdout: str) -> str:
+        """`codape 0.2.3` -> `v0.2.3`, matching the release tag it names.
+
+        The `v` prefix is what a release tarball is called, so a self-reported
+        version carrying it compares directly with a pinned one. A build from
+        the working tree reports the same crate version as the last release
+        unless the version was bumped, which is why the report below also
+        carries the binary's path when one was uploaded.
+        """
+        text = stdout.strip()
+        match = re.search(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", text)
+        return f"v{match.group(0)}" if match else text
 
     # -- setup ---------------------------------------------------------
 
@@ -718,6 +768,15 @@ class CodapeHarborAgent(BaseInstalledAgent):
             context.cost_usd = float(summary["total_cost_usd"])
         context.metadata = {
             "version": self._version,
+            # For a trial the harness built rather than downloaded, the crate
+            # version alone cannot identify the build: a working-tree binary
+            # reports the same `0.2.2` as the release until the bump, and two
+            # runs from different commits look identical in `result.json`.
+            # `local_binary` is the host path of the file that was uploaded, so
+            # a trial can be traced back to the build it measured.
+            "local_binary": (
+                str(self._local_binary) if self._local_binary is not None else None
+            ),
             "exit_code": exit_code,
             "subtype": (summary or {}).get("subtype"),
             "is_error": (summary or {}).get("is_error"),

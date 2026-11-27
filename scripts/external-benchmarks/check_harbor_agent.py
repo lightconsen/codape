@@ -598,6 +598,113 @@ def check_failure_is_attributable(module) -> None:
           f"a clean run must not carry an error key: {clean_metadata.get('error')!r}")
 
 
+def check_local_binary_identity(module) -> None:
+    """A trial built from the tree must not be recorded as the release.
+
+    `version` is the tarball to download, so it cannot also name a build of the
+    working tree. The adapter used to pass the pin straight through, which
+    meant a `--ak binary_path=...` trial wrote `agent_info.version: "v0.2.2"`
+    into `result.json` — the release it never ran. That field is what the
+    sweep's documents read to establish which binary produced a score
+    (`docs/tb-harbor-4.1.md`), so a local-binary sweep would have been recorded
+    under a version that appears, on inspection, to be entirely from a
+    different commit.
+
+    The fix is Harbor's own mechanism: with no pinned version it calls
+    `get_version_command` after setup and records what the container reports.
+    This asserts both halves — the pin is dropped, and the command exists and
+    parses — because either alone leaves the field wrong.
+    """
+    handle = _writable_elf()
+    try:
+        local = _agent(module, binary_path=handle)
+        check(local._version is None,
+              "a local binary must not carry the release pin as its version, "
+              f"got {local._version!r}")
+
+        # An explicit, non-default version is the caller saying which build
+        # this is. Dropping that would lose information the sweep wants.
+        named = _agent(module, binary_path=handle, version="v0.2.3-rc1")
+        check(named._version == "v0.2.3-rc1",
+              f"an explicit version must survive, got {named._version!r}")
+
+        # The release path keeps the pin: that is what it downloads.
+        pinned = _agent(module, version="v0.2.2")
+        check(pinned._version == "v0.2.2",
+              f"a release run must keep its pin, got {pinned._version!r}")
+
+        # Dropping the pin is only sound because a release run cannot lose it:
+        # with nothing to download it refuses rather than curling
+        # `releases/download/None`.
+        try:
+            _agent(module, version=None)
+        except ValueError:
+            pass
+        else:
+            check(False,
+                  "a release run with no version must be refused, not rendered "
+                  "as releases/download/None")
+    finally:
+        os.unlink(handle)
+
+    # Harbor's hook, and the parse that makes its answer comparable to a pin.
+    # `getattr` rather than attribute access: on an adapter without the hook
+    # this group already has one failure, and an AttributeError would abort the
+    # rest of it, hiding the metadata assertions below behind the first one.
+    get_command = getattr(pinned, "get_version_command", None)
+    command = get_command() if get_command else None
+    check(command is not None and "codape" in command and "--version" in command,
+          f"the version command must ask the installed binary, got {command!r}")
+    parse = getattr(pinned, "parse_version", None)
+    cases = {
+        "codape 0.2.3": "v0.2.3",
+        "codape 0.2.3\n": "v0.2.3",
+        "codape 0.2.3-rc1": "v0.2.3-rc1",
+    }
+    for stdout, expected in cases.items() if parse else ():
+        got = parse(stdout)
+        check(got == expected,
+              f"parse_version({stdout!r}) must give {expected!r}, got {got!r}")
+
+    # The trial's own record of which file was measured. Two builds of one
+    # commit report one crate version, so the path is the only thing that
+    # separates them after the fact.
+    stream = transcript(TEXT, RESULT)
+    stub = _ExecStub({module.STREAM_PATH: stream, module.EXIT_CODE_PATH: "0\n"})
+    agent = _agent(module, binary_path=_writable_elf())
+    try:
+        stub.bind(agent)
+        context = module.AgentContext()
+        with _trajectory_write_stubbed(module):
+            asyncio.run(agent._record(stub, context))
+        metadata = getattr(context, "metadata", None) or {}
+        check(metadata.get("local_binary") == str(agent._local_binary),
+              "a local-binary run must record which file produced it, "
+              f"got {metadata.get('local_binary')!r}")
+    finally:
+        os.unlink(str(agent._local_binary))
+
+    # A release run must not invent the key: its absence is the signal.
+    downloaded = _agent(module)
+    stub = _ExecStub({module.STREAM_PATH: stream, module.EXIT_CODE_PATH: "0\n"})
+    stub.bind(downloaded)
+    context = module.AgentContext()
+    with _trajectory_write_stubbed(module):
+        asyncio.run(downloaded._record(stub, context))
+    metadata = getattr(context, "metadata", None) or {}
+    check(metadata.get("local_binary") is None,
+          "a release run has no local binary to name, got "
+          f"{metadata.get('local_binary')!r}")
+
+
+def _writable_elf() -> str:
+    """A path the adapter accepts as a local binary."""
+    handle = tempfile.NamedTemporaryFile(prefix="codape-check-elf-", delete=False)
+    handle.write(b"\x7fELF")
+    handle.close()
+    return handle.name
+
+
 def check_against_real_harbor(module) -> None:
     """When harbor is installed, validate through its own pydantic models.
 
@@ -1439,6 +1546,7 @@ def main() -> int:
         ("install_prerequisites", check_install_prerequisites),
         ("timed_out_raises", check_timed_out_raises),
         ("trajectory_model_name", check_trajectory_model_name),
+        ("local_binary_identity", check_local_binary_identity),
         ("against_real_harbor", check_against_real_harbor),
     ):
         run_check(name, lambda: function(module))

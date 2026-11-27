@@ -105,6 +105,23 @@ jobs:
       - name: Check the runners' transcript parsing
         run: python3 -I scripts/external-benchmarks/check_reporting.py
 
+  benchmark-sweep-analysis:
+    name: Benchmark sweep analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # `analyze_sweep.py` decides whether one arm beat the other, and it was
+      # the one instrument in this directory with no check at all. It reported
+      # `codape 26, claude 3` on a sweep whose honest answer was `codape 5,
+      # claude 3, tie 6`: Harbor grades a trial that never reached the model,
+      # the Claude arm's quota ran out on 30 of 45, and every one of those
+      # became a loss for an arm that was never measured. A verdict that
+      # flips a documented tie into a 26-3 rout is worse than no verdict, and
+      # this is the cheap way to notice the next one.
+      - name: Check the sweep comparison's verdicts
+        run: python3 -I scripts/external-benchmarks/check_sweep_analysis.py
+
   benchmark-fixtures:
     name: Benchmark fixtures
     runs-on: ubuntu-latest

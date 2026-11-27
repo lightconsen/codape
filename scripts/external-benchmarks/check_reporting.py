@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import types
@@ -276,6 +277,45 @@ def check_result_frame_read_keeps_every_segment(agent) -> None:
         summary["duration_ms"] == 3000,
         f"agent: duration from the frames it read: {summary['duration_ms']} of 3000",
     )
+
+
+def check_local_binary_identity() -> None:
+    """A 0.2.18 trial built from the tree must not be recorded as the release.
+
+    The same defect as the Harbor adapter's, in the other runner: `version` is
+    the release tag whose tarball the install script downloads, and the adapter
+    wrote it into `codape-run.json` even for a `--codape-binary` run, which
+    downloads nothing. On an arm64 host that flag is the *only* way to run this
+    arm — the pinned release is x86_64 — so the record of every such trial
+    named a version the trial never executed, and `agent.version` (which
+    0.2.18 records in the run config) said the same.
+    """
+    stub_terminal_bench()
+    agent = load("codape_agent_under_test", ROOT / "terminal-bench" / "codape_agent.py")
+
+    handle = tempfile.NamedTemporaryFile(prefix="codape-check-bin-", delete=False)
+    handle.write(b"\x7fELF")
+    handle.close()
+    try:
+        local = agent.CodapeAgent(binary_path=handle.name)
+        check(local._version is None,
+              "agent: a local binary must not carry the release pin as its "
+              f"version, got {local._version!r}")
+        check(local._get_template_variables()["version"] == "",
+              "agent: the install template takes no tag on the local-binary "
+              f"branch, got {local._get_template_variables()['version']!r}")
+
+        named = agent.CodapeAgent(binary_path=handle.name, version="v0.2.3-rc1")
+        check(named._version == "v0.2.3-rc1",
+              f"agent: an explicit version must survive, got {named._version!r}")
+    finally:
+        os.unlink(handle.name)
+
+    pinned = agent.CodapeAgent(version="v0.2.2")
+    check(pinned._version == "v0.2.2",
+          f"agent: a release run must keep its pin, got {pinned._version!r}")
+    check(pinned._get_template_variables()["version"] == "v0.2.2",
+          "agent: a release run must hand the tag to the install template")
 
 
 def check_terminal_bench_runner() -> None:
@@ -574,6 +614,7 @@ def main() -> int:
     # saying which fields the runners are missing.
     for group in (
         check_agent_module,
+        check_local_binary_identity,
         check_terminal_bench_runner,
         check_swebench_runner,
         check_programbench_runner,
