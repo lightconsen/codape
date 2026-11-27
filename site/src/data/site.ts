@@ -9,6 +9,12 @@ export const RELEASES = `${REPO}/releases`
  */
 export const INSTALL_URL = "https://codape.com/install.sh"
 export const INSTALL_CMD = `curl -fsSL ${INSTALL_URL} | sh`
+/**
+ * The release the site advertises, in the order `codape --version` prints it.
+ * `scripts/check-site-version.py` compares it with `crates/cli/Cargo.toml`, so
+ * the landing page cannot outlive a bump — the hero and the terminal animation
+ * both read this constant rather than repeating the string.
+ */
 export const VERSION = "0.2.2"
 
 /**

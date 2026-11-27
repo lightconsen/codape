@@ -157,6 +157,19 @@ jobs:
       - name: Check the unsafe_code allowlist
         run: python3 scripts/check-unsafe.py
 
+  site-version:
+    name: Site version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      # A release edits twenty-one manifests and a lockfile, and the landing
+      # page has no reason to be in that change: it shipped `0.2.2` through a
+      # bump, and the terminal animation spelled the version out a second time.
+      # This fails when site/src/data/site.ts disagrees with crates/cli.
+      - name: Check the advertised version
+        run: python3 -I scripts/check-site-version.py
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
