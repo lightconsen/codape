@@ -168,10 +168,25 @@ def check_installer_paths() -> None:
         "wrong one is only visible on the arm host a reviewer may be using",
     )
     check(
-        "harborframework/terminal-bench:hello-world" in out,
-        "the image check must pull a `harborframework/*` image, not `alpine`: "
-        "a registry mirror that refuses those digests serves alpine fine and "
-        "fails every trial",
+        "harborframework/terminal-bench:" in out
+        and "-environment-v4.1.0" in out,
+        "the image check must pull a real `harborframework/*` task image, not "
+        "`alpine`: a registry mirror that refuses those digests serves alpine "
+        "fine and fails every trial",
+    )
+    # The tag must be derived from a task list, not invented. An earlier
+    # version pulled `...:hello-world`, which does not exist: the failure read
+    # exactly like a mirror refusing digests, so the check reported a registry
+    # problem on hosts that pull real images fine.
+    check(
+        "tasks-clean10.txt" in out,
+        "the image tag must come from a real task list; a hardcoded tag that "
+        "does not exist is indistinguishable from a registry failure",
+    )
+    check(
+        "docker manifest inspect" in INSTALLER.read_text(encoding="utf-8"),
+        "the remedy must say how to tell a missing tag from a refused digest; "
+        "it only prints on failure, so this reads the source",
     )
     check(
         "measure-host-speed.sh" in out,

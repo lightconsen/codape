@@ -257,6 +257,24 @@ def check_codape_argv(tmp: Path, tasks: Path, binary: Path) -> None:
         "a relative `--binary` must be made absolute",
     )
 
+    # `--pricing` has the same trap and the same fix: the adapter reads it with
+    # a plain `open` against Harbor's working directory. A relative path works
+    # only when the caller stands in the repository root, and the failure is a
+    # completed paid run whose result frames carry no `total_cost_usd`.
+    relative_pricing = run(
+        ["codape", str(tasks), "--dry-run", "--pricing", "terminal-bench/prices.json"],
+    )
+    pricing_argv = command_of(relative_pricing)
+    check(
+        pricing_argv is not None
+        and any(
+            part.startswith(f"pricing_path={ROOT}/terminal-bench/prices.json")
+            for part in pricing_argv
+        ),
+        "a relative `--pricing` must be made absolute, or the adapter reads it "
+        "against the wrong directory and the run reports no cost",
+    )
+
 
 def check_guards(tmp: Path, tasks: Path) -> None:
     # A model the gateway does not serve costs a container and twenty minutes to

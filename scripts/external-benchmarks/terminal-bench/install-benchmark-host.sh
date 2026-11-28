@@ -326,20 +326,34 @@ else
     # registry this host can reach actually serves `harborframework/*`. A
     # mirror that refuses those digests lets `docker pull alpine` succeed and
     # every trial fail, which is a very expensive way to learn it.
-    image="harborframework/terminal-bench:hello-world"
+    #
+    # The tag comes from the task list rather than being invented. An earlier
+    # version of this check pulled `harborframework/terminal-bench:hello-world`,
+    # which is not a tag that exists: the repository carries per-task tags in
+    # two forms, `<task>-environment-<contenthash>` and the stable
+    # `<task>-environment-v4.1.0`. A missing tag and a mirror that refuses
+    # digests fail the same way, so the invented name made every install report
+    # a registry problem that was never there — including on hosts that pull
+    # real images in six seconds.
+    task=$(grep -v '^[[:space:]]*#' "$DEST/scripts/external-benchmarks/terminal-bench/tasks-clean10.txt" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' | head -1 | tr -d '[:space:]') || task=""
+    [ -n "$task" ] || task="fin-saccr-rwa"
+    image="harborframework/terminal-bench:${task}-environment-v4.1.0"
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "   would run: docker pull $image"
     else
         if timeout 900 $SUDO docker pull -q "$image" >/dev/null 2>&1; then
             ok "pulled $image"
         else
-            cat >&2 <<'MSG'
-   note: could not pull harborframework/terminal-bench:hello-world.
+            cat >&2 <<MSG
+   note: could not pull $image
          That is the family every 4.1 task image belongs to, and a registry
-         mirror that refuses these digests is a documented failure here — it
-         lets `docker pull alpine` succeed while every trial fails.
-         Try `docker pull mirror.gcr.io/harborframework/terminal-bench:hello-world`
-         then `docker tag mirror.gcr.io/... harborframework/terminal-bench:hello-world`,
+         mirror that refuses those digests is a documented failure here — it
+         lets \`docker pull alpine\` succeed while every trial fails. But check
+         the reference first: \`docker manifest inspect $image\` distinguishes a
+         tag that does not exist from a mirror that will not serve it.
+         Try \`docker pull mirror.gcr.io/$image\`
+         then \`docker tag mirror.gcr.io/$image $image\`,
          or point the daemon at docker.io directly.
 MSG
         fi
