@@ -66,7 +66,15 @@ DATASET=terminal-bench/terminal-bench@4.1.0
 # reaching a container and failing twenty minutes later, not a roster of
 # everything that exists: add a line when an endpoint is actually used, rather
 # than loosening the check.
-ALLOWED_MODELS="deepseek-v4.1-flash k3"
+#
+# `deepseek/deepseek-v4.1-flash` is the same model behind a gateway that spells
+# it with the vendor prefix, and the spelling is not cosmetic: that gateway
+# answers 400 `Model "deepseek-v4.1-flash" is not supported on this endpoint`
+# for the bare name, so the two forms are not interchangeable and both have to
+# be listed. Keep them separate rather than teaching the gate to strip prefixes
+# — a gateway is free to serve real `vendor/model` ids, and the runs recorded so
+# far are not comparable to one that silently renamed its model.
+ALLOWED_MODELS="deepseek-v4.1-flash deepseek/deepseek-v4.1-flash k3"
 
 REQUIRED_KEY="CODAPE_AUTH_TOKEN CODAPE_BASE_URL CODAPE_MODEL"
 
