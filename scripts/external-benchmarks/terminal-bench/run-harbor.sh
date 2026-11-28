@@ -60,10 +60,13 @@ ADAPTER=codape_harbor_agent:CodapeHarborAgent
 CLAUDE_ADAPTER=claude-code
 DATASET=terminal-bench/terminal-bench@4.1.0
 
-# The gateway answers for these and gets a hard failure for anything else.
-# `deepseek-v4.1-flash` is what every recorded 4.1 trial used; add a line here
-# when the gateway gains a model, rather than loosening the check.
-ALLOWED_MODELS="deepseek-v4.1-flash"
+# The endpoints the recorded runs used. Every trial in the 2026-11 sweeps was
+# `deepseek-v4.1-flash` through one gateway; `k3` is the Kimi endpoint, added
+# when a run was pointed at it. The list is a guard against a typo quietly
+# reaching a container and failing twenty minutes later, not a roster of
+# everything that exists: add a line when an endpoint is actually used, rather
+# than loosening the check.
+ALLOWED_MODELS="deepseek-v4.1-flash k3"
 
 REQUIRED_KEY="CODAPE_AUTH_TOKEN CODAPE_BASE_URL CODAPE_MODEL"
 
