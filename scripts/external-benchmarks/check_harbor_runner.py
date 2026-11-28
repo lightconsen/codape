@@ -295,7 +295,7 @@ def check_guards(tmp: Path, tasks: Path) -> None:
     # so a dry run accepts every model and an assertion written that way passes
     # however the list reads. The stand-in `harbor` is what makes a real
     # invocation free.
-    for served in ("deepseek-v4.1-flash", "k3"):
+    for served in ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "k3"):
         result = run(["codape", str(tasks)], key_file=write_key_file(tmp, model=served))
         check(
             result.returncode == 0,
