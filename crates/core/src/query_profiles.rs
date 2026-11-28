@@ -25,14 +25,25 @@ pub enum ModelProfile {
 }
 
 impl ModelProfile {
+    /// Environment keys consulted, in precedence order. The profile's own key
+    /// wins first; then the main model keys, in the same order the session
+    /// resolution uses (`CODAPE_MODEL` before the provider variables). Leaving
+    /// `CODAPE_MODEL` out of this list once meant that a session configured
+    /// only through it still ran its side queries on the built-in defaults.
     const fn runtime_env_keys(self) -> &'static [&'static str] {
         match self {
-            Self::Main => &["CODAPE_MAIN_MODEL", "ANTHROPIC_MODEL", "OPENAI_MODEL"],
+            Self::Main => &[
+                "CODAPE_MAIN_MODEL",
+                "CODAPE_MODEL",
+                "ANTHROPIC_MODEL",
+                "OPENAI_MODEL",
+            ],
             Self::Lightweight => &[
                 "CODAPE_LIGHTWEIGHT_MODEL",
                 "ANTHROPIC_LIGHTWEIGHT_MODEL",
                 "OPENAI_LIGHTWEIGHT_MODEL",
                 "CODAPE_MAIN_MODEL",
+                "CODAPE_MODEL",
                 "ANTHROPIC_MODEL",
                 "OPENAI_MODEL",
             ],
@@ -41,6 +52,7 @@ impl ModelProfile {
                 "ANTHROPIC_BACKGROUND_MODEL",
                 "OPENAI_BACKGROUND_MODEL",
                 "CODAPE_MAIN_MODEL",
+                "CODAPE_MODEL",
                 "ANTHROPIC_MODEL",
                 "OPENAI_MODEL",
             ],
@@ -263,6 +275,51 @@ mod tests {
                 (key == "ANTHROPIC_MODEL").then(|| "qwen3.6-plus".to_string())
             }),
             ModelId("qwen3.6-plus".into())
+        );
+    }
+
+    #[test]
+    fn model_profile_runtime_reads_codape_model() {
+        // A session configured only through `CODAPE_MODEL` — the container
+        // shape the benchmarks run in — must not fall back to the built-in
+        // Anthropic ids for its side queries.
+        let only_codape = |key: &str| (key == "CODAPE_MODEL").then(|| "gw-model".to_string());
+        assert_eq!(
+            ModelProfile::Main.resolve_with_lookup(only_codape),
+            ModelId("gw-model".into())
+        );
+        assert_eq!(
+            ModelProfile::Lightweight.resolve_with_lookup(only_codape),
+            ModelId("gw-model".into())
+        );
+        assert_eq!(
+            ModelProfile::Background.resolve_with_lookup(only_codape),
+            ModelId("gw-model".into())
+        );
+    }
+
+    #[test]
+    fn model_profile_runtime_codape_model_beats_provider_vars() {
+        // Same precedence as the session resolution: codape's own variable
+        // wins over the provider spellings.
+        let lookup = |key: &str| match key {
+            "CODAPE_MODEL" => Some("gw-model".to_string()),
+            "ANTHROPIC_MODEL" => Some("provider-model".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ModelProfile::Main.resolve_with_lookup(lookup),
+            ModelId("gw-model".into())
+        );
+        // And the profile-specific key still wins over both.
+        let lookup_specific = |key: &str| match key {
+            "CODAPE_LIGHTWEIGHT_MODEL" => Some("small-model".to_string()),
+            "CODAPE_MODEL" => Some("gw-model".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            ModelProfile::Lightweight.resolve_with_lookup(lookup_specific),
+            ModelId("small-model".into())
         );
     }
 

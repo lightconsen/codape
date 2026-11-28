@@ -569,8 +569,15 @@ impl PermissionHook for ExplainPermissionHook {
     async fn evaluate(
         &self,
         request: &PermissionRequest,
-        _mode: crate::permissions::PermissionMode,
+        mode: crate::permissions::PermissionMode,
     ) -> Result<Option<PermissionResult>, PermissionRequestError> {
+        // Bypass mode has no approval flow for an explanation to inform, so
+        // asking the model for one would be a hidden extra call on every tool
+        // call with nobody to read it (headless `--dangerously-skip-permissions`
+        // is exactly that mode).
+        if mode.bypasses_all() {
+            return Ok(None);
+        }
         let explanation = crate::prompts::explain_permission(
             self.api_client.as_ref(),
             &request.tool_name,
@@ -1197,6 +1204,74 @@ mod tests {
             ),
             "{event:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn explain_permission_hook_skips_model_call_under_bypass() {
+        use crate::api_client::{ApiClient, ApiResponse, StreamEvent};
+        use futures::Stream;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone, Default)]
+        struct CountingClient {
+            calls: std::sync::Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApiClient for CountingClient {
+            fn clone_box(&self) -> Box<dyn ApiClient> {
+                Box::new(self.clone())
+            }
+
+            async fn create_message(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[ToolInfo],
+            ) -> Result<ApiResponse, crate::api_client::ApiError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ApiResponse {
+                    content: "explanation".into(),
+                    tool_calls: Vec::new(),
+                    usage: UsageSummary {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
+                    },
+                    stop_reason: "end_turn".into(),
+                    thinking: None,
+                    server_blocks: Vec::new(),
+                })
+            }
+
+            async fn create_message_streaming(
+                &self,
+                _system: &str,
+                _messages: &[serde_json::Value],
+                _model: &ModelId,
+                _max_tokens: u32,
+                _tools: &[ToolInfo],
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + 'static>> {
+                Box::pin(futures::stream::empty())
+            }
+        }
+
+        let client = CountingClient::default();
+        let calls = client.calls.clone();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hook = ExplainPermissionHook::new_with_event_tx(Box::new(client), event_tx);
+        let request = make_request("Bash");
+        let result = hook
+            .evaluate(&request, PermissionMode::BypassPermissions)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
